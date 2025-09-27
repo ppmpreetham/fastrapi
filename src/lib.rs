@@ -16,15 +16,15 @@ use serde_json::{Value, Map};
 static ROUTES: Lazy<DashMap<String, Py<PyAny>>> = Lazy::new(|| DashMap::new());
 
 #[pyclass]
-pub struct FasterAPI {
+pub struct FastrAPI {
     router: Arc<DashMap<String, Py<PyAny>>>, // reference to routes
 }
 
 #[pymethods]
-impl FasterAPI {
+impl FastrAPI {
     #[new]
     fn new() -> Self {
-        FasterAPI {
+        FastrAPI {
             router: Arc::new(DashMap::new()),
         }
     }
@@ -130,7 +130,7 @@ impl FasterAPI {
                 .block_on(async move {
                     let addr = format!("{}:{}", host, port);
                     let listener = TcpListener::bind(&addr).await.unwrap();
-                    println!("🚀 FasterAPI running at http://{}", addr);
+                    println!("🚀 FastrAPI running at http://{}", addr);
                     axum::serve(listener, app).await.unwrap();
                 });
         });
@@ -198,8 +198,8 @@ fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
 }
 
 #[pymodule]
-fn fasterapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<FasterAPI>()?;
+fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<FastrAPI>()?;
     m.add_function(wrap_pyfunction!(get_decorator, m)?)?;
     Ok(())
 }

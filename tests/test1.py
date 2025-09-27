@@ -1,5 +1,5 @@
-from fasterapi import FasterAPI
-app = FasterAPI()
+from fastrapi import FastrAPI
+app = FastrAPI()
 
 @app.get("/hello")
 def hello():

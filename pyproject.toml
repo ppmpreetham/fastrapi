@@ -3,13 +3,48 @@ requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "fasterapi"
+name = "fastrapi"
+version = "0.1.0"
+description = "A high-performance Python API framework powered by Rust"
+readme = "README.md"
 requires-python = ">=3.8"
-classifiers = [
-    "Programming Language :: Rust",
-    "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
+license = {file = "LICENSE"}
+keywords = ["fastapi", "fastrapi", "api", "web", "framework", "fast", "rust"]
+authors = [
+  {name = "Preetham", email = "ppmpreetham1@gmail.com"}
 ]
-dynamic = ["version"]
+
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+  "Topic :: Software Development :: Libraries :: Application Frameworks"
+]
+
+# If you have dependencies, add them here
+# dependencies = [
+#   "dependency1",
+#   "dependency2>=1.0.0"
+# ]
+
+# If you have optional dependencies, uncomment and adjust this section
+# [project.optional-dependencies]
+# test = [
+#   "pytest",
+#   "pytest-cov"
+# ]
+
+[project.urls]
+homepage = "https://github.com/ppmpreetham/fastrapi"
+documentation = "https://github.com/ppmpreetham/fastrapi#readme"
+repository = "https://github.com/ppmpreetham/fastrapi.git"
+"bug tracker" = "https://github.com/ppmpreetham/fastrapi/issues"
+
+# If you have CLI scripts, add them here
+# [project.scripts]
+# fastrapi-cli = "fastrapi:main_cli"
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
