@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyModule};
+use pyo3::types::{PyAny, PyCFunction, PyDict, PyModule, PyTuple};
 use axum::{
     http::StatusCode,
     response::IntoResponse,
@@ -47,35 +47,35 @@ impl FasterAPI {
 
     /// @app.get(<path>)
     fn get<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
-        let code = format!(
-            "def decorator(func):\n    import fasterapi\n    fasterapi.get_decorator(func, '{}')\n    return func",
-            path
-        );
+        let path_clone = path.clone();
 
-        let locals = PyDict::new(py);
-        py.run(&CString::new(&*code).unwrap(), None, Some(&locals))?;
-        let decorator = locals.get_item("decorator")?;
-        match decorator {
-            Some(bound_any) => Ok(bound_any.unbind()),
-            None => Ok(py.None().into()),
-        }
+        let decorator = move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
+            Python::attach(|py| {                      // acquire GIL here
+                let func: Py<PyAny> = args.get_item(0)?.extract()?;
+                ROUTES.insert(format!("GET {}", path_clone), func.clone_ref(py));
+                Ok(func.into())
+            })
+        };
+
+        PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
     }
+
 
     /// @app.post(...)
     fn post<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
-        let code = format!(
-            "def decorator(func):\n    import fasterapi\n    key = 'POST {}'\n    fasterapi.ROUTES[key] = func\n    return func",
-            path
-        );
+    let path_clone = path.clone();
 
-        let locals = PyDict::new(py);
-        py.run(&CString::new(&*code).unwrap(), None, Some(&locals))?;
-        let decorator = locals.get_item("decorator")?;
-        match decorator {
-            Some(bound_any) => Ok(bound_any.unbind()),
-            None => Ok(py.None().into()),
-        }
+        let decorator = move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
+            Python::attach(|py| {
+                let func: Py<PyAny> = args.get_item(0)?.extract()?;
+                ROUTES.insert(format!("POST {}", path_clone), func.clone_ref(py));
+                Ok(func.into())
+            })
+        };
+
+        PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
     }
+
 
     /// axum route serving
     fn serve(&self, py: Python, host: Option<String>, port: Option<u16>) -> PyResult<()> {

@@ -1,5 +1,4 @@
 from fasterapi import FasterAPI
-
 app = FasterAPI()
 
 @app.get("/hello")
