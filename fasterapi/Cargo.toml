@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 hyper = "1.7.0"
+hyper-util = "0.1.17"
 once_cell = "1.21.3"
 pyo3 = { version = "0.26.0", features = ["extension-module", "auto-initialize"] }
 # pyo3-asyncio = { version = "0.26.0", features = ["tokio-runtime"] }
