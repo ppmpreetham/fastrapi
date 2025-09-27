@@ -1,0 +1,203 @@
+use pyo3::prelude::*;
+use pyo3::types::{PyAny, PyDict, PyModule};
+use axum::{
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get as axum_get, post as axum_post},
+    Router,
+    Json,
+};
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use std::ffi::CString;
+use serde_json::{Value, Map};
+
+static ROUTES: Lazy<DashMap<String, Py<PyAny>>> = Lazy::new(|| DashMap::new());
+
+#[pyclass]
+pub struct FasterAPI {
+    router: Arc<DashMap<String, Py<PyAny>>>, // reference to routes
+}
+
+#[pymethods]
+impl FasterAPI {
+    #[new]
+    fn new() -> Self {
+        FasterAPI {
+            router: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// registering a python callback for a route
+    fn register_route(&self, path: String, func: Py<PyAny>, method: Option<String>) {
+        let method = method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
+        let key = format!("{} {}", method, path);
+        ROUTES.insert(key, func);
+    }
+
+    /// helper fn for GET
+    #[staticmethod]
+    fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
+        let key = format!("GET {}", path);
+        ROUTES.insert(key, func);
+        Ok(())
+    }
+
+    /// @app.get(<path>)
+    fn get<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        let code = format!(
+            "def decorator(func):\n    import fasterapi\n    fasterapi.get_decorator(func, '{}')\n    return func",
+            path
+        );
+
+        let locals = PyDict::new(py);
+        py.run(&CString::new(&*code).unwrap(), None, Some(&locals))?;
+        let decorator = locals.get_item("decorator")?;
+        match decorator {
+            Some(bound_any) => Ok(bound_any.unbind()),
+            None => Ok(py.None().into()),
+        }
+    }
+
+    /// @app.post(...)
+    fn post<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        let code = format!(
+            "def decorator(func):\n    import fasterapi\n    key = 'POST {}'\n    fasterapi.ROUTES[key] = func\n    return func",
+            path
+        );
+
+        let locals = PyDict::new(py);
+        py.run(&CString::new(&*code).unwrap(), None, Some(&locals))?;
+        let decorator = locals.get_item("decorator")?;
+        match decorator {
+            Some(bound_any) => Ok(bound_any.unbind()),
+            None => Ok(py.None().into()),
+        }
+    }
+
+    /// axum route serving
+    fn serve(&self, py: Python, host: Option<String>, port: Option<u16>) -> PyResult<()> {
+        let host = host.unwrap_or_else(|| "127.0.0.1".to_string());
+        let port = port.unwrap_or(8000);
+
+        // tokio runtime
+        let rt = tokio::runtime::Runtime::new()?;
+        let mut app = Router::new();
+
+        for entry in ROUTES.iter() {
+            let parts: Vec<&str> = entry.key().splitn(2, ' ').collect();
+            let method = parts[0];
+            let path = parts[1].to_string();
+
+            let py_func = entry.value().clone();
+            let rt_handle = rt.handle().clone();
+
+            let handler = {
+                let py_func = py_func.clone();
+                let rt_handle = rt_handle.clone();
+                move || async move {
+                    match rt_handle.spawn_blocking(move || {
+                        Python::attach(|py| {
+                            py_func.call0(py).map(|result| py_to_response(&result.into_bound(py)))
+                        })
+                    }).await {
+                        Ok(Ok(response)) => response.into_response(),
+                        Ok(Err(err)) => {
+                            Python::attach(|py| err.print(py));
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        }
+                        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    }
+                }
+            };
+
+            if method == "GET" {
+                app = app.route(&path, axum_get(handler));
+            } else if method == "POST" {
+                app = app.route(&path, axum_post(handler));
+            }
+        }
+
+        py.detach(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let addr = format!("{}:{}", host, port);
+                    let listener = TcpListener::bind(&addr).await.unwrap();
+                    println!("🚀 FasterAPI running at http://{}", addr);
+                    axum::serve(listener, app).await.unwrap();
+                });
+        });
+
+        Ok(())
+    }
+}
+
+fn py_dict_to_json(dict: &Bound<'_, PyDict>) -> Value {
+    let mut map = Map::new();
+
+    for (key, value) in dict.iter() {
+        let k: String = match key.extract() {
+            Ok(s) => s,
+            Err(_) => continue, // skip non-string keys
+        };
+
+        if let Ok(s) = value.extract::<String>() {
+            map.insert(k, Value::String(s));
+        } else if let Ok(i) = value.extract::<i64>() {
+            map.insert(k, Value::Number(i.into()));
+        } else if let Ok(f) = value.extract::<f64>() {
+            if let Some(num) = serde_json::Number::from_f64(f) {
+                map.insert(k, Value::Number(num));
+            } else {
+                map.insert(k, Value::Null);
+            }
+        } else if let Ok(b) = value.extract::<bool>() {
+            map.insert(k, Value::Bool(b));
+        } else if value.is_none() {
+            map.insert(k, Value::Null);
+        } else if let Ok(nested) = value.downcast::<PyDict>() {
+            map.insert(k, py_dict_to_json(&nested));
+        } else {
+            map.insert(k, Value::String(format!("{:?}", value)));
+        }
+    }
+
+    Value::Object(map)
+}
+
+/// py values to axum responses
+fn py_to_response(obj: &Bound<'_, PyAny>) -> impl IntoResponse {
+    if let Ok(s) = obj.extract::<String>() {
+        s.into_response()
+    } else if let Ok(i) = obj.extract::<i64>() {
+        i.to_string().into_response()
+    } else if let Ok(dict) = obj.downcast::<PyDict>() {
+        // Convert dict to JSON
+        let json = py_dict_to_json(dict);
+        Json(json).into_response()
+    } else if obj.is_none() {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        format!("{:?}", obj).into_response()
+    }
+}
+
+/// same helper for GET decorator
+#[pyfunction]
+fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
+    let key = format!("GET {}", path);
+    ROUTES.insert(key, func);
+    Ok(())
+}
+
+#[pymodule]
+fn fasterapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<FasterAPI>()?;
+    m.add_function(wrap_pyfunction!(get_decorator, m)?)?;
+    Ok(())
+}
