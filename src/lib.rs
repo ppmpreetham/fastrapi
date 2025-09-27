@@ -11,7 +11,6 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use std::ffi::CString;
 use serde_json::{Value, Map};
 
 static ROUTES: Lazy<DashMap<String, Py<PyAny>>> = Lazy::new(|| DashMap::new());
@@ -90,26 +89,29 @@ impl FasterAPI {
             let parts: Vec<&str> = entry.key().splitn(2, ' ').collect();
             let method = parts[0];
             let path = parts[1].to_string();
-
-            let py_func = entry.value().clone();
+            
+            let route_key = entry.key().clone();
             let rt_handle = rt.handle().clone();
 
-            let handler = {
-                let py_func = py_func.clone();
-                let rt_handle = rt_handle.clone();
-                move || async move {
-                    match rt_handle.spawn_blocking(move || {
-                        Python::attach(|py| {
-                            py_func.call0(py).map(|result| py_to_response(&result.into_bound(py)))
-                        })
-                    }).await {
-                        Ok(Ok(response)) => response.into_response(),
-                        Ok(Err(err)) => {
-                            Python::attach(|py| err.print(py));
-                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            let handler = move || async move {
+                let route_key = route_key.clone();
+                match rt_handle.spawn_blocking(move || {
+                    Python::attach(|py| {
+                        if let Some(py_func) = ROUTES.get(&route_key) {
+                            let result = py_func.call0(py);
+                            result.map(|result| py_to_response(&result.into_bound(py)))
+                        } else {
+                            Err(pyo3::PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                format!("Route handler not found for {}", route_key)))
                         }
-                        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    })
+                }).await {
+                    Ok(Ok(response)) => response.into_response(),
+                    Ok(Err(err)) => {
+                        Python::attach(|py| err.print(py));
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
                     }
+                    Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
                 }
             };
 
