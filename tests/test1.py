@@ -3,7 +3,7 @@ app = FastrAPI()
 
 @app.get("/hello")
 def hello():
-    return {"message": "Hello from Rust+Python!"}
+    return {"Hello": "World"}
 
 @app.get("/add")
 def add():
