@@ -12,6 +12,7 @@ use once_cell::sync::Lazy;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use serde_json::{Value, Map};
+use serde_pyobject::to_pyobject; // Removed unused pydict import
 
 static ROUTES: Lazy<DashMap<String, Py<PyAny>>> = Lazy::new(|| DashMap::new());
 
@@ -49,7 +50,7 @@ impl FastrAPI {
         let path_clone = path.clone();
 
         let decorator = move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
-            Python::attach(|py| {                      // acquire GIL here
+            Python::attach(|py| {
                 let func: Py<PyAny> = args.get_item(0)?.extract()?;
                 ROUTES.insert(format!("GET {}", path_clone), func.clone_ref(py));
                 Ok(func.into())
@@ -93,32 +94,58 @@ impl FastrAPI {
             let route_key = entry.key().clone();
             let rt_handle = rt.handle().clone();
 
-            let handler = move || async move {
-                let route_key = route_key.clone();
-                match rt_handle.spawn_blocking(move || {
-                    Python::attach(|py| {
-                        if let Some(py_func) = ROUTES.get(&route_key) {
-                            let result = py_func.call0(py);
-                            result.map(|result| py_to_response(&result.into_bound(py)))
-                        } else {
-                            Err(pyo3::PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                                format!("Route handler not found for {}", route_key)))
-                        }
-                    })
-                }).await {
-                    Ok(Ok(response)) => response.into_response(),
-                    Ok(Err(err)) => {
-                        Python::attach(|py| err.print(py));
-                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                    }
-                    Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-                }
-            };
-
             if method == "GET" {
+                let route_key_clone = route_key.clone();
+                let rt_handle_clone = rt_handle.clone();
+                
+                let handler = move || async move {
+                    let route_key = route_key_clone.clone();
+                    match rt_handle_clone.spawn_blocking(move || {
+                        Python::attach(|py| {
+                            if let Some(py_func) = ROUTES.get(&route_key) {
+                                let result = py_func.call0(py);
+                                result.map(|result| py_to_response(&result.into_bound(py)))
+                            } else {
+                                Err(pyo3::PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    format!("Route handler not found for {}", route_key)))
+                            }
+                        })
+                    }).await {
+                        Ok(Ok(response)) => response.into_response(),
+                        Ok(Err(err)) => {
+                            Python::attach(|py| err.print(py));
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        }
+                        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    }
+                };
                 app = app.route(&path, axum_get(handler));
             } else if method == "POST" {
-                app = app.route(&path, axum_post(handler));
+                let route_key_clone = route_key.clone();
+                let rt_handle_clone = rt_handle.clone();
+                
+                let post_handler = move |Json(payload): Json<serde_json::Value>| async move {
+                    let route_key = route_key_clone.clone();
+                    match rt_handle_clone.spawn_blocking(move || {
+                        Python::attach(|py| {
+                            if let Some(py_func) = ROUTES.get(&route_key) {
+                                let py_payload = json_to_py_object(py, &payload);                                
+                                let result = py_func.call1(py, (py_payload,));
+                                result.map(|res| py_to_response(&res.into_bound(py)))
+                            } else {
+                                Err(pyo3::PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Route handler not found for {}", route_key)))
+                            }
+                        })
+                    }).await {
+                        Ok(Ok(response)) => response.into_response(),
+                        Ok(Err(err)) => {
+                            Python::attach(|py| err.print(py));
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        }
+                        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    }
+                };
+                app = app.route(&path, axum_post(post_handler));
             }
         }
 
@@ -170,6 +197,16 @@ fn py_dict_to_json(dict: &Bound<'_, PyDict>) -> Value {
     }
 
     Value::Object(map)
+}
+
+fn json_to_py_object<'py>(py: Python<'py>, value: &Value) -> Py<PyAny> {
+    match to_pyobject(py, value) {
+        Ok(obj) => obj.into(),
+        Err(e) => {
+            eprintln!("Error converting JSON to Python object: {}", e);
+            format!("Error: {}", e).into_pyobject(py).unwrap().into()
+        }
+    }
 }
 
 /// py values to axum responses
