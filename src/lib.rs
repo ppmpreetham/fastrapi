@@ -3,8 +3,7 @@ use pyo3::types::{PyAny, PyCFunction, PyDict, PyModule, PyTuple};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get as axum_get, post as axum_post, put as axum_put, delete as axum_delete,
-              patch as axum_patch, options as axum_options, head as axum_head},
+    routing::{get as axum_get, post as axum_post, put as axum_put, delete as axum_delete, patch as axum_patch, options as axum_options, head as axum_head},
     Router,
     Json,
     extract::{Extension, ConnectInfo},
@@ -24,7 +23,7 @@ struct AppState {
     rt_handle: tokio::runtime::Handle,
 }
 
-// --- Python handler runners ---
+/// Python handler runners
 
 async fn run_py_handler_with_args(
     rt_handle: tokio::runtime::Handle,
@@ -33,23 +32,25 @@ async fn run_py_handler_with_args(
 ) -> Response {
     match rt_handle.spawn_blocking(move || {
         Python::attach(|py| {
-            if let Some(py_func) = ROUTES.get(&route_key) {
+            let result = if let Some(py_func) = ROUTES.get(&route_key) {
                 let py_payload = json_to_py_object(py, &payload);
-                py_func.call1(py, (py_payload,))
+                match py_func.call1(py, (py_payload,)) {
+                    Ok(result) => Ok(py_to_response(py, &result.into_bound(py))),
+                    Err(err) => {
+                        err.print(py);
+                        Err(())
+                    }
+                }
             } else {
-                Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Route handler not found for {}",
-                    route_key
-                )))
-            }
+                eprintln!("Route handler not found for {}", route_key);
+                Err(())
+            };
+            result
         })
     }).await
     {
-        Ok(Ok(result)) => Python::attach(|py| py_to_response(&result.into_bound(py))),
-        Ok(Err(err)) => {
-            Python::attach(|py| err.print(py));
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -60,27 +61,29 @@ async fn run_py_handler_no_args(
 ) -> Response {
     match rt_handle.spawn_blocking(move || {
         Python::attach(|py| {
-            if let Some(py_func) = ROUTES.get(&route_key) {
-                py_func.call0(py)
+            let result = if let Some(py_func) = ROUTES.get(&route_key) {
+                match py_func.call0(py) {
+                    Ok(result) => Ok(py_to_response(py, &result.into_bound(py))),
+                    Err(err) => {
+                        err.print(py);
+                        Err(())
+                    }
+                }
             } else {
-                Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Route handler not found for {}",
-                    route_key
-                )))
-            }
+                eprintln!("Route handler not found for {}", route_key);
+                Err(())
+            };
+            result
         })
     }).await
     {
-        Ok(Ok(result)) => Python::attach(|py| py_to_response(&result.into_bound(py))),
-        Ok(Err(err)) => {
-            Python::attach(|py| err.print(py));
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
-// --- FastrAPI class ---
+/// FastrAPI class
 
 #[pyclass]
 pub struct FastrAPI {
@@ -134,11 +137,10 @@ impl FastrAPI {
         let route_key = format!("{} {}", method, path);
 
         let decorator = move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
-            Python::attach(|py| {
-                let func: Py<PyAny> = args.get_item(0)?.extract()?;
-                ROUTES.insert(route_key.clone(), func.clone_ref(py));
-                Ok(func.into())
-            })
+            let py = args.py();
+            let func: Py<PyAny> = args.get_item(0)?.extract()?;
+            ROUTES.insert(route_key.clone(), func.clone_ref(py));
+            Ok(func.into())
         };
 
         PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
@@ -217,22 +219,38 @@ impl FastrAPI {
     }
 }
 
-// --- JSON/Python conversion helpers ---
+/// JSON/Python conversion helpers
 
 fn py_dict_to_json(dict: &Bound<'_, PyDict>) -> Value {
     let mut map = Map::new();
     for (key, value) in dict.iter() {
         let k: String = match key.extract() { Ok(s) => s, Err(_) => continue };
-        if let Ok(s) = value.extract::<String>() { map.insert(k, Value::String(s)); }
-        else if let Ok(i) = value.extract::<i64>() { map.insert(k, Value::Number(i.into())); }
-        else if let Ok(f) = value.extract::<f64>() {
-            if let Some(num) = serde_json::Number::from_f64(f) { map.insert(k, Value::Number(num)); }
-            else { map.insert(k, Value::Null); }
+        
+        if let Ok(s) = value.extract::<String>() { 
+            map.insert(k, Value::String(s)); 
         }
-        else if let Ok(b) = value.extract::<bool>() { map.insert(k, Value::Bool(b)); }
-        else if value.is_none() { map.insert(k, Value::Null); }
-        else if let Ok(nested) = value.downcast::<PyDict>() { map.insert(k, py_dict_to_json(&nested)); }
-        else { map.insert(k, Value::String(format!("{:?}", value))); }
+        else if let Ok(i) = value.extract::<i64>() { 
+            map.insert(k, Value::Number(i.into())); 
+        }
+        else if let Ok(f) = value.extract::<f64>() {
+            if let Some(num) = serde_json::Number::from_f64(f) { 
+                map.insert(k, Value::Number(num)); 
+            } else { 
+                map.insert(k, Value::Null); 
+            }
+        }
+        else if let Ok(b) = value.extract::<bool>() { 
+            map.insert(k, Value::Bool(b)); 
+        }
+        else if value.is_none() { 
+            map.insert(k, Value::Null); 
+        }
+        else if let Ok(nested) = value.cast::<PyDict>() {
+            map.insert(k, py_dict_to_json(&nested)); 
+        }
+        else { 
+            map.insert(k, Value::String(format!("{:?}", value))); 
+        }
     }
     Value::Object(map)
 }
@@ -247,18 +265,27 @@ fn json_to_py_object<'py>(py: Python<'py>, value: &Value) -> Py<PyAny> {
     }
 }
 
-fn py_to_response(obj: &Bound<'_, PyAny>) -> Response {
-    if let Ok(s) = obj.extract::<String>() { s.into_response() }
-    else if let Ok(i) = obj.extract::<i64>() { i.to_string().into_response() }
-    else if let Ok(dict) = obj.downcast::<PyDict>() {
-        let json = py_dict_to_json(dict);
+// Python token to avoid redundant Python::attach calls
+fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Response {
+    if let Ok(s) = obj.extract::<String>() { 
+        s.into_response() 
+    }
+    else if let Ok(i) = obj.extract::<i64>() { 
+        i.to_string().into_response() 
+    }
+    else if let Ok(dict) = obj.cast::<PyDict>() {
+        let json = py_dict_to_json(&dict);
         Json(json).into_response()
     }
-    else if obj.is_none() { StatusCode::NO_CONTENT.into_response() }
-    else { format!("{:?}", obj).into_response() }
+    else if obj.is_none() { 
+        StatusCode::NO_CONTENT.into_response() 
+    }
+    else { 
+        format!("{:?}", obj).into_response() 
+    }
 }
 
-// --- Python module ---
+// Python module
 
 #[pyfunction]
 fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
