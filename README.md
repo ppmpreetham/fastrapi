@@ -33,12 +33,27 @@ app = FastrAPI()
 def hello():
     return {"Hello": "World"}
 
+@app.post("/echo")
+def echo(data):
+    return {"received": data}
 if __name__ == "__main__":
     app.serve("127.0.0.1", 8080)
 ```
 
+### Now, test it with:
+```bash
+    curl http://127.0.0.1:8080/hello
+```
+
+For the `POST` endpoint:
+```bash
+curl --location 'http://127.0.0.1:8080/echo' \
+--header 'Content-Type: application/json' \
+--data '{"foo": 123, "bar": [1, 2, 3]}'
+```
+
 ## Performance
-Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Uvicorn across multiple worker configurations.
+Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn across multiple worker configurations.
 
 ### 🖥️ Test Environment
 - **Kernel:** 6.16.8-arch3-1  
@@ -48,13 +63,14 @@ Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Uvicorn acro
 
 ### ⚡ Benchmark Results
 
-| Framework                  | Avg Latency (ms) | Requests/sec | **Speed Metric** (req/sec ÷ ms) |
-|-----------------------------|-----------------|-------------|-------------------------------|
-| **FASTRAPI**               | 2.15            | 8378        | **3897**                      |
-| FastAPI + Guvicorn (workers: 1)     | 21.08           | 937         | 44                            |
-| FastAPI + Guvicorn (workers: 16)    | 4.84            | 3882        | 802                           |
+| Framework                           | Avg Latency (ms) | Median Latency (ms) | Requests/sec | **Speed Metric** (req/sec ÷ avg ms) |
+|------------------------------------|-----------------|-------------------|-------------|-----------------------------------|
+| **FASTRAPI**                        | 2.19            | 2.16              | 8881        | **4051**                          |
+| FastAPI + Uvicorn (workers: 1)     | 21.08           | 19.67             | 937         | 44                                |
+| FastAPI + Uvicorn (workers: 16)    | 4.84            | 4.17              | 3882        | 802                               |
 
-> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency — making it **~88× faster** than FastAPI + Guvicorn with 1 worker.
+
+> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency — making it **~91× faster** than FastAPI + Guvicorn with 1 worker.
 
 ## Current Limitations
 - Limited validation features compared to FastAPI's Pydantic integration
