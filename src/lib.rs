@@ -15,6 +15,7 @@ use tokio::net::TcpListener;
 mod utils;
 mod py_handlers;
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
+use crate::utils::shutdown_signal;
 
 pub static ROUTES: Lazy<DashMap<String, Py<PyAny>>> = Lazy::new(|| DashMap::new());
 
@@ -150,6 +151,7 @@ impl FastrAPI {
                 let listener = TcpListener::bind(&addr).await.unwrap();
                 println!("🚀 FastrAPI running at http://{}", addr);
                 axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+                    .with_graceful_shutdown(shutdown_signal())
                     .await
                     .unwrap();
             });

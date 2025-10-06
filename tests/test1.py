@@ -1,6 +1,10 @@
 from fastrapi import FastrAPI
 app = FastrAPI()
 
+@app.get("/")
+def hello():
+    return {"Hello": "World"}
+    
 @app.get("/hello")
 def hello():
     return {"Hello": "World"}
