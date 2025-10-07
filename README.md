@@ -7,6 +7,7 @@ A blazing-fast web framework that brings Rust performance to Python developers. 
 - 🚀 **Blazing Performance**: Powered by Rust and Axum - up to **88x** faster than *FastAPI*
 - 🐍 **Python-First**: Write familiar Python code with zero Rust knowledge required
 - 🛡️ **Rock-Solid Types**: Built-in type safety inherited from Rust's robust type system
+- 📝 **Pydantic Integration**: Full support for Pydantic models for request/response validation
 - ⚡ **Async Native**: Tokio-powered async runtime for maximum concurrency
 - 🪶 **Ultra Lightweight**: Minimal runtime overhead with maximum throughput
 - 🎯 **Drop-in Replacement**: Compatible with FastAPI's beloved decorator syntax
