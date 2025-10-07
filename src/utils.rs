@@ -8,29 +8,30 @@ use axum::{
 use serde_json::{Value, Map};
 use serde_pyobject::to_pyobject;
 
-pub async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
+// TODO: handle the Ctrl + C shutdown without affecting speed
+// pub async fn shutdown_signal() {
+//     let ctrl_c = async {
+//         tokio::signal::ctrl_c()
+//             .await
+//             .expect("failed to install Ctrl+C handler");
+//     };
 
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
+//     #[cfg(unix)]
+//     let terminate = async {
+//         signal::unix::signal(signal::unix::SignalKind::terminate())
+//             .expect("failed to install signal handler")
+//             .recv()
+//             .await;
+//     };
 
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+//     #[cfg(not(unix))]
+//     let terminate = std::future::pending::<()>();
 
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
-}
+//     tokio::select! {
+//         _ = ctrl_c => {},
+//         _ = terminate => {},
+//     }
+// }
 
 pub fn json_to_py_object<'py>(py: Python<'py>, value: &Value) -> Py<PyAny> {
     match to_pyobject(py, value) {
