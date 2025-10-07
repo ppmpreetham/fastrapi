@@ -1,5 +1,6 @@
 from fastrapi import FastrAPI
 from pydantic import BaseModel
+
 app = FastrAPI()
 
 @app.get("/")
