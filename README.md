@@ -36,13 +36,14 @@ def hello():
 @app.post("/echo")
 def echo(data):
     return {"received": data}
+
 if __name__ == "__main__":
     app.serve("127.0.0.1", 8080)
 ```
 
 ### Now, test it with:
 ```bash
-    curl http://127.0.0.1:8080/hello
+curl http://127.0.0.1:8080/hello
 ```
 
 For the `POST` endpoint:
