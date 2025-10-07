@@ -1,4 +1,4 @@
-use pyo3::{exceptions::PyTypeError, prelude::*, types::{PyDict, PyType}};
+use pyo3::{prelude::*, types::{PyAny, PyDict, PyType}};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -17,73 +17,54 @@ pub async fn run_py_handler_with_args(
             if let Some(entry) = ROUTES.get(&route_key) {
                 let py_func = entry.value().bind(py);
 
-                let py_payload_result = match py_func.getattr("__annotations__") {
+                let py_payload = match py_func.getattr("__annotations__") {
                     Ok(annotations) => {
-                        if let Ok(annot_dict) = annotations.downcast::<PyDict>() {
-                            if let Some(item) = annot_dict.items().into_iter().next() {
+                        if let Ok(ann_dict) = annotations.downcast::<PyDict>() {
+                            if let Some(item) = ann_dict.items().into_iter().next() {
                                 let (_, type_hint) = item.extract::<(Py<PyAny>, Py<PyAny>)>().unwrap();
                                 let type_hint_bound = type_hint.into_bound(py);
+
                                 if type_hint_bound.is_instance_of::<PyType>() {
-                                    validate_with_pydantic(py, &type_hint_bound, &payload)
+                                    // pydantic validation
+                                    match validate_with_pydantic(py, &type_hint_bound, &payload) {
+                                        Ok(validated) => validated,
+                                        Err(err_resp) => return err_resp,
+                                    }
                                 } else {
-                                    Ok(json_to_py_object(py, &payload))
+                                    json_to_py_object(py, &payload)
                                 }
                             } else {
-                                Ok(json_to_py_object(py, &payload))
+                                json_to_py_object(py, &payload)
                             }
                         } else {
-                            Ok(json_to_py_object(py, &payload))
+                            json_to_py_object(py, &payload)
                         }
                     }
-                    Err(_) => Ok(json_to_py_object(py, &payload)),
+                    Err(_) => json_to_py_object(py, &payload),
                 };
 
-                match py_payload_result {
-                    Ok(py_payload) => match py_func.call1((py_payload,)) {
-                        Ok(result) => Ok(py_to_response(py, &result)),
-                        Err(err) => {
-                            let err_str = Python::attach(|py| {
-                                if err.is_instance_of::<PyTypeError>(py) {
-                                    format!("TypeError in route handler: {}", err)
-                                } else {
-                                    format!("Error in route handler: {}", err)
-                                }
-                            });
-                            
-                            err.print(py);
-                            Ok((
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                err_str,
-                            ).into_response())
-                        }
-                    },
-                    Err(response) => Ok(response),
+                match py_func.call1((py_payload,)) {
+                    Ok(result) => py_to_response(py, &result),
+                    Err(err) => {
+                        err.print(py);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Error in route handler: {}", err)
+                        ).into_response()
+                    }
                 }
             } else {
                 eprintln!("Route handler not found for {}", route_key);
-                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Route handler not found"
-                ))
+                (StatusCode::NOT_FOUND, "Route handler not found").into_response()
             }
         })
-    }).await
-    {
-        Ok(Ok(response)) => response,
-        Ok(Err(err)) => {
-            Python::attach(|py| {
-                err.print(py);
-                if err.is_instance_of::<PyTypeError>(py) {
-                    format!("TypeError in handler execution: {}", err)
-                } else {
-                    format!("Error in handler execution: {}", err)
-                };
-                (StatusCode::INTERNAL_SERVER_ERROR).into_response()
-            })
-        },
+    }).await {
+        Ok(response) => response,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
+/// for routes WITHOUT payload (GET)
 pub async fn run_py_handler_no_args(
     rt_handle: tokio::runtime::Handle,
     route_key: String,
@@ -92,33 +73,22 @@ pub async fn run_py_handler_no_args(
         Python::attach(|py| {
             if let Some(py_func) = ROUTES.get(&route_key) {
                 match py_func.call0(py) {
-                    Ok(result) => Ok(py_to_response(py, &result.into_bound(py))),
+                    Ok(result) => py_to_response(py, &result.into_bound(py)),
                     Err(err) => {
                         err.print(py);
-                        Err(err)
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Error in route handler: {}", err)
+                        ).into_response()
                     }
                 }
             } else {
                 eprintln!("Route handler not found for {}", route_key);
-                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Route handler not found",
-                ))
+                (StatusCode::NOT_FOUND, "Route handler not found").into_response()
             }
         })
-    }).await
-    {
-        Ok(Ok(response)) => response,
-        Ok(Err(err)) => {
-            Python::attach(|py| {
-                err.print(py);
-                if err.is_instance_of::<PyTypeError>(py) {
-                    format!("TypeError in handler execution: {}", err)
-                } else {
-                    format!("Error in handler execution: {}", err)
-                };
-                (StatusCode::INTERNAL_SERVER_ERROR).into_response()
-            })
-        },
+    }).await {
+        Ok(response) => response,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
