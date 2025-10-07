@@ -11,7 +11,7 @@ use once_cell::sync::Lazy;
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use tracing::{info, debug, warn, error, Level};
+use tracing::{info, debug, warn, Level};
 use tracing_subscriber;
 
 mod utils;
