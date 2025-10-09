@@ -1,16 +1,32 @@
-# FastrAPI ⚡
+# FastrAPI (Fast + Rust + API)
 
-A blazing-fast web framework that brings Rust performance to Python developers. FastrAPI + Rust = **FastrAPI**.
+![alt text](readme/fastrapi.gif)
 
-## ✨ Key Features
+FastrAPI is a high-performance web framework that supercharges your Python APIs with the power of Rust. Built on Axum and PyO3, it delivers unmatched speed, type safety, and developer-friendly Python syntax. Create robust, async-ready APIs with minimal overhead and maximum throughput. FastrAPI is your drop-in replacement for FastAPI, offering familiar syntax with up to 9.5x faster performance.
 
-- 🚀 **Blazing Performance**: Powered by Rust and Axum - up to **88x** faster than *FastAPI*
-- 🐍 **Python-First**: Write familiar Python code with zero Rust knowledge required
-- 🛡️ **Rock-Solid Types**: Built-in type safety inherited from Rust's robust type system
-- 📝 **Pydantic Integration**: Full support for Pydantic models for request/response validation
-- ⚡ **Async Native**: Tokio-powered async runtime for maximum concurrency
-- 🪶 **Ultra Lightweight**: Minimal runtime overhead with maximum throughput
-- 🎯 **Drop-in Replacement**: Compatible with FastAPI's beloved decorator syntax
+## Key Features
+
+- **Lightning Speed**: Powered by Rust and Axum, FastrAPI delivers up to 9.5x faster performance than FastAPI, making your APIs scream.
+- **Python-First**: Write clean, familiar Python code—no Rust knowledge needed. FastrAPI handles the heavy lifting behind the scenes.
+- **Ironclad Type Safety**: Inherits Rust's robust type system for rock-solid reliability, catching errors before they hit production.
+- **Pydantic Powered**: Seamless integration with Pydantic for effortless request and response validation, keeping your data in check.
+- **Async Native**: Built on Tokio's async runtime, FastrAPI maximizes concurrency for handling thousands of requests with ease.
+- **Ultra Lightweight**: Minimal runtime overhead with maximum throughput.
+- **Drop-in Replacement**: Drop-in compatibility with FastAPI's beloved decorator syntax, so you can switch without rewriting your codebase.
+
+---
+
+#### Is it as fast as claimed?
+Yes. Powered by Rust and Axum, FastrAPI outperforms FastAPI by up to 9.5x in real-world benchmarks, with no compromises on usability. Check it out [here](https://github.com/ppmpreetham/fastrapi?tab=readme-ov-file#performance)
+
+#### Do I need to know Rust?
+Nope. FastrAPI lets you write 100% Python code while leveraging Rust's performance under the hood.
+
+#### Can it handle complex APIs?
+Absolutely. With full Pydantic integration and async support, FastrAPI scales effortlessly for small projects and enterprise-grade APIs alike.
+
+#### Will it keep up with FastAPI updates?
+Yes. FastrAPI mirrors FastAPI's decorator-based syntax, ensuring compatibility and instant access to familiar workflows.
 
 ## Installation
 
@@ -54,6 +70,29 @@ curl --location 'http://127.0.0.1:8080/echo' \
 --data '{"foo": 123, "bar": [1, 2, 3]}'
 ```
 
+
+<details>
+  <summary>Show Pydantic example</summary>
+
+```python
+from pydantic import BaseModel
+from fastrapi import FastrAPI
+
+api = FastrAPI()
+
+class User(BaseModel):
+    name: str
+    age: int
+
+@api.post("/create_user")
+def create_user(data: User):
+    return {"msg": f"Hello {data.name}, age {data.age}"}
+
+api.serve("127.0.0.1", 8080)
+```
+
+</details>
+
 ## Performance
 Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn across multiple worker configurations.
 
@@ -65,14 +104,14 @@ Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn acr
 
 ### ⚡ Benchmark Results
 
-| Framework                           | Avg Latency (ms) | Median Latency (ms) | Requests/sec | **Speed Metric** (req/sec ÷ avg ms) |
-|------------------------------------|-----------------|-------------------|-------------|-----------------------------------|
-| **FASTRAPI**                        | 2.19            | 2.16              | 8881        | **4051**                          |
-| FastAPI + Uvicorn (workers: 1)     | 21.08           | 19.67             | 937         | 44                                |
-| FastAPI + Uvicorn (workers: 16)    | 4.84            | 4.17              | 3882        | 802                               |
+| Framework                          | Avg Latency (ms) | Median Latency (ms) | Requests/sec | P95 Latency (ms) | P99 Latency (ms) |
+|------------------------------------|-----------------|-------------------|--------------|-----------------|-----------------|
+| **FASTRAPI**                       | 2.19            | 2.16              | **8881**     | 3.79            | 11.67           |
+| FastAPI + Guvicorn (workers: 1)    | 21.08           | 19.67             | 937          | 38.47           | 93.42           |
+| FastAPI + Guvicorn (workers: 16)   | 4.84            | 4.17              | 3882         | 10.22           | 81.20           |
 
 
-> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency — making it **~91× faster** than FastAPI + Guvicorn with 1 worker.
+> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency — making it **~9.5× faster** than FastAPI + Guvicorn with 1 worker.
 
 ## Current Limitations
 - Limited validation features compared to FastAPI's Pydantic integration
