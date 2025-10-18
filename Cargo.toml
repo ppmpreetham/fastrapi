@@ -1,6 +1,6 @@
 [package]
 name = "fastrapi"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -19,3 +19,8 @@ tokio = { version = "1.47.1", features = ["full"] }
 serde-pyobject = { git = "https://github.com/ppmpreetham/serde-pyobject.git" }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa-axum = "0.2"
+utoipa-rapidoc = "6.0.0"
+utoipa = "5.4.0"
+serde = "1.0.228"

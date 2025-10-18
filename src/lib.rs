@@ -1,22 +1,25 @@
-use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyCFunction, PyDict, PyModule, PyTuple};
 use axum::{
-    routing::{get as axum_get, post as axum_post, put as axum_put, delete as axum_delete, patch as axum_patch, options as axum_options, head as axum_head},
-    Router,
-    Json,
-    extract::{Extension, ConnectInfo},
+    extract::{ConnectInfo, Extension},
+    routing::{
+        delete as axum_delete, get as axum_get, head as axum_head, options as axum_options,
+        patch as axum_patch, post as axum_post, put as axum_put,
+    },
+    Json, Router,
 };
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use std::sync::Arc;
+use pyo3::prelude::*;
+use pyo3::types::{PyAny, PyCFunction, PyDict, PyModule, PyTuple};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{info, debug, warn, Level};
+use tracing::{debug, info, warn, Level};
 use tracing_subscriber;
-
-mod utils;
+use utoipa::OpenApi as ApiDoc;
+use utoipa_swagger_ui::SwaggerUi;
 mod py_handlers;
 mod pydantic;
+mod utils;
 
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
 // use crate::utils::shutdown_signal;
@@ -29,9 +32,28 @@ struct AppState {
     rt_handle: tokio::runtime::Handle,
 }
 
+// Define our API documentation
+#[derive(ApiDoc)]
+#[openapi(
+    paths(
+        // You'll need to add your actual paths here when you have them defined
+        // For now, we're just creating an empty documentation
+    ),
+    components(
+        // Add components here if needed
+    ),
+    tags(
+        // Add API tags here if needed
+    )
+)]
+struct ApiDocumentation;
+
 /// FastrAPI class
 #[pyclass]
 pub struct FastrAPI {
+    // Since we're using the global ROUTES map, we don't need this field
+    // Keeping it for backward compatibility but marking as unused
+    #[allow(dead_code)]
     router: Arc<DashMap<String, Py<PyAny>>>,
 }
 
@@ -79,14 +101,28 @@ impl FastrAPI {
         self.create_decorator("HEAD", path, py)
     }
 
-    fn create_decorator<'py>(&self, method: &str, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
+    fn create_decorator<'py>(
+        &self,
+        method: &str,
+        path: String,
+        py: Python<'py>,
+    ) -> PyResult<Py<PyAny>> {
+        // Create the route key
         let route_key = format!("{} {}", method, path);
 
-        let decorator = move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
+        // Clone the route_key for the closure to avoid capturing a reference to the local variable
+        let route_key_for_closure = route_key.clone();
+
+        let decorator = move |args: &Bound<'_, PyTuple>,
+                              _kwargs: Option<&Bound<'_, PyDict>>|
+              -> PyResult<Py<PyAny>> {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.extract()?;
-            ROUTES.insert(route_key.clone(), func.clone_ref(py));
-            info!("🧩 Added decorated route [{}]", route_key);
+
+            // Use the cloned route_key specific to this closure
+            ROUTES.insert(route_key_for_closure.clone(), func.clone_ref(py));
+            info!("🧩 Added decorated route [{}]", route_key_for_closure);
+
             Ok(func.into())
         };
 
@@ -106,7 +142,9 @@ impl FastrAPI {
 
         let rt = tokio::runtime::Runtime::new()?;
         let rt_handle = rt.handle().clone();
-        let app_state = AppState { rt_handle: rt_handle.clone() };
+        let app_state = AppState {
+            rt_handle: rt_handle.clone(),
+        };
 
         let mut app = Router::new();
 
@@ -116,21 +154,17 @@ impl FastrAPI {
         }
 
         for entry in ROUTES.iter() {
-            // Get the full route key as a String (owned)
+            // full route key
             let route_key = entry.key().to_string();
-            
-            // Split the route key into method and path
-            let parts: Vec<String> = route_key.splitn(2, ' ')
-                .map(|s| s.to_string())
-                .collect();
-            
-            // Make sure we have both method and path parts
+
+            // method and path from frk
+            let parts: Vec<String> = route_key.splitn(2, ' ').map(|s| s.to_string()).collect();
+
             if parts.len() != 2 {
                 warn!("⚠️ Invalid route key format: {}", route_key);
                 continue;
             }
-            
-            // Extract method and path as owned Strings
+
             let method = parts[0].clone();
             let path = parts[1].clone();
 
@@ -140,15 +174,17 @@ impl FastrAPI {
                 "GET" | "HEAD" | "OPTIONS" => {
                     let route_key_clone = route_key.clone();
                     let method_clone = method.clone();
-                    let handler_fn = move |Extension(state): Extension<AppState>, ConnectInfo(addr): ConnectInfo<SocketAddr>| {
-                        let route_key = route_key_clone.clone();
-                        let method = method_clone.clone();
-                        async move {
-                            println!("📥 Incoming {} request to {}", method, route_key);
-                            println!("Client IP: {}", addr);
-                            run_py_handler_no_args(state.rt_handle, route_key).await
-                        }
-                    };
+                    let handler_fn =
+                        move |Extension(state): Extension<AppState>,
+                              ConnectInfo(addr): ConnectInfo<SocketAddr>| {
+                            let route_key = route_key_clone.clone();
+                            let method = method_clone.clone();
+                            async move {
+                                println!("📥 Incoming {} request to {}", method, route_key);
+                                println!("Client IP: {}", addr);
+                                run_py_handler_no_args(state.rt_handle, route_key).await
+                            }
+                        };
 
                     app = match method.as_str() {
                         "GET" => app.route(&path, axum_get(handler_fn)),
@@ -160,16 +196,19 @@ impl FastrAPI {
                 "POST" | "PUT" | "DELETE" | "PATCH" => {
                     let route_key_clone = route_key.clone();
                     let method_clone = method.clone();
-                    let handler_fn = move |Extension(state): Extension<AppState>, ConnectInfo(addr): ConnectInfo<SocketAddr>, Json(payload): Json<serde_json::Value>| {
-                        let route_key = route_key_clone.clone();
-                        let method = method_clone.clone();
-                        async move {
-                            println!("📥 Incoming {} request to {}", method, route_key);
-                            println!("Client IP: {}", addr);
-                            println!("Payload: {}", payload);
-                            run_py_handler_with_args(state.rt_handle, route_key, payload).await
-                        }
-                    };
+                    let handler_fn =
+                        move |Extension(state): Extension<AppState>,
+                              ConnectInfo(addr): ConnectInfo<SocketAddr>,
+                              Json(payload): Json<serde_json::Value>| {
+                            let route_key = route_key_clone.clone();
+                            let method = method_clone.clone();
+                            async move {
+                                println!("📥 Incoming {} request to {}", method, route_key);
+                                println!("Client IP: {}", addr);
+                                println!("Payload: {}", payload);
+                                run_py_handler_with_args(state.rt_handle, route_key, payload).await
+                            }
+                        };
 
                     app = match method.as_str() {
                         "POST" => app.route(&path, axum_post(handler_fn)),
@@ -184,16 +223,22 @@ impl FastrAPI {
         }
 
         app = app.layer(axum::Extension(app_state));
+        app = app.merge(
+            SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDocumentation::openapi()),
+        );
 
         py.detach(move || {
             rt.block_on(async move {
                 let addr = format!("{}:{}", host, port);
                 let listener = TcpListener::bind(&addr).await.unwrap();
                 info!("🚀 FastrAPI running at http://{}", addr);
-                axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-                    // .with_graceful_shutdown(shutdown_signal())
-                    .await
-                    .unwrap();
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                // .with_graceful_shutdown(shutdown_signal())
+                .await
+                .unwrap();
             });
         });
 
