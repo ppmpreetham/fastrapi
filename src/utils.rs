@@ -5,35 +5,12 @@ use axum::{
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use serde_pyobject::to_pyobject;
 
-// TODO: handle the Ctrl + C shutdown without affecting speed
-// pub async fn shutdown_signal() {
-//     let ctrl_c = async {
-//         tokio::signal::ctrl_c()
-//             .await
-//             .expect("failed to install Ctrl+C handler");
-//     };
-
-//     #[cfg(unix)]
-//     let terminate = async {
-//         signal::unix::signal(signal::unix::SignalKind::terminate())
-//             .expect("failed to install signal handler")
-//             .recv()
-//             .await;
-//     };
-
-//     #[cfg(not(unix))]
-//     let terminate = std::future::pending::<()>();
-
-//     tokio::select! {
-//         _ = ctrl_c => {},
-//         _ = terminate => {},
-//     }
-// }
-
-pub fn json_to_py_object<'py>(py: Python<'py>, value: &Value) -> Py<PyAny> {
+/// Fast JSON to Python conversion
+#[inline]
+pub fn json_to_py_object(py: Python<'_>, value: &Value) -> Py<PyAny> {
     match to_pyobject(py, value) {
         Ok(obj) => obj.into(),
         Err(e) => {
@@ -43,89 +20,97 @@ pub fn json_to_py_object<'py>(py: Python<'py>, value: &Value) -> Py<PyAny> {
     }
 }
 
+/// Optimized response conversion with early returns
+#[inline]
 pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Response {
-    if let Ok(s) = obj.extract::<String>() {
-        return s.into_response();
-    }
-    if let Ok(i) = obj.extract::<i64>() {
-        return i.to_string().into_response();
-    }
-    if let Ok(f) = obj.extract::<f64>() {
-        return f.to_string().into_response();
-    }
-    if let Ok(b) = obj.extract::<bool>() {
-        return b.to_string().into_response();
-    }
-
-    if let Ok(dict) = obj.cast::<PyDict>() {
-        let json = py_dict_to_json(py, dict);
-        return Json(json).into_response();
-    }
-    if let Ok(list) = obj.cast::<PyList>() {
-        let json = py_list_to_json(py, list);
-        return Json(json).into_response();
-    }
-
-    // Handle None
+    // Check None first (common case)
     if obj.is_none() {
         return StatusCode::NO_CONTENT.into_response();
     }
 
+    // Try simple scalar types first (most common, ordered by frequency)
+    if let Ok(s) = obj.extract::<String>() {
+        return s.into_response();
+    }
+    if let Ok(i) = obj.extract::<i64>() {
+        return Json(json!(i)).into_response();
+    }
+    if let Ok(b) = obj.extract::<bool>() {
+        return Json(json!(b)).into_response();
+    }
+    if let Ok(f) = obj.extract::<f64>() {
+        return Json(json!(f)).into_response();
+    }
+
+    // Try complex types (use cast for performance)
+    if let Ok(dict) = obj.cast::<PyDict>() {
+        return Json(py_dict_to_json(py, dict)).into_response();
+    }
+    if let Ok(list) = obj.cast::<PyList>() {
+        return Json(py_list_to_json(py, list)).into_response();
+    }
+
     // Fallback
-    format!("{:?}", obj).into_response()
+    Json(json!(format!("{:?}", obj))).into_response()
 }
 
-/// JSON/Python conversion helpers
+/// Optimized dict to JSON conversion with capacity hint
+#[inline]
 pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
-    let mut map = Map::new();
-    for (key, value) in dict.iter() {
-        let k: String = match key.extract() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+    let mut map = Map::with_capacity(dict.len());
 
-        map.insert(k, py_any_to_json(py, &value));
+    for (key, value) in dict.iter() {
+        if let Ok(k) = key.extract::<String>() {
+            map.insert(k, py_any_to_json(py, &value));
+        }
     }
+
     Value::Object(map)
 }
 
-/// Convert Python list to JSON
+/// Optimized list to JSON conversion with capacity hint
+#[inline]
 pub fn py_list_to_json(py: Python<'_>, list: &Bound<'_, PyList>) -> Value {
-    let mut vec = Vec::new();
+    let mut vec = Vec::with_capacity(list.len());
+
     for item in list.iter() {
         vec.push(py_any_to_json(py, &item));
     }
+
     Value::Array(vec)
 }
 
-/// Convert any Python object to JSON Value
+/// Fast any to JSON conversion with early returns
+#[inline]
 fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
-    // Try simple types first
-    if let Ok(s) = value.extract::<String>() {
-        return Value::String(s);
+    if value.is_none() {
+        return Value::Null;
+    }
+
+    // Try scalar types first (ordered by frequency)
+    if let Ok(b) = value.extract::<bool>() {
+        return Value::Bool(b);
     }
     if let Ok(i) = value.extract::<i64>() {
         return Value::Number(i.into());
     }
     if let Ok(f) = value.extract::<f64>() {
-        if let Some(num) = serde_json::Number::from_f64(f) {
-            return Value::Number(num);
-        }
-        return Value::Null;
+        return serde_json::Number::from_f64(f)
+            .map(Value::Number)
+            .unwrap_or(Value::Null);
     }
-    if let Ok(b) = value.extract::<bool>() {
-        return Value::Bool(b);
-    }
-    if value.is_none() {
-        return Value::Null;
+    if let Ok(s) = value.extract::<String>() {
+        return Value::String(s);
     }
 
-    if let Ok(nested_dict) = value.cast::<PyDict>() {
-        return py_dict_to_json(py, nested_dict);
+    // Try complex types
+    if let Ok(dict) = value.cast::<PyDict>() {
+        return py_dict_to_json(py, dict);
     }
-    if let Ok(nested_list) = value.cast::<PyList>() {
-        return py_list_to_json(py, nested_list);
+    if let Ok(list) = value.cast::<PyList>() {
+        return py_list_to_json(py, list);
     }
 
+    // Fallback
     Value::String(format!("{:?}", value))
 }

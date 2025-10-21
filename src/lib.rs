@@ -17,42 +17,38 @@ use tracing::{debug, info, warn, Level};
 use tracing_subscriber;
 use utoipa::OpenApi as ApiDoc;
 use utoipa_swagger_ui::SwaggerUi;
+
 mod py_handlers;
 mod pydantic;
 mod utils;
 
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
-// use crate::utils::shutdown_signal;
 use crate::pydantic::register_pydantic_integration;
 
 pub static ROUTES: Lazy<DashMap<String, Py<PyAny>>> = Lazy::new(DashMap::new);
+
+// Use a dedicated runtime for Python handlers
+// This prevents blocking the main Tokio runtime
+static PYTHON_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(num_cpus::get())
+        .thread_name("python-handler")
+        .enable_all()
+        .build()
+        .expect("Failed to create Python runtime")
+});
 
 #[derive(Clone)]
 struct AppState {
     rt_handle: tokio::runtime::Handle,
 }
 
-// Define our API documentation
 #[derive(ApiDoc)]
-#[openapi(
-    paths(
-        // You'll need to add your actual paths here when you have them defined
-        // For now, we're just creating an empty documentation
-    ),
-    components(
-        // Add components here if needed
-    ),
-    tags(
-        // Add API tags here if needed
-    )
-)]
+#[openapi(paths(), components(), tags())]
 struct ApiDocumentation;
 
-/// FastrAPI class
 #[pyclass]
 pub struct FastrAPI {
-    // Since we're using the global ROUTES map, we don't need this field
-    // Keeping it for backward compatibility but marking as unused
     #[allow(dead_code)]
     router: Arc<DashMap<String, Py<PyAny>>>,
 }
@@ -108,7 +104,6 @@ impl FastrAPI {
         py: Python<'py>,
     ) -> PyResult<Py<PyAny>> {
         let route_key = format!("{} {}", method, path);
-        let route_key_for_closure = route_key.clone();
 
         let decorator = move |args: &Bound<'_, PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
@@ -116,10 +111,10 @@ impl FastrAPI {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.extract()?;
 
-            ROUTES.insert(route_key_for_closure.clone(), func.clone_ref(py));
-            info!("🧩 Added decorated route [{}]", route_key_for_closure);
+            ROUTES.insert(route_key.clone(), func.clone_ref(py));
+            info!("🧩 Added decorated route [{}]", route_key);
 
-            Ok(func.into())
+            Ok(func)
         };
 
         PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
@@ -137,10 +132,8 @@ impl FastrAPI {
         let port = port.unwrap_or(8000);
 
         let rt = tokio::runtime::Runtime::new()?;
-        let rt_handle = rt.handle().clone();
-        let app_state = AppState {
-            rt_handle: rt_handle.clone(),
-        };
+        let rt_handle = PYTHON_RUNTIME.handle().clone();
+        let app_state = AppState { rt_handle };
 
         let mut app = Router::new();
 
@@ -149,37 +142,35 @@ impl FastrAPI {
             println!("   • {}", key.key());
         }
 
+        // Use Arc<str> to avoid cloning on every request
         for entry in ROUTES.iter() {
-            let route_key = entry.key().to_string();
-            let parts: Vec<String> = route_key.splitn(2, ' ').map(|s| s.to_string()).collect();
+            let route_key: Arc<str> = entry.key().clone().into();
+            let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
 
             if parts.len() != 2 {
                 warn!("⚠️ Invalid route key format: {}", route_key);
                 continue;
             }
 
-            let method = parts[0].clone();
-            let path = parts[1].clone();
+            let method = parts[0];
+            let path = parts[1].to_string();
 
             debug!("🔧 Building route: [{} {}]", method, path);
 
-            match method.as_str() {
+            match method {
                 "GET" | "HEAD" | "OPTIONS" => {
-                    let route_key_clone = route_key.clone();
-                    let method_clone = method.clone();
+                    let route_key = Arc::clone(&route_key);
                     let handler_fn =
                         move |Extension(state): Extension<AppState>,
                               ConnectInfo(addr): ConnectInfo<SocketAddr>| {
-                            let route_key = route_key_clone.clone();
-                            let method = method_clone.clone();
+                            let route_key = Arc::clone(&route_key);
                             async move {
-                                println!("📥 Incoming {} request to {}", method, route_key);
-                                println!("Client IP: {}", addr);
+                                debug!("📥 {} from {}", route_key, addr);
                                 run_py_handler_no_args(state.rt_handle, route_key).await
                             }
                         };
 
-                    app = match method.as_str() {
+                    app = match method {
                         "GET" => app.route(&path, axum_get(handler_fn)),
                         "HEAD" => app.route(&path, axum_head(handler_fn)),
                         "OPTIONS" => app.route(&path, axum_options(handler_fn)),
@@ -187,23 +178,19 @@ impl FastrAPI {
                     };
                 }
                 "POST" | "PUT" | "DELETE" | "PATCH" => {
-                    let route_key_clone = route_key.clone();
-                    let method_clone = method.clone();
+                    let route_key = Arc::clone(&route_key);
                     let handler_fn =
                         move |Extension(state): Extension<AppState>,
                               ConnectInfo(addr): ConnectInfo<SocketAddr>,
                               Json(payload): Json<serde_json::Value>| {
-                            let route_key = route_key_clone.clone();
-                            let method = method_clone.clone();
+                            let route_key = Arc::clone(&route_key);
                             async move {
-                                println!("📥 Incoming {} request to {}", method, route_key);
-                                println!("Client IP: {}", addr);
-                                println!("Payload: {}", payload);
+                                debug!("📥 {} from {}", route_key, addr);
                                 run_py_handler_with_args(state.rt_handle, route_key, payload).await
                             }
                         };
 
-                    app = match method.as_str() {
+                    app = match method {
                         "POST" => app.route(&path, axum_post(handler_fn)),
                         "PUT" => app.route(&path, axum_put(handler_fn)),
                         "DELETE" => app.route(&path, axum_delete(handler_fn)),
@@ -229,7 +216,6 @@ impl FastrAPI {
                     listener,
                     app.into_make_service_with_connect_info::<SocketAddr>(),
                 )
-                // .with_graceful_shutdown(shutdown_signal())
                 .await
                 .unwrap();
             });
