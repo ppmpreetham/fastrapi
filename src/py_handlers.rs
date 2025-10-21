@@ -76,7 +76,7 @@ pub async fn run_py_handler_with_args(
     }
 }
 
-/// for routes WITHOUT payload (GET)
+/// For routes WITHOUT payload (GET, HEAD, OPTIONS)
 pub async fn run_py_handler_no_args(
     rt_handle: tokio::runtime::Handle,
     route_key: String,
@@ -86,7 +86,10 @@ pub async fn run_py_handler_no_args(
             Python::attach(|py| {
                 if let Some(py_func) = ROUTES.get(&route_key) {
                     match py_func.call0(py) {
-                        Ok(result) => py_to_response(py, &result.into_bound(py)),
+                        Ok(result) => {
+                            let result_bound = result.into_bound(py);
+                            py_to_response(py, &result_bound)
+                        }
                         Err(err) => {
                             err.print(py);
                             (

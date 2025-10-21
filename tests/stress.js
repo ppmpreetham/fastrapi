@@ -10,5 +10,5 @@ export let options = {
 };
 
 export default function () {
-    http.get('http://127.0.0.1:8080/hello');
+    http.get('http://127.0.0.1:8080/');
 }

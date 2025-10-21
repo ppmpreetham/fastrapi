@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{PyAny, PyDict, PyList};
 use serde_json::{Map, Value};
 use serde_pyobject::to_pyobject;
 
@@ -43,23 +43,40 @@ pub fn json_to_py_object<'py>(py: Python<'py>, value: &Value) -> Py<PyAny> {
     }
 }
 
-pub fn py_to_response(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> Response {
+pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Response {
     if let Ok(s) = obj.extract::<String>() {
-        s.into_response()
-    } else if let Ok(i) = obj.extract::<i64>() {
-        i.to_string().into_response()
-    } else if let Ok(dict) = obj.cast::<PyDict>() {
-        let json = py_dict_to_json(dict);
-        Json(json).into_response()
-    } else if obj.is_none() {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        format!("{:?}", obj).into_response()
+        return s.into_response();
     }
+    if let Ok(i) = obj.extract::<i64>() {
+        return i.to_string().into_response();
+    }
+    if let Ok(f) = obj.extract::<f64>() {
+        return f.to_string().into_response();
+    }
+    if let Ok(b) = obj.extract::<bool>() {
+        return b.to_string().into_response();
+    }
+
+    if let Ok(dict) = obj.cast::<PyDict>() {
+        let json = py_dict_to_json(py, dict);
+        return Json(json).into_response();
+    }
+    if let Ok(list) = obj.cast::<PyList>() {
+        let json = py_list_to_json(py, list);
+        return Json(json).into_response();
+    }
+
+    // Handle None
+    if obj.is_none() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
+    // Fallback
+    format!("{:?}", obj).into_response()
 }
 
 /// JSON/Python conversion helpers
-pub fn py_dict_to_json(dict: &Bound<'_, PyDict>) -> Value {
+pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
     let mut map = Map::new();
     for (key, value) in dict.iter() {
         let k: String = match key.extract() {
@@ -67,25 +84,48 @@ pub fn py_dict_to_json(dict: &Bound<'_, PyDict>) -> Value {
             Err(_) => continue,
         };
 
-        if let Ok(s) = value.extract::<String>() {
-            map.insert(k, Value::String(s));
-        } else if let Ok(i) = value.extract::<i64>() {
-            map.insert(k, Value::Number(i.into()));
-        } else if let Ok(f) = value.extract::<f64>() {
-            if let Some(num) = serde_json::Number::from_f64(f) {
-                map.insert(k, Value::Number(num));
-            } else {
-                map.insert(k, Value::Null);
-            }
-        } else if let Ok(b) = value.extract::<bool>() {
-            map.insert(k, Value::Bool(b));
-        } else if value.is_none() {
-            map.insert(k, Value::Null);
-        } else if let Ok(nested) = value.cast::<PyDict>() {
-            map.insert(k, py_dict_to_json(nested));
-        } else {
-            map.insert(k, Value::String(format!("{:?}", value)));
-        }
+        map.insert(k, py_any_to_json(py, &value));
     }
     Value::Object(map)
+}
+
+/// Convert Python list to JSON
+pub fn py_list_to_json(py: Python<'_>, list: &Bound<'_, PyList>) -> Value {
+    let mut vec = Vec::new();
+    for item in list.iter() {
+        vec.push(py_any_to_json(py, &item));
+    }
+    Value::Array(vec)
+}
+
+/// Convert any Python object to JSON Value
+fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
+    // Try simple types first
+    if let Ok(s) = value.extract::<String>() {
+        return Value::String(s);
+    }
+    if let Ok(i) = value.extract::<i64>() {
+        return Value::Number(i.into());
+    }
+    if let Ok(f) = value.extract::<f64>() {
+        if let Some(num) = serde_json::Number::from_f64(f) {
+            return Value::Number(num);
+        }
+        return Value::Null;
+    }
+    if let Ok(b) = value.extract::<bool>() {
+        return Value::Bool(b);
+    }
+    if value.is_none() {
+        return Value::Null;
+    }
+
+    if let Ok(nested_dict) = value.cast::<PyDict>() {
+        return py_dict_to_json(py, nested_dict);
+    }
+    if let Ok(nested_list) = value.cast::<PyList>() {
+        return py_list_to_json(py, nested_list);
+    }
+
+    Value::String(format!("{:?}", value))
 }

@@ -25,7 +25,7 @@ use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
 // use crate::utils::shutdown_signal;
 use crate::pydantic::register_pydantic_integration;
 
-pub static ROUTES: Lazy<DashMap<String, Py<PyAny>>> = Lazy::new(|| DashMap::new());
+pub static ROUTES: Lazy<DashMap<String, Py<PyAny>>> = Lazy::new(DashMap::new);
 
 #[derive(Clone)]
 struct AppState {
@@ -107,10 +107,7 @@ impl FastrAPI {
         path: String,
         py: Python<'py>,
     ) -> PyResult<Py<PyAny>> {
-        // Create the route key
         let route_key = format!("{} {}", method, path);
-
-        // Clone the route_key for the closure to avoid capturing a reference to the local variable
         let route_key_for_closure = route_key.clone();
 
         let decorator = move |args: &Bound<'_, PyTuple>,
@@ -119,7 +116,6 @@ impl FastrAPI {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.extract()?;
 
-            // Use the cloned route_key specific to this closure
             ROUTES.insert(route_key_for_closure.clone(), func.clone_ref(py));
             info!("🧩 Added decorated route [{}]", route_key_for_closure);
 
@@ -154,10 +150,7 @@ impl FastrAPI {
         }
 
         for entry in ROUTES.iter() {
-            // full route key
             let route_key = entry.key().to_string();
-
-            // method and path from frk
             let parts: Vec<String> = route_key.splitn(2, ' ').map(|s| s.to_string()).collect();
 
             if parts.len() != 2 {
@@ -246,7 +239,6 @@ impl FastrAPI {
     }
 }
 
-// Python module
 #[pyfunction]
 fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
     let key = format!("GET {}", path);
@@ -255,7 +247,7 @@ fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
     Ok(())
 }
 
-#[pymodule]
+#[pymodule(gil_used = false)]
 fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FastrAPI>()?;
     m.add_function(wrap_pyfunction!(get_decorator, m)?)?;

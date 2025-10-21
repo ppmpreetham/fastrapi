@@ -60,13 +60,17 @@ pub fn call_with_pydantic_validation<'py>(
     payload: &Value,
 ) -> Response {
     match validate_with_pydantic(py, model_class, payload) {
-        Ok(validated_obj) => match route_func.call1((validated_obj,)) {
-            Ok(result) => py_to_response(py, &result.as_any()),
-            Err(err) => {
-                err.print(py);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        Ok(validated_obj) => {
+            match route_func.call1((validated_obj,)) {
+                Ok(result) => {
+                    py_to_response(py, &result)
+                }
+                Err(err) => {
+                    err.print(py);
+                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                }
             }
-        },
+        }
         Err(validation_error) => validation_error,
     }
 }
