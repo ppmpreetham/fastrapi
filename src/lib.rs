@@ -9,7 +9,8 @@ use axum::{
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyCFunction, PyDict, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyCFunction, PyDict, PyModule, PyTuple, PyType};
+use smallvec::SmallVec;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -25,7 +26,14 @@ mod utils;
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
 use crate::pydantic::register_pydantic_integration;
 
-pub static ROUTES: Lazy<DashMap<String, Py<PyAny>>> = Lazy::new(DashMap::new);
+#[derive(Clone)]
+pub struct RouteHandler {
+    pub func: Py<PyAny>,
+    pub needs_validation: bool,
+    pub validator_class: Option<Py<PyAny>>,
+}
+
+pub static ROUTES: Lazy<DashMap<String, RouteHandler>> = Lazy::new(DashMap::new);
 
 static PYTHON_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
     let worker_threads = num_cpus::get().max(4).min(16);
@@ -49,8 +57,10 @@ struct ApiDocumentation;
 #[pyclass]
 pub struct FastrAPI {
     #[allow(dead_code)]
-    router: Arc<DashMap<String, Py<PyAny>>>,
+    router: Arc<DashMap<String, RouteHandler>>,
 }
+
+use smartstring::alias::String as SmartString;
 
 #[pymethods]
 impl FastrAPI {
@@ -62,10 +72,52 @@ impl FastrAPI {
     }
 
     fn register_route(&self, path: String, func: Py<PyAny>, method: Option<String>) {
-        let method = method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
-        let key = format!("{} {}", method, path);
-        ROUTES.insert(key.clone(), func);
-        info!("✅ Registered route [{}]", key);
+        Python::attach(|py| {
+            let func_bound = func.bind(py);
+
+            let (needs_validation, validator_class) = match func_bound.getattr("__annotations__") {
+                Ok(ann) => {
+                    if let Ok(dict) = ann.cast::<PyDict>() {
+                        if let Some(item) = dict.items().into_iter().next() {
+                            if let Ok((_, type_hint)) = item.extract::<(Py<PyAny>, Py<PyAny>)>() {
+                                // Use .bind() instead of .into_bound() to avoid moving
+                                let hint_bound = type_hint.bind(py);
+                                if hint_bound.is_instance_of::<PyType>() {
+                                    (true, Some(type_hint))
+                                } else {
+                                    (false, None)
+                                }
+                            } else {
+                                (false, None)
+                            }
+                        } else {
+                            (false, None)
+                        }
+                    } else {
+                        (false, None)
+                    }
+                }
+                _ => (false, None),
+            };
+
+            let handler = RouteHandler {
+                func: func.clone_ref(py),
+                needs_validation,
+                validator_class,
+            };
+
+            let method = method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
+            let mut key = SmartString::new();
+            key.push_str(&method);
+            key.push(' ');
+            key.push_str(&path);
+
+            ROUTES.insert((&key).to_string(), handler);
+            info!(
+                "✅ Registered route [{}] (validation: {})",
+                key, needs_validation
+            );
+        });
     }
 
     fn get<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
@@ -109,9 +161,44 @@ impl FastrAPI {
               -> PyResult<Py<PyAny>> {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.extract()?;
+            let func_bound = func.bind(py);
 
-            ROUTES.insert(route_key.clone(), func.clone_ref(py));
-            info!("🧩 Added decorated route [{}]", route_key);
+            let (needs_validation, validator_class) = match func_bound.getattr("__annotations__") {
+                Ok(ann) => {
+                    if let Ok(dict) = ann.cast::<PyDict>() {
+                        if let Some(item) = dict.items().into_iter().next() {
+                            if let Ok((_, type_hint)) = item.extract::<(Py<PyAny>, Py<PyAny>)>() {
+                                // Use .bind() instead of .into_bound() to avoid moving
+                                let hint_bound = type_hint.bind(py);
+                                if hint_bound.is_instance_of::<PyType>() {
+                                    (true, Some(type_hint))
+                                } else {
+                                    (false, None)
+                                }
+                            } else {
+                                (false, None)
+                            }
+                        } else {
+                            (false, None)
+                        }
+                    } else {
+                        (false, None)
+                    }
+                }
+                _ => (false, None),
+            };
+
+            let handler = RouteHandler {
+                func: func.clone_ref(py),
+                needs_validation,
+                validator_class,
+            };
+
+            ROUTES.insert(route_key.clone(), handler);
+            info!(
+                "🧩 Added decorated route [{}] (validation: {})",
+                route_key, needs_validation
+            );
 
             Ok(func)
         };
@@ -143,7 +230,7 @@ impl FastrAPI {
         // Use Arc<str> to avoid cloning on every request
         for entry in ROUTES.iter() {
             let route_key: Arc<str> = entry.key().clone().into();
-            let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
+            let parts: SmallVec<[&str; 2]> = route_key.splitn(2, ' ').collect();
 
             if parts.len() != 2 {
                 warn!("⚠️ Invalid route key format: {}", route_key);
@@ -160,10 +247,11 @@ impl FastrAPI {
                     let route_key = Arc::clone(&route_key);
                     let handler_fn =
                         move |Extension(state): Extension<AppState>,
-                              ConnectInfo(addr): ConnectInfo<SocketAddr>| {
+                              ConnectInfo(_addr): ConnectInfo<SocketAddr>| {
                             let route_key = Arc::clone(&route_key);
                             async move {
-                                debug!("📥 {} from {}", route_key, addr);
+                                #[cfg(feature = "verbose-logging")]
+                                debug!("{} from {}", route_key, _addr);
                                 run_py_handler_no_args(state.rt_handle, route_key).await
                             }
                         };
@@ -179,11 +267,12 @@ impl FastrAPI {
                     let route_key = Arc::clone(&route_key);
                     let handler_fn =
                         move |Extension(state): Extension<AppState>,
-                              ConnectInfo(addr): ConnectInfo<SocketAddr>,
+                              ConnectInfo(_addr): ConnectInfo<SocketAddr>,
                               Json(payload): Json<serde_json::Value>| {
                             let route_key = Arc::clone(&route_key);
                             async move {
-                                debug!("📥 {} from {}", route_key, addr);
+                                #[cfg(feature = "verbose-logging")]
+                                debug!("📥 {} from {}", route_key, _addr);
                                 run_py_handler_with_args(state.rt_handle, route_key, payload).await
                             }
                         };
@@ -236,9 +325,43 @@ impl FastrAPI {
 
 #[pyfunction]
 fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
-    let key = format!("GET {}", path);
-    ROUTES.insert(key.clone(), func);
-    info!("🔗 Registered via get_decorator [{}]", key);
+    Python::attach(|py| {
+        let func_bound = func.bind(py);
+
+        let (needs_validation, validator_class) = match func_bound.getattr("__annotations__") {
+            Ok(ann) => {
+                if let Ok(dict) = ann.cast::<PyDict>() {
+                    if let Some(item) = dict.items().into_iter().next() {
+                        if let Ok((_, type_hint)) = item.extract::<(Py<PyAny>, Py<PyAny>)>() {
+                            let hint_bound = type_hint.bind(py);
+                            if hint_bound.is_instance_of::<PyType>() {
+                                (true, Some(type_hint))
+                            } else {
+                                (false, None)
+                            }
+                        } else {
+                            (false, None)
+                        }
+                    } else {
+                        (false, None)
+                    }
+                } else {
+                    (false, None)
+                }
+            }
+            _ => (false, None),
+        };
+
+        let handler = RouteHandler {
+            func: func.clone_ref(py),
+            needs_validation,
+            validator_class,
+        };
+
+        let key = format!("GET {}", path);
+        ROUTES.insert(key.clone(), handler);
+        info!("🔗 Registered via get_decorator [{}]", key);
+    });
     Ok(())
 }
 

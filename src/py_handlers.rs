@@ -7,10 +7,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use pyo3::{
-    prelude::*,
-    types::{PyAny, PyDict, PyType},
-};
+use pyo3::prelude::*;
 use std::sync::Arc;
 use tracing::error;
 
@@ -20,66 +17,44 @@ pub async fn run_py_handler_with_args(
     route_key: Arc<str>,
     payload: serde_json::Value,
 ) -> Response {
-    // Use spawn_blocking to prevent blocking Tokio's async executor
-    // This is crucial because Python handlers may do I/O
     match rt_handle
         .spawn_blocking(move || {
             Python::attach(|py| {
-                // Detach during long operations to allow GC and other Python events
-                if let Some(entry) = ROUTES.get(route_key.as_ref()) {
-                    let py_func = entry.value().bind(py);
+                let entry = match ROUTES.get(route_key.as_ref()) {
+                    Some(e) => e,
+                    None => {
+                        error!("Route handler not found: {}", route_key);
+                        return (StatusCode::NOT_FOUND, "Route handler not found").into_response();
+                    }
+                };
 
-                    let py_payload = match py_func.getattr("__annotations__") {
-                        Ok(annotations) => {
-                            if let Ok(ann_dict) = annotations.cast::<PyDict>() {
-                                if let Some(item) = ann_dict.items().into_iter().next() {
-                                    if let Ok((_, type_hint)) =
-                                        item.extract::<(Py<PyAny>, Py<PyAny>)>()
-                                    {
-                                        let type_hint_bound = type_hint.into_bound(py);
+                let handler = entry.value();
+                let py_func = handler.func.bind(py);
 
-                                        if type_hint_bound.is_instance_of::<PyType>() {
-                                            // Pydantic validation
-                                            match validate_with_pydantic(
-                                                py,
-                                                &type_hint_bound,
-                                                &payload,
-                                            ) {
-                                                Ok(validated) => validated,
-                                                Err(err_resp) => return err_resp,
-                                            }
-                                        } else {
-                                            json_to_py_object(py, &payload)
-                                        }
-                                    } else {
-                                        json_to_py_object(py, &payload)
-                                    }
-                                } else {
-                                    json_to_py_object(py, &payload)
-                                }
-                            } else {
-                                json_to_py_object(py, &payload)
-                            }
+                let py_payload = if handler.needs_validation {
+                    if let Some(ref validator) = handler.validator_class {
+                        match validate_with_pydantic(py, &validator.bind(py), &payload) {
+                            Ok(validated) => validated,
+                            Err(err_resp) => return err_resp,
                         }
-                        Err(_) => json_to_py_object(py, &payload),
-                    };
-
-                    // Call Python function with vectorcall optimization
-                    match py_func.call1((py_payload,)) {
-                        Ok(result) => py_to_response(py, &result),
-                        Err(err) => {
-                            err.print(py);
-                            error!("Error in route handler {}: {}", route_key, err);
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                format!("Error in route handler: {}", err),
-                            )
-                                .into_response()
-                        }
+                    } else {
+                        json_to_py_object(py, &payload)
                     }
                 } else {
-                    error!("Route handler not found: {}", route_key);
-                    (StatusCode::NOT_FOUND, "Route handler not found").into_response()
+                    json_to_py_object(py, &payload)
+                };
+
+                match py_func.call1((py_payload,)) {
+                    Ok(result) => py_to_response(py, &result),
+                    Err(err) => {
+                        err.print(py);
+                        error!("Error in route handler {}: {}", route_key, err);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Error in route handler: {}", err),
+                        )
+                            .into_response()
+                    }
                 }
             })
         })
@@ -101,25 +76,30 @@ pub async fn run_py_handler_no_args(
     match rt_handle
         .spawn_blocking(move || {
             Python::attach(|py| {
-                if let Some(py_func) = ROUTES.get(route_key.as_ref()) {
-                    match py_func.call0(py) {
-                        Ok(result) => {
-                            let result_bound = result.into_bound(py);
-                            py_to_response(py, &result_bound)
-                        }
-                        Err(err) => {
-                            err.print(py);
-                            error!("Error in route handler {}: {}", route_key, err);
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                format!("Error in route handler: {}", err),
-                            )
-                                .into_response()
-                        }
+                let entry = match ROUTES.get(route_key.as_ref()) {
+                    Some(e) => e,
+                    None => {
+                        error!("Route handler not found: {}", route_key);
+                        return (StatusCode::NOT_FOUND, "Route handler not found").into_response();
                     }
-                } else {
-                    error!("Route handler not found: {}", route_key);
-                    (StatusCode::NOT_FOUND, "Route handler not found").into_response()
+                };
+
+                let handler = entry.value();
+
+                match handler.func.call0(py) {
+                    Ok(result) => {
+                        let result_bound = result.into_bound(py);
+                        py_to_response(py, &result_bound)
+                    }
+                    Err(err) => {
+                        err.print(py);
+                        error!("Error in route handler {}: {}", route_key, err);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Error in route handler: {}", err),
+                        )
+                            .into_response()
+                    }
                 }
             })
         })

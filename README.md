@@ -1,11 +1,11 @@
 # FastrAPI (Fast + Rust + API)
 
 <img src="https://raw.githubusercontent.com/ppmpreetham/fastrapi/refs/heads/main/readme/fastrapi.gif" width="100%" alt="FastRAPI GIF">
-FastrAPI is a high-performance web framework that supercharges your Python APIs with the power of Rust. Built on Axum and PyO3, it delivers unmatched speed, type safety, and developer-friendly Python syntax. Create robust, async-ready APIs with minimal overhead and maximum throughput. FastrAPI is your drop-in replacement for FastAPI, offering familiar syntax with up to 9.5x faster performance.
+FastrAPI is a high-performance web framework that supercharges your Python APIs with the power of Rust. Built on Axum and PyO3, it delivers unmatched speed, type safety, and developer-friendly Python syntax. Create robust, async-ready APIs with minimal overhead and maximum throughput. FastrAPI is your drop-in replacement for FastAPI, offering familiar syntax with up to 31x faster performance.
 
 ## Key Features
 
-- **Lightning Speed**: Powered by Rust and Axum, FastrAPI delivers up to 9.5x faster performance than FastAPI, making your APIs scream.
+- **Lightning Speed**: Powered by Rust and Axum, FastrAPI delivers up to 31x faster performance than FastAPI, making your APIs scream.
 - **Python-First**: Write clean, familiar Python code—no Rust knowledge needed. FastrAPI handles the heavy lifting behind the scenes.
 - **Ironclad Type Safety**: Inherits Rust's robust type system for rock-solid reliability, catching errors before they hit production.
 - **Pydantic Powered**: Seamless integration with Pydantic for effortless request and response validation, keeping your data in check.
@@ -16,7 +16,7 @@ FastrAPI is a high-performance web framework that supercharges your Python APIs 
 ---
 
 #### Is it as fast as claimed?
-Yes. Powered by Rust and Axum, FastrAPI outperforms FastAPI by up to 9.5x in real-world benchmarks, with no compromises on usability. Check it out [here](https://github.com/ppmpreetham/fastrapi?tab=readme-ov-file#performance)
+Yes. Powered by Rust and Axum, FastrAPI outperforms FastAPI by up to 31x in real-world benchmarks, with no compromises on usability. Check it out [here](https://github.com/ppmpreetham/fastrapi?tab=readme-ov-file#performance)
 
 #### Do I need to know Rust?
 Nope. FastrAPI lets you write 100% Python code while leveraging Rust's performance under the hood.
@@ -103,18 +103,29 @@ Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn acr
 
 ### ⚡ Benchmark Results
 
-| Framework                          | Avg Latency (ms) | Median Latency (ms) | Requests/sec | P95 Latency (ms) | P99 Latency (ms) |
-|------------------------------------|-----------------|-------------------|--------------|-----------------|-----------------|
-| **FASTRAPI**                       | 2.19            | 2.16              | **8881**     | 3.79            | 11.67           |
-| FastAPI + Guvicorn (workers: 1)    | 21.08           | 19.67             | 937          | 38.47           | 93.42           |
-| FastAPI + Guvicorn (workers: 16)   | 4.84            | 4.17              | 3882         | 10.22           | 81.20           |
+| Framework                              | Avg Latency (ms) | Median Latency (ms) | Requests/sec | P95 Latency (ms) | P99 Latency (ms) |
+|----------------------------------------|------------------|---------------------|---------------|------------------|------------------|
+| **FASTRAPI**                           | **0.63**         | **0.00**            | **29273**     | **2.38**         | **12.22**        |
+| FastAPI + Guvicorn (workers: 1)       | 21.08            | 19.67               | 937           | 38.47            | 93.42            |
+| FastAPI + Guvicorn (workers: 16)      | 4.84             | 4.17                | 3882          | 10.22            | 81.20            |
 
-
-> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency — making it **~9.5× faster** than FastAPI + Guvicorn with 1 worker.
+> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency — making it **~31× faster** than FastAPI + Guvicorn with 1 worker.
 
 ## Current Limitations
-- Limited validation features compared to FastAPI's Pydantic integration
-- Some advanced features are still in development
+Some advanced features are still in development like:
+
+- [ ] Middleware
+- [ ] OpenAPI docs generation
+- [ ] Websockets
+- [ ] Dependency injection
+- [ ] Better error handling (currently shows Rust errors)
+- [ ] Background tasks
+- [ ] Static file serving
+- [ ] Testing support
+- [ ] Logging/metrics (maybe next)
+- [ ] Rate limiter (even FastAPI doesn't have it)
+- [ ] GraphQL support
+- [ ] A nice logging tool
 
 ## Contributing
 Contributions are welcome! Please feel free to submit a Pull Request.
