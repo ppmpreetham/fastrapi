@@ -1,9 +1,9 @@
-use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyModule, PyDict};
+use crate::utils::{json_to_py_object, py_to_response};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use pyo3::prelude::*;
+use pyo3::types::{PyAny, PyDict, PyModule};
 use serde_json::Value;
-use crate::utils::{json_to_py_object, py_to_response};
 
 pub fn load_pydantic_model(py: Python<'_>, module: &str, class_name: &str) -> PyResult<Py<PyAny>> {
     let module = PyModule::import(py, module)?;
@@ -23,12 +23,13 @@ pub fn validate_with_pydantic<'py>(
     } else {
         let data_bound = py_data.bind(py);
         if data_bound.is_instance_of::<PyDict>() {
-            let dict = data_bound.downcast::<PyDict>().map_err(|e| {
+            let dict = data_bound.cast::<PyDict>().map_err(|e| {
                 let err_str = e.to_string();
                 (
                     StatusCode::UNPROCESSABLE_ENTITY,
                     format!("Pydantic validation failed: {}", err_str),
-                ).into_response()
+                )
+                    .into_response()
             })?;
             model_class.call((), Some(dict))
         } else {
@@ -59,21 +60,24 @@ pub fn call_with_pydantic_validation<'py>(
     payload: &Value,
 ) -> Response {
     match validate_with_pydantic(py, model_class, payload) {
-        Ok(validated_obj) => {
-            match route_func.call1((validated_obj,)) {
-                Ok(result) => py_to_response(py, &result.as_any()),
-                Err(err) => {
-                    err.print(py);
-                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                }
+        Ok(validated_obj) => match route_func.call1((validated_obj,)) {
+            Ok(result) => py_to_response(py, &result.as_any()),
+            Err(err) => {
+                err.print(py);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }
-        }
+        },
         Err(validation_error) => validation_error,
     }
 }
 
 #[pyfunction]
-fn test_model(py: Python<'_>, module: String, class_name: String, data: Py<PyAny>) -> PyResult<Py<PyAny>> {
+fn test_model(
+    py: Python<'_>,
+    module: String,
+    class_name: String,
+    data: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
     let model = load_pydantic_model(py, &module, &class_name)?;
     let bound_model = model.bind(py);
     let validated = bound_model.call1((data,))?;
