@@ -13,7 +13,7 @@ use pyo3::types::{PyAny, PyCFunction, PyDict, PyModule, PyTuple};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{debug, info, warn, Level};
+use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber;
 use utoipa::OpenApi as ApiDoc;
 use utoipa_swagger_ui::SwaggerUi;
@@ -27,11 +27,10 @@ use crate::pydantic::register_pydantic_integration;
 
 pub static ROUTES: Lazy<DashMap<String, Py<PyAny>>> = Lazy::new(DashMap::new);
 
-// Use a dedicated runtime for Python handlers
-// This prevents blocking the main Tokio runtime
 static PYTHON_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+    let worker_threads = num_cpus::get().max(4).min(16);
     tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(num_cpus::get())
+        .worker_threads(worker_threads)
         .thread_name("python-handler")
         .enable_all()
         .build()
@@ -131,7 +130,6 @@ impl FastrAPI {
         let host = host.unwrap_or_else(|| "127.0.0.1".to_string());
         let port = port.unwrap_or(8000);
 
-        let rt = tokio::runtime::Runtime::new()?;
         let rt_handle = PYTHON_RUNTIME.handle().clone();
         let app_state = AppState { rt_handle };
 
@@ -208,16 +206,27 @@ impl FastrAPI {
         );
 
         py.detach(move || {
-            rt.block_on(async move {
+            PYTHON_RUNTIME.block_on(async move {
                 let addr = format!("{}:{}", host, port);
-                let listener = TcpListener::bind(&addr).await.unwrap();
+
+                let listener = match TcpListener::bind(&addr).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        error!("Failed to bind to {}: {}", addr, e);
+                        return;
+                    }
+                };
+
                 info!("🚀 FastrAPI running at http://{}", addr);
-                axum::serve(
+
+                if let Err(e) = axum::serve(
                     listener,
                     app.into_make_service_with_connect_info::<SocketAddr>(),
                 )
                 .await
-                .unwrap();
+                {
+                    error!("Server error: {}", e);
+                }
             });
         });
 

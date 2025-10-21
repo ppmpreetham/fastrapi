@@ -20,7 +20,6 @@ pub fn json_to_py_object(py: Python<'_>, value: &Value) -> Py<PyAny> {
     }
 }
 
-/// Optimized response conversion with early returns
 #[inline]
 pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Response {
     // Check None first (common case)
@@ -28,9 +27,16 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Response {
         return StatusCode::NO_CONTENT.into_response();
     }
 
-    // Try simple scalar types first (most common, ordered by frequency)
+    // Complex types first (most likely in API responses)
+    if let Ok(dict) = obj.cast::<PyDict>() {
+        return Json(py_dict_to_json(py, dict)).into_response();
+    }
+    if let Ok(list) = obj.cast::<PyList>() {
+        return Json(py_list_to_json(py, list)).into_response();
+    }
+
     if let Ok(s) = obj.extract::<String>() {
-        return s.into_response();
+        return Json(json!(s)).into_response();
     }
     if let Ok(i) = obj.extract::<i64>() {
         return Json(json!(i)).into_response();
@@ -40,14 +46,6 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Response {
     }
     if let Ok(f) = obj.extract::<f64>() {
         return Json(json!(f)).into_response();
-    }
-
-    // Try complex types (use cast for performance)
-    if let Ok(dict) = obj.cast::<PyDict>() {
-        return Json(py_dict_to_json(py, dict)).into_response();
-    }
-    if let Ok(list) = obj.cast::<PyList>() {
-        return Json(py_list_to_json(py, list)).into_response();
     }
 
     // Fallback

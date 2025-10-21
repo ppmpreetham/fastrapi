@@ -12,6 +12,7 @@ use pyo3::{
     types::{PyAny, PyDict, PyType},
 };
 use std::sync::Arc;
+use tracing::error;
 
 /// For routes WITH payload (POST, PUT, PATCH, DELETE)
 pub async fn run_py_handler_with_args(
@@ -28,7 +29,6 @@ pub async fn run_py_handler_with_args(
                 if let Some(entry) = ROUTES.get(route_key.as_ref()) {
                     let py_func = entry.value().bind(py);
 
-                    // Optimized type annotation checking
                     let py_payload = match py_func.getattr("__annotations__") {
                         Ok(annotations) => {
                             if let Ok(ann_dict) = annotations.cast::<PyDict>() {
@@ -39,6 +39,7 @@ pub async fn run_py_handler_with_args(
                                         let type_hint_bound = type_hint.into_bound(py);
 
                                         if type_hint_bound.is_instance_of::<PyType>() {
+                                            // Pydantic validation
                                             match validate_with_pydantic(
                                                 py,
                                                 &type_hint_bound,
@@ -63,11 +64,12 @@ pub async fn run_py_handler_with_args(
                         Err(_) => json_to_py_object(py, &payload),
                     };
 
-                    // Vectorcall optimization via tuple
+                    // Call Python function with vectorcall optimization
                     match py_func.call1((py_payload,)) {
                         Ok(result) => py_to_response(py, &result),
                         Err(err) => {
                             err.print(py);
+                            error!("Error in route handler {}: {}", route_key, err);
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 format!("Error in route handler: {}", err),
@@ -76,6 +78,7 @@ pub async fn run_py_handler_with_args(
                         }
                     }
                 } else {
+                    error!("Route handler not found: {}", route_key);
                     (StatusCode::NOT_FOUND, "Route handler not found").into_response()
                 }
             })
@@ -83,7 +86,10 @@ pub async fn run_py_handler_with_args(
         .await
     {
         Ok(response) => response,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => {
+            error!("Tokio spawn_blocking error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
@@ -103,6 +109,7 @@ pub async fn run_py_handler_no_args(
                         }
                         Err(err) => {
                             err.print(py);
+                            error!("Error in route handler {}: {}", route_key, err);
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 format!("Error in route handler: {}", err),
@@ -111,6 +118,7 @@ pub async fn run_py_handler_no_args(
                         }
                     }
                 } else {
+                    error!("Route handler not found: {}", route_key);
                     (StatusCode::NOT_FOUND, "Route handler not found").into_response()
                 }
             })
@@ -118,6 +126,9 @@ pub async fn run_py_handler_no_args(
         .await
     {
         Ok(response) => response,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => {
+            error!("Tokio spawn_blocking error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
