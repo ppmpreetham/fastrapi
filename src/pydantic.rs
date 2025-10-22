@@ -41,18 +41,12 @@ pub fn validate_with_pydantic<'py>(
         Ok(obj) => Ok(obj.into()),
         Err(e) => {
             e.print(py);
-            let err_str = e.to_string();
-            let response = (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Pydantic validation failed: {}", err_str),
-            )
-                .into_response();
+            let response = (StatusCode::UNPROCESSABLE_ENTITY,).into_response();
             Err(response)
         }
     }
 }
 
-/// idk when to use it but it validates payload via Pydantic and then calls the Python route handler.
 pub fn call_with_pydantic_validation<'py>(
     py: Python<'py>,
     route_func: &Bound<'py, PyAny>,
@@ -69,6 +63,30 @@ pub fn call_with_pydantic_validation<'py>(
         },
         Err(validation_error) => validation_error,
     }
+}
+
+pub fn is_pydantic_model(py: Python<'_>, type_hint: &Bound<'_, PyAny>) -> bool {
+    if !type_hint.is_instance_of::<pyo3::types::PyType>() {
+        return false;
+    }
+
+    // Pydantic v2: has model_validate
+    if type_hint.hasattr("model_validate").unwrap_or(false) {
+        return true;
+    }
+
+    // Pydantic v1: subclass of BaseModel
+    if let Ok(pydantic) = PyModule::import(py, "pydantic") {
+        if let Ok(base_model) = pydantic.getattr("BaseModel") {
+            if let Ok(base_model_type) = base_model.cast::<pyo3::types::PyType>() {
+                if let Ok(type_obj) = type_hint.cast::<pyo3::types::PyType>() {
+                    return type_obj.is_subclass(&base_model_type).unwrap_or(false);
+                }
+            }
+        }
+    }
+
+    false
 }
 
 #[pyfunction]
