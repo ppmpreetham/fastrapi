@@ -113,16 +113,15 @@ Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn acr
 
 ## Current Limitations
 Some advanced features are still in development like:
+- [ ] Logging/metrics
 - [ ] Middleware
-- [ ] OpenAPI docs generation (currently in works)
 - [ ] Websockets
 - [ ] Dependency injection
+- [ ] Static file serving
+- [ ] Rate limiter (even FastAPI doesn't have it)
 - [ ] Better error handling (currently shows Rust errors)
 - [ ] Background tasks
-- [ ] Static file serving
 - [ ] Testing support
-- [ ] Logging/metrics (maybe next)
-- [ ] Rate limiter (even FastAPI doesn't have it)
 - [ ] GraphQL support
 - [ ] A nice logging tool
 
@@ -143,3 +142,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 Inspired by [FastAPI](https://github.com/fastapi/fastapis)
 Built with [PyO3](https://github.com/PyO3/pyo3/) and [Axum](https://github.com/tokio-rs/axum/)
+
+## Star History
+[![Star History Chart](https://api.star-history.com/svg?repos=ppmpreetham/fastrapi&type=Date)](https://star-history.com/#ppmpreetham/fastrapi&Date)

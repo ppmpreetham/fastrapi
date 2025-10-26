@@ -1,5 +1,6 @@
 use axum::{
     extract::{ConnectInfo, Extension},
+    response::Html,
     routing::{
         delete as axum_delete, get as axum_get, head as axum_head, options as axum_options,
         patch as axum_patch, post as axum_post, put as axum_put,
@@ -16,9 +17,8 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber;
-use utoipa::OpenApi as ApiDoc;
-use utoipa_swagger_ui::SwaggerUi;
-
+mod openapi;
+use openapi::build_openapi_spec;
 mod py_handlers;
 mod pydantic;
 mod utils;
@@ -26,10 +26,12 @@ mod utils;
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
 use crate::pydantic::{is_pydantic_model, register_pydantic_integration};
 
+const SWAGGER_HTML: &str = include_str!("../static/swagger-ui.html");
+
 #[derive(Clone)]
 pub struct RouteHandler {
     pub func: Py<PyAny>,
-    pub param_validators: Vec<(String, Py<PyAny>)>, // (param_name, pydantic_model)
+    pub param_validators: Vec<(String, Py<PyAny>)>,
 }
 
 pub static ROUTES: Lazy<DashMap<String, RouteHandler>> = Lazy::new(DashMap::new);
@@ -49,10 +51,6 @@ struct AppState {
     rt_handle: tokio::runtime::Handle,
 }
 
-#[derive(ApiDoc)]
-#[openapi(paths(), components(), tags())]
-struct ApiDocumentation;
-
 #[pyclass]
 pub struct FastrAPI {
     #[allow(dead_code)]
@@ -66,7 +64,7 @@ fn parse_param_validators(py: Python, func: &Bound<PyAny>) -> Vec<(String, Py<Py
     let mut validators = Vec::new();
 
     if let Ok(annotations) = func.getattr("__annotations__") {
-        if let Ok(ann_dict) = annotations.downcast::<PyDict>() {
+        if let Ok(ann_dict) = annotations.cast::<PyDict>() {
             for (key, value) in ann_dict.iter() {
                 if let Ok(param_name) = key.extract::<String>() {
                     if param_name != "return" && is_pydantic_model(py, &value) {
@@ -202,6 +200,22 @@ impl FastrAPI {
             println!("   • {}", key.key());
         }
 
+        // Build OpenAPI spec from routes
+        let openapi_spec = build_openapi_spec(py, &ROUTES);
+        let openapi_json = Arc::new(
+            serde_json::to_value(&openapi_spec).expect("Failed to serialize OpenAPI spec"),
+        );
+
+        // Serve OpenAPI JSON manually
+        let openapi_json_clone = Arc::clone(&openapi_json);
+        app = app.route(
+            "/api-docs/openapi.json",
+            axum_get(move || {
+                let json = Arc::clone(&openapi_json_clone);
+                async move { Json(json.as_ref().clone()) }
+            }),
+        );
+        app = app.route("/docs", axum_get(|| async { Html(SWAGGER_HTML) }));
         // Use Arc<str> to avoid cloning on every request
         for entry in ROUTES.iter() {
             let route_key: Arc<str> = entry.key().clone().into();
@@ -265,9 +279,9 @@ impl FastrAPI {
         }
 
         app = app.layer(axum::Extension(app_state));
-        app = app.merge(
-            SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDocumentation::openapi()),
-        );
+
+        // Add Swagger UI pointing to the JSON endpoint
+        // app = app.merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", openapi_spec));
 
         py.detach(move || {
             PYTHON_RUNTIME.block_on(async move {
@@ -282,6 +296,8 @@ impl FastrAPI {
                 };
 
                 info!("🚀 FastrAPI running at http://{}", addr);
+                info!("📚 Swagger UI available at http://{}/docs", addr);
+                info!("📄 OpenAPI spec at http://{}/api-docs/openapi.json", addr);
 
                 if let Err(e) = axum::serve(
                     listener,
