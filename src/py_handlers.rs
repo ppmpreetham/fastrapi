@@ -1,4 +1,4 @@
-use crate::pydantic::{is_pydantic_model, validate_with_pydantic};
+use crate::pydantic::validate_with_pydantic;
 use crate::{
     utils::{json_to_py_object, py_to_response},
     ROUTES,
@@ -9,7 +9,7 @@ use axum::{
     Json,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyDict};
+use pyo3::types::PyDict;
 use serde_json::json;
 use std::sync::Arc;
 use tracing::error;
@@ -41,72 +41,66 @@ pub async fn run_py_handler_with_args(
                             StatusCode::UNPROCESSABLE_ENTITY,
                             Json(json!({"detail": "Payload must be an object for this route"})),
                         )
-                        .into_response();
+                            .into_response();
                     }
                 };
 
                 let kwargs = PyDict::new(py);
 
-                match py_func.getattr("__annotations__") {
-                    Ok(annotations) => {
-                        if let Ok(ann_dict) = annotations.cast::<PyDict>() {
-                            for (key, value) in ann_dict.iter() {
-                                let param_name = match key.extract::<String>() {
-                                    Ok(name) => name,
-                                    Err(_) => continue,
-                                };
-                                
-                                if param_name == "return" {
-                                    continue;
-                                }
-
-                                if is_pydantic_model(py, &value) {
-                                    if let Some(param_data) = payload_obj.get(&param_name) {
-                                        match validate_with_pydantic(py, &value, param_data) {
-                                            Ok(validated_model) => {
-                                                kwargs.set_item(key, validated_model).unwrap();
-                                            }
-                                            Err(err_resp) => return err_resp,
-                                        }
-                                    } else {
+                // Use cached param_validators instead of re-parsing annotations
+                if !handler.param_validators.is_empty() {
+                    // We have Pydantic validators cached - validate each parameter
+                    for (param_name, validator) in &handler.param_validators {
+                        if let Some(param_data) = payload_obj.get(param_name) {
+                            let validator_bound = validator.bind(py);
+                            match validate_with_pydantic(py, validator_bound, param_data) {
+                                Ok(validated_model) => {
+                                    if let Err(e) =
+                                        kwargs.set_item(param_name.as_str(), validated_model)
+                                    {
+                                        error!("Failed to set kwarg '{}': {}", param_name, e);
                                         return (
-                                            StatusCode::UNPROCESSABLE_ENTITY,
-                                            Json(json!({
-                                                "detail": format!("Missing required parameter: {}", param_name)
-                                            })),
+                                            StatusCode::INTERNAL_SERVER_ERROR,
+                                            "Failed to set parameter",
                                         )
-                                        .into_response();
-                                    }
-                                } else {
-                                    // non-Pydantic parameters, if any
-                                    if let Some(param_data) = payload_obj.get(&param_name) {
-                                        let py_param = json_to_py_object(py, param_data);
-                                        kwargs.set_item(key, py_param).unwrap();
+                                            .into_response();
                                     }
                                 }
+                                Err(err_resp) => return err_resp,
                             }
+                        } else {
+                            return (
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                Json(json!({
+                                    "detail": format!("Missing required parameter: {}", param_name)
+                                })),
+                            )
+                                .into_response();
                         }
                     }
-                    Err(_) => {
-                        // fallback for no annotations or other issues, pass the whole payload
-                        let py_payload = json_to_py_object(py, &payload);
-                        kwargs.set_item("payload", py_payload).unwrap();
+                } else {
+                    // No Pydantic validators - pass payload fields as-is
+                    for (key, value) in payload_obj.iter() {
+                        let py_value = json_to_py_object(py, value);
+                        if let Err(e) = kwargs.set_item(key, py_value) {
+                            error!("Failed to set kwarg '{}': {}", key, e);
+                        }
                     }
-                };
+                }
 
                 let result = py_func.call((), Some(&kwargs));
 
                 match result {
                     Ok(result) => py_to_response(py, &result),
                     Err(err) => {
-                        // #[cfg(debug_assertions)]
+                        #[cfg(debug_assertions)]
                         err.print(py);
                         error!("Error in route handler {}: {}", route_key, err);
                         (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             format!("Error in route handler: {}", err),
                         )
-                        .into_response()
+                            .into_response()
                     }
                 }
             })

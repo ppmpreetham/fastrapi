@@ -9,7 +9,7 @@ use axum::{
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyCFunction, PyDict, PyModule, PyTuple, PyType};
+use pyo3::types::{PyAny, PyCFunction, PyDict, PyModule, PyTuple};
 use smallvec::SmallVec;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -24,13 +24,12 @@ mod pydantic;
 mod utils;
 
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
-use crate::pydantic::register_pydantic_integration;
+use crate::pydantic::{is_pydantic_model, register_pydantic_integration};
 
 #[derive(Clone)]
 pub struct RouteHandler {
     pub func: Py<PyAny>,
-    pub needs_validation: bool,
-    pub validator_class: Option<Py<PyAny>>,
+    pub param_validators: Vec<(String, Py<PyAny>)>, // (param_name, pydantic_model)
 }
 
 pub static ROUTES: Lazy<DashMap<String, RouteHandler>> = Lazy::new(DashMap::new);
@@ -62,6 +61,25 @@ pub struct FastrAPI {
 
 use smartstring::alias::String as SmartString;
 
+// Helper function to parse annotations once
+fn parse_param_validators(py: Python, func: &Bound<PyAny>) -> Vec<(String, Py<PyAny>)> {
+    let mut validators = Vec::new();
+
+    if let Ok(annotations) = func.getattr("__annotations__") {
+        if let Ok(ann_dict) = annotations.downcast::<PyDict>() {
+            for (key, value) in ann_dict.iter() {
+                if let Ok(param_name) = key.extract::<String>() {
+                    if param_name != "return" && is_pydantic_model(py, &value) {
+                        validators.push((param_name, value.unbind()));
+                    }
+                }
+            }
+        }
+    }
+
+    validators
+}
+
 #[pymethods]
 impl FastrAPI {
     #[new]
@@ -75,35 +93,12 @@ impl FastrAPI {
         Python::attach(|py| {
             let func_bound = func.bind(py);
 
-            let (needs_validation, validator_class) = match func_bound.getattr("__annotations__") {
-                Ok(ann) => {
-                    if let Ok(dict) = ann.cast::<PyDict>() {
-                        if let Some(item) = dict.items().into_iter().next() {
-                            if let Ok((_, type_hint)) = item.extract::<(Py<PyAny>, Py<PyAny>)>() {
-                                // Use .bind() instead of .into_bound() to avoid moving
-                                let hint_bound = type_hint.bind(py);
-                                if hint_bound.is_instance_of::<PyType>() {
-                                    (true, Some(type_hint))
-                                } else {
-                                    (false, None)
-                                }
-                            } else {
-                                (false, None)
-                            }
-                        } else {
-                            (false, None)
-                        }
-                    } else {
-                        (false, None)
-                    }
-                }
-                _ => (false, None),
-            };
+            // Parse validators once at registration time
+            let param_validators = parse_param_validators(py, func_bound);
 
             let handler = RouteHandler {
                 func: func.clone_ref(py),
-                needs_validation,
-                validator_class,
+                param_validators: param_validators.clone(),
             };
 
             let method = method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
@@ -112,10 +107,12 @@ impl FastrAPI {
             key.push(' ');
             key.push_str(&path);
 
+            let has_validation = !param_validators.is_empty();
             ROUTES.insert((&key).to_string(), handler);
             info!(
-                "✅ Registered route [{}] (validation: {})",
-                key, needs_validation
+                "✅ Registered route [{}] (validators: {})",
+                key,
+                param_validators.len()
             );
         });
     }
@@ -163,41 +160,19 @@ impl FastrAPI {
             let func: Py<PyAny> = args.get_item(0)?.extract()?;
             let func_bound = func.bind(py);
 
-            let (needs_validation, validator_class) = match func_bound.getattr("__annotations__") {
-                Ok(ann) => {
-                    if let Ok(dict) = ann.cast::<PyDict>() {
-                        if let Some(item) = dict.items().into_iter().next() {
-                            if let Ok((_, type_hint)) = item.extract::<(Py<PyAny>, Py<PyAny>)>() {
-                                // Use .bind() instead of .into_bound() to avoid moving
-                                let hint_bound = type_hint.bind(py);
-                                if hint_bound.is_instance_of::<PyType>() {
-                                    (true, Some(type_hint))
-                                } else {
-                                    (false, None)
-                                }
-                            } else {
-                                (false, None)
-                            }
-                        } else {
-                            (false, None)
-                        }
-                    } else {
-                        (false, None)
-                    }
-                }
-                _ => (false, None),
-            };
+            // Parse validators once at decoration time
+            let param_validators = parse_param_validators(py, func_bound);
 
             let handler = RouteHandler {
                 func: func.clone_ref(py),
-                needs_validation,
-                validator_class,
+                param_validators: param_validators.clone(),
             };
 
             ROUTES.insert(route_key.clone(), handler);
             info!(
-                "🧩 Added decorated route [{}] (validation: {})",
-                route_key, needs_validation
+                "🧩 Added decorated route [{}] (validators: {})",
+                route_key,
+                param_validators.len()
             );
 
             Ok(func)
@@ -328,39 +303,21 @@ fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
     Python::attach(|py| {
         let func_bound = func.bind(py);
 
-        let (needs_validation, validator_class) = match func_bound.getattr("__annotations__") {
-            Ok(ann) => {
-                if let Ok(dict) = ann.cast::<PyDict>() {
-                    if let Some(item) = dict.items().into_iter().next() {
-                        if let Ok((_, type_hint)) = item.extract::<(Py<PyAny>, Py<PyAny>)>() {
-                            let hint_bound = type_hint.bind(py);
-                            if hint_bound.is_instance_of::<PyType>() {
-                                (true, Some(type_hint))
-                            } else {
-                                (false, None)
-                            }
-                        } else {
-                            (false, None)
-                        }
-                    } else {
-                        (false, None)
-                    }
-                } else {
-                    (false, None)
-                }
-            }
-            _ => (false, None),
-        };
+        // Parse validators once at registration time
+        let param_validators = parse_param_validators(py, func_bound);
 
         let handler = RouteHandler {
             func: func.clone_ref(py),
-            needs_validation,
-            validator_class,
+            param_validators: param_validators.clone(),
         };
 
         let key = format!("GET {}", path);
         ROUTES.insert(key.clone(), handler);
-        info!("🔗 Registered via get_decorator [{}]", key);
+        info!(
+            "🔗 Registered via get_decorator [{}] (validators: {})",
+            key,
+            param_validators.len()
+        );
     });
     Ok(())
 }
