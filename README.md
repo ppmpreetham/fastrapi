@@ -1,12 +1,12 @@
 # FastrAPI (Fast + Rust + API)
 
 <img src="https://raw.githubusercontent.com/ppmpreetham/fastrapi/refs/heads/main/readme/fastrapi.gif" width="100%" alt="FastRAPI GIF">
-FastrAPI is a high-performance web framework that supercharges your Python APIs with the power of Rust. Built on Axum and PyO3, it delivers unmatched speed, type safety, and developer-friendly Python syntax. Create robust, async-ready APIs with minimal overhead and maximum throughput. FastrAPI is your drop-in replacement for FastAPI, offering familiar syntax with up to 31x faster performance.
+FastrAPI is a high-performance web framework that supercharges your Python APIs with the power of Rust. Built on Axum and PyO3, it delivers unmatched speed, type safety, and developer-friendly Python syntax. Create robust, async-ready APIs with minimal overhead and maximum throughput. FastrAPI is your drop-in replacement for FastAPI, offering familiar syntax with up to 32x faster performance.
 
 ## Key Features
 
-- **Lightning Speed**: Powered by Rust and Axum, FastrAPI delivers up to 31x faster performance than FastAPI, making your APIs scream.
-- **Python-First**: Write clean, familiar Python code—no Rust knowledge needed. FastrAPI handles the heavy lifting behind the scenes.
+- **Lightning Speed**: Powered by Rust and Axum, FastrAPI delivers up to 32x faster performance than FastAPI, making your APIs scream.
+- **Python-First**: Write clean, familiar Python code, no Rust knowledge needed. FastrAPI handles the heavy lifting behind the scenes.
 - **Ironclad Type Safety**: Inherits Rust's robust type system for rock-solid reliability, catching errors before they hit production.
 - **Pydantic Powered**: Seamless integration with Pydantic for effortless request and response validation, keeping your data in check.
 - **Async Native**: Built on Tokio's async runtime, FastrAPI maximizes concurrency for handling thousands of requests with ease.
@@ -16,7 +16,7 @@ FastrAPI is a high-performance web framework that supercharges your Python APIs 
 ---
 
 #### Is it as fast as claimed?
-Yes. Powered by Rust and Axum, FastrAPI outperforms FastAPI by up to 31x in real-world benchmarks, with no compromises on usability. Check it out [here](https://github.com/ppmpreetham/fastrapi?tab=readme-ov-file#performance)
+Yes. Powered by Rust and Axum, FastrAPI outperforms FastAPI by up to 32x in real-world benchmarks, with no compromises on usability. Check it out [here](https://github.com/ppmpreetham/fastrapi?tab=readme-ov-file#performance)
 
 #### Do I need to know Rust?
 Nope. FastrAPI lets you write 100% Python code while leveraging Rust's performance under the hood.
@@ -105,17 +105,16 @@ Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn acr
 
 | Framework                              | Avg Latency (ms) | Median Latency (ms) | Requests/sec | P95 Latency (ms) | P99 Latency (ms) |
 |----------------------------------------|------------------|---------------------|---------------|------------------|------------------|
-| **FASTRAPI**                           | **0.63**         | **0.00**            | **29273**     | **2.38**         | **12.22**        |
+| **FASTRAPI**                           | **0.60**         | **0.00**            | **30858**     | **2.38**         | **12.22**        |
 | FastAPI + Guvicorn (workers: 1)       | 21.08            | 19.67               | 937           | 38.47            | 93.42            |
 | FastAPI + Guvicorn (workers: 16)      | 4.84             | 4.17                | 3882          | 10.22            | 81.20            |
 
-> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency — making it **~31× faster** than FastAPI + Guvicorn with 1 worker.
+> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency ,  making it **~32× faster** than FastAPI + Guvicorn with 1 worker.
 
 ## Current Limitations
 Some advanced features are still in development like:
-
 - [ ] Middleware
-- [ ] OpenAPI docs generation
+- [ ] OpenAPI docs generation (currently in works)
 - [ ] Websockets
 - [ ] Dependency injection
 - [ ] Better error handling (currently shows Rust errors)
@@ -136,9 +135,11 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - Push to the branch (git push origin feature/amazing-feature)
 - Open a Pull Request
 
+Check out [CONTRIBUTING.md](CONTRIBUTING.md) for more details.
+
 ## License
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
-Inspired by FastAPI
+Inspired by [FastAPI](https://github.com/fastapi/fastapis)
 Built with [PyO3](https://github.com/PyO3/pyo3/) and [Axum](https://github.com/tokio-rs/axum/)
