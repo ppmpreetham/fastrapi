@@ -105,7 +105,7 @@ Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn acr
 
 | Framework                              | Avg Latency (ms) | Median Latency (ms) | Requests/sec | P95 Latency (ms) | P99 Latency (ms) |
 |----------------------------------------|------------------|---------------------|---------------|------------------|------------------|
-| **FASTRAPI**                           | **0.60**         | **0.00**            | **31360**     | **2.39**         | **12.22**        |
+| **FASTRAPI**                           | **0.59**         | **0.00**            | **31360**     | **2.39**         | **11.12**        |
 | FastAPI + Guvicorn (workers: 1)       | 21.08            | 19.67               | 937           | 38.47            | 93.42            |
 | FastAPI + Guvicorn (workers: 16)      | 4.84             | 4.17                | 3882          | 10.22            | 81.20            |
 
