@@ -205,18 +205,11 @@ impl FastrAPI {
         let openapi_json = Arc::new(
             serde_json::to_value(&openapi_spec).expect("Failed to serialize OpenAPI spec"),
         );
-
-        // Serve OpenAPI JSON manually
-        let openapi_json_clone = Arc::clone(&openapi_json);
-        app = app.route(
-            "/api-docs/openapi.json",
-            axum_get(move || {
-                let json = Arc::clone(&openapi_json_clone);
-                async move { Json(json.as_ref().clone()) }
-            }),
+        info!(
+            "✅ OpenAPI spec generated with {} paths",
+            openapi_spec.paths.len()
         );
-        app = app.route("/docs", axum_get(|| async { Html(SWAGGER_HTML) }));
-        // Use Arc<str> to avoid cloning on every request
+
         for entry in ROUTES.iter() {
             let route_key: Arc<str> = entry.key().clone().into();
             let parts: SmallVec<[&str; 2]> = route_key.splitn(2, ' ').collect();
@@ -278,10 +271,16 @@ impl FastrAPI {
             }
         }
 
-        app = app.layer(axum::Extension(app_state));
+        app = app.route(
+            "/api-docs/openapi.json",
+            axum_get(move || {
+                let json = openapi_json.clone();
+                async move { Json(json.as_ref().clone()) }
+            }),
+        );
+        app = app.route("/docs", axum_get(|| async { Html(SWAGGER_HTML) }));
 
-        // Add Swagger UI pointing to the JSON endpoint
-        // app = app.merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", openapi_spec));
+        app = app.layer(axum::Extension(app_state));
 
         py.detach(move || {
             PYTHON_RUNTIME.block_on(async move {
