@@ -1,11 +1,10 @@
 use crate::pydantic::validate_with_pydantic;
-use crate::{
-    utils::{json_to_py_object, py_to_response},
-    ROUTES,
-};
+use crate::utils::{json_to_py_object, py_any_to_json};
+use crate::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
+use crate::{ResponseType, ROUTES};
 use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    http::{header, StatusCode},
+    response::{Html, IntoResponse, Redirect, Response},
     Json,
 };
 use pyo3::prelude::*;
@@ -14,7 +13,6 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::error;
 
-/// For routes WITH payload (POST, PUT, PATCH, DELETE)
 pub async fn run_py_handler_with_args(
     rt_handle: tokio::runtime::Handle,
     route_key: Arc<str>,
@@ -32,6 +30,7 @@ pub async fn run_py_handler_with_args(
                 };
 
                 let handler = entry.value();
+                let response_type = handler.response_type;
                 let py_func = handler.func.bind(py);
 
                 let payload_obj = match payload.as_object() {
@@ -47,9 +46,7 @@ pub async fn run_py_handler_with_args(
 
                 let kwargs = PyDict::new(py);
 
-                // Use cached param_validators instead of re-parsing annotations
                 if !handler.param_validators.is_empty() {
-                    // We have Pydantic validators cached - validate each parameter
                     for (param_name, validator) in &handler.param_validators {
                         if let Some(param_data) = payload_obj.get(param_name) {
                             let validator_bound = validator.bind(py);
@@ -79,7 +76,6 @@ pub async fn run_py_handler_with_args(
                         }
                     }
                 } else {
-                    // No Pydantic validators - pass payload fields as-is
                     for (key, value) in payload_obj.iter() {
                         let py_value = json_to_py_object(py, value);
                         if let Err(e) = kwargs.set_item(key, py_value) {
@@ -91,7 +87,7 @@ pub async fn run_py_handler_with_args(
                 let result = py_func.call((), Some(&kwargs));
 
                 match result {
-                    Ok(result) => py_to_response(py, &result),
+                    Ok(result) => convert_response_by_type(py, &result, response_type),
                     Err(err) => {
                         #[cfg(debug_assertions)]
                         err.print(py);
@@ -115,7 +111,6 @@ pub async fn run_py_handler_with_args(
     }
 }
 
-/// For routes WITHOUT payload (GET, HEAD, OPTIONS)
 pub async fn run_py_handler_no_args(
     rt_handle: tokio::runtime::Handle,
     route_key: Arc<str>,
@@ -132,11 +127,12 @@ pub async fn run_py_handler_no_args(
                 };
 
                 let handler = entry.value();
+                let response_type = handler.response_type;
 
                 match handler.func.call0(py) {
                     Ok(result) => {
                         let result_bound = result.into_bound(py);
-                        py_to_response(py, &result_bound)
+                        convert_response_by_type(py, &result_bound, response_type)
                     }
                     Err(err) => {
                         #[cfg(debug_assertions)]
@@ -160,4 +156,91 @@ pub async fn run_py_handler_no_args(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+// Branch once based on pre-determined response type
+#[inline(always)]
+fn convert_response_by_type(
+    py: Python,
+    result: &Bound<PyAny>,
+    response_type: ResponseType,
+) -> Response {
+    match response_type {
+        ResponseType::Html => convert_html_response(py, result),
+        ResponseType::Json => convert_json_response(py, result),
+        ResponseType::PlainText => convert_text_response(py, result),
+        ResponseType::Redirect => convert_redirect_response(py, result),
+        ResponseType::Auto => convert_auto_response(py, result), // Original behavior
+    }
+}
+
+// Use Axum's Html - direct attribute access (no type checking)
+#[inline(always)]
+fn convert_html_response(_py: Python, result: &Bound<PyAny>) -> Response {
+    if let Ok(resp) = result.extract::<PyRef<'_, PyHTMLResponse>>() {
+        let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
+        (status_code, Html(resp.content.clone())).into_response()
+    } else {
+        error!("Expected HTMLResponse, but got another type.");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    }
+}
+
+// Use Axum's Json - direct attribute access
+#[inline(always)]
+fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
+    if let Ok(resp) = result.extract::<PyRef<'_, PyJSONResponse>>() {
+        // Direct, native Rust struct access
+        let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
+        // `resp.content` is a Py<PyAny>, so we bind it and convert
+        let json = py_any_to_json(py, &resp.content.bind(py));
+        (status_code, Json(json)).into_response()
+    } else {
+        error!("Expected JSONResponse, but got another type.");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    }
+}
+
+// Plain text using Axum's tuple response
+#[inline(always)]
+fn convert_text_response(_py: Python, result: &Bound<PyAny>) -> Response {
+    if let Ok(resp) = result.extract::<PyRef<'_, PyPlainTextResponse>>() {
+        let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
+        (
+            status_code,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            resp.content.clone(),
+        )
+            .into_response()
+    } else {
+        error!("Expected PlainTextResponse, but got another type.");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    }
+}
+
+// Use Axum's Redirect
+#[inline(always)]
+fn convert_redirect_response(_py: Python, result: &Bound<PyAny>) -> Response {
+    if let Ok(resp) = result.extract::<PyRef<'_, PyRedirectResponse>>() {
+        if resp.status_code == 301 {
+            Redirect::permanent(&resp.url).into_response()
+        } else {
+            Redirect::temporary(&resp.url).into_response()
+        }
+    } else {
+        error!("Expected RedirectResponse, but got another type.");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    }
+}
+
+// Original behavior for untyped responses - FAST PATH (30K+ req/sec)
+#[inline(always)]
+fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
+    if result.is_none() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
+    // Direct JSON conversion - NO dict checking, NO type checking
+    let json = py_any_to_json(py, result);
+    (StatusCode::OK, Json(json)).into_response()
 }

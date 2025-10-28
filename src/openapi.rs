@@ -96,7 +96,7 @@ pub fn extract_pydantic_schema(py: Python, model: &Bound<PyAny>) -> Option<JsonV
     // Try to call model.model_json_schema() for Pydantic v2
     if let Ok(schema_method) = model.getattr("model_json_schema") {
         if let Ok(schema_result) = schema_method.call0() {
-            if let Ok(schema_dict) = schema_result.downcast::<PyDict>() {
+            if let Ok(schema_dict) = schema_result.cast::<PyDict>() {
                 return Some(py_dict_to_json(py, schema_dict));
             }
         }
@@ -105,7 +105,7 @@ pub fn extract_pydantic_schema(py: Python, model: &Bound<PyAny>) -> Option<JsonV
     // Try Pydantic v1 (schema())
     if let Ok(schema_method) = model.getattr("schema") {
         if let Ok(schema_result) = schema_method.call0() {
-            if let Ok(schema_dict) = schema_result.downcast::<PyDict>() {
+            if let Ok(schema_dict) = schema_result.cast::<PyDict>() {
                 return Some(py_dict_to_json(py, schema_dict));
             }
         }

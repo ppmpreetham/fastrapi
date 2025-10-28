@@ -17,21 +17,35 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber;
+
 mod openapi;
-use openapi::build_openapi_spec;
 mod py_handlers;
 mod pydantic;
+mod status;
 mod utils;
 
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
 use crate::pydantic::{is_pydantic_model, register_pydantic_integration};
+use crate::status::create_status_submodule;
+use openapi::build_openapi_spec;
 
 const SWAGGER_HTML: &str = include_str!("../static/swagger-ui.html");
+
+// Response type tracking (zero-cost enum)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResponseType {
+    Json,
+    Html,
+    PlainText,
+    Redirect,
+    Auto, // For untyped responses (original behavior)
+}
 
 #[derive(Clone)]
 pub struct RouteHandler {
     pub func: Py<PyAny>,
     pub param_validators: Vec<(String, Py<PyAny>)>,
+    pub response_type: ResponseType, // Add response type tracking
 }
 
 pub static ROUTES: Lazy<DashMap<String, RouteHandler>> = Lazy::new(DashMap::new);
@@ -59,9 +73,37 @@ pub struct FastrAPI {
 
 use smartstring::alias::String as SmartString;
 
-// Helper function to parse annotations once
-fn parse_param_validators(py: Python, func: &Bound<PyAny>) -> Vec<(String, Py<PyAny>)> {
+// Detect response type from annotation (called once at registration)
+fn get_response_type(py: Python, func: &Bound<PyAny>) -> ResponseType {
+    if let Ok(annotations) = func.getattr("__annotations__") {
+        if let Ok(dict) = annotations.cast::<PyDict>() {
+            if let Ok(Some(return_type)) = dict.get_item("return") {
+                let return_str = format!("{:?}", return_type);
+                if return_str.contains("HTMLResponse") {
+                    return ResponseType::Html;
+                }
+                if return_str.contains("JSONResponse") {
+                    return ResponseType::Json;
+                }
+                if return_str.contains("PlainTextResponse") {
+                    return ResponseType::PlainText;
+                }
+                if return_str.contains("RedirectResponse") {
+                    return ResponseType::Redirect;
+                }
+            }
+        }
+    }
+    ResponseType::Auto
+}
+
+// Helper function to parse annotations once (now also returns response type)
+fn parse_route_metadata(
+    py: Python,
+    func: &Bound<PyAny>,
+) -> (Vec<(String, Py<PyAny>)>, ResponseType) {
     let mut validators = Vec::new();
+    let response_type = get_response_type(py, func);
 
     if let Ok(annotations) = func.getattr("__annotations__") {
         if let Ok(ann_dict) = annotations.cast::<PyDict>() {
@@ -75,7 +117,7 @@ fn parse_param_validators(py: Python, func: &Bound<PyAny>) -> Vec<(String, Py<Py
         }
     }
 
-    validators
+    (validators, response_type)
 }
 
 #[pymethods]
@@ -90,13 +132,12 @@ impl FastrAPI {
     fn register_route(&self, path: String, func: Py<PyAny>, method: Option<String>) {
         Python::attach(|py| {
             let func_bound = func.bind(py);
-
-            // Parse validators once at registration time
-            let param_validators = parse_param_validators(py, func_bound);
+            let (param_validators, response_type) = parse_route_metadata(py, func_bound);
 
             let handler = RouteHandler {
                 func: func.clone_ref(py),
                 param_validators: param_validators.clone(),
+                response_type,
             };
 
             let method = method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
@@ -105,12 +146,12 @@ impl FastrAPI {
             key.push(' ');
             key.push_str(&path);
 
-            let has_validation = !param_validators.is_empty();
             ROUTES.insert((&key).to_string(), handler);
             info!(
-                "✅ Registered route [{}] (validators: {})",
+                "✅ Registered route [{}] (validators: {}, type: {:?})",
                 key,
-                param_validators.len()
+                param_validators.len(),
+                response_type
             );
         });
     }
@@ -158,19 +199,20 @@ impl FastrAPI {
             let func: Py<PyAny> = args.get_item(0)?.extract()?;
             let func_bound = func.bind(py);
 
-            // Parse validators once at decoration time
-            let param_validators = parse_param_validators(py, func_bound);
+            let (param_validators, response_type) = parse_route_metadata(py, func_bound);
 
             let handler = RouteHandler {
                 func: func.clone_ref(py),
                 param_validators: param_validators.clone(),
+                response_type,
             };
 
             ROUTES.insert(route_key.clone(), handler);
             info!(
-                "🧩 Added decorated route [{}] (validators: {})",
+                "🧩 Added decorated route [{}] (validators: {}, type: {:?})",
                 route_key,
-                param_validators.len()
+                param_validators.len(),
+                response_type
             );
 
             Ok(func)
@@ -200,7 +242,6 @@ impl FastrAPI {
             println!("   • {}", key.key());
         }
 
-        // Build OpenAPI spec from routes
         let openapi_spec = build_openapi_spec(py, &ROUTES);
         let openapi_json = Arc::new(
             serde_json::to_value(&openapi_spec).expect("Failed to serialize OpenAPI spec"),
@@ -317,23 +358,124 @@ impl FastrAPI {
 fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
     Python::attach(|py| {
         let func_bound = func.bind(py);
-
-        // Parse validators once at registration time
-        let param_validators = parse_param_validators(py, func_bound);
+        let (param_validators, response_type) = parse_route_metadata(py, func_bound);
 
         let handler = RouteHandler {
             func: func.clone_ref(py),
             param_validators: param_validators.clone(),
+            response_type,
         };
 
         let key = format!("GET {}", path);
         ROUTES.insert(key.clone(), handler);
         info!(
-            "🔗 Registered via get_decorator [{}] (validators: {})",
+            "🔗 Registered via get_decorator [{}] (validators: {}, type: {:?})",
             key,
-            param_validators.len()
+            param_validators.len(),
+            response_type
         );
     });
+    Ok(())
+}
+
+// Simple Python wrapper classes - just hold data
+#[pyclass(name = "HTMLResponse")]
+#[derive(Clone)]
+pub struct PyHTMLResponse {
+    #[pyo3(get)]
+    pub content: String,
+    #[pyo3(get)]
+    pub status_code: u16,
+}
+
+#[pymethods]
+impl PyHTMLResponse {
+    #[new]
+    #[pyo3(signature = (content, status_code=200))]
+    fn new(content: String, status_code: u16) -> Self {
+        Self {
+            content,
+            status_code,
+        }
+    }
+}
+
+#[pyclass(name = "JSONResponse")]
+#[derive(Clone)]
+pub struct PyJSONResponse {
+    #[pyo3(get)]
+    pub content: Py<PyAny>,
+    #[pyo3(get)]
+    pub status_code: u16,
+}
+
+#[pymethods]
+impl PyJSONResponse {
+    #[new]
+    #[pyo3(signature = (content, status_code=200))]
+    fn new(content: Py<PyAny>, status_code: u16) -> Self {
+        Self {
+            content,
+            status_code,
+        }
+    }
+}
+
+#[pyclass(name = "PlainTextResponse")]
+#[derive(Clone)]
+pub struct PyPlainTextResponse {
+    #[pyo3(get)]
+    pub content: String,
+    #[pyo3(get)]
+    pub status_code: u16,
+}
+
+#[pymethods]
+impl PyPlainTextResponse {
+    #[new]
+    #[pyo3(signature = (content, status_code=200))]
+    fn new(content: String, status_code: u16) -> Self {
+        Self {
+            content,
+            status_code,
+        }
+    }
+}
+
+#[pyclass(name = "RedirectResponse")]
+#[derive(Clone)]
+pub struct PyRedirectResponse {
+    #[pyo3(get)]
+    pub url: String,
+    #[pyo3(get)]
+    pub status_code: u16,
+}
+
+#[pymethods]
+impl PyRedirectResponse {
+    #[new]
+    #[pyo3(signature = (url, status_code=307))]
+    fn new(url: String, status_code: u16) -> Self {
+        Self { url, status_code }
+    }
+}
+
+fn create_responses_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = parent.py();
+    let responses_module = PyModule::new(py, "responses")?;
+
+    responses_module.add_class::<PyJSONResponse>()?;
+    responses_module.add_class::<PyHTMLResponse>()?;
+    responses_module.add_class::<PyPlainTextResponse>()?;
+    responses_module.add_class::<PyRedirectResponse>()?;
+
+    parent.add_submodule(&responses_module)?;
+
+    // Register in sys.modules for import support
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("fastrapi.responses", &responses_module)?;
+
     Ok(())
 }
 
@@ -341,6 +483,10 @@ fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
 fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FastrAPI>()?;
     m.add_function(wrap_pyfunction!(get_decorator, m)?)?;
+
+    create_responses_submodule(m)?;
+    create_status_submodule(m)?;
     register_pydantic_integration(m)?;
+
     Ok(())
 }

@@ -80,7 +80,7 @@ pub fn py_list_to_json(py: Python<'_>, list: &Bound<'_, PyList>) -> Value {
 
 /// Fast any to JSON conversion with early returns
 #[inline]
-fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
+pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
     if value.is_none() {
         return Value::Null;
     }
