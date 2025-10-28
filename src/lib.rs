@@ -31,28 +31,21 @@ use openapi::build_openapi_spec;
 
 const SWAGGER_HTML: &str = include_str!("../static/swagger-ui.html");
 
-// response type tracking
+// Response type tracking (zero-cost enum)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResponseType {
     Json,
     Html,
     PlainText,
     Redirect,
-    Auto, // for untyped responses
-}
-
-//  pydantic v1 or v2
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ValidationMethod {
-    V1,
-    V2,
+    Auto, // For untyped responses (original behavior)
 }
 
 #[derive(Clone)]
 pub struct RouteHandler {
     pub func: Py<PyAny>,
-    pub param_validators: Vec<(String, Py<PyAny>, ValidationMethod)>,
-    pub response_type: ResponseType,
+    pub param_validators: Vec<(String, Py<PyAny>)>,
+    pub response_type: ResponseType, // Add response type tracking
 }
 
 pub static ROUTES: Lazy<DashMap<String, RouteHandler>> = Lazy::new(DashMap::new);
@@ -80,7 +73,7 @@ pub struct FastrAPI {
 
 use smartstring::alias::String as SmartString;
 
-// detects response type
+// Detect response type from annotation (called once at registration)
 fn get_response_type(py: Python, func: &Bound<PyAny>) -> ResponseType {
     if let Ok(annotations) = func.getattr("__annotations__") {
         if let Ok(dict) = annotations.cast::<PyDict>() {
@@ -104,11 +97,11 @@ fn get_response_type(py: Python, func: &Bound<PyAny>) -> ResponseType {
     ResponseType::Auto
 }
 
-// helper function to parse annotations once (also returns response type)
+// Helper function to parse annotations once (now also returns response type)
 fn parse_route_metadata(
     py: Python,
     func: &Bound<PyAny>,
-) -> (Vec<(String, Py<PyAny>, ValidationMethod)>, ResponseType) {
+) -> (Vec<(String, Py<PyAny>)>, ResponseType) {
     let mut validators = Vec::new();
     let response_type = get_response_type(py, func);
 
@@ -117,19 +110,13 @@ fn parse_route_metadata(
             for (key, value) in ann_dict.iter() {
                 if let Ok(param_name) = key.extract::<String>() {
                     if param_name != "return" && is_pydantic_model(py, &value) {
-                        // cache validation method
-                        let method = if value.hasattr("model_validate").unwrap_or(false) {
-                            ValidationMethod::V2
-                        } else {
-                            ValidationMethod::V1
-                        };
-
-                        validators.push((param_name, value.unbind(), method)); // store it
+                        validators.push((param_name, value.unbind()));
                     }
                 }
             }
         }
     }
+
     (validators, response_type)
 }
 
@@ -391,7 +378,7 @@ fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
     Ok(())
 }
 
-// simple python wrapper classes, just to hold data
+// Simple Python wrapper classes - just hold data
 #[pyclass(name = "HTMLResponse")]
 #[derive(Clone)]
 pub struct PyHTMLResponse {
@@ -484,7 +471,7 @@ fn create_responses_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
 
     parent.add_submodule(&responses_module)?;
 
-    // registering in sys.modules for import support (DONT TOUCH THIS)
+    // Register in sys.modules for import support
     py.import("sys")?
         .getattr("modules")?
         .set_item("fastrapi.responses", &responses_module)?;
