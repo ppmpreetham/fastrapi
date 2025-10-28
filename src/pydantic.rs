@@ -1,4 +1,5 @@
 use crate::utils::{json_to_py_object, py_to_response};
+use crate::ValidationMethod;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use pyo3::prelude::*;
@@ -15,25 +16,26 @@ pub fn validate_with_pydantic<'py>(
     py: Python<'py>,
     model_class: &Bound<'py, PyAny>,
     json_payload: &Value,
+    method: ValidationMethod,
 ) -> Result<Py<PyAny>, Response> {
     let py_data = json_to_py_object(py, json_payload);
 
-    let validated = if let Ok(validate_method) = model_class.getattr("model_validate") {
-        validate_method.call1((py_data,))
-    } else {
-        let data_bound = py_data.bind(py);
-        if data_bound.is_instance_of::<PyDict>() {
-            let dict = data_bound.cast::<PyDict>().map_err(|e| {
-                let err_str = e.to_string();
-                (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    format!("Pydantic validation failed: {}", err_str),
-                )
-                    .into_response()
-            })?;
-            model_class.call((), Some(dict))
-        } else {
-            model_class.call1((py_data,))
+    let validated = match method {
+        // V2: Call .model_validate()
+        ValidationMethod::V2 => model_class
+            .getattr("model_validate")
+            .unwrap() // We know this exists
+            .call1((py_data,)),
+
+        // V1: Call the class itself
+        ValidationMethod::V1 => {
+            let data_bound = py_data.bind(py);
+            if data_bound.is_instance_of::<PyDict>() {
+                let dict = data_bound.cast::<PyDict>().unwrap();
+                model_class.call((), Some(dict))
+            } else {
+                model_class.call1((py_data,))
+            }
         }
     };
 
@@ -52,8 +54,9 @@ pub fn call_with_pydantic_validation<'py>(
     route_func: &Bound<'py, PyAny>,
     model_class: &Bound<'py, PyAny>,
     payload: &Value,
+    method: ValidationMethod,
 ) -> Response {
-    match validate_with_pydantic(py, model_class, payload) {
+    match validate_with_pydantic(py, model_class, payload, method) {
         Ok(validated_obj) => match route_func.call1((validated_obj,)) {
             Ok(result) => py_to_response(py, &result),
             Err(err) => {

@@ -159,7 +159,7 @@ pub fn build_openapi_spec(
         {
             let mut request_schemas = HashMap::new();
 
-            for (param_name, validator) in &handler.param_validators {
+            for (param_name, validator, method) in &handler.param_validators {
                 let validator_bound = validator.bind(py);
                 if let Some(schema) = extract_pydantic_schema(py, validator_bound) {
                     // Store schema in components

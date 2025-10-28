@@ -47,10 +47,10 @@ pub async fn run_py_handler_with_args(
                 let kwargs = PyDict::new(py);
 
                 if !handler.param_validators.is_empty() {
-                    for (param_name, validator) in &handler.param_validators {
+                    for (param_name, validator, method) in &handler.param_validators {
                         if let Some(param_data) = payload_obj.get(param_name) {
                             let validator_bound = validator.bind(py);
-                            match validate_with_pydantic(py, validator_bound, param_data) {
+                            match validate_with_pydantic(py, validator_bound, param_data, *method) {
                                 Ok(validated_model) => {
                                     if let Err(e) =
                                         kwargs.set_item(param_name.as_str(), validated_model)
@@ -158,7 +158,7 @@ pub async fn run_py_handler_no_args(
     }
 }
 
-// Branch once based on pre-determined response type
+// branch ONCE based on pre-determined response type
 #[inline(always)]
 fn convert_response_by_type(
     py: Python,
@@ -170,7 +170,7 @@ fn convert_response_by_type(
         ResponseType::Json => convert_json_response(py, result),
         ResponseType::PlainText => convert_text_response(py, result),
         ResponseType::Redirect => convert_redirect_response(py, result),
-        ResponseType::Auto => convert_auto_response(py, result), // Original behavior
+        ResponseType::Auto => convert_auto_response(py, result), // untyped
     }
 }
 
@@ -190,9 +190,7 @@ fn convert_html_response(_py: Python, result: &Bound<PyAny>) -> Response {
 #[inline(always)]
 fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyJSONResponse>>() {
-        // Direct, native Rust struct access
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
-        // `resp.content` is a Py<PyAny>, so we bind it and convert
         let json = py_any_to_json(py, &resp.content.bind(py));
         (status_code, Json(json)).into_response()
     } else {
@@ -233,14 +231,13 @@ fn convert_redirect_response(_py: Python, result: &Bound<PyAny>) -> Response {
     }
 }
 
-// Original behavior for untyped responses - FAST PATH (30K+ req/sec)
+// for untyped responses - FAST PATH
 #[inline(always)]
 fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
     if result.is_none() {
         return StatusCode::NO_CONTENT.into_response();
     }
-
-    // Direct JSON conversion - NO dict checking, NO type checking
+    // Direct JSON conversion
     let json = py_any_to_json(py, result);
     (StatusCode::OK, Json(json)).into_response()
 }
