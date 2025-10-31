@@ -1,4 +1,4 @@
-name: Maturin Build + PGO + Publish (multi-platform abi3)
+name: Maturin Build + PGO + Publish (multi-platform)
 
 on:
   push:
@@ -12,11 +12,12 @@ permissions:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }}
+    name: Build on ${{ matrix.os }} with Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        python: [3.9, 3.10, 3.11, 3.12, 3.13, 3.14]
       fail-fast: false
 
     env:
@@ -27,16 +28,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.9 (for abi3)
+      - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: ${{ matrix.python }}
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          # Installs the component that provides llvm-profdata
           components: llvm-tools-preview
 
       - name: Prepare profiling directory
@@ -50,31 +50,23 @@ jobs:
           args: >
             --release
             --out pgo-wheel
-            --interpreter python3.9
-            --compatibility manylinux_2_28
           rust-toolchain: stable
         env:
           RUSTFLAGS: '-Cprofile-generate=${{ github.workspace }}/profdata'
 
-      # This is the new, corrected profiling step
       - name: Install deps and run profiling
         shell: bash
         run: |
           python -m pip install -U pip wheel build
           pip install ./pgo-wheel/*.whl --force-reinstall
-          # Install pydantic, which is a dependency for your examples
           pip install pydantic
 
           echo "Running PGO workload by importing 'safe' examples..."
-          # This runs all the top-level code (app creation, route registration)
-          # without triggering the `app.serve()` call in the `if __name__ == "__main__"` block.
-          # This is the perfect way to generate profile data for this code.
           python -c "import examples.basic"
           python -c "import examples.different_request_types"
           python -c "import examples.fastrapi_types"
           python -c "import examples.pydantic_example"
 
-      # Detect llvm-profdata properly on all platforms
       - name: Detect LLVM profdata tool
         id: detect-profdata
         run: |
@@ -88,7 +80,6 @@ jobs:
           fi
         shell: bash
 
-      # Merge profiling data with OS-specific shells
       - name: Merge PGO data (Linux/Mac)
         if: runner.os != 'Windows'
         shell: bash
@@ -100,15 +91,13 @@ jobs:
         run: |
           & "${{ env.LLVM_PROFDATA }}" merge -o merged.profdata profdata
 
-      - name: Build PGO-optimized abi3 wheel
+      - name: Build PGO-optimized wheel
         uses: PyO3/maturin-action@v1
         with:
           manylinux: auto
           args: >
             --release
             --out dist
-            --interpreter python3.9
-            --compatibility manylinux_2_28
           rust-toolchain: stable
         env:
           RUSTFLAGS: '-Cprofile-use=${{ github.workspace }}/merged.profdata'
@@ -116,7 +105,7 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: abi3-pgo-${{ matrix.os }}
+          name: pgo-${{ matrix.os }}-py${{ matrix.python }}
           path: dist/*.whl
 
   publish:
@@ -125,18 +114,17 @@ jobs:
     needs: build
     environment: publish
     permissions:
-      id-token: write       # OIDC for PyPI
-      contents: read        # To checkout
-      attestations: write   # To publish attestations
+      id-token: write
+      contents: read
+      attestations: write
 
     steps:
       - name: Download all built artifacts
         uses: actions/download-artifact@v4
         with:
           path: wheels
-          # Use a pattern to download all wheel artifacts
-          pattern: abi3-pgo-*
-          merge-multiple: true # Merge all OS wheels into one 'wheels' directory
+          pattern: pgo-*
+          merge-multiple: true
 
       - name: Show collected wheels
         run: ls -R wheels
@@ -158,4 +146,3 @@ jobs:
           packages-dir: wheels
         env:
           PYPI_API_TOKEN: ${{ secrets.TEST_PYPI_API_TOKEN }}
-
