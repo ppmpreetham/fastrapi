@@ -123,6 +123,7 @@ jobs:
     name: Publish to PyPI or TestPyPI
     runs-on: ubuntu-latest
     needs: build
+    environment: publish
     permissions:
       id-token: write       # OIDC for PyPI
       contents: read        # To checkout
