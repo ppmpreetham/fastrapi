@@ -1,4 +1,4 @@
-name: Build + PGO + Publish (multi-platform abi3)
+name: Maturin Build + PGO + Publish (multi-platform abi3)
 
 on:
   push:
@@ -20,8 +20,8 @@ jobs:
       fail-fast: false
 
     env:
-      PYO3_PRINT_CONFIG: 1
       CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: full
 
     steps:
       - name: Checkout repository
