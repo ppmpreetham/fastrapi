@@ -22,12 +22,16 @@ mod exceptions;
 mod openapi;
 mod py_handlers;
 mod pydantic;
+mod responses;
 mod status;
 mod utils;
 
-use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
 use crate::pydantic::{is_pydantic_model, register_pydantic_integration};
 use crate::status::create_status_submodule;
+use crate::{
+    py_handlers::{run_py_handler_no_args, run_py_handler_with_args},
+    responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse},
+};
 use openapi::build_openapi_spec;
 
 const SWAGGER_HTML: &str = include_str!("../static/swagger-ui.html");
@@ -377,88 +381,6 @@ fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
         );
     });
     Ok(())
-}
-
-// Simple Python wrapper classes - just hold data
-#[pyclass(name = "HTMLResponse")]
-#[derive(Clone)]
-pub struct PyHTMLResponse {
-    #[pyo3(get)]
-    pub content: String,
-    #[pyo3(get)]
-    pub status_code: u16,
-}
-
-#[pymethods]
-impl PyHTMLResponse {
-    #[new]
-    #[pyo3(signature = (content, status_code=200))]
-    fn new(content: String, status_code: u16) -> Self {
-        Self {
-            content,
-            status_code,
-        }
-    }
-}
-
-#[pyclass(name = "JSONResponse")]
-#[derive(Clone)]
-pub struct PyJSONResponse {
-    #[pyo3(get)]
-    pub content: Py<PyAny>,
-    #[pyo3(get)]
-    pub status_code: u16,
-}
-
-#[pymethods]
-impl PyJSONResponse {
-    #[new]
-    #[pyo3(signature = (content, status_code=200))]
-    fn new(content: Py<PyAny>, status_code: u16) -> Self {
-        Self {
-            content,
-            status_code,
-        }
-    }
-}
-
-#[pyclass(name = "PlainTextResponse")]
-#[derive(Clone)]
-pub struct PyPlainTextResponse {
-    #[pyo3(get)]
-    pub content: String,
-    #[pyo3(get)]
-    pub status_code: u16,
-}
-
-#[pymethods]
-impl PyPlainTextResponse {
-    #[new]
-    #[pyo3(signature = (content, status_code=200))]
-    fn new(content: String, status_code: u16) -> Self {
-        Self {
-            content,
-            status_code,
-        }
-    }
-}
-
-#[pyclass(name = "RedirectResponse")]
-#[derive(Clone)]
-pub struct PyRedirectResponse {
-    #[pyo3(get)]
-    pub url: String,
-    #[pyo3(get)]
-    pub status_code: u16,
-}
-
-#[pymethods]
-impl PyRedirectResponse {
-    #[new]
-    #[pyo3(signature = (url, status_code=307))]
-    fn new(url: String, status_code: u16) -> Self {
-        Self { url, status_code }
-    }
 }
 
 fn create_responses_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
