@@ -53,13 +53,6 @@ jobs:
         env:
           RUSTFLAGS: '-Cprofile-generate=${{ github.workspace }}/profdata'
 
-      - name: Run profiling benchmarks
-        shell: bash
-        run: |
-          python -m pip install -U pip pytest
-          pip install ./pgo-wheel/*.whl --force-reinstall
-          pytest tests/benchmarks
-
       - name: Detect LLVM profdata tool
         id: prof
         shell: bash
