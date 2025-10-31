@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'  # publish to PyPI when version tags are pushed
-  workflow_dispatch:  # manual trigger → publish manually
+  workflow_dispatch:  # manual trigger → publish to TestPyPI
 
 permissions:
   contents: write
@@ -37,9 +37,6 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Install llvm-tools-preview
-        run: rustup component add llvm-tools-preview
-
       - name: Prepare profiling directory
         shell: bash
         run: mkdir -p ${{ github.workspace }}/profdata
@@ -56,28 +53,31 @@ jobs:
         env:
           RUSTFLAGS: '-Cprofile-generate=${{ github.workspace }}/profdata'
 
+      # Detect llvm-profdata properly on all platforms
       - name: Detect LLVM profdata tool
-        id: prof
-        shell: bash
+        id: detect-profdata
         run: |
-          set -e
-          RUST_HOST=$(rustc -Vv | grep host | awk '{print $2}')
-          TOOLCHAIN=$(rustup show active-toolchain | cut -d ' ' -f 1)
-          SYSROOT=$(rustc --print sysroot)
+          rust_host=$(rustc -Vv | grep host | awk '{print $2}')
+          toolchain=$(rustup show active-toolchain | cut -d ' ' -f 1)
+          sysroot=$(rustc --print sysroot)
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            echo "LLVM_PROFDATA=$USERPROFILE\\.rustup\\toolchains\\$TOOLCHAIN\\lib\\rustlib\\$RUST_HOST\\bin\\llvm-profdata.exe" >> "$GITHUB_ENV"
+            echo "LLVM_PROFDATA=$(cygpath -w "$sysroot\\lib\\rustlib\\$rust_host\\bin\\llvm-profdata.exe")" >> "$GITHUB_ENV"
           else
-            echo "LLVM_PROFDATA=$SYSROOT/lib/rustlib/$RUST_HOST/bin/llvm-profdata" >> "$GITHUB_ENV"
+            echo "LLVM_PROFDATA=$sysroot/lib/rustlib/$rust_host/bin/llvm-profdata" >> "$GITHUB_ENV"
           fi
-
-      - name: Merge PGO data
         shell: bash
+
+      # Merge profiling data with OS-specific shells
+      - name: Merge PGO data (Linux/Mac)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ${{ env.LLVM_PROFDATA }} merge -o merged.profdata profdata
+
+      - name: Merge PGO data (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          if [ -x "${{ env.LLVM_PROFDATA }}" ]; then
-            ${{ env.LLVM_PROFDATA }} merge -o merged.profdata profdata || echo "No profile data found, skipping merge."
-          else
-            echo "llvm-profdata not found, skipping PGO merge."
-          fi
+          & "${{ env.LLVM_PROFDATA }}" merge -o merged.profdata profdata
 
       - name: Build PGO-optimized abi3 wheel
         uses: PyO3/maturin-action@v1
