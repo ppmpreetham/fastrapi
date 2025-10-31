@@ -18,6 +18,7 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber;
 
+mod exceptions;
 mod openapi;
 mod py_handlers;
 mod pydantic;
@@ -74,7 +75,7 @@ pub struct FastrAPI {
 use smartstring::alias::String as SmartString;
 
 // Detect response type from annotation (called once at registration)
-fn get_response_type(py: Python, func: &Bound<PyAny>) -> ResponseType {
+fn get_response_type(_py: Python, func: &Bound<PyAny>) -> ResponseType {
     if let Ok(annotations) = func.getattr("__annotations__") {
         if let Ok(dict) = annotations.cast::<PyDict>() {
             if let Ok(Some(return_type)) = dict.get_item("return") {
@@ -97,7 +98,7 @@ fn get_response_type(py: Python, func: &Bound<PyAny>) -> ResponseType {
     ResponseType::Auto
 }
 
-// Helper function to parse annotations once (now also returns response type)
+// Helper function to parse annotations
 fn parse_route_metadata(
     py: Python,
     func: &Bound<PyAny>,
@@ -487,6 +488,10 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     create_responses_submodule(m)?;
     create_status_submodule(m)?;
     register_pydantic_integration(m)?;
+
+    // Exceptions
+    m.add_class::<exceptions::PyHTTPException>()?;
+    m.add_class::<exceptions::PyWebSocketException>()?;
 
     Ok(())
 }
