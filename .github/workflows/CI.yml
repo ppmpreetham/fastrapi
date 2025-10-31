@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'  # publish to PyPI when version tags are pushed
-  workflow_dispatch:  # manual trigger → publish to TestPyPI
+  workflow_dispatch:  # manual trigger → optional TestPyPI
 
 permissions:
   contents: write
@@ -35,7 +35,11 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          components: llvm-tools-preview
           toolchain: stable
+
+      - name: Verify llvm-profdata availability
+        run: rustup component list --installed
 
       - name: Prepare profiling directory
         shell: bash
@@ -53,21 +57,22 @@ jobs:
         env:
           RUSTFLAGS: '-Cprofile-generate=${{ github.workspace }}/profdata'
 
-      # Detect llvm-profdata properly on all platforms
+      # Find llvm-profdata reliably across OSes
       - name: Detect LLVM profdata tool
         id: detect-profdata
         run: |
-          rust_host=$(rustc -Vv | grep host | awk '{print $2}')
-          toolchain=$(rustup show active-toolchain | cut -d ' ' -f 1)
-          sysroot=$(rustc --print sysroot)
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            echo "LLVM_PROFDATA=$(cygpath -w "$sysroot\\lib\\rustlib\\$rust_host\\bin\\llvm-profdata.exe")" >> "$GITHUB_ENV"
+          set -eux
+          llvm_bin=$(rustup which llvm-profdata || true)
+          if [ -x "$llvm_bin" ]; then
+            echo "LLVM_PROFDATA=$llvm_bin" >> "$GITHUB_ENV"
+          elif [ -x "$(command -v llvm-profdata)" ]; then
+            echo "LLVM_PROFDATA=$(command -v llvm-profdata)" >> "$GITHUB_ENV"
           else
-            echo "LLVM_PROFDATA=$sysroot/lib/rustlib/$rust_host/bin/llvm-profdata" >> "$GITHUB_ENV"
+            echo "llvm-profdata not found" >&2
+            exit 1
           fi
-        shell: bash
 
-      # Merge profiling data with OS-specific shells
+      # Merge PGO data
       - name: Merge PGO data (Linux/Mac)
         if: runner.os != 'Windows'
         shell: bash
