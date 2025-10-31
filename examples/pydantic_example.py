@@ -18,4 +18,5 @@ def register(user: User, address: Address):
         "msg": f"Registered {user.name}, age {user.age}, living at {address.street}, {address.city} {address.zip}"
     }
 
-api.serve("127.0.0.1", 8080)
+if __name__ == "__main__":
+    api.serve("127.0.0.1", 8080)

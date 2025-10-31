@@ -7,4 +7,5 @@ api = FastrAPI()
 def get_html() -> HTMLResponse:
     return HTMLResponse("<h1>Hello</h1>")
 
-api.serve("127.0.0.1", 8080)
+if __name__ == "__main__":
+    api.serve("127.0.0.1", 8080)
