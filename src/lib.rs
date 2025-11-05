@@ -1,5 +1,6 @@
 use axum::{
     extract::{ConnectInfo, Extension},
+    middleware as axum_middleware,
     response::Html,
     routing::{
         delete as axum_delete, get as axum_get, head as axum_head, options as axum_options,
@@ -7,34 +8,40 @@ use axum::{
     },
     Json, Router,
 };
+
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyCFunction, PyDict, PyModule, PyTuple};
+use pyo3::wrap_pyfunction;
 use smallvec::SmallVec;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{debug, error, info, warn, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber;
-
 mod exceptions;
+mod middlewares;
 mod openapi;
 mod py_handlers;
 mod pydantic;
 mod responses;
 mod status;
-mod utils;
 
+mod utils;
+use crate::middlewares::{cors_middleware, header_middleware, logging_middleware, PyMiddleware};
 use crate::pydantic::{is_pydantic_model, register_pydantic_integration};
 use crate::status::create_status_submodule;
 use crate::{
     py_handlers::{run_py_handler_no_args, run_py_handler_with_args},
     responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse},
 };
+
 use openapi::build_openapi_spec;
 
 const SWAGGER_HTML: &str = include_str!("../static/swagger-ui.html");
+pub static ROUTES: Lazy<DashMap<String, RouteHandler>> = Lazy::new(DashMap::new);
+pub static MIDDLEWARES: Lazy<DashMap<String, Arc<PyMiddleware>>> = Lazy::new(DashMap::new);
 
 // Response type tracking (zero-cost enum)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,10 +60,9 @@ pub struct RouteHandler {
     pub response_type: ResponseType, // Add response type tracking
 }
 
-pub static ROUTES: Lazy<DashMap<String, RouteHandler>> = Lazy::new(DashMap::new);
-
 static PYTHON_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
     let worker_threads = num_cpus::get().max(4).min(16);
+
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)
         .thread_name("python-handler")
@@ -99,6 +105,7 @@ fn get_response_type(_py: Python, func: &Bound<PyAny>) -> ResponseType {
             }
         }
     }
+
     ResponseType::Auto
 }
 
@@ -138,7 +145,6 @@ impl FastrAPI {
         Python::attach(|py| {
             let func_bound = func.bind(py);
             let (param_validators, response_type) = parse_route_metadata(py, func_bound);
-
             let handler = RouteHandler {
                 func: func.clone_ref(py),
                 param_validators: param_validators.clone(),
@@ -150,7 +156,6 @@ impl FastrAPI {
             key.push_str(&method);
             key.push(' ');
             key.push_str(&path);
-
             ROUTES.insert((&key).to_string(), handler);
             info!(
                 "✅ Registered route [{}] (validators: {}, type: {:?})",
@@ -196,16 +201,14 @@ impl FastrAPI {
         py: Python<'py>,
     ) -> PyResult<Py<PyAny>> {
         let route_key = format!("{} {}", method, path);
-
         let decorator = move |args: &Bound<'_, PyTuple>,
+
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.extract()?;
             let func_bound = func.bind(py);
-
             let (param_validators, response_type) = parse_route_metadata(py, func_bound);
-
             let handler = RouteHandler {
                 func: func.clone_ref(py),
                 param_validators: param_validators.clone(),
@@ -226,6 +229,22 @@ impl FastrAPI {
         PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
     }
 
+    fn middleware(&self, py: Python, middleware_type: String) -> PyResult<Py<PyAny>> {
+        let decorator = move |args: &Bound<'_, PyTuple>,
+                              _kwargs: Option<&Bound<'_, PyDict>>|
+              -> PyResult<Py<PyAny>> {
+            let py = args.py();
+            let func: Py<PyAny> = args.get_item(0)?.extract()?;
+            let py_middleware = PyMiddleware::new(func.clone_ref(py));
+            let middleware_id = format!("{}_{}", middleware_type, MIDDLEWARES.len());
+            MIDDLEWARES.insert(middleware_id.clone(), Arc::new(py_middleware));
+            info!("🔗 Registered middleware: {}", middleware_id);
+            Ok(func)
+        };
+
+        PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
+    }
+
     fn serve(&self, py: Python, host: Option<String>, port: Option<u16>) -> PyResult<()> {
         tracing_subscriber::fmt()
             .with_max_level(Level::DEBUG)
@@ -233,10 +252,8 @@ impl FastrAPI {
             .init();
 
         info!("🚀 Starting FastrAPI...");
-
         let host = host.unwrap_or_else(|| "127.0.0.1".to_string());
         let port = port.unwrap_or(8000);
-
         let rt_handle = PYTHON_RUNTIME.handle().clone();
         let app_state = AppState { rt_handle };
 
@@ -251,10 +268,7 @@ impl FastrAPI {
         let openapi_json = Arc::new(
             serde_json::to_value(&openapi_spec).expect("Failed to serialize OpenAPI spec"),
         );
-        info!(
-            "✅ OpenAPI spec generated with {} paths",
-            openapi_spec.paths.len()
-        );
+        // Register routes
 
         for entry in ROUTES.iter() {
             let route_key: Arc<str> = entry.key().clone().into();
@@ -268,8 +282,6 @@ impl FastrAPI {
             let method = parts[0];
             let path = parts[1].to_string();
 
-            debug!("🔧 Building route: [{} {}]", method, path);
-
             match method {
                 "GET" | "HEAD" | "OPTIONS" => {
                     let route_key = Arc::clone(&route_key);
@@ -277,11 +289,7 @@ impl FastrAPI {
                         move |Extension(state): Extension<AppState>,
                               ConnectInfo(_addr): ConnectInfo<SocketAddr>| {
                             let route_key = Arc::clone(&route_key);
-                            async move {
-                                #[cfg(feature = "verbose-logging")]
-                                debug!("{} from {}", route_key, _addr);
-                                run_py_handler_no_args(state.rt_handle, route_key).await
-                            }
+                            async move { run_py_handler_no_args(state.rt_handle, route_key).await }
                         };
 
                     app = match method {
@@ -299,8 +307,6 @@ impl FastrAPI {
                               Json(payload): Json<serde_json::Value>| {
                             let route_key = Arc::clone(&route_key);
                             async move {
-                                #[cfg(feature = "verbose-logging")]
-                                debug!("📥 {} from {}", route_key, _addr);
                                 run_py_handler_with_args(state.rt_handle, route_key, payload).await
                             }
                         };
@@ -325,6 +331,32 @@ impl FastrAPI {
             }),
         );
         app = app.route("/docs", axum_get(|| async { Html(SWAGGER_HTML) }));
+
+        // ONLY apply middleware if explicitly registered
+        // This ensures zero overhead when no middleware is used
+        let has_middlewares = !MIDDLEWARES.is_empty();
+        if has_middlewares {
+            info!("🔗 Applying {} middleware(s)", MIDDLEWARES.len());
+
+            // Apply built-in middleware layers (only when user wants middleware)
+            app = app
+                .layer(axum_middleware::from_fn(header_middleware))
+                .layer(axum_middleware::from_fn(cors_middleware))
+                .layer(axum_middleware::from_fn(logging_middleware));
+
+            // Apply Python middlewares
+            for entry in MIDDLEWARES.iter() {
+                let middleware = entry.value().clone();
+                info!("   🔗 {}", entry.key());
+                app = app.layer(axum_middleware::from_fn(move |req, next| {
+                    let middleware = middleware.clone();
+
+                    async move { middlewares::execute_py_middleware(middleware, req, next).await }
+                }));
+            }
+        } else {
+            info!("⚡ No middleware registered - running in high-performance mode");
+        }
 
         app = app.layer(axum::Extension(app_state));
 
@@ -386,7 +418,6 @@ fn get_decorator(func: Py<PyAny>, path: String) -> PyResult<()> {
 fn create_responses_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let responses_module = PyModule::new(py, "responses")?;
-
     responses_module.add_class::<PyJSONResponse>()?;
     responses_module.add_class::<PyHTMLResponse>()?;
     responses_module.add_class::<PyPlainTextResponse>()?;
