@@ -3,11 +3,12 @@ use pyo3::types::{PyAny, PyCFunction, PyDict, PyTuple};
 use std::sync::Arc;
 use tracing::info;
 
-use crate::cors::{parse_cors_params, CorsConfig};
-use crate::middlewares::PyMiddleware;
+use crate::middlewares::{
+    parse_cors_params, parse_gzip_params, parse_session_params, parse_trusted_host_params,
+    CORSMiddleware, GZipMiddleware, PyMiddleware, SessionMiddleware, TrustedHostMiddleware,
+};
 use crate::pydantic::parse_route_metadata;
 use crate::{RouteHandler, MIDDLEWARES, ROUTES};
-
 #[pyclass(name = "FastrAPI")]
 pub struct FastrAPI {
     #[pyo3(get, set)]
@@ -82,7 +83,12 @@ pub struct FastrAPI {
     pub separate_input_output_schemas: bool,
     #[pyo3(get, set)]
     pub openapi_external_docs: Option<Py<PyAny>>,
-    pub cors_config: Option<CorsConfig>,
+
+    // CORS for rust side of things
+    pub cors_config: Option<CORSMiddleware>,
+    pub trusted_host_config: Option<TrustedHostMiddleware>,
+    pub gzip_config: Option<GZipMiddleware>,
+    pub session_config: Option<SessionMiddleware>,
 }
 
 #[pymethods]
@@ -219,6 +225,9 @@ impl FastrAPI {
             separate_input_output_schemas,
             openapi_external_docs,
             cors_config: None,
+            trusted_host_config: None,
+            gzip_config: None,
+            session_config: None,
         })
     }
 
@@ -232,16 +241,34 @@ impl FastrAPI {
         let mw_bound = middleware_class.bind(py);
         let cls_name = mw_bound.getattr("__name__")?.extract::<String>()?;
 
-        // check if it matches our class name for the Rust-native optimization
-        if cls_name == "CORSMiddleware" {
-            if let Some(kw) = kwargs {
-                let config = parse_cors_params(kw)?;
-                self.cors_config = Some(config);
-                info!("CORS Middleware configured and optimized via Rust/Axum Layer");
-            } else {
-                // if no kwargs are passed, use the Rust default config
-                self.cors_config = Some(CorsConfig::default());
-                info!("CORS Middleware configured with defaults via Rust/Axum Layer");
+        // empty dict if no kwargs provided
+        let empty_dict = PyDict::new(py);
+        let opts = kwargs.unwrap_or(&empty_dict);
+
+        match cls_name.as_str() {
+            "CORSMiddleware" => {
+                self.cors_config = Some(parse_cors_params(opts)?);
+                info!("Enabled CORSMiddleware");
+            }
+            "TrustedHostMiddleware" => {
+                self.trusted_host_config = Some(parse_trusted_host_params(opts)?);
+                info!("Enabled TrustedHostMiddleware");
+            }
+            "GZipMiddleware" => {
+                self.gzip_config = Some(parse_gzip_params(opts)?);
+                info!("Enabled GZipMiddleware");
+            }
+            "SessionMiddleware" => {
+                self.session_config = Some(parse_session_params(opts)?);
+                info!("Enabled SessionMiddleware");
+            }
+            _ => {
+                // reject unknown classes
+                let msg = format!(
+                    "Middleware '{}' is not supported. Only CORSMiddleware, TrustedHostMiddleware, GZipMiddleware, and SessionMiddleware are allowed via add_middleware.", 
+                    cls_name
+                );
+                return Err(pyo3::exceptions::PyValueError::new_err(msg));
             }
         }
         Ok(())
@@ -275,6 +302,7 @@ impl FastrAPI {
         self.create_decorator("HEAD", path, py)
     }
 
+    // decorator for generic Python functions: @app.middleware("smtg")
     fn middleware(&self, py: Python, middleware_type: String) -> PyResult<Py<PyAny>> {
         let decorator = move |args: &Bound<'_, PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
@@ -304,27 +332,21 @@ impl FastrAPI {
         py: Python<'py>,
     ) -> PyResult<Py<PyAny>> {
         let route_key = format!("{} {}", method, path);
-
         let decorator = move |args: &Bound<'_, PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.extract()?;
             let func_bound = func.bind(py);
-
             let (param_validators, response_type) = parse_route_metadata(py, func_bound);
-
             let handler = RouteHandler {
                 func: func.clone_ref(py),
                 param_validators,
                 response_type,
             };
-
             ROUTES.insert(route_key.clone(), handler);
-            info!("🧩 Added route [{}]", route_key);
             Ok(func)
         };
-
         PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
     }
 }

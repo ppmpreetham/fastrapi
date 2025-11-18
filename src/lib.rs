@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
+use pyo3::types::PyModule;
 
 mod app;
-mod cors;
 mod exceptions;
 mod middlewares;
 mod openapi;
@@ -9,23 +9,18 @@ mod py_handlers;
 mod pydantic;
 mod request;
 mod responses;
-mod router;
 mod server;
 mod status;
 mod utils;
 
 pub use app::FastrAPI;
 pub use exceptions::{PyHTTPException, PyWebSocketException};
-pub use middlewares::{header_middleware, logging_middleware, PyMiddleware};
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
 
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::sync::Arc;
-
-pub static ROUTES: Lazy<DashMap<String, RouteHandler>> = Lazy::new(DashMap::new);
-pub static MIDDLEWARES: Lazy<DashMap<String, Arc<PyMiddleware>>> = Lazy::new(DashMap::new);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResponseType {
@@ -43,6 +38,10 @@ pub struct RouteHandler {
     pub response_type: ResponseType,
 }
 
+pub static ROUTES: Lazy<DashMap<String, RouteHandler>> = Lazy::new(DashMap::new);
+pub static MIDDLEWARES: Lazy<DashMap<String, Arc<middlewares::PyMiddleware>>> =
+    Lazy::new(DashMap::new);
+
 #[pymodule(gil_used = false)]
 fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FastrAPI>()?;
@@ -53,7 +52,7 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pydantic::register_pydantic_integration(m)?;
     status::create_status_submodule(m)?;
 
-    cors::register(m)?;
+    middlewares::register(m)?;
 
     Ok(())
 }

@@ -1,16 +1,26 @@
-use axum::extract::{ConnectInfo, Extension};
-use axum::{middleware as axum_middleware, response::Html, routing::*, Json, Router};
+use axum::{
+    extract::{ConnectInfo, Extension, Request},
+    http::StatusCode,
+    middleware::{self as axum_middleware, Next},
+    response::{Html, IntoResponse},
+    routing::*,
+    Json, Router,
+};
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tower_http::cors::CorsLayer;
 use tracing::{info, Level};
 
+// middleware Libraries
+use tower_http::compression::{predicate::SizeAbove, CompressionLayer};
+use tower_sessions::cookie::Key;
+use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
+
+// internal Imports
 use crate::app::FastrAPI;
-use crate::cors::build_cors_layer;
-use crate::middlewares::{header_middleware, logging_middleware};
+use crate::middlewares::build_cors_layer;
 use crate::openapi::build_openapi_spec;
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
 use crate::{MIDDLEWARES, ROUTES};
@@ -45,7 +55,6 @@ pub fn serve(py: Python, host: Option<String>, port: Option<u16>, app: &FastrAPI
     let openapi_url = app.openapi_url.clone();
     let docs_url_for_log = docs_url.clone();
 
-    // Pass the entire app config to build_router
     let router = build_router(py, app_state.clone(), docs_url, openapi_url, app);
 
     py.detach(move || {
@@ -53,9 +62,9 @@ pub fn serve(py: Python, host: Option<String>, port: Option<u16>, app: &FastrAPI
             let addr = format!("{}:{}", host, port);
             let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
 
-            info!("FastrAPI running at http://{}", addr);
+            info!("🚀 FastrAPI running at http://{}", addr);
             if let Some(docs) = &docs_url_for_log {
-                info!("Swagger UI at http://{}{}", addr, docs);
+                info!("📚 Swagger UI at http://{}{}", addr, docs);
             }
 
             axum::serve(
@@ -75,11 +84,16 @@ fn build_router(
     app_state: AppState,
     docs_url: Option<String>,
     openapi_url: String,
-    app_config: &FastrAPI, // Received the config here
+    app_config: &FastrAPI,
 ) -> Router {
     let mut app = Router::new();
 
-    // route registering
+    let session_config = app_config.session_config.clone();
+    let gzip_config = app_config.gzip_config.clone();
+    let cors_config = app_config.cors_config.clone();
+    let trusted_host_config = app_config.trusted_host_config.clone();
+
+    // Route registration
     for entry in ROUTES.iter() {
         let route_key: Arc<str> = entry.key().clone().into();
         let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
@@ -94,7 +108,7 @@ fn build_router(
         app = register_route(app, method, path, Arc::clone(&route_key), app_state.clone());
     }
 
-    // OpenAPI endpoints
+    // OpenAPI
     let openapi_spec = build_openapi_spec(py, &ROUTES);
     let openapi_json = Arc::new(serde_json::to_value(&openapi_spec).unwrap());
 
@@ -116,24 +130,47 @@ fn build_router(
         );
     }
 
-    if let Some(config) = &app_config.cors_config {
-        match build_cors_layer(config) {
-            Ok(cors_layer) => {
-                app = app.layer(cors_layer);
-                info!("CorsLayer applied successfully.");
-            }
-            Err(e) => {
-                eprintln!("Error building CorsLayer: {:?}", e);
-            }
-        }
+    // =========================== //
+    // ==== LAYER APPLICATION ==== //
+    // =========================== //
+
+    // L1: Sessions
+    if let Some(config) = session_config {
+        info!("🍪 Layer: Sessions");
+        let key = Key::from(config.secret_key.as_bytes());
+
+        let store = MemoryStore::default();
+
+        let layer = SessionManagerLayer::new(store)
+            .with_signed(key)
+            .with_name(config.session_cookie.clone())
+            .with_path(config.path.clone())
+            .with_secure(config.https_only);
+
+        let layer = if let Some(max_age) = config.max_age {
+            layer.with_expiry(Expiry::OnInactivity(
+                tower_sessions::cookie::time::Duration::seconds(max_age),
+            ))
+        } else {
+            layer
+        };
+
+        app = app.layer(layer);
     }
 
-    // to do: add built-in middlewares here
-    // app = app
-    //     .layer(axum_middleware::from_fn(header_middleware))
-    //     .layer(axum_middleware::from_fn(logging_middleware));
+    // L2: GZip
+    if let Some(config) = gzip_config {
+        info!("🗜️ Layer: GZip (min: {} bytes)", config.minimum_size);
+        let predicate = SizeAbove::new(config.minimum_size as u16);
+        app = app.layer(CompressionLayer::new().compress_when(predicate));
+    }
 
+    // L3: Python Middleware
     if !MIDDLEWARES.is_empty() {
+        info!(
+            "🔗 Applying {} custom Python middleware(s)",
+            MIDDLEWARES.len()
+        );
         for entry in MIDDLEWARES.iter() {
             let middleware = entry.value().clone();
             app = app.layer(axum_middleware::from_fn(move |req, next| {
@@ -143,16 +180,61 @@ fn build_router(
         }
     }
 
+    // L4: CORS
+    if let Some(config) = cors_config {
+        info!("🛡️ Layer: CORS");
+        match build_cors_layer(&config) {
+            Ok(layer) => {
+                app = app.layer(layer);
+            }
+            Err(e) => eprintln!("Error building CORS layer: {:?}", e),
+        }
+    }
+
+    // L5: Trusted Host
+    if let Some(config) = trusted_host_config {
+        info!("🔒 Layer: TrustedHost");
+        let allowed = Arc::new(config.allowed_hosts);
+        let redirect = config.www_redirect;
+
+        app = app.layer(axum_middleware::from_fn(move |req: Request, next: Next| {
+            let allowed = allowed.clone();
+            async move {
+                let host_header = req
+                    .headers()
+                    .get("host")
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("");
+
+                if allowed.contains(&"*".to_string()) || allowed.iter().any(|h| h == host_header) {
+                    return next.run(req).await;
+                }
+
+                if redirect && host_header.starts_with("www.") {
+                    let root = host_header.strip_prefix("www.").unwrap();
+                    if allowed.iter().any(|h| h == root) {
+                        return (axum::http::StatusCode::MOVED_PERMANENTLY, "Redirecting...")
+                            .into_response();
+                    }
+                }
+
+                (StatusCode::BAD_REQUEST, "Invalid Host Header").into_response()
+            }
+        }));
+    }
+
     app.layer(Extension(app_state))
 }
 
+// Helper
 fn register_route(
     app: Router,
     method: &str,
     path: String,
     route_key: Arc<str>,
-    state: AppState,
+    _state: AppState,
 ) -> Router {
+    let handler_key = Arc::clone(&route_key);
     match method {
         "GET" | "HEAD" | "OPTIONS" => {
             let route_key_clone = Arc::clone(&route_key);

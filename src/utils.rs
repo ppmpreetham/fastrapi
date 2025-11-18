@@ -78,37 +78,46 @@ pub fn py_list_to_json(py: Python<'_>, list: &Bound<'_, PyList>) -> Value {
     Value::Array(vec)
 }
 
-/// Fast any to JSON conversion with early returns
+use pythonize::depythonize;
 #[inline]
-pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
-    if value.is_none() {
-        return Value::Null;
+pub fn py_any_to_json(_py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
+    match depythonize(value) {
+        Ok(v) => v,
+        Err(e) => Value::String(format!("Serialization Error: {}", e)),
     }
-
-    // Try scalar types first (ordered by frequency)
-    if let Ok(b) = value.extract::<bool>() {
-        return Value::Bool(b);
-    }
-    if let Ok(i) = value.extract::<i64>() {
-        return Value::Number(i.into());
-    }
-    if let Ok(f) = value.extract::<f64>() {
-        return serde_json::Number::from_f64(f)
-            .map(Value::Number)
-            .unwrap_or(Value::Null);
-    }
-    if let Ok(s) = value.extract::<String>() {
-        return Value::String(s);
-    }
-
-    // Try complex types
-    if let Ok(dict) = value.cast::<PyDict>() {
-        return py_dict_to_json(py, dict);
-    }
-    if let Ok(list) = value.cast::<PyList>() {
-        return py_list_to_json(py, list);
-    }
-
-    // Fallback
-    Value::String(format!("{:?}", value))
 }
+// TODO: Benchmark against serde-pyobject, pythonize and manual conversion
+// /// Fast any to JSON conversion with early returns
+// #[inline]
+// pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
+//     if value.is_none() {
+//         return Value::Null;
+//     }
+
+//     // Try scalar types first (ordered by frequency)
+//     if let Ok(b) = value.extract::<bool>() {
+//         return Value::Bool(b);
+//     }
+//     if let Ok(i) = value.extract::<i64>() {
+//         return Value::Number(i.into());
+//     }
+//     if let Ok(f) = value.extract::<f64>() {
+//         return serde_json::Number::from_f64(f)
+//             .map(Value::Number)
+//             .unwrap_or(Value::Null);
+//     }
+//     if let Ok(s) = value.extract::<String>() {
+//         return Value::String(s);
+//     }
+
+//     // Try complex types
+//     if let Ok(dict) = value.cast::<PyDict>() {
+//         return py_dict_to_json(py, dict);
+//     }
+//     if let Ok(list) = value.cast::<PyList>() {
+//         return py_list_to_json(py, list);
+//     }
+
+//     // Fallback
+//     Value::String(format!("{:?}", value))
+// }
