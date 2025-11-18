@@ -23,6 +23,7 @@ use crate::app::FastrAPI;
 use crate::middlewares::build_cors_layer;
 use crate::openapi::build_openapi_spec;
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
+use crate::utils::local_guard;
 use crate::{MIDDLEWARES, ROUTES};
 
 static PYTHON_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
@@ -94,22 +95,26 @@ fn build_router(
     let trusted_host_config = app_config.trusted_host_config.clone();
 
     // Route registration
-    for entry in ROUTES.iter() {
-        let route_key: Arc<str> = entry.key().clone().into();
+    let guard = local_guard(&*ROUTES);
+    for entry in ROUTES.iter(&guard) {
+        let (route_key, _handler) = entry;
         let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
-
         if parts.len() != 2 {
             continue;
         }
-
         let method = parts[0];
         let path = parts[1].to_string();
-
-        app = register_route(app, method, path, Arc::clone(&route_key), app_state.clone());
+        app = register_route(
+            app,
+            method,
+            path,
+            route_key.as_str().into(),
+            app_state.clone(),
+        );
     }
 
     // OpenAPI
-    let openapi_spec = build_openapi_spec(py, &ROUTES);
+    let openapi_spec = build_openapi_spec(py, &*ROUTES);
     let openapi_json = Arc::new(serde_json::to_value(&openapi_spec).unwrap());
 
     app = app.route(
@@ -167,16 +172,18 @@ fn build_router(
 
     // L3: Python Middleware
     if !MIDDLEWARES.is_empty() {
-        info!(
-            "🔗 Applying {} custom Python middleware(s)",
-            MIDDLEWARES.len()
-        );
-        for entry in MIDDLEWARES.iter() {
-            let middleware = entry.value().clone();
+        info!("Applying {} custom Python middleware(s)", MIDDLEWARES.len());
+
+        let guard = local_guard(&*MIDDLEWARES);
+        for (_key, middleware_ref) in MIDDLEWARES.iter(&guard) {
+            let middleware = middleware_ref.clone();
+
             app = app.layer(axum_middleware::from_fn(move |req, next| {
-                let middleware = middleware.clone();
-                async move { crate::middlewares::execute_py_middleware(middleware, req, next).await }
-            }));
+            let middleware = middleware.clone();
+            async move {
+                crate::middlewares::execute_py_middleware(middleware, req, next).await
+            }
+        }));
         }
     }
 
@@ -234,7 +241,7 @@ fn register_route(
     route_key: Arc<str>,
     _state: AppState,
 ) -> Router {
-    let handler_key = Arc::clone(&route_key);
+    let _handler_key = Arc::clone(&route_key);
     match method {
         "GET" | "HEAD" | "OPTIONS" => {
             let route_key_clone = Arc::clone(&route_key);

@@ -8,6 +8,16 @@ use pyo3::types::{PyAny, PyDict, PyList};
 use serde_json::{json, Map, Value};
 use serde_pyobject::to_pyobject;
 
+// For local reads (fast, non-Send for sync blocks like spawn_blocking)
+pub fn local_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::LocalGuard<'_> {
+    map.guard()
+}
+
+// For async/Send (use in handlers)
+pub fn owned_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::OwnedGuard {
+    map.owned_guard()
+}
+
 /// Fast JSON to Python conversion
 #[inline]
 pub fn json_to_py_object(py: Python<'_>, value: &Value) -> Py<PyAny> {

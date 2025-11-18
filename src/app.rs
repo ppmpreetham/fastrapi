@@ -311,7 +311,9 @@ impl FastrAPI {
             let func: Py<PyAny> = args.get_item(0)?.extract()?;
             let py_middleware = PyMiddleware::new(func.clone_ref(py));
             let middleware_id = format!("{}_{}", middleware_type, MIDDLEWARES.len());
-            MIDDLEWARES.insert(middleware_id.clone(), Arc::new(py_middleware));
+            MIDDLEWARES
+                .pin()
+                .insert(middleware_id.clone(), Arc::new(py_middleware));
             info!("🔗 Registered middleware: {}", middleware_id);
             Ok(func)
         };
@@ -344,7 +346,7 @@ impl FastrAPI {
                 param_validators,
                 response_type,
             };
-            ROUTES.insert(route_key.clone(), handler);
+            ROUTES.pin().insert(route_key.clone(), handler);
             Ok(func)
         };
         PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())

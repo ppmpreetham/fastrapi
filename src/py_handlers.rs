@@ -1,5 +1,6 @@
 use crate::pydantic::validate_with_pydantic;
 use crate::responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
+use crate::utils::local_guard;
 use crate::utils::{json_to_py_object, py_any_to_json};
 use crate::{ResponseType, ROUTES};
 use axum::{
@@ -21,7 +22,8 @@ pub async fn run_py_handler_with_args(
     match rt_handle
         .spawn_blocking(move || {
             Python::attach(|py| {
-                let entry = match ROUTES.get(route_key.as_ref()) {
+                let guard = local_guard(&*ROUTES);
+                let entry = match ROUTES.get(route_key.as_ref(), &guard) {
                     Some(e) => e,
                     None => {
                         error!("Route handler not found: {}", route_key);
@@ -29,7 +31,7 @@ pub async fn run_py_handler_with_args(
                     }
                 };
 
-                let handler = entry.value();
+                let handler = entry;
                 let response_type = handler.response_type;
                 let py_func = handler.func.bind(py);
 
@@ -118,15 +120,10 @@ pub async fn run_py_handler_no_args(
     match rt_handle
         .spawn_blocking(move || {
             Python::attach(|py| {
-                let entry = match ROUTES.get(route_key.as_ref()) {
-                    Some(e) => e,
-                    None => {
-                        error!("Route handler not found: {}", route_key);
-                        return (StatusCode::NOT_FOUND, "Route handler not found").into_response();
-                    }
-                };
-
-                let handler = entry.value();
+                let guard = local_guard(&*ROUTES);
+                let handler = ROUTES
+                    .get(route_key.as_ref(), &guard)
+                    .expect("Route not found");
                 let response_type = handler.response_type;
 
                 match handler.func.call0(py) {

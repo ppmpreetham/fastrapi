@@ -18,9 +18,11 @@ pub use app::FastrAPI;
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
 
-use dashmap::DashMap;
 use once_cell::sync::Lazy;
+use papaya::HashMap;
 use std::sync::Arc;
+
+use crate::middlewares::PyMiddleware;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResponseType {
@@ -38,9 +40,10 @@ pub struct RouteHandler {
     pub response_type: ResponseType,
 }
 
-pub static ROUTES: Lazy<DashMap<String, RouteHandler>> = Lazy::new(DashMap::new);
-pub static MIDDLEWARES: Lazy<DashMap<String, Arc<middlewares::PyMiddleware>>> =
-    Lazy::new(DashMap::new);
+pub static ROUTES: Lazy<HashMap<String, RouteHandler>> = Lazy::new(|| HashMap::with_capacity(128));
+
+pub static MIDDLEWARES: Lazy<HashMap<String, Arc<PyMiddleware>>> =
+    Lazy::new(|| HashMap::with_capacity(16));
 
 #[pymodule(gil_used = false)]
 fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
