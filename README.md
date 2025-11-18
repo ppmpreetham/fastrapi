@@ -1,5 +1,7 @@
 # FastrAPI (Fast + Rust + API)
 
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/fastrapi?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLUE&right_color=GREEN&left_text=Downloads)](https://pepy.tech/projects/fastrapi)
+
 <img src="https://raw.githubusercontent.com/ppmpreetham/fastrapi/refs/heads/main/readme/fastrapi.gif" width="100%" alt="FastRAPI GIF">
 FastrAPI is a high-performance web framework that supercharges your Python APIs with the power of Rust. Built on Axum and PyO3, it delivers unmatched speed, type safety, and developer-friendly Python syntax. Create robust, async-ready APIs with minimal overhead and maximum throughput. FastrAPI is your drop-in replacement for FastAPI, offering familiar syntax with up to 33x faster performance.
 

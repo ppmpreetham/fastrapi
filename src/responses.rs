@@ -1,3 +1,4 @@
+use pyo3::prelude::*;
 use pyo3::{pyclass, pymethods, Py, PyAny};
 
 // Simple Python wrapper classes - just hold data
@@ -80,4 +81,22 @@ impl PyRedirectResponse {
     fn new(url: String, status_code: u16) -> Self {
         Self { url, status_code }
     }
+}
+
+pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = parent.py();
+    let responses_module = PyModule::new(py, "responses")?;
+
+    responses_module.add_class::<PyJSONResponse>()?;
+    responses_module.add_class::<PyHTMLResponse>()?;
+    responses_module.add_class::<PyPlainTextResponse>()?;
+    responses_module.add_class::<PyRedirectResponse>()?;
+
+    parent.add_submodule(&responses_module)?;
+
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("fastrapi.responses", &responses_module)?;
+
+    Ok(())
 }

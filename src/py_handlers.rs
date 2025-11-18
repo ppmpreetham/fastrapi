@@ -174,7 +174,7 @@ fn convert_response_by_type(
     }
 }
 
-// Use Axum's Html - direct attribute access (no type checking)
+// Axum's Html
 #[inline(always)]
 fn convert_html_response(_py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyHTMLResponse>>() {
@@ -186,13 +186,11 @@ fn convert_html_response(_py: Python, result: &Bound<PyAny>) -> Response {
     }
 }
 
-// Use Axum's Json - direct attribute access
+// Axum's Json
 #[inline(always)]
 fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyJSONResponse>>() {
-        // Direct, native Rust struct access
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
-        // `resp.content` is a Py<PyAny>, so we bind it and convert
         let json = py_any_to_json(py, &resp.content.bind(py));
         (status_code, Json(json)).into_response()
     } else {
@@ -201,7 +199,7 @@ fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
     }
 }
 
-// Plain text using Axum's tuple response
+// Plain text -> Axum's tuple
 #[inline(always)]
 fn convert_text_response(_py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyPlainTextResponse>>() {
@@ -233,14 +231,14 @@ fn convert_redirect_response(_py: Python, result: &Bound<PyAny>) -> Response {
     }
 }
 
-// Original behavior for untyped responses - FAST PATH (30K+ req/sec)
+// FAST PATH for untyped responses
 #[inline(always)]
 fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
     if result.is_none() {
         return StatusCode::NO_CONTENT.into_response();
     }
 
-    // Direct JSON conversion - NO dict checking, NO type checking
+    // Direct JSON conversion
     let json = py_any_to_json(py, result);
     (StatusCode::OK, Json(json)).into_response()
 }

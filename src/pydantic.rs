@@ -1,4 +1,5 @@
 use crate::utils::{json_to_py_object, py_to_response};
+use crate::ResponseType;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use pyo3::prelude::*;
@@ -105,4 +106,49 @@ fn test_model(
 pub fn register_pydantic_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(test_model, m)?)?;
     Ok(())
+}
+
+pub fn parse_route_metadata(
+    py: Python,
+    func: &Bound<PyAny>,
+) -> (Vec<(String, Py<PyAny>)>, ResponseType) {
+    let mut validators = Vec::new();
+    let response_type = get_response_type(py, func);
+
+    if let Ok(annotations) = func.getattr("__annotations__") {
+        if let Ok(ann_dict) = annotations.cast::<pyo3::types::PyDict>() {
+            for (key, value) in ann_dict.iter() {
+                if let Ok(param_name) = key.extract::<String>() {
+                    if param_name != "return" && is_pydantic_model(py, &value) {
+                        validators.push((param_name, value.unbind()));
+                    }
+                }
+            }
+        }
+    }
+
+    (validators, response_type)
+}
+
+fn get_response_type(_py: Python, func: &Bound<PyAny>) -> ResponseType {
+    if let Ok(annotations) = func.getattr("__annotations__") {
+        if let Ok(dict) = annotations.cast::<pyo3::types::PyDict>() {
+            if let Ok(Some(return_type)) = dict.get_item("return") {
+                let return_str = format!("{:?}", return_type);
+                if return_str.contains("HTMLResponse") {
+                    return ResponseType::Html;
+                }
+                if return_str.contains("JSONResponse") {
+                    return ResponseType::Json;
+                }
+                if return_str.contains("PlainTextResponse") {
+                    return ResponseType::PlainText;
+                }
+                if return_str.contains("RedirectResponse") {
+                    return ResponseType::Redirect;
+                }
+            }
+        }
+    }
+    ResponseType::Auto
 }
