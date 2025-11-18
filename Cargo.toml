@@ -35,3 +35,13 @@ tower-sessions = {version ="0.14.0", features = ["signed"]} # for sessions
 tower = "0.5.2"
 cookie = {version = "0.18.1",features = ["private", "signed"]}
 pythonize = "0.27.0"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = true
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3
