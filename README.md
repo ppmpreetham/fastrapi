@@ -20,6 +20,8 @@ FastrAPI is a high-performance web framework that supercharges your Python APIs 
 #### Is it as fast as claimed?
 Yes. Powered by Rust and Axum, FastrAPI outperforms FastAPI by up to 33x in real-world benchmarks, with no compromises on usability. Check it out [here](https://github.com/ppmpreetham/fastrapi?tab=readme-ov-file#performance)
 
+![FastRAPI vs other frameworks comparision](readme/BenchMark0_2_1.jpg)
+
 #### Do I need to know Rust?
 Nope. FastrAPI lets you write 100% Python code while leveraging Rust's performance under the hood.
 
@@ -113,6 +115,85 @@ api.serve("127.0.0.1", 8080)
 
 </details>
 
+<details>
+  <summary>Show Middleware Example</summary>
+
+```python
+from fastrapi import FastrAPI
+from fastrapi.responses import JSONResponse
+
+from fastrapi.middleware import (
+    CORSMiddleware,
+    TrustedHostMiddleware,
+    GZipMiddleware,
+    SessionMiddleware
+)
+
+app = FastrAPI()
+
+# TrustedHost Middleware
+app.add_middleware(
+    TrustedHostMiddleware, 
+    allowed_hosts=["127.0.0.1", "localhost", "127.0.0.1:8000"],
+    www_redirect=True
+)
+
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+    allow_credentials=False
+)
+
+# 3. GZip Middleware
+app.add_middleware(
+    GZipMiddleware, 
+    minimum_size=500,
+    compresslevel=9
+)
+
+# 4. Session Middleware
+app.add_middleware(
+    SessionMiddleware,
+    secret_key="super-duper-secret-key-change-this-in-prod-pwease-uwu-BUT-MAKE-IT-LONGER-NOW",
+    session_cookie="fastrapi_session",
+    max_age=3600,
+    https_only=False
+)
+
+# ROUTES
+# WARNING: ALWAYS return JSONResponse if it's JSON, to ensure proper serialization
+@app.get("/")
+def index() -> JSONResponse:
+    return JSONResponse({"status": "running"})
+
+@app.get("/heavy")
+def heavy_data() -> JSONResponse:
+    # response large enough to trigger GZip compression
+    large_data = "x" * 1000
+    return JSONResponse({
+        "data": large_data,
+        "note": "Check content-encoding header!"
+    })
+
+# Session Test: Increment a counter stored in the cookie
+@app.get("/counter")
+def session_counter(request) -> JSONResponse:
+    # For now, this verifies the Middleware sets the cookie correctly.
+    return JSONResponse({"message": "Session cookie should be set"})
+
+if __name__ == "__main__":
+    app.serve("127.0.0.1", 8000)
+
+# Test with:
+# curl -v -H "Host: 127.0.0.1" http://127.0.0.1:8000/
+# curl -v -H "Origin: http://example.com" http://127.0.0.1:8000/
+```
+
+</details>
+
 ## Performance
 Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn across multiple worker configurations.
 
@@ -135,16 +216,15 @@ Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn acr
 ## Current Limitations
 Some advanced features are still in development like:
 - [ ] Logging/metrics
-- [ ] Middleware
+- [ ] A nice logging tool
+- [ ] Better error handling (currently shows Rust errors)
+- [ ] Rate limiter (even FastAPI doesn't have it)
 - [ ] Websockets
 - [ ] Dependency injection
 - [ ] Static file serving
-- [ ] Rate limiter (even FastAPI doesn't have it)
-- [ ] Better error handling (currently shows Rust errors)
 - [ ] Background tasks
 - [ ] Testing support
 - [ ] GraphQL support
-- [ ] A nice logging tool
 
 ## Contributing
 Contributions are welcome! Please feel free to submit a Pull Request.
