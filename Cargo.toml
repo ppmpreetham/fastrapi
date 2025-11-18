@@ -1,6 +1,6 @@
 [package]
 name = "fastrapi"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -29,3 +29,6 @@ futures-util = "0.3.31"
 utoipa = "5.4.0"
 hyper = "1.7.0"
 hyper-util = "0.1.17"
+# TODO: if using python package, make these features optional
+tower-http = {version ="0.6.6", features = ["cors", "compression", "trace", "set-header"] }
+tower-sessions = "0.14.0" # for sessions

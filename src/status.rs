@@ -83,7 +83,7 @@ pub const WS_1013_TRY_AGAIN_LATER: u16 = 1013;
 pub const WS_1014_BAD_GATEWAY: u16 = 1014;
 pub const WS_1015_TLS_HANDSHAKE: u16 = 1015;
 
-/// for the status submodule.
+/// for the status submodule
 pub fn create_status_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let status_module = PyModule::new(py, "status")?;
@@ -219,5 +219,17 @@ pub fn create_status_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         .getattr("modules")?
         .set_item("fastrapi.status", &status_module)?;
 
+    Ok(())
+}
+
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("HTTP_200_OK", HTTP_200_OK)?;
+    m.add("HTTP_201_CREATED", HTTP_201_CREATED)?;
+    m.add("HTTP_400_BAD_REQUEST", HTTP_400_BAD_REQUEST)?;
+    m.add("HTTP_404_NOT_FOUND", HTTP_404_NOT_FOUND)?;
+    m.add(
+        "HTTP_500_INTERNAL_SERVER_ERROR",
+        HTTP_500_INTERNAL_SERVER_ERROR,
+    )?;
     Ok(())
 }

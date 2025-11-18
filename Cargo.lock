@@ -223,7 +223,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "fastrapi"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "axum",
  "dashmap",
@@ -241,6 +241,7 @@ dependencies = [
  "smartstring",
  "tokio",
  "tokio-tungstenite",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "utoipa",
@@ -1325,6 +1326,22 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "tower-http"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adc82fd73de2a9722ac5da747f12383d2bfdb93591ee6c58486e0097890f05f2"
+dependencies = [
+ "bitflags",
+ "bytes",
+ "http",
+ "http-body",
+ "pin-project-lite",
  "tower-layer",
  "tower-service",
  "tracing",

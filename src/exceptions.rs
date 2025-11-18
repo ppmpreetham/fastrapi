@@ -1,5 +1,6 @@
 // HTTPException(status_code, detail=None, headers=None)
 
+use pyo3::prelude::*;
 use pyo3::{pyclass, pymethods, types::PyDict, Py};
 
 #[pyclass(name = "HTTPException", extends = pyo3::exceptions::PyException)]
@@ -44,4 +45,10 @@ impl PyWebSocketException {
     fn new(code: u16, reason: Option<String>) -> Self {
         Self { code, reason }
     }
+}
+
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyHTTPException>()?;
+    m.add_class::<PyWebSocketException>()?;
+    Ok(())
 }

@@ -9,7 +9,7 @@ use pyo3::types::{PyAny, PyDict};
 use std::sync::Arc;
 use tracing::{debug, error};
 
-/// Python middleware wrapper
+/// middleware wrapper
 #[derive(Clone)]
 pub struct PyMiddleware {
     pub func: Py<PyAny>,
@@ -20,7 +20,7 @@ impl PyMiddleware {
     }
 }
 
-/// Convert Axum Request to Python dict representation
+/// Axum Request to python dict
 fn request_to_py_dict(py: Python<'_>, req: &Request) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
 
@@ -112,8 +112,7 @@ pub async fn execute_py_middleware(
     }
 }
 
-/// Middleware layer for CORS
-
+/// cors middleware
 pub async fn cors_middleware(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
@@ -131,7 +130,7 @@ pub async fn cors_middleware(request: Request, next: Next) -> Response {
     response
 }
 
-/// Middleware for request logging
+/// request logging middleware
 pub async fn logging_middleware(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
@@ -151,7 +150,7 @@ pub async fn logging_middleware(request: Request, next: Next) -> Response {
     response
 }
 
-/// Middleware for adding custom headers
+/// custom headers middleware
 pub async fn header_middleware(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
 
