@@ -14,7 +14,7 @@ mod status;
 mod utils;
 
 pub use app::FastrAPI;
-pub use exceptions::{PyHTTPException, PyWebSocketException};
+// pub use exceptions::{PyHTTPException, PyWebSocketException};
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
 
@@ -47,7 +47,7 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FastrAPI>()?;
 
     responses::register(m)?;
-    exceptions::register(m)?;
+    // exceptions::register(m)?;
     request::register(m)?;
     pydantic::register_pydantic_integration(m)?;
     status::create_status_submodule(m)?;
