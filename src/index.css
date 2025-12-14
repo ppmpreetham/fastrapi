@@ -11,3 +11,7 @@ html,
   margin: 0;
   padding: 0;
 }
+
+@utility no-scrollbar {
+  @apply [scrollbar-width:none] [&::-webkit-scrollbar]:hidden;
+}
