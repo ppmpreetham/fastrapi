@@ -1,12 +1,13 @@
 import { FastrapiModel } from "../models/fastrapimodel";
-import { Environment, PerspectiveCamera, Text } from "@react-three/drei";
+import { Environment, PerspectiveCamera } from "@react-three/drei";
 import { OrbitControls, ScrollControls, useScroll } from "@react-three/drei";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 import { CrystalField } from "../models/crystals/MultiChristal";
 import * as THREE from "three";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { useFrame } from "@react-three/fiber";
+import { Rotate0, Rotate1, Rotate2 } from "./ContentRotate";
 
 const PI = Math.PI;
 
@@ -19,11 +20,16 @@ function CameraScroller({
 }) {
   const scroll = useScroll();
   const radius = 10;
+  const [count, updateCount] = useState<number>(1);
+
   useFrame(() => {
     const angle = scroll.offset * 2 * PI;
-    if (Math.abs((angle % PI) - PI / 2) < 0.1) {
-      console.log("Snapped to odd multiple of PI/2");
+
+    const newCount = Math.floor((angle - PI / 2) / PI) + 1;
+    if (newCount !== count) {
+      updateCount(newCount);
     }
+    console.log(newCount);
     const x = Math.sin(angle) * radius;
     const z = Math.cos(angle) * radius;
     if (cameraRef.current) {
@@ -56,24 +62,8 @@ const Experience = () => {
         <group ref={groupRef}>
           <CrystalField />
           <FastrapiModel ref={logoRef} />
-          <Text color="#c9ff61" fontSize={2} font="/fonts/random.ttf" position={[0, 0, 0.01]}>
-            FastRAPI
-          </Text>
-          <Text color="black" fontSize={2} font="/fonts/random.ttf" position={[0.05, -0.05, 0]}>
-            FastRAPI
-          </Text>
-          <Text
-            color="#c9ff61"
-            fontSize={2}
-            font="/fonts/random.ttf"
-            position={[0, 0, -0.92]}
-            rotation={[0, PI, 0]}
-          >
-            FastRAPI
-          </Text>
-          <Text color="black" fontSize={2} font="/fonts/random.ttf" position={[0.05, -0.05, 0]}>
-            FastRAPI
-          </Text>
+          <Rotate0 place={false} />
+          <Rotate1 place={true} />
         </group>
       </ScrollControls>
     </>
