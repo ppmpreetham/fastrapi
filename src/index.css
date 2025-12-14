@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-primary: #c9ff61;
+  --color-secondary: #022cfd;
+}
+
+body,
+html,
+#root {
+  margin: 0;
+  padding: 0;
+}
