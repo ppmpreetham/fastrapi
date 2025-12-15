@@ -7,6 +7,7 @@ type BuildingsProps = {
   avoidRadius?: number;
   count?: number;
   offset?: number;
+  planeScale?: number;
 };
 
 const Buildings = ({
@@ -15,9 +16,8 @@ const Buildings = ({
   avoidRadius = 12,
   count = 50,
   offset = -2,
+  planeScale = 75,
 }: BuildingsProps) => {
-  const planeScale = 75;
-
   const buildings = useMemo(() => {
     const result = [];
     let attempts = 0;
@@ -44,7 +44,6 @@ const Buildings = ({
       });
     }
 
-    console.log(`Generated ${result.length} buildings in ${attempts} attempts`);
     return result;
   }, []);
 

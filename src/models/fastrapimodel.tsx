@@ -27,7 +27,7 @@ export function FastrapiModel(props: JSX.IntrinsicElements["group"]) {
           metalness={0}
           transmission={1}
           transparent
-          opacity={0.15}
+          opacity={0.5}
           ior={10}
           thickness={0.5}
           envMapIntensity={1}

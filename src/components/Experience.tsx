@@ -2,7 +2,6 @@ import { useRef, useState } from "react";
 import * as THREE from "three";
 import { useFrame } from "@react-three/fiber";
 import {
-  Environment,
   PerspectiveCamera,
   OrbitControls,
   ScrollControls,
@@ -14,10 +13,11 @@ import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 
 import { FastrapiModel } from "../models/fastrapimodel";
-import { CrystalField } from "../models/crystals/MultiChristal";
+import { CrystalField } from "../models/MultiCrystal";
 
 import { Rotate0, Rotate1, Rotate2, Rotate3 } from "./ContentRotate";
-import Buildings from "../models/crystals/Buildings";
+import Buildings from "../models/Buildings";
+import { CloudsMulti } from "../models/Cloud";
 
 const rotateComponents = [Rotate0, Rotate1, Rotate2, Rotate3];
 const length = rotateComponents.length;
@@ -70,14 +70,20 @@ const Experience = () => {
   return (
     <>
       <OrbitControls enableZoom={false} enablePan={false} />
-      <SpotLight position={[0, 5, 0]} angle={1 / 2} intensity={50} />
-      {/* <Environment preset="dawn" /> */}
+      <SpotLight position={[0, 5, 0]} angle={1 / 2} intensity={50} rotation={[1, 1, 1]} />
       <ScrollControls pages={length} damping={0.25} infinite={false}>
         <PerspectiveCamera makeDefault position={[0, 0, radius]} ref={cameraRef} />
         <CameraScroller cameraRef={cameraRef} tl={tl} setCount={setCount} count={count} />
         <group ref={groupRef}>
+          <CloudsMulti count={40} planeScale={100} offset={[5, 5, 0]} />
           <CrystalField />
-          <Buildings min={[1, 1, 1]} max={[10, 10, 10]} avoidRadius={12} count={100} />
+          <Buildings
+            min={[1, 1, 1]}
+            max={[10, 10, 10]}
+            avoidRadius={12}
+            count={100}
+            planeScale={75}
+          />
           <FastrapiModel ref={logoRef} />
           {(() => {
             const Rotate = rotateComponents[count];
