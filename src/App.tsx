@@ -9,6 +9,13 @@ export default function App() {
       <Canvas
         className="h-full w-full"
         shadows
+        gl={{
+          powerPreference: "high-performance",
+          alpha: false,
+        }}
+        performance={{ min: 0.5 }}
+        dpr={1}
+
         // WEBGPU DOESNT WORK WELL WITH TEXT AND POSTPROCESSING YET
         // gl={(props) => {
         //   const renderer = new WebGPURenderer({

@@ -7,6 +7,7 @@ import {
   OrbitControls,
   ScrollControls,
   useScroll,
+  SpotLight,
 } from "@react-three/drei";
 
 import gsap from "gsap";
@@ -16,10 +17,13 @@ import { FastrapiModel } from "../models/fastrapimodel";
 import { CrystalField } from "../models/crystals/MultiChristal";
 
 import { Rotate0, Rotate1, Rotate2, Rotate3 } from "./ContentRotate";
+import Buildings from "../models/crystals/Buildings";
+
 const rotateComponents = [Rotate0, Rotate1, Rotate2, Rotate3];
 const length = rotateComponents.length;
 
 const PI = Math.PI;
+const radius = 10;
 
 function CameraScroller({
   cameraRef,
@@ -33,7 +37,6 @@ function CameraScroller({
   count: number;
 }) {
   const scroll = useScroll();
-  const radius = 10;
 
   useFrame(() => {
     const angle = scroll.offset * (length - 1) * PI;
@@ -67,12 +70,14 @@ const Experience = () => {
   return (
     <>
       <OrbitControls enableZoom={false} enablePan={false} />
-      <Environment preset="dawn" />
+      <SpotLight position={[0, 5, 0]} angle={1 / 2} intensity={50} />
+      {/* <Environment preset="dawn" /> */}
       <ScrollControls pages={length} damping={0.25} infinite={false}>
-        <PerspectiveCamera makeDefault position={[0, 0, 10]} ref={cameraRef} />
+        <PerspectiveCamera makeDefault position={[0, 0, radius]} ref={cameraRef} />
         <CameraScroller cameraRef={cameraRef} tl={tl} setCount={setCount} count={count} />
         <group ref={groupRef}>
           <CrystalField />
+          <Buildings min={[1, 1, 1]} max={[10, 10, 10]} avoidRadius={12} count={100} />
           <FastrapiModel ref={logoRef} />
           {(() => {
             const Rotate = rotateComponents[count];
