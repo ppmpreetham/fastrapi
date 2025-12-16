@@ -60,7 +60,7 @@ export function CrystalField({ count = 50, planeScale = 20, offset = -2 }) {
   return (
     <>
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, offset, 0]}>
-        <planeGeometry args={[planeScale, planeScale, 10, 10]} />
+        <planeGeometry args={[planeScale * 2, planeScale * 2, 40, 40]} />
         <meshStandardMaterial wireframe />
       </mesh>
       {Array.from({ length: count }).map((_, i) => (

@@ -2,6 +2,9 @@ import { useRef } from "react";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 
+var isMobile =
+  typeof window !== "undefined" && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
 interface FrameworkData {
   name: string;
   value: number;
@@ -49,26 +52,25 @@ export default function FrameworkChart() {
   }, [maxValue]);
 
   return (
-    <div className="min-h-fit fixed w-[33vw] font-random">
-      <div ref={containerRef} className="mx-auto max-w-6xl space-y-4">
-        {data.map((item) => (
-          <div key={item.name} className="flex items-center gap-6">
-            <div className="w-40 text-right text-3xl text-white">{item.name}</div>
-
-            <div className="relative flex-1">
-              <div className="bar h-14" style={{ backgroundColor: item.color }} />
-
-              <span
-                className={`value absolute -right-24 top-1/2 -translate-y-1/2 text-3xl font-bold [-webkit-text-stroke:0.25px_black] ${
-                  item.color === "#c6ff00" ? "text-lime-300" : "text-white"
-                }`}
-              >
-                {item.value.toLocaleString()}
-              </span>
-            </div>
+    <div
+      ref={containerRef}
+      className={`min-h-fit fixed w-[33vw] font-random mx-auto max-w-7xl space-y-4 pointer-events-none`}
+    >
+      {data.map((item) => (
+        <div key={item.name} className="flex items-center gap-6">
+          <div className={`w-40 text-right text-${isMobile ? 1 : 3}xl text-white`}>{item.name}</div>
+          <div className="relative flex-1">
+            <div className="bar h-14" style={{ backgroundColor: item.color }} />
+            <span
+              className={`value absolute -right-24 top-1/2 translate-x-6 -translate-y-1/2 text-4xl font-bold [-webkit-text-stroke:0.25px_black] ${
+                item.color === "#c6ff00" ? "text-lime-300" : "text-white"
+              }`}
+            >
+              {item.value.toLocaleString()}
+            </span>
           </div>
-        ))}
-      </div>
+        </div>
+      ))}
     </div>
   );
 }

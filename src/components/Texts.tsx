@@ -10,18 +10,20 @@ export function RotHeaderText({
   place,
   size = 2,
   offset = [0, 0, 0],
+  color = "#c9ff61",
 }: {
   text: string;
   place: boolean;
   size?: number;
   offset?: [number, number, number];
+  color?: string;
 }) {
   return (
     <>
       {place ? (
         <>
           <Text
-            color="#c9ff61"
+            color={color}
             fontSize={size}
             font="/fonts/random.ttf"
             position={[offset[0], offset[1], back + offset[2]]}
@@ -35,7 +37,7 @@ export function RotHeaderText({
       ) : (
         <>
           <Text
-            color="#c9ff61"
+            color={color}
             fontSize={size}
             font="/fonts/random.ttf"
             position={[offset[0], offset[1], front + offset[2]]}
@@ -55,17 +57,19 @@ export function RotSubText({
   place,
   size = 1,
   offset = [0, 0, 0],
+  color = "#c9ff61",
 }: {
   text: string;
   place: boolean;
   size?: number;
   offset?: [number, number, number];
+  color?: string;
 }) {
   return (
     <>
       {place ? (
         <Text
-          color="#c9ff61"
+          color={color}
           fontSize={size}
           font="/fonts/random.ttf"
           position={[offset[0], offset[1], back + offset[2]]}
@@ -77,7 +81,7 @@ export function RotSubText({
         </Text>
       ) : (
         <Text
-          color="#c9ff61"
+          color={color}
           fontSize={size}
           font="/fonts/random.ttf"
           position={[offset[0], offset[1], front + offset[2]]}

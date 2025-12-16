@@ -8,7 +8,6 @@ export default function App() {
     <div className="w-screen min-h-screen h-screen">
       <Canvas
         className="h-full w-full"
-        shadows
         gl={{
           powerPreference: "high-performance",
           alpha: false,
@@ -30,7 +29,7 @@ export default function App() {
         <color attach="background" args={["#022cfd"]} />
         <Experience />
         <EffectComposer>
-          <Bloom luminanceThreshold={0.2} mipmapBlur luminanceSmoothing={0.9} height={300} />
+          <Bloom luminanceThreshold={0.1} mipmapBlur luminanceSmoothing={0.9} height={300} />
           <Noise opacity={0.15} />
         </EffectComposer>
       </Canvas>

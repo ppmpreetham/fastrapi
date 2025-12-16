@@ -15,11 +15,11 @@ import { useGSAP } from "@gsap/react";
 import { FastrapiModel } from "../models/fastrapimodel";
 import { CrystalField } from "../models/MultiCrystal";
 
-import { Rotate0, Rotate1, Rotate2, Rotate3 } from "./ContentRotate";
+import { Rotate0, Rotate1, Rotate2, Rotate3, Rotate4, Rotate5 } from "./ContentRotate";
 import Buildings from "../models/Buildings";
 import { CloudsMulti } from "../models/Cloud";
 
-const rotateComponents = [Rotate0, Rotate1, Rotate2, Rotate3];
+const rotateComponents = [Rotate0, Rotate1, Rotate2, Rotate3, Rotate4, Rotate5];
 const length = rotateComponents.length;
 
 const PI = Math.PI;
