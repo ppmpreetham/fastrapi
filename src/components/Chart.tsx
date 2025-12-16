@@ -53,13 +53,13 @@ export default function FrameworkChart() {
       <div ref={containerRef} className="mx-auto max-w-6xl space-y-4">
         {data.map((item) => (
           <div key={item.name} className="flex items-center gap-6">
-            <div className="w-40 text-right text-2xl text-white">{item.name}</div>
+            <div className="w-40 text-right text-3xl text-white">{item.name}</div>
 
             <div className="relative flex-1">
               <div className="bar h-14" style={{ backgroundColor: item.color }} />
 
               <span
-                className={`value absolute -right-24 top-1/2 -translate-y-1/2 text-2xl font-bold stroke-2 stroke-black ${
+                className={`value absolute -right-24 top-1/2 -translate-y-1/2 text-3xl font-bold [-webkit-text-stroke:0.25px_black] ${
                   item.color === "#c6ff00" ? "text-lime-300" : "text-white"
                 }`}
               >

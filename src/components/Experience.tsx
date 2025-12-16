@@ -57,8 +57,6 @@ function CameraScroller({
 }
 
 const Experience = () => {
-  const logoRef = useRef<THREE.Mesh>(null!);
-  const groupRef = useRef<THREE.Mesh>(null!);
   const tl = useRef<gsap.core.Timeline>(null!);
   const cameraRef = useRef<THREE.PerspectiveCamera>(null!);
   const [count, setCount] = useState<number>(1);
@@ -74,7 +72,7 @@ const Experience = () => {
       <ScrollControls pages={length} damping={0.25} infinite={false}>
         <PerspectiveCamera makeDefault position={[0, 0, radius]} ref={cameraRef} />
         <CameraScroller cameraRef={cameraRef} tl={tl} setCount={setCount} count={count} />
-        <group ref={groupRef}>
+        <group>
           <CloudsMulti count={40} planeScale={100} offset={[5, 5, 0]} />
           <CrystalField />
           <Buildings
@@ -84,19 +82,10 @@ const Experience = () => {
             count={100}
             planeScale={75}
           />
-          <FastrapiModel ref={logoRef} />
-          {(() => {
-            const Rotate = rotateComponents[count];
-            return Rotate ? <Rotate place={count % 2 === 1} /> : null;
-          })()}
-          {/* {rotateComponents.map((RotateComponent, index) => (
-            <group key={index} visible={count === index + 1}> 
-                Note: Your original code used count (1-based) vs index (0-based).
-                 Adjust logic: if count starts at 1, render visible if count === index + 1
-               
-              <RotateComponent place={(index + 1) % 2 === 1} />
-            </group>
-          ))} */}
+          <FastrapiModel />
+          {rotateComponents.map((RotateComponent, index) =>
+            count === index ? <RotateComponent key={index} place={index % 2 === 1} /> : null
+          )}
         </group>
       </ScrollControls>
     </>
