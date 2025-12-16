@@ -26,15 +26,8 @@ export function RotHeaderText({
             font="/fonts/random.ttf"
             position={[offset[0], offset[1], back + offset[2]]}
             rotation={[0, PI, 0]}
-          >
-            {text}
-          </Text>
-          <Text
-            color="black"
-            fontSize={size}
-            font="/fonts/random.ttf"
-            position={[offset[0] + 0.05, offset[1] - 0.05, back + offset[2] + 0.01]}
-            rotation={[0, PI, 0]}
+            outlineWidth={0.025}
+            outlineColor="black"
           >
             {text}
           </Text>
@@ -46,14 +39,8 @@ export function RotHeaderText({
             fontSize={size}
             font="/fonts/random.ttf"
             position={[offset[0], offset[1], front + offset[2]]}
-          >
-            {text}
-          </Text>
-          <Text
-            color="black"
-            fontSize={size}
-            font="/fonts/random.ttf"
-            position={[offset[0] + 0.05, offset[1] - 0.05, front + offset[2] - 0.01]}
+            outlineWidth={0.025} // Adds border efficiently
+            outlineColor="black"
           >
             {text}
           </Text>
@@ -83,6 +70,8 @@ export function RotSubText({
           font="/fonts/random.ttf"
           position={[offset[0], offset[1], back + offset[2]]}
           rotation={[0, PI, 0]}
+          outlineWidth={0.025} // Adds border efficiently
+          outlineColor="black"
         >
           {text}
         </Text>
@@ -92,6 +81,8 @@ export function RotSubText({
           fontSize={size}
           font="/fonts/random.ttf"
           position={[offset[0], offset[1], front + offset[2]]}
+          outlineWidth={0.025} // Adds border efficiently
+          outlineColor="black"
         >
           {text}
         </Text>

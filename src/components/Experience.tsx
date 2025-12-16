@@ -89,6 +89,14 @@ const Experience = () => {
             const Rotate = rotateComponents[count];
             return Rotate ? <Rotate place={count % 2 === 1} /> : null;
           })()}
+          {/* {rotateComponents.map((RotateComponent, index) => (
+            <group key={index} visible={count === index + 1}> 
+                Note: Your original code used count (1-based) vs index (0-based).
+                 Adjust logic: if count starts at 1, render visible if count === index + 1
+               
+              <RotateComponent place={(index + 1) % 2 === 1} />
+            </group>
+          ))} */}
         </group>
       </ScrollControls>
     </>

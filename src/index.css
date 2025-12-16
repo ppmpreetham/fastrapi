@@ -3,6 +3,7 @@
 @theme inline {
   --color-primary: #c9ff61;
   --color-secondary: #022cfd;
+  --font-random: "Random", sans-serif;
 }
 
 body,
@@ -14,4 +15,9 @@ html,
 
 @utility no-scrollbar {
   @apply [scrollbar-width:none] [&::-webkit-scrollbar]:hidden;
+}
+
+@font-face {
+  font-family: "Random";
+  src: url("/fonts/random.ttf") format("truetype");
 }

@@ -14,13 +14,7 @@ export function FastrapiModel(props: JSX.IntrinsicElements["group"]) {
   const { nodes } = useGLTF("/models/fastrapi.glb") as unknown as GLTFResult;
   return (
     <group {...props} dispose={null}>
-      <mesh
-        geometry={nodes.Curve.geometry}
-        rotation={[Math.PI / 2, 0, 0]}
-        scale={4}
-        castShadow
-        receiveShadow
-      >
+      <mesh geometry={nodes.Curve.geometry} rotation={[Math.PI / 2, 0, 0]} scale={4}>
         <meshPhysicalMaterial
           color="#e6f7ff"
           roughness={0}
