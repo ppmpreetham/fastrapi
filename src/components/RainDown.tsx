@@ -28,7 +28,7 @@ export default function RainDown({ planeScale = 40 }: { planeScale?: number }) {
         key: `fastrapi_${i}`,
         position: [
           (Math.random() - 0.5) * planeScale,
-          20 + Math.random() * 40,
+          10 + Math.random() * 40,
           (Math.random() - 0.5) * planeScale,
         ],
         rotation: [

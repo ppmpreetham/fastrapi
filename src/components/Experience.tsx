@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import * as THREE from "three";
 import { useFrame } from "@react-three/fiber";
 import {
@@ -46,20 +46,32 @@ const Experience = () => {
   const tl = useRef<gsap.core.Timeline>(null!);
   const cameraRef = useRef<THREE.PerspectiveCamera>(null!);
   const [count, setCount] = useState<number>(1);
+  const [rainTriggered, setRainTriggered] = useState(false);
 
   useGSAP(() => {
     tl.current = gsap.timeline();
   }, []);
+
+  useEffect(() => {
+    const handler = () => {
+      if (rainTriggered) return;
+      setRainTriggered(true);
+      setTimeout(() => (window.location.href = "/docs"), 3500);
+    };
+    window.addEventListener("triggerRainDocs", handler);
+    return () => window.removeEventListener("triggerRainDocs", handler);
+  }, [rainTriggered]);
 
   return (
     <>
       <OrbitControls enableZoom={false} enablePan={false} />
       <SpotLight position={[0, 5, 0]} angle={1 / 2} intensity={50} rotation={[1, 1, 1]} />
 
-      <Physics gravity={[0, -9.81, 0]}>
+      <Physics gravity={[0, -20, 0]}>
         <ScrollControls pages={length} damping={0.25} infinite={false}>
           <PerspectiveCamera makeDefault position={[0, 0, radius]} ref={cameraRef} />
           <CameraScroller cameraRef={cameraRef} tl={tl} setCount={setCount} count={count} />
+
           <group>
             <RigidBody
               type="fixed"
@@ -73,9 +85,10 @@ const Experience = () => {
               </mesh>
               <CuboidCollider args={[50, 50, 1]} position={[0, 0, -1]} />
             </RigidBody>
+
             <CloudsMulti count={40} planeScale={100} offset={[5, 5, 0]} />
             <CrystalField count={50} planeScale={40} offset={-2} />
-            <RainDown planeScale={40} />
+            {rainTriggered && <RainDown planeScale={40} />}
             <Buildings
               min={[1, 1, 1]}
               max={[10, 10, 10]}

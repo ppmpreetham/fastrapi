@@ -99,7 +99,10 @@ export const Rotate4 = ({ place }: { place: boolean }) => {
         offset={[0, 1.4, 0]}
         color="white"
       />
-      <mesh position={[0, 0, -0.01]}>
+      <mesh
+        position={[0, 0, -0.01]}
+        onClick={() => window.dispatchEvent(new Event("triggerRainDocs"))}
+      >
         <planeGeometry args={[8, 2]} />
         <meshBasicMaterial color="#c6ff00" />
       </mesh>

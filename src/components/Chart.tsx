@@ -58,7 +58,9 @@ export default function FrameworkChart() {
     >
       {data.map((item) => (
         <div key={item.name} className="flex items-center gap-6">
-          <div className={`w-40 text-right text-${isMobile ? 1 : 3}xl text-white`}>{item.name}</div>
+          <div className={`w-40 text-right text-${isMobile ? 3 : 3}4xl text-white`}>
+            {item.name}
+          </div>
           <div className="relative flex-1">
             <div className="bar h-14" style={{ backgroundColor: item.color }} />
             <span
