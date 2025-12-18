@@ -24,7 +24,7 @@ export function CloudSingle(props: JSX.IntrinsicElements["group"]) {
             new MeshStandardMaterial({
               color: "white",
               emissive: new Color("white"),
-              // emissiveIntensity: 0.6,
+              emissiveIntensity: 0.6,
               wireframe: true,
             }),
           []

@@ -2,10 +2,14 @@ import { Bloom, EffectComposer, Noise } from "@react-three/postprocessing";
 
 import Experience from "./components/Experience";
 import { Canvas } from "@react-three/fiber";
+import { Suspense } from "react";
+import { PerformanceMonitor } from "@react-three/drei";
+import Cursor from "./components/Cursor";
 
 export default function App() {
   return (
     <div className="w-screen min-h-screen h-screen">
+      <Cursor />
       <Canvas
         className="h-full w-full"
         gl={{
@@ -14,6 +18,7 @@ export default function App() {
         }}
         performance={{ min: 0.5 }}
         dpr={1}
+        // frameloop="demand"
 
         // WEBGPU DOESNT WORK WELL WITH TEXT AND POSTPROCESSING YET
         // gl={(props) => {
@@ -26,8 +31,11 @@ export default function App() {
         //   return renderer.init().then(() => renderer);
         // }}
       >
+        <PerformanceMonitor></PerformanceMonitor>
         <color attach="background" args={["#022cfd"]} />
-        <Experience />
+        <Suspense>
+          <Experience />
+        </Suspense>
         <EffectComposer>
           <Bloom luminanceThreshold={0.1} mipmapBlur luminanceSmoothing={0.9} height={300} />
           <Noise opacity={0.15} />

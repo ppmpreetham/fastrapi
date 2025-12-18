@@ -3,13 +3,8 @@ import { Mesh, MeshStandardMaterial, Color } from "three";
 import { useMemo, type JSX } from "react";
 import { type GLTF } from "three-stdlib";
 
-type Crystal1GLTF = GLTF & {
-  nodes: { Crystal1: Mesh };
-};
-
-type Crystal2GLTF = GLTF & {
-  nodes: { Crystal2: Mesh };
-};
+type Crystal1GLTF = GLTF & { nodes: { Crystal1: Mesh } };
+type Crystal2GLTF = GLTF & { nodes: { Crystal2: Mesh } };
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
 
@@ -40,7 +35,6 @@ export function CrystalCluster(props: JSX.IntrinsicElements["group"]) {
                 (rand(-1, 1) * Math.PI) / 4,
               ]}
             />
-
             <merged.c2
               scale={0.1 * rand(0.9, 1.4)}
               rotation={[
@@ -59,10 +53,6 @@ export function CrystalCluster(props: JSX.IntrinsicElements["group"]) {
 export function CrystalField({ count = 50, planeScale = 20, offset = -2 }) {
   return (
     <>
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, offset, 0]}>
-        <planeGeometry args={[planeScale * 2, planeScale * 2, 40, 40]} />
-        <meshStandardMaterial wireframe />
-      </mesh>
       {Array.from({ length: count }).map((_, i) => (
         <CrystalCluster
           key={i}

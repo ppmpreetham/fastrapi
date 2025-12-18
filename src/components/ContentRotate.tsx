@@ -17,9 +17,8 @@ export const Rotate0 = ({ place }: { place: boolean }) => {
 };
 
 export const Rotate1 = ({ place }: { place: boolean }) => {
-  const { gl } = useThree(); // Get the canvas parent
-  const portalContainer =
-    gl.domElement.parentNode instanceof HTMLElement ? gl.domElement.parentNode : undefined; // Ensure it's an HTMLElement
+  const { gl } = useThree();
+
   return (
     <group>
       <Html
@@ -85,25 +84,26 @@ export const Rotate3 = ({ place }: { place: boolean }) => {
 };
 
 export const Rotate4 = ({ place }: { place: boolean }) => {
-  return (
-    <group>
-      <RotSubText place={place} text="Install now!" size={0.5} offset={[0, 1, 0]} color="white" />
-      <RotHeaderText place={place} text="pip install fastrapi" size={1} />
-    </group>
-  );
-};
+  // Boxes rain down from the sky when clicked on the Check Docs
 
-export const Rotate5 = ({ place }: { place: boolean }) => {
+  function PhysicsBoxes() {
+    return <div>ContentRotate</div>;
+  }
+
   return (
     <group>
       <RotSubText
         place={place}
         text="5 mins to get started!"
         size={0.5}
-        offset={[0, 1, 0]}
+        offset={[0, 1.4, 0]}
         color="white"
       />
-      <RotHeaderText place={place} text="Check Docs" size={1.5} />
+      <mesh position={[0, 0, -0.01]}>
+        <planeGeometry args={[8, 2]} />
+        <meshBasicMaterial color="#c6ff00" />
+      </mesh>
+      <RotHeaderText place={place} text="Check Docs" size={1.5} color="black" />
     </group>
   );
 };
