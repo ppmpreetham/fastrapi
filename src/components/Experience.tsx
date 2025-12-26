@@ -14,7 +14,7 @@ import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 
 import { FastrapiModel } from "../models/fastrapimodel";
-import { CrystalField } from "../models/MultiCrystal";
+import { CrystalField, ProximityCrystals } from "../models/MultiCrystal";
 import RainDown from "./RainDown";
 import { Rotate0, Rotate1, Rotate2, Rotate3, Rotate4 } from "./ContentRotate";
 import Buildings from "../models/Buildings";
@@ -88,6 +88,7 @@ const Experience = () => {
 
             <CloudsMulti count={40} planeScale={100} offset={[5, 5, 0]} />
             <CrystalField count={50} planeScale={40} offset={-2} />
+            <ProximityCrystals count={120} radius={35} />
             {rainTriggered && <RainDown planeScale={40} />}
             <Buildings
               min={[1, 1, 1]}

@@ -8,7 +8,7 @@ import Cursor from "./components/Cursor";
 
 export default function App() {
   return (
-    <div className="w-screen min-h-screen h-screen">
+    <div className="w-screen min-h-screen h-screen cursor-none">
       <Cursor />
       <Canvas
         className="h-full w-full"

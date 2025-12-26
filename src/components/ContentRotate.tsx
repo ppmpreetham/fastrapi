@@ -2,6 +2,7 @@ import { RotHeaderText, RotSubText } from "./Texts";
 import { Html } from "@react-three/drei";
 import FrameworkChart from "./Chart";
 import { useThree } from "@react-three/fiber";
+import Features from "./Features";
 
 var isMobile =
   typeof window !== "undefined" && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -59,19 +60,7 @@ export const Rotate1 = ({ place }: { place: boolean }) => {
 };
 
 export const Rotate2 = ({ place }: { place: boolean }) => {
-  return (
-    <group>
-      <RotSubText
-        place={place}
-        text="Features Include"
-        size={0.5}
-        offset={[0, 1, 0]}
-        color="white"
-      />
-      <RotHeaderText place={place} text="PyDantic" size={isMobile ? 1.1 : 2} />
-      {/* feat: add many more here (images and other stuff) */}
-    </group>
-  );
+  return <Features place={place} />;
 };
 export const Rotate3 = ({ place }: { place: boolean }) => {
   return (
