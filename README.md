@@ -43,7 +43,14 @@ uv install fastrapi
 pip install fastrapi
 ```
 
-## Quick Start
+### Switch from FastAPI
+
+```diff
+- from fastapi import FastAPI
++ from fastrapi import FastrAPI
+```
+
+## Get Started
 
 ```python
 from fastrapi import FastrAPI
