@@ -1,17 +1,17 @@
-import { Bloom, EffectComposer, Noise } from "@react-three/postprocessing";
+import { Bloom, EffectComposer, Noise } from "@react-three/postprocessing"
 
-import Experience from "./components/Experience";
-import { Canvas } from "@react-three/fiber";
-import { Suspense } from "react";
-import { PerformanceMonitor } from "@react-three/drei";
-import Cursor from "./components/Cursor";
+import Experience from "./components/Experience"
+import { Canvas } from "@react-three/fiber"
+import { Suspense } from "react"
+import { PerformanceMonitor } from "@react-three/drei"
+import Cursor from "./components/Cursor"
 
 export default function App() {
   return (
     <div className="w-screen min-h-screen h-screen cursor-none">
       <Cursor />
       <Canvas
-        className="h-full w-full"
+        className="h-full w-full touch-auto"
         gl={{
           powerPreference: "high-performance",
           alpha: false,
@@ -42,5 +42,5 @@ export default function App() {
         </EffectComposer>
       </Canvas>
     </div>
-  );
+  )
 }
