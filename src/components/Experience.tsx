@@ -34,27 +34,22 @@ function CameraScroller({ cameraRef, tl, setCount }: any) {
   const scroll = useScroll()
   const angle = useRef(PI / 2)
   const prevOffset = useRef(scroll.offset)
+  const lastMoveTime = useRef(performance.now())
 
   useFrame((_, delta) => {
-    const target = scroll.offset * (length - 1) * PI
-    const velocity = scroll.offset - prevOffset.current
+    const rawAngle = scroll.offset * (length - 1) * PI
+
+    const now = performance.now()
+    const velocity = Math.abs(scroll.offset - prevOffset.current)
     prevOffset.current = scroll.offset
 
-    const snap = getNearestSnapAngle(target)
-    const snapDistance = Math.abs(target - snap)
-    const snapThreshold = 0.35
+    if (velocity > 0.0001) lastMoveTime.current = now
+    const isIdle = now - lastMoveTime.current > 1000
 
-    const shouldSnap = snapDistance < snapThreshold
+    const snap = getNearestSnapAngle(rawAngle)
+    const target = isIdle ? snap : rawAngle
 
-    const minDamping = 6
-    const maxDamping = 12
-    const damping = shouldSnap
-      ? minDamping + (maxDamping - minDamping) * (1 - snapDistance / snapThreshold)
-      : minDamping
-
-    const finalTarget = shouldSnap ? snap : target
-
-    angle.current = THREE.MathUtils.damp(angle.current, finalTarget, damping, delta)
+    angle.current = THREE.MathUtils.damp(angle.current, target, 6, delta)
 
     const index = SNAP_ANGLES.findIndex((a) => Math.abs(a - angle.current) < PI / 2)
     setCount(index === -1 ? 0 : index)
