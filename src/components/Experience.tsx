@@ -49,7 +49,17 @@ function CameraScroller({ cameraRef, tl, setCount }: any) {
     const snap = getNearestSnapAngle(rawAngle)
     const target = isIdle ? snap : rawAngle
 
-    angle.current = THREE.MathUtils.damp(angle.current, target, 6, delta)
+    const nearestBoundary = getNearestSnapAngle(angle.current)
+    const boundaryDist = Math.abs(angle.current - nearestBoundary)
+    const boundaryRange = PI
+
+    const t = THREE.MathUtils.clamp(1 - boundaryDist / boundaryRange, 0, 1)
+    const boost = THREE.MathUtils.smoothstep(t, 0, 1)
+
+    const baseDamping = isIdle ? 2 : 6
+    const damping = baseDamping + boost * 8
+
+    angle.current = THREE.MathUtils.damp(angle.current, target, damping, delta)
 
     const index = SNAP_ANGLES.findIndex((a) => Math.abs(a - angle.current) < PI / 2)
     setCount(index === -1 ? 0 : index)
