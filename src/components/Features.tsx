@@ -1,5 +1,5 @@
-import gsap from "gsap";
-import { RotHeaderText, RotSubText } from "./Texts";
+// import gsap from "gsap";
+import { RotHeaderText, RotSubText } from "./Texts"
 
 const Features = ({ place }: { place: boolean }) => {
   return (
@@ -29,7 +29,7 @@ const Features = ({ place }: { place: boolean }) => {
       />
       {/* feat: add many more here (images and other stuff) */}
     </group>
-  );
-};
+  )
+}
 
-export default Features;
+export default Features

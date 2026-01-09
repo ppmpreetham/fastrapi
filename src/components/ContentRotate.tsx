@@ -1,11 +1,11 @@
-import { RotHeaderText, RotSubText } from "./Texts";
-import { Html } from "@react-three/drei";
-import FrameworkChart from "./Chart";
-import { useThree } from "@react-three/fiber";
-import Features from "./Features";
+import { RotHeaderText, RotSubText } from "./Texts"
+import { Html } from "@react-three/drei"
+import FrameworkChart from "./Chart"
+import { useThree } from "@react-three/fiber"
+import Features from "./Features"
 
 var isMobile =
-  typeof window !== "undefined" && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  typeof window !== "undefined" && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
 
 export const Rotate0 = ({ place }: { place: boolean }) => {
   return (
@@ -14,11 +14,11 @@ export const Rotate0 = ({ place }: { place: boolean }) => {
       <RotHeaderText place={place} text="FastRAPI" size={isMobile ? 1 : 2} />
       <RotSubText place={place} text="Scroll to Continue" size={0.25} offset={[0, -4, 0]} />
     </group>
-  );
-};
+  )
+}
 
 export const Rotate1 = ({ place }: { place: boolean }) => {
-  const { gl } = useThree();
+  const { gl } = useThree()
 
   return (
     <group>
@@ -56,12 +56,12 @@ export const Rotate1 = ({ place }: { place: boolean }) => {
         color="white"
       />
     </group>
-  );
-};
+  )
+}
 
 export const Rotate2 = ({ place }: { place: boolean }) => {
-  return <Features place={place} />;
-};
+  return <Features place={place} />
+}
 export const Rotate3 = ({ place }: { place: boolean }) => {
   return (
     <group>
@@ -69,15 +69,15 @@ export const Rotate3 = ({ place }: { place: boolean }) => {
       <RotHeaderText place={place} text="ONE CHARACTER" />
       {/* feat: show change from FastAPI to FastRAPI */}
     </group>
-  );
-};
+  )
+}
 
 export const Rotate4 = ({ place }: { place: boolean }) => {
   // Boxes rain down from the sky when clicked on the Check Docs
 
-  function PhysicsBoxes() {
-    return <div>ContentRotate</div>;
-  }
+  // function PhysicsBoxes() {
+  //   return <div>ContentRotate</div>;
+  // }
 
   return (
     <group>
@@ -97,5 +97,5 @@ export const Rotate4 = ({ place }: { place: boolean }) => {
       </mesh>
       <RotHeaderText place={place} text="Check Docs" size={1.5} color="black" />
     </group>
-  );
-};
+  )
+}
