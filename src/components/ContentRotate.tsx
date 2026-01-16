@@ -50,7 +50,7 @@ export const Rotate1 = ({ place }: { place: boolean }) => {
       />
       <RotSubText
         place={place}
-        text="* here means max threads"
+        text="* Represents Multiple Threads"
         size={0.25}
         offset={[0, -3.5, 0]}
         color="white"

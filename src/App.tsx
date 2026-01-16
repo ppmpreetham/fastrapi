@@ -9,12 +9,13 @@ import Cursor from "./components/Cursor"
 export default function App() {
   return (
     <div className="w-screen min-h-screen h-screen cursor-none">
+      {/* <GrainEffect /> */}
       <Cursor />
       <Canvas
         className="h-full w-full touch-auto"
         gl={{
           powerPreference: "high-performance",
-          alpha: false,
+          alpha: true,
         }}
         performance={{ min: 0.5 }}
         dpr={1}
