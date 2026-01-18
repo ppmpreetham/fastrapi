@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from fastrapi import FastrAPI
 
-api = FastrAPI()
+api = FastrAPI(openapi_url="/api-docs/openapi.json")
 
 class User(BaseModel):
     name: str
@@ -18,5 +18,4 @@ def register(user: User, address: Address):
         "msg": f"Registered {user.name}, age {user.age}, living at {address.street}, {address.city} {address.zip}"
     }
 
-if __name__ == "__main__":
-    api.serve("127.0.0.1", 8080)
+api.serve("127.0.0.1", 8080)

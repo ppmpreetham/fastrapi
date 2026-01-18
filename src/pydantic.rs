@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::utils::{json_to_py_object, py_to_response};
 use crate::ResponseType;
 use axum::http::StatusCode;
@@ -107,45 +109,123 @@ pub fn register_pydantic_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(test_model, m)?)?;
     Ok(())
 }
-
 pub fn parse_route_metadata(
     py: Python,
     func: &Bound<PyAny>,
-) -> (Vec<(String, Py<PyAny>)>, ResponseType) {
+    path: &str,
+) -> (
+    Vec<(String, Py<PyAny>)>,
+    ResponseType,
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    HashMap<String, crate::dependencies::DependencyInfo>,
+) {
     let mut validators = Vec::new();
+    let mut path_params = Vec::new();
+    let mut query_params = Vec::new();
+    let mut body_params = Vec::new();
+
     let response_type = get_response_type(py, func);
 
+    // Extract path parameter names from route pattern
+    path_params = crate::params::extract_path_param_names(path);
+
+    // Parse dependencies
+    let dependencies = crate::dependencies::parse_dependencies(py, func).unwrap_or_default();
+
+    // Parse function annotations
     if let Ok(annotations) = func.getattr("__annotations__") {
         if let Ok(ann_dict) = annotations.cast::<pyo3::types::PyDict>() {
+            let inspect = py.import("inspect").ok();
+            let signature = inspect
+                .and_then(|i| i.call_method1("signature", (func,)).ok())
+                .and_then(|s| s.getattr("parameters").ok());
+
             for (key, value) in ann_dict.iter() {
                 if let Ok(param_name) = key.extract::<String>() {
-                    if param_name != "return" && is_pydantic_model(py, &value) {
-                        validators.push((param_name, value.unbind()));
+                    if param_name == "return" {
+                        continue;
+                    }
+
+                    // Skip if it's a dependency
+                    if dependencies.contains_key(&param_name) {
+                        continue;
+                    }
+
+                    let type_str = format!("{:?}", value);
+
+                    // Check if it's a Pydantic model
+                    if is_pydantic_model(py, &value) {
+                        validators.push((param_name.clone(), value.unbind()));
+                        body_params.push(param_name.clone());
+                        continue;
+                    }
+
+                    // Check if parameter is explicitly marked as Query
+                    let is_query_param = if let Some(sig) = &signature {
+                        if let Ok(params) = sig.cast::<pyo3::types::PyDict>() {
+                            if let Ok(Some(param)) = params.get_item(&param_name) {
+                                if let Ok(default) = param.getattr("default") {
+                                    if !default.is_none() {
+                                        // FIXED: Correctly handle Bound<PyString> -> String comparison
+                                        default
+                                            .get_type()
+                                            .name()
+                                            .map(|n| n.to_string_lossy() == "Query")
+                                            .unwrap_or(false)
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        type_str.contains("Query")
+                    };
+
+                    // Categorize parameter
+                    if path_params.contains(&param_name) {
+                        // Already in path params
+                    } else if is_query_param {
+                        query_params.push(param_name);
+                    } else {
+                        // If not explicitly path or query, assume it's body for POST/PUT/PATCH
+                        body_params.push(param_name);
                     }
                 }
             }
         }
     }
 
-    (validators, response_type)
+    (
+        validators,
+        response_type,
+        path_params,
+        query_params,
+        body_params,
+        dependencies,
+    )
 }
 
 fn get_response_type(_py: Python, func: &Bound<PyAny>) -> ResponseType {
     if let Ok(annotations) = func.getattr("__annotations__") {
         if let Ok(dict) = annotations.cast::<pyo3::types::PyDict>() {
-            if let Ok(Some(return_type)) = dict.get_item("return") {
-                let return_str = format!("{:?}", return_type);
-                if return_str.contains("HTMLResponse") {
-                    return ResponseType::Html;
-                }
-                if return_str.contains("JSONResponse") {
-                    return ResponseType::Json;
-                }
-                if return_str.contains("PlainTextResponse") {
-                    return ResponseType::PlainText;
-                }
-                if return_str.contains("RedirectResponse") {
-                    return ResponseType::Redirect;
+            if let Ok(Some(return_annotation)) = dict.get_item("return") {
+                if let Ok(type_str) = return_annotation.extract::<String>() {
+                    return match type_str.as_str() {
+                        "HTMLResponse" => ResponseType::Html,
+                        "JSONResponse" => ResponseType::Json,
+                        "PlainTextResponse" => ResponseType::PlainText,
+                        "RedirectResponse" => ResponseType::Redirect,
+                        _ => ResponseType::Auto,
+                    };
                 }
             }
         }

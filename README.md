@@ -224,12 +224,18 @@ Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn acr
 Some advanced features are still in development like:
 - [ ] Logging/metrics
 - [ ] A nice logging tool
+- [ ] Async Middleware support
+- [ ] Lifespan Events (@app.on_startup / @app.on_shutdown)
 - [ ] Better error handling (currently shows Rust errors)
 - [ ] Rate limiter (even FastAPI doesn't have it)
 - [ ] Websockets
+- [ ] Form/Multipart support
+- [ ] Sub-APIs / Includes
+- [ ] Security Utilities (OAuth2, JWT, etc.)
+- [ ] Hot Reloading
+- [ ] Rust integration
 - [ ] Dependency injection
-- [ ] Static file serving
-- [ ] Background tasks
+- [ ] Static file serving (UploadFile + axum::extract::Multipart)
 - [ ] Testing support
 - [ ] GraphQL support
 

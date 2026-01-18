@@ -130,7 +130,6 @@ pub fn build_openapi_spec(
 ) -> OpenApiSpec {
     let mut spec = OpenApiSpec::default();
     let mut schemas: HashMap<String, JsonValue> = HashMap::new();
-
     let guard = routes.guard();
 
     for (route_key, handler) in routes.iter(&guard) {
@@ -138,7 +137,6 @@ pub fn build_openapi_spec(
         if parts.len() != 2 {
             continue;
         }
-
         let method = parts[0].to_lowercase();
         let path = parts[1].to_string();
 
@@ -159,46 +157,53 @@ pub fn build_openapi_spec(
             responses: HashMap::new(),
         };
 
-        // Request body for POST/PUT/PATCH with validators
+        // --- FIXED BODY SCHEMA GENERATION ---
         if !handler.param_validators.is_empty()
             && ["post", "put", "patch"].contains(&method.as_str())
         {
-            let mut request_schemas = HashMap::new();
-
-            for (param_name, validator) in &handler.param_validators {
+            let content_schema = if handler.param_validators.len() == 1 {
+                // CASE A: Single Body -> Direct Reference
+                let (_, validator) = &handler.param_validators[0];
                 let validator_bound = validator.bind(py);
+
                 if let Some(schema) = extract_pydantic_schema(py, validator_bound) {
                     let schema_name = get_schema_name(validator_bound);
-                    schemas.insert(schema_name.clone(), schema.clone());
-                    request_schemas.insert(
-                        param_name.clone(),
-                        json!({
-                            "$ref": format!("#/components/schemas/{}", schema_name)
-                        }),
-                    );
+                    schemas.insert(schema_name.clone(), schema);
+                    json!({ "$ref": format!("#/components/schemas/{}", schema_name) })
+                } else {
+                    json!({ "type": "object" })
                 }
-            }
-
-            if !request_schemas.is_empty() {
-                operation.request_body = Some(RequestBody {
-                    required: true,
-                    content: {
-                        let mut content = HashMap::new();
-                        content.insert(
-                            "application/json".to_string(),
-                            MediaType {
-                                schema: json!({
-                                    "type": "object",
-                                    "properties": request_schemas,
-                                }),
-                            },
+            } else {
+                // CASE B: Multiple Bodies -> Nested Properties
+                let mut properties = HashMap::new();
+                for (param_name, validator) in &handler.param_validators {
+                    let validator_bound = validator.bind(py);
+                    if let Some(schema) = extract_pydantic_schema(py, validator_bound) {
+                        let schema_name = get_schema_name(validator_bound);
+                        schemas.insert(schema_name.clone(), schema);
+                        properties.insert(
+                            param_name.clone(),
+                            json!({ "$ref": format!("#/components/schemas/{}", schema_name) }),
                         );
-                        content
-                    },
-                });
-            }
-        }
+                    }
+                }
+                json!({ "type": "object", "properties": properties })
+            };
 
+            operation.request_body = Some(RequestBody {
+                required: true,
+                content: {
+                    let mut map = HashMap::new();
+                    map.insert(
+                        "application/json".to_string(),
+                        MediaType {
+                            schema: content_schema,
+                        },
+                    );
+                    map
+                },
+            });
+        }
         // Default 200 response
         operation.responses.insert(
             "200".to_string(),
@@ -242,7 +247,6 @@ pub fn build_openapi_spec(
             );
         }
 
-        // Insert into paths
         let path_item = spec.paths.entry(path).or_insert_with(|| PathItem {
             get: None,
             post: None,
@@ -261,11 +265,8 @@ pub fn build_openapi_spec(
         }
     }
 
-    // Attach collected schemas
     if let Some(components) = &mut spec.components {
         components.schemas = schemas;
     }
-
-    debug!("Built OpenAPI spec with {} paths", spec.paths.len());
     spec
 }

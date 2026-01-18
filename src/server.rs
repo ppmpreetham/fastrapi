@@ -24,6 +24,7 @@ use crate::middlewares::build_cors_layer;
 use crate::openapi::build_openapi_spec;
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
 use crate::utils::local_guard;
+use crate::websocket::{ws_handler, WEBSOCKET_ROUTES};
 use crate::{MIDDLEWARES, ROUTES};
 
 static PYTHON_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
@@ -110,6 +111,25 @@ fn build_router(
             path,
             route_key.as_str().into(),
             app_state.clone(),
+        );
+    }
+
+    // Websockets
+    let guard = crate::utils::local_guard(&*WEBSOCKET_ROUTES);
+    for (key, _) in WEBSOCKET_ROUTES.iter(&guard) {
+        let parts: Vec<&str> = key.splitn(2, ' ').collect();
+        if parts.len() != 2 || parts[0] != "WS" {
+            continue;
+        }
+        let path = parts[1].to_string();
+        let route_key = Arc::new(key.clone());
+
+        app = app.route(
+            &path,
+            get({
+                let rt_handle = app_state.rt_handle.clone();
+                move |ws| ws_handler(ws, Extension(route_key.clone()), Extension(rt_handle))
+            }),
         );
     }
 

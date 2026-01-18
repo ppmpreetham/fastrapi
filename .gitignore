@@ -73,3 +73,6 @@ docs/_build/
 
 # Extras
 update.ps1
+
+node_modules/
+.vite

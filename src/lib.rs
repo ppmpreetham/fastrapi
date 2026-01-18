@@ -2,9 +2,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
 mod app;
+mod background;
+mod dependencies;
 mod exceptions;
 mod middlewares;
 mod openapi;
+mod params;
 mod py_handlers;
 mod pydantic;
 mod request;
@@ -12,14 +15,15 @@ mod responses;
 mod server;
 mod status;
 mod utils;
+mod websocket;
 
 pub use app::FastrAPI;
-// pub use exceptions::{PyHTTPException, PyWebSocketException};
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
 
 use once_cell::sync::Lazy;
-use papaya::HashMap;
+use papaya::HashMap as PapayaHashMap;
+use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
 
 use crate::middlewares::PyMiddleware;
@@ -38,24 +42,30 @@ pub struct RouteHandler {
     pub func: Py<PyAny>,
     pub param_validators: Vec<(String, Py<PyAny>)>,
     pub response_type: ResponseType,
+    pub path_param_names: Vec<String>,
+    pub query_param_names: Vec<String>,
+    pub body_param_names: Vec<String>,
+    pub dependencies: StdHashMap<String, crate::dependencies::DependencyInfo>,
 }
 
-pub static ROUTES: Lazy<HashMap<String, RouteHandler>> = Lazy::new(|| HashMap::with_capacity(128));
+pub static ROUTES: Lazy<PapayaHashMap<String, RouteHandler>> =
+    Lazy::new(|| PapayaHashMap::with_capacity(128));
 
-pub static MIDDLEWARES: Lazy<HashMap<String, Arc<PyMiddleware>>> =
-    Lazy::new(|| HashMap::with_capacity(16));
+pub static MIDDLEWARES: Lazy<PapayaHashMap<String, Arc<PyMiddleware>>> =
+    Lazy::new(|| PapayaHashMap::with_capacity(16));
 
 #[pymodule(gil_used = false)]
 fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FastrAPI>()?;
 
     responses::register(m)?;
-    // exceptions::register(m)?;
+    exceptions::register(m)?;
     request::register(m)?;
+    background::register(m)?;
     pydantic::register_pydantic_integration(m)?;
     status::create_status_submodule(m)?;
-
+    params::register(m)?;
     middlewares::register(m)?;
-
+    websocket::register(m)?;
     Ok(())
 }

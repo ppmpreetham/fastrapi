@@ -8,6 +8,7 @@ use crate::middlewares::{
     CORSMiddleware, GZipMiddleware, PyMiddleware, SessionMiddleware, TrustedHostMiddleware,
 };
 use crate::pydantic::parse_route_metadata;
+use crate::websocket::websocket as ws_decorator;
 use crate::{RouteHandler, MIDDLEWARES, ROUTES};
 #[pyclass(name = "FastrAPI")]
 pub struct FastrAPI {
@@ -102,7 +103,7 @@ impl FastrAPI {
         summary=None,
         description="".to_string(),
         version="0.1.0".to_string(),
-        openapi_url="/openapi.json".to_string(),
+        openapi_url="/api-docs/openapi.json".to_string(),
         openapi_tags=None,
         servers=None,
         dependencies=None,
@@ -302,6 +303,16 @@ impl FastrAPI {
         self.create_decorator("HEAD", path, py)
     }
 
+    // decorator for websockets: @app.websocket("/ws")
+    fn websocket<'py>(&self, path: String, _py: Python<'py>) -> PyResult<Py<PyAny>> {
+        if !path.starts_with('/') {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "WebSocket path must start with '/'",
+            ));
+        }
+        ws_decorator(path)
+    }
+
     // decorator for generic Python functions: @app.middleware("smtg")
     fn middleware(&self, py: Python, middleware_type: String) -> PyResult<Py<PyAny>> {
         let decorator = move |args: &Bound<'_, PyTuple>,
@@ -334,17 +345,30 @@ impl FastrAPI {
         py: Python<'py>,
     ) -> PyResult<Py<PyAny>> {
         let route_key = format!("{} {}", method, path);
+        let path_for_closure = path.clone();
         let decorator = move |args: &Bound<'_, PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.extract()?;
             let func_bound = func.bind(py);
-            let (param_validators, response_type) = parse_route_metadata(py, func_bound);
+            let (
+                param_validators,
+                response_type,
+                path_param_names,
+                query_param_names,
+                body_param_names,
+                dependencies,
+            ) = parse_route_metadata(py, func_bound, &path_for_closure);
+
             let handler = RouteHandler {
                 func: func.clone_ref(py),
                 param_validators,
                 response_type,
+                path_param_names,
+                query_param_names,
+                body_param_names,
+                dependencies,
             };
             ROUTES.pin().insert(route_key.clone(), handler);
             Ok(func)
