@@ -1,6 +1,6 @@
 use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
+use pyo3::{prelude::*, IntoPyObjectExt};
 use std::sync::{Arc, Mutex};
 
 #[pyclass(name = "Request", module = "fastrapi.request")]
@@ -104,77 +104,80 @@ impl PyRequest {
     }
 
     fn body<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let scope_bound = self.scope.bind(py);
+        let method_opt = scope_bound.get_item("method").ok();
+        let method = method_opt
+            .and_then(|m| m.extract::<String>().ok())
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+
+        if !matches!(method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE") {
+            return Ok(PyBytes::new(py, &[]).into_any());
+        }
+
         let receive = self.receive.clone();
-        let body_store = self._body.clone();
-        let is_consumed = self._is_consumed.clone();
+        let cache = self._body.clone();
+        let consumed = self._is_consumed.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // cached
             {
-                let lock = body_store.lock().unwrap();
-                if let Some(data) = &*lock {
-                    return Python::attach(|py| Ok(PyBytes::new(py, data).unbind()));
+                let cache_guard = cache.lock().unwrap();
+                if let Some(cached) = &*cache_guard {
+                    return Python::attach(|py| Ok(PyBytes::new(py, cached).into_any().unbind()));
                 }
             }
 
-            // consumed but not cached
             {
-                let lock = is_consumed.lock().unwrap();
-                if *lock {
+                let mut consumed_guard = consumed.lock().unwrap();
+                if *consumed_guard {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        "Stream already consumed",
+                        "Body stream already consumed",
                     ));
                 }
             }
 
-            // ASGI Read Loop
-            let mut data = Vec::new();
+            let mut full_body = Vec::new();
+
             loop {
-                let fut = Python::attach(|py| {
-                    let awaitable = receive.bind(py).call0()?;
-                    pyo3_async_runtimes::tokio::into_future(awaitable)
-                })?;
+                let message = {
+                    let fut = Python::attach(|py| {
+                        let awaitable = receive.bind(py).call0()?;
+                        pyo3_async_runtimes::tokio::into_future(awaitable)
+                    })?;
 
-                let message_obj: Py<PyAny> = fut.await?;
+                    fut.await?
+                };
 
-                let (chunk, more_body) = Python::attach(|py| -> PyResult<(Vec<u8>, bool)> {
-                    let msg = message_obj.bind(py);
-                    let msg_type: String = msg.get_item("type")?.extract()?;
+                Python::attach(|py| -> PyResult<()> {
+                    let msg = message.bind(py);
+                    let typ: String = msg.get_item("type")?.extract()?;
 
-                    if msg_type != "http.request" {
-                        return Ok((vec![], false));
+                    if typ != "http.request" {
+                        return Ok(());
                     }
 
-                    let body_bytes: Vec<u8> = match msg.get_item("body") {
-                        Ok(b) => b.extract()?,
-                        Err(_) => vec![],
-                    };
+                    if let Ok(body_item) = msg.get_item("body") {
+                        let bytes: Vec<u8> = body_item.extract()?;
+                        full_body.extend(bytes);
+                    }
 
-                    let more = match msg.get_item("more_body") {
-                        Ok(m) => m.extract()?,
-                        Err(_) => false,
-                    };
+                    let more_body: bool = msg.get_item("more_body")?.extract().unwrap_or(false);
 
-                    Ok((body_bytes, more))
+                    if !more_body {
+                        let mut cache_guard = cache.lock().unwrap();
+                        *cache_guard = Some(full_body.clone());
+
+                        let mut consumed_guard = consumed.lock().unwrap();
+                        *consumed_guard = true;
+
+                        return Ok(());
+                    }
+
+                    Ok(())
                 })?;
-
-                data.extend_from_slice(&chunk);
-                if !more_body {
-                    break;
-                }
             }
 
-            // cache
-            {
-                let mut lock = body_store.lock().unwrap();
-                *lock = Some(data.clone());
-            }
-            {
-                let mut lock = is_consumed.lock().unwrap();
-                *lock = true;
-            }
-
-            Python::attach(|py| Ok(PyBytes::new(py, &data).unbind()))
+            unreachable!("Body reading loop should never exit normally");
         })
     }
 
