@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from fastrapi import FastrAPI
 from fastrapi.responses import JSONResponse
-# from fastrapi.exceptions import HTTPException
+# from fastrapi import HTTPException
 import asyncio
 
 

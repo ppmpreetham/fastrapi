@@ -42,7 +42,6 @@ impl PyBackgroundTasks {
         for (func, args) in tasks {
             let handle = tokio::spawn(async move {
                 Python::attach(|py| {
-                    // converts Vec<Py<PyAny>> to tuple
                     let args_tuple = PyTuple::new(py, &args).expect("Failed to create tuple");
                     match func.call1(py, &args_tuple) {
                         Ok(_) => {}
@@ -60,7 +59,15 @@ impl PyBackgroundTasks {
     }
 }
 
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyBackgroundTasks>()?;
+pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = parent.py();
+    let bg_module = PyModule::new(py, "background")?;
+    bg_module.add_class::<PyBackgroundTasks>()?;
+
+    parent.add_submodule(&bg_module)?;
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("fastrapi.background", &bg_module)?;
+
     Ok(())
 }

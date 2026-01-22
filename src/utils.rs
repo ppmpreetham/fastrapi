@@ -8,13 +8,13 @@ use pyo3::types::{PyAny, PyDict, PyList};
 use serde_json::{json, Map, Value};
 use serde_pyobject::to_pyobject;
 
-// For local reads (fast, non-Send for sync blocks like spawn_blocking)
+// for local reads (fast, non-Send for sync blocks like spawn_blocking)
 pub fn local_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::LocalGuard<'_> {
     map.guard()
 }
 
-// For async/Send (use in handlers)
-pub fn owned_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::OwnedGuard {
+// for async/Send (in handlers)
+pub fn owned_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::OwnedGuard<'_> {
     map.owned_guard()
 }
 
@@ -62,7 +62,7 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Response {
     Json(json!(format!("{:?}", obj))).into_response()
 }
 
-/// Optimized dict to JSON conversion with capacity hint
+/// dict to JSON conversion with capacity hint
 #[inline]
 pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
     let mut map = Map::with_capacity(dict.len());
@@ -76,7 +76,7 @@ pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
     Value::Object(map)
 }
 
-/// Optimized list to JSON conversion with capacity hint
+/// list to JSON conversion with capacity hint
 #[inline]
 pub fn py_list_to_json(py: Python<'_>, list: &Bound<'_, PyList>) -> Value {
     let mut vec = Vec::with_capacity(list.len());

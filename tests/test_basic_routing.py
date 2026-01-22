@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from fastrapi import FastrAPI, Depends, Header, Query, Path, Form, File, UploadFile
 from fastrapi.responses import JSONResponse
-from fastrapi.exceptions import HTTPException
+from fastrapi import HTTPException
 import asyncio
 
 def test_root_endpoint(client, app):

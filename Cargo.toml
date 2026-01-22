@@ -1,6 +1,6 @@
 [package]
 name = "fastrapi"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -39,6 +39,7 @@ papaya = { version = "0.2.3" }
 parking_lot = "0.12.5"
 fastwebsockets = { version = "0.10.0", features = ["upgrade", "with_axum"]}
 bytes = "1.11.0"
+async-recursion = "1.1.1"
 
 [profile.release]
 codegen-units = 1

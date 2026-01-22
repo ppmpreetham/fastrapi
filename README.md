@@ -220,6 +220,25 @@ Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn acr
 
 > **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency ,  making it **~33× faster** than FastAPI + Guvicorn with 1 worker.
 
+## Comparison: FastAPI vs FastRAPI
+
+| Area                              | FastAPI                                               | FastRAPI                                                    | FastRAPI wins? |
+|-----------------------------------|-------------------------------------------------------|-------------------------------------------------------------|----------------|
+| Dependency resolution             | Runtime `inspect` + reflection every request          | One-time parsing at decorator → pre-built injection plan    | ✅             |
+| Fast-path for trivial endpoints   | No special case: full kwargs/dependency work always  | `is_fast_path` flag → skip deps, validation, kwargs         | ✅             |
+| Route lookup speed                | Starlette regex router (slows with many routes)       | `papaya` concurrent hashmap → O(1) lookup                   | ✅             |
+| Middleware usability (Python)     | `@app.middleware` often buggy / limited               | Clean, working decorator + real execution                   | ✅             |
+| Background tasks reliability      | Fire-and-forget, errors usually swallowed             | Proper `JoinHandle` + error logging                         | ✅             |
+| WebSocket implementation          | Starlette (solid but heavy)                           | Custom with bounded channels + clean async pump             | ✅             |
+| Startup-time error detection      | Almost everything deferred to runtime                 | Full signature + dependency analysis at decorator time      | ✅             |
+| Concurrency & resource safety     | asyncio + threadpool                                  | Native Tokio + Rust memory & thread safety                  | ✅             |
+| Deployment footprint              | Heavy (uvicorn + many deps)                           | Tiny Rust binary + optional Python runtime                  | ✅             |
+| Scaling to 10,000+ routes         | Noticeable slowdown                                   | Stays fast thanks to hashmap lookup                         | ✅             |
+| JSON serialization flexibility    | Hard to swap (monkey-patch needed)                    | Trivial to plug orjson / sonic-rs / simdjson                | ✅             |
+| `response_model=None` + raw Response return | Fully supported                                     | serialization                                       | ❌ (for now)   |
+| `APIRouter` + `include_router()`  | Yes, mature ecosystem                                 | Not yet implemented                                         | ❌ (for now)   |
+| `app.mount()` / `StaticFiles`     | Yes                                                   | Not yet implemented                                         | ❌ (for now)   |
+
 ## Current Limitations
 Some advanced features are still in development like:
 - [ ] Logging/metrics
@@ -228,16 +247,35 @@ Some advanced features are still in development like:
 - [ ] Lifespan Events (@app.on_startup / @app.on_shutdown)
 - [ ] Better error handling (currently shows Rust errors)
 - [ ] Rate limiter (even FastAPI doesn't have it)
-- [ ] Websockets
-- [ ] Form/Multipart support
+- [x] Websockets
+- [x] Form/Multipart support
 - [ ] Sub-APIs / Includes
-- [ ] Security Utilities (OAuth2, JWT, etc.)
+- [x] Security Utilities (OAuth2, JWT, etc.)
 - [ ] Hot Reloading
-- [ ] Rust integration
-- [ ] Dependency injection
-- [ ] Static file serving (UploadFile + axum::extract::Multipart)
+- [x] Rust integration
+- [x] Dependency injection
+- [x] Static file serving (UploadFile + axum::extract::Multipart)
 - [ ] Testing support
 - [ ] GraphQL support
+- [ ] APIRouter + include_router(prefix=..., tags=..., dependencies=...)
+- [ ] Respect response_model=None (allow raw Response / RedirectResponse returns)
+- [ ] app.mount() for static files & sub-apps
+- [ ] @app.exception_handler() + app.add_exception_handler()
+- [ ] Proper Python-friendly error pages (no Rust tracebacks in production)
+- [ ] lifespan= context manager (modern style)
+- [ ] app.openapi() method (customizable spec)
+- [ ] app.state (mutable app-wide state)
+- [ ] app.openapi_tags= ordering in Swagger UI
+- [ ] callbacks= and webhooks= in OpenAPI
+- [ ] app.servers=, root_path, openapi_external_docs
+- [ ] app.swagger_ui_parameters= customization
+- [ ] separate_input_output_schemas in OpenAPI generation
+- [ ] Hot reloading / watchfiles integration
+- [ ] Built-in TestClient (starlette.testclient style)
+- [ ] Metrics / Prometheus endpoint
+- [ ] Advanced dependency scopes (request vs function)
+- [ ] Full middleware ordering control
+- [ ] Rust → Python FFI helpers for fast endpoints
 
 ## Contributing
 Contributions are welcome! Please feel free to submit a Pull Request.

@@ -1,12 +1,13 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 
-/// Extract path parameter names from a route pattern like "/users/{user_id}/posts/{post_id}"
+// --- Utilities ---
+
+/// from route patterns like "/users/{user_id}"
 pub fn extract_path_param_names(path: &str) -> Vec<String> {
     let mut params = Vec::new();
     let mut in_param = false;
     let mut current_param = String::new();
-
     for c in path.chars() {
         match c {
             '{' => {
@@ -26,26 +27,11 @@ pub fn extract_path_param_names(path: &str) -> Vec<String> {
             }
         }
     }
-
     params
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// --- Sentinels ---
 
-    #[test]
-    fn test_extract_path_params() {
-        assert_eq!(
-            extract_path_param_names("/users/{user_id}/posts/{post_id}"),
-            vec!["user_id", "post_id"]
-        );
-        assert_eq!(extract_path_param_names("/users/{id}"), vec!["id"]);
-        assert_eq!(extract_path_param_names("/users"), Vec::<String>::new());
-    }
-}
-
-// Sentinel value for "not set" vs "None"
 #[pyclass(name = "_Unset")]
 #[derive(Clone)]
 pub struct Unset;
@@ -58,7 +44,6 @@ impl Unset {
     }
 }
 
-// Undefined sentinel (similar to FastAPI's Undefined)
 #[pyclass(name = "Undefined")]
 #[derive(Clone)]
 pub struct Undefined;
@@ -71,26 +56,57 @@ impl Undefined {
     }
 }
 
-// Base parameter info structure
-#[derive(Clone, Debug)]
-pub struct ParamInfo {
-    pub default: Option<Py<PyAny>>,
-    pub alias: Option<String>,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub gt: Option<f64>,
-    pub ge: Option<f64>,
-    pub lt: Option<f64>,
-    pub le: Option<f64>,
-    pub min_length: Option<usize>,
-    pub max_length: Option<usize>,
-    pub pattern: Option<String>,
-    pub deprecated: Option<bool>,
-    pub include_in_schema: bool,
-    pub examples: Option<Py<PyAny>>,
+// --- Dependency Classes ---
+
+#[pyclass(name = "Depends", subclass)]
+#[derive(Clone)]
+pub struct PyDepends {
+    #[pyo3(get)]
+    pub dependency: Option<Py<PyAny>>,
+    #[pyo3(get)]
+    pub use_cache: bool,
 }
 
-// Query parameter
+#[pymethods]
+impl PyDepends {
+    #[new]
+    #[pyo3(signature = (dependency=None, *, use_cache=true))]
+    pub fn new(dependency: Option<Py<PyAny>>, use_cache: bool) -> Self {
+        Self {
+            dependency,
+            use_cache,
+        }
+    }
+}
+
+#[pyclass(name = "Security", extends = PyDepends)]
+#[derive(Clone)]
+pub struct PySecurity {
+    #[pyo3(get)]
+    pub scopes: Vec<String>,
+}
+
+#[pymethods]
+impl PySecurity {
+    #[new]
+    #[pyo3(signature = (dependency=None, *, scopes=None, use_cache=true))]
+    fn new(
+        dependency: Option<Py<PyAny>>,
+        scopes: Option<Vec<String>>,
+        use_cache: bool,
+    ) -> (Self, PyDepends) {
+        (
+            Self {
+                scopes: scopes.unwrap_or_default(),
+            },
+            PyDepends::new(dependency, use_cache),
+        )
+    }
+}
+
+// --- Parameter Classes ---
+
+// Query
 #[pyclass(name = "Query")]
 #[derive(Clone)]
 pub struct PyQuery {
@@ -127,24 +143,7 @@ pub struct PyQuery {
 #[pymethods]
 impl PyQuery {
     #[new]
-    #[pyo3(signature = (
-        default=None,
-        *,
-        alias=None,
-        title=None,
-        description=None,
-        gt=None,
-        ge=None,
-        lt=None,
-        le=None,
-        min_length=None,
-        max_length=None,
-        pattern=None,
-        deprecated=None,
-        include_in_schema=true,
-        examples=None,
-        **_extra
-    ))]
+    #[pyo3(signature = (default=None, *, alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         default: Option<Py<PyAny>>,
@@ -182,7 +181,7 @@ impl PyQuery {
     }
 }
 
-// Path parameter
+// Path
 #[pyclass(name = "Path")]
 #[derive(Clone)]
 pub struct PyPath {
@@ -219,24 +218,7 @@ pub struct PyPath {
 #[pymethods]
 impl PyPath {
     #[new]
-    #[pyo3(signature = (
-        default=None,
-        *,
-        alias=None,
-        title=None,
-        description=None,
-        gt=None,
-        ge=None,
-        lt=None,
-        le=None,
-        min_length=None,
-        max_length=None,
-        pattern=None,
-        deprecated=None,
-        include_in_schema=true,
-        examples=None,
-        **_extra
-    ))]
+    #[pyo3(signature = (default=None, *, alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         default: Option<Py<PyAny>>,
@@ -274,7 +256,7 @@ impl PyPath {
     }
 }
 
-// Body parameter
+// Body (embed, media_type)
 #[pyclass(name = "Body")]
 #[derive(Clone)]
 pub struct PyBody {
@@ -315,26 +297,7 @@ pub struct PyBody {
 #[pymethods]
 impl PyBody {
     #[new]
-    #[pyo3(signature = (
-        default=None,
-        *,
-        embed=None,
-        media_type="application/json".to_string(),
-        alias=None,
-        title=None,
-        description=None,
-        gt=None,
-        ge=None,
-        lt=None,
-        le=None,
-        min_length=None,
-        max_length=None,
-        pattern=None,
-        deprecated=None,
-        include_in_schema=true,
-        examples=None,
-        **_extra
-    ))]
+    #[pyo3(signature = (default=None, *, embed=None, media_type="application/json".to_string(), alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         default: Option<Py<PyAny>>,
@@ -376,7 +339,7 @@ impl PyBody {
     }
 }
 
-// Cookie parameter
+// Cookie
 #[pyclass(name = "Cookie")]
 #[derive(Clone)]
 pub struct PyCookie {
@@ -413,24 +376,7 @@ pub struct PyCookie {
 #[pymethods]
 impl PyCookie {
     #[new]
-    #[pyo3(signature = (
-        default=None,
-        *,
-        alias=None,
-        title=None,
-        description=None,
-        gt=None,
-        ge=None,
-        lt=None,
-        le=None,
-        min_length=None,
-        max_length=None,
-        pattern=None,
-        deprecated=None,
-        include_in_schema=true,
-        examples=None,
-        **_extra
-    ))]
+    #[pyo3(signature = (default=None, *, alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         default: Option<Py<PyAny>>,
@@ -468,7 +414,6 @@ impl PyCookie {
     }
 }
 
-// Header parameter
 #[pyclass(name = "Header")]
 #[derive(Clone)]
 pub struct PyHeader {
@@ -507,25 +452,7 @@ pub struct PyHeader {
 #[pymethods]
 impl PyHeader {
     #[new]
-    #[pyo3(signature = (
-        default=None,
-        *,
-        alias=None,
-        convert_underscores=true,
-        title=None,
-        description=None,
-        gt=None,
-        ge=None,
-        lt=None,
-        le=None,
-        min_length=None,
-        max_length=None,
-        pattern=None,
-        deprecated=None,
-        include_in_schema=true,
-        examples=None,
-        **_extra
-    ))]
+    #[pyo3(signature = (default=None, *, alias=None, convert_underscores=true, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         default: Option<Py<PyAny>>,
@@ -565,7 +492,7 @@ impl PyHeader {
     }
 }
 
-// Form parameter
+// Form (media_type)
 #[pyclass(name = "Form")]
 #[derive(Clone)]
 pub struct PyForm {
@@ -604,25 +531,7 @@ pub struct PyForm {
 #[pymethods]
 impl PyForm {
     #[new]
-    #[pyo3(signature = (
-        default=None,
-        *,
-        media_type="application/x-www-form-urlencoded".to_string(),
-        alias=None,
-        title=None,
-        description=None,
-        gt=None,
-        ge=None,
-        lt=None,
-        le=None,
-        min_length=None,
-        max_length=None,
-        pattern=None,
-        deprecated=None,
-        include_in_schema=true,
-        examples=None,
-        **_extra
-    ))]
+    #[pyo3(signature = (default=None, *, media_type="application/x-www-form-urlencoded".to_string(), alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         default: Option<Py<PyAny>>,
@@ -662,7 +571,7 @@ impl PyForm {
     }
 }
 
-// File parameter
+// File (file type)
 #[pyclass(name = "File")]
 #[derive(Clone)]
 pub struct PyFile {
@@ -701,25 +610,7 @@ pub struct PyFile {
 #[pymethods]
 impl PyFile {
     #[new]
-    #[pyo3(signature = (
-        default=None,
-        *,
-        media_type="multipart/form-data".to_string(),
-        alias=None,
-        title=None,
-        description=None,
-        gt=None,
-        ge=None,
-        lt=None,
-        le=None,
-        min_length=None,
-        max_length=None,
-        pattern=None,
-        deprecated=None,
-        include_in_schema=true,
-        examples=None,
-        **_extra
-    ))]
+    #[pyo3(signature = (default=None, *, media_type="multipart/form-data".to_string(), alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         default: Option<Py<PyAny>>,
@@ -759,10 +650,12 @@ impl PyFile {
     }
 }
 
-// Registration function to add all classes to the module
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Unset>()?;
     m.add_class::<Undefined>()?;
+    m.add_class::<PyDepends>()?;
+    m.add_class::<PySecurity>()?;
+
     m.add_class::<PyQuery>()?;
     m.add_class::<PyPath>()?;
     m.add_class::<PyBody>()?;

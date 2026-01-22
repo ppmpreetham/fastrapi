@@ -1,5 +1,5 @@
 # tests/test_exceptions.py
-from fastrapi.exceptions import HTTPException
+from fastrapi import HTTPException
 
 
 def test_http_exception(client, app):

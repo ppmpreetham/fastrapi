@@ -1,35 +1,94 @@
-// HTTPException(status_code, detail=None, headers=None)
-
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
+use pyo3::exceptions::{PyException, PyRuntimeError, PyUserWarning};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde_json::json;
 
-#[pyclass(name = "HTTPException")]
+// --- Base Errors ---
+
+#[pyclass(extends=PyRuntimeError, name = "FastrAPIError")]
+pub struct PyFastrAPIError;
+
+#[pymethods]
+impl PyFastrAPIError {
+    #[new]
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[pyclass(extends=PyException, subclass, name = "ValidationException")]
+pub struct PyValidationException {
+    #[pyo3(get)]
+    pub _errors: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyValidationException {
+    #[new]
+    fn new(_errors: Py<PyAny>) -> Self {
+        Self { _errors }
+    }
+
+    fn errors(&self) -> Py<PyAny> {
+        self._errors.clone()
+    }
+
+    fn __str__(&self, py: Python<'_>) -> String {
+        let errors = self._errors.bind(py);
+        let len = errors.len().unwrap_or(0);
+        format!(
+            "{} validation error{} occurred",
+            len,
+            if len == 1 { "" } else { "s" }
+        )
+    }
+}
+
+// --- Request/Response Validation Errors ---
+
+#[pyclass(extends=PyValidationException, name = "RequestValidationError")]
+pub struct PyRequestValidationError {
+    #[pyo3(get)]
+    pub body: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyRequestValidationError {
+    #[new]
+    #[pyo3(signature = (errors, *, body=None))]
+    fn new(errors: Py<PyAny>, body: Option<Py<PyAny>>) -> (Self, PyValidationException) {
+        let body = body.unwrap_or_else(|| Python::attach(|py| py.None()));
+        (Self { body }, PyValidationException::new(errors))
+    }
+}
+
+#[pyclass(extends=PyValidationException, name = "ResponseValidationError")]
+pub struct PyResponseValidationError {
+    #[pyo3(get)]
+    pub body: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyResponseValidationError {
+    #[new]
+    #[pyo3(signature = (errors, *, body=None))]
+    fn new(errors: Py<PyAny>, body: Option<Py<PyAny>>) -> (Self, PyValidationException) {
+        let body = body.unwrap_or_else(|| Python::attach(|py| py.None()));
+        (Self { body }, PyValidationException::new(errors))
+    }
+}
+
+// --- HTTP Exceptions ---
+
+#[pyclass(extends=PyException, name = "HTTPException")]
 #[derive(Clone)]
-/// An HTTP exception you can raise in your own code to show errors to the client.
-/// This is for client errors, invalid authentication, invalid data, etc. Not for server
-/// errors in your code.
-///
-/// Read more about it in the
-/// [FastAPI docs for Handling Errors](https://fastapi.tiangolo.com/tutorial/handling-errors/).
-/// ## Example
-/// ```python
-/// from fastapi import FastAPI, HTTPException
-/// app = FastAPI()
-/// items = {"foo": "The Foo Wrestlers"}
-/// @app.get("/items/{item_id}")
-/// async def read_item(item_id: str):
-///     if item_id not in items:
-///         raise HTTPException(status_code=404, detail="Item not found")
-///     return {"item": items[item_id]}
-/// ```
 pub struct PyHTTPException {
     #[pyo3(get)]
     pub status_code: u16,
     #[pyo3(get)]
-    pub detail: Option<String>,
+    pub detail: Py<PyAny>,
     #[pyo3(get)]
     pub headers: Option<Py<PyDict>>,
 }
@@ -38,7 +97,13 @@ pub struct PyHTTPException {
 impl PyHTTPException {
     #[new]
     #[pyo3(signature = (status_code, detail=None, headers=None))]
-    fn new(status_code: u16, detail: Option<String>, headers: Option<Py<PyDict>>) -> Self {
+    fn new(
+        py: Python<'_>,
+        status_code: u16,
+        detail: Option<Py<PyAny>>,
+        headers: Option<Py<PyDict>>,
+    ) -> Self {
+        let detail = detail.unwrap_or_else(|| py.None());
         Self {
             status_code,
             detail,
@@ -46,38 +111,40 @@ impl PyHTTPException {
         }
     }
 
-    fn __str__(&self) -> String {
-        format!(
-            "{}: {}",
-            self.status_code,
-            self.detail.as_deref().unwrap_or("No details provided")
-        )
+    fn __str__(&self, py: Python<'_>) -> String {
+        let d = self.detail.bind(py);
+        let s = d
+            .str()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        format!("{}: {}", self.status_code, s)
     }
 
-    fn __repr__(&self) -> String {
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let d = self.detail.bind(py);
+        let r = d
+            .repr()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         format!(
-            "HTTPException(status_code={}, detail={:?})",
-            self.status_code, self.detail
+            "HTTPException(status_code={}, detail={})",
+            self.status_code, r
         )
     }
 }
 
 impl PyHTTPException {
-    pub fn to_response(&self) -> Response {
+    pub fn to_response(&self, py: Python<'_>) -> Response {
         let status =
             StatusCode::from_u16(self.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let detail = self
-            .detail
-            .clone()
-            .unwrap_or_else(|| "An error occurred".to_string());
-
-        (status, Json(json!({ "detail": detail }))).into_response()
+        let detail_json = crate::utils::py_any_to_json(py, self.detail.bind(py));
+        (status, Json(json!({ "detail": detail_json }))).into_response()
     }
 }
 
-// WebSocketException(code, reason=None)
+// --- WebSocket Exceptions ---
 
-#[pyclass(name = "WebSocketException")]
+#[pyclass(extends=PyException, name = "WebSocketException")]
 #[derive(Clone)]
 pub struct PyWebSocketException {
     #[pyo3(get)]
@@ -95,11 +162,7 @@ impl PyWebSocketException {
     }
 
     fn __str__(&self) -> String {
-        format!(
-            "{}: {}",
-            self.code,
-            self.reason.as_deref().unwrap_or("No reason provided")
-        )
+        format!("{}: {}", self.code, self.reason.as_deref().unwrap_or(""))
     }
 
     fn __repr__(&self) -> String {
@@ -110,8 +173,24 @@ impl PyWebSocketException {
     }
 }
 
+#[pyclass(extends=PyUserWarning, name = "FastrAPIDeprecationWarning")]
+pub struct PyFastrAPIDeprecationWarning;
+
+#[pymethods]
+impl PyFastrAPIDeprecationWarning {
+    #[new]
+    fn new() -> Self {
+        Self
+    }
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyFastrAPIError>()?;
+    m.add_class::<PyValidationException>()?;
+    m.add_class::<PyRequestValidationError>()?;
+    m.add_class::<PyResponseValidationError>()?;
     m.add_class::<PyHTTPException>()?;
     m.add_class::<PyWebSocketException>()?;
+    m.add_class::<PyFastrAPIDeprecationWarning>()?;
     Ok(())
 }

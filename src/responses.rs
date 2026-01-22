@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::{pyclass, pymethods, Py, PyAny};
 
-// Simple Python wrapper classes - just hold data
+// wrapper classes
 #[pyclass(name = "HTMLResponse")]
 #[derive(Clone)]
 pub struct PyHTMLResponse {

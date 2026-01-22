@@ -1,6 +1,6 @@
 use axum::{extract::Extension, response::IntoResponse};
 use bytes::Bytes;
-use fastwebsockets::{upgrade, FragmentCollector, Frame, OpCode, WebSocket};
+use fastwebsockets::{upgrade, FragmentCollector, Frame, OpCode};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use once_cell::sync::Lazy;
@@ -74,11 +74,9 @@ async fn handle_connection(
             .ok_or("Route not found")?
     };
 
-    // BOUNDED channels for backpressure
     let (tx_to_rust, mut rx_from_python) = mpsc::channel::<WSMessage>(1024);
     let (tx_to_python, rx_from_rust) = mpsc::channel::<WSMessage>(1024);
 
-    // Create WebSocket object
     let py_ws_obj: Py<PyWebSocket> = Python::attach(|py| {
         Py::new(
             py,
@@ -90,14 +88,12 @@ async fn handle_connection(
         )
     })?;
 
-    // Execute the Python coroutine properly using into_future
     let python_handler_future = Python::attach(|py| {
         let coroutine = handler.call1(py, (py_ws_obj.clone(),))?;
         let bound = coroutine.bind(py);
         pyo3_async_runtimes::tokio::into_future(bound.clone())
     })?;
 
-    // Run Python handler concurrently with socket loop
     tokio::select! {
         result = python_handler_future => {
             if let Err(e) = result {
@@ -112,7 +108,6 @@ async fn handle_connection(
         }
     }
 
-    // Mark as disconnected
     Python::attach(|py| {
         if let Ok(py_ws) = py_ws_obj.try_borrow(py) {
             py_ws
@@ -124,7 +119,6 @@ async fn handle_connection(
     Ok(())
 }
 
-// Separate socket pump function for cleaner code
 async fn socket_pump(
     ws: &mut FragmentCollector<TokioIo<Upgraded>>,
     tx_to_python: mpsc::Sender<WSMessage>,
@@ -140,7 +134,6 @@ async fn socket_pump(
                         break;
                     }
                     OpCode::Text | OpCode::Binary => {
-                        // Convert payload to Bytes using to_vec() then into()
                         let bytes = Bytes::from(frame.payload.to_vec());
                         let msg = if frame.opcode == OpCode::Text {
                             WSMessage::Text(bytes)
