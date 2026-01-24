@@ -1,13 +1,7 @@
 import { useRef, useState, useEffect } from "react"
 import * as THREE from "three"
 import { useFrame } from "@react-three/fiber"
-import {
-  PerspectiveCamera,
-  OrbitControls,
-  ScrollControls,
-  useScroll,
-  SpotLight,
-} from "@react-three/drei"
+import { PerspectiveCamera, ScrollControls, useScroll, SpotLight } from "@react-three/drei"
 import { Physics, RigidBody, CuboidCollider } from "@react-three/rapier"
 import gsap from "gsap"
 import { useGSAP } from "@gsap/react"
@@ -90,7 +84,6 @@ const Experience = () => {
     const handler = () => {
       if (rainTriggered) return
       setRainTriggered(true)
-      setTimeout(() => (window.location.href = "/docs"), 3500)
     }
     window.addEventListener("triggerRainDocs", handler)
     return () => window.removeEventListener("triggerRainDocs", handler)

@@ -40,7 +40,7 @@ export const RotHeaderText = forwardRef<
           fontSize={size}
           font="/fonts/random.ttf"
           position={[offset[0], offset[1], front + offset[2]]}
-          outlineWidth={0.025} // Adds border efficiently
+          outlineWidth={0.025}
           outlineColor="black"
         >
           {text}
@@ -70,7 +70,7 @@ export const RotSubText = forwardRef<
           font="/fonts/random.ttf"
           position={[offset[0], offset[1], back + offset[2]]}
           rotation={[0, PI, 0]}
-          outlineWidth={0.025} // Adds border efficiently
+          outlineWidth={0.025}
           outlineColor="black"
         >
           {text}
@@ -82,7 +82,7 @@ export const RotSubText = forwardRef<
           fontSize={size}
           font="/fonts/random.ttf"
           position={[offset[0], offset[1], front + offset[2]]}
-          outlineWidth={0.025} // Adds border efficiently
+          outlineWidth={0.025}
           outlineColor="black"
         >
           {text}

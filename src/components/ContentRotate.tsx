@@ -82,14 +82,14 @@ export const Rotate4 = ({ place }: { place: boolean }) => {
         place={place}
         text="5 mins to get started!"
         size={isMobile ? 0.4 : 0.5}
-        offset={[0, 1.4, 0]}
+        offset={[0, 1.4 - (isMobile ? 0.5 : 0), 0]}
         color="white"
       />
       <mesh
-        position={[0, isMobile ? 0.5 : 0, 0.01]}
+        position={[0, 0, 0.01]}
         onClick={() => window.dispatchEvent(new Event("triggerRainDocs"))}
       >
-        <planeGeometry args={isMobile ? [4, 1] : [8, 2]} />
+        <planeGeometry args={isMobile ? [4, 1.25] : [8, 2.25]} />
         <meshBasicMaterial color="#c6ff00" />
       </mesh>
       <RotHeaderText
@@ -97,7 +97,7 @@ export const Rotate4 = ({ place }: { place: boolean }) => {
         text="Check Docs"
         size={isMobile ? 0.75 : 1.5}
         color="black"
-        offset={[0, isMobile ? 0.5 : 0, 0.02]}
+        offset={[0, 0, 0.02]}
       />
     </group>
   )

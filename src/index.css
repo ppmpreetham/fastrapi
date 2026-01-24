@@ -2,6 +2,7 @@
 
 @theme inline {
   --color-primary: #c9ff61;
+  --color-primary-glow: #f3ff1f;
   --color-secondary: #022cfd;
   --font-random: "Random", sans-serif;
 }
