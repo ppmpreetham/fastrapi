@@ -30,18 +30,38 @@ const DocsSection = () => {
   }, [])
 
   const docsButtonRef = useRef<HTMLDivElement>(null)
+  const docsRef = useRef<HTMLAnchorElement>(null)
+
   const [rainTriggered, setRainTriggered] = useState(false)
+  const [transitionComplete, setTransitionComplete] = useState(false)
 
   useGSAP(() => {
     gsap.set(docsButtonRef.current, { opacity: 0 })
     const handler = () => {
       if (rainTriggered) return
       setRainTriggered(true)
-      gsap.to(docsButtonRef.current, {
+
+      const tl = gsap.timeline()
+      tl.to(docsButtonRef.current, {
         opacity: 1,
-        duration: 3.5,
+        duration: 1,
         ease: "power2.out",
       })
+        .to(
+          docsButtonRef.current,
+          {
+            width: "100vw",
+            height: "100vh",
+            duration: 1.5,
+            ease: "power2.inOut",
+            onComplete: () => {
+              setTransitionComplete(true)
+              window.dispatchEvent(new Event("hideThreeJS"))
+            },
+          },
+          "+=2.5",
+        ) // 1 + 2.5 more seconds =  3.5s
+        .to(docsRef.current, {})
     }
     window.addEventListener("triggerRainDocs", handler)
     return () => window.removeEventListener("triggerRainDocs", handler)
@@ -49,10 +69,14 @@ const DocsSection = () => {
 
   return (
     <div className="fixed z-10 w-screen h-screen flex justify-center items-center font-random pointer-events-none will-change-transform">
-      {" "}
-      {/*navbar items */}
-      <div ref={docsButtonRef} className="fixed bg-primary-glow text-black" style={{ fontSize }}>
-        Check Docs
+      <div
+        ref={docsButtonRef}
+        className="bg-primary-glow text-black flex justify-center items-center"
+        style={{ fontSize }}
+      >
+        <a ref={docsRef}>
+          <span>Check</span> <span>Docs</span>
+        </a>
       </div>
       {/* <div className="flex justify-between items-start">
         <div className="navbar-links">
