@@ -1,160 +1,173 @@
-name: Maturin Build + PGO + Publish (multi-platform abi3)
+name: CI
 
 on:
   push:
+    branches:
+      - main
+      - master
     tags:
-      - 'v*'  # publish to PyPI when version tags are pushed
-  workflow_dispatch:  # manual trigger → publish to TestPyPI
+      - '*'
+  pull_request:
+  workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
-  build:
-    name: Build on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+  linux:
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-      fail-fast: false
-
-    env:
-      CARGO_TERM_COLOR: always
-      RUST_BACKTRACE: full
-
+        platform:
+          - runner: ubuntu-22.04
+            target: x86_64
+          - runner: ubuntu-22.04
+            target: x86
+          - runner: ubuntu-22.04
+            target: aarch64
+          - runner: ubuntu-22.04
+            target: armv7
+          - runner: ubuntu-22.04
+            target: s390x
+          - runner: ubuntu-22.04
+            target: ppc64le
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.9 (for abi3)
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          # Installs the component that provides llvm-profdata
-          components: llvm-tools-preview
-
-      - name: Prepare profiling directory
-        shell: bash
-        run: mkdir -p ${{ github.workspace }}/profdata
-
-      - name: Build instrumented wheel (profile-generate)
+          python-version: 3.x
+      - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
-          args: >
-            --release
-            --out pgo-wheel
-            --interpreter python3.9
-            --compatibility manylinux_2_28
-          rust-toolchain: stable
-        env:
-          RUSTFLAGS: '-Cprofile-generate=${{ github.workspace }}/profdata'
-
-      # This is the new, corrected profiling step
-      - name: Install deps and run profiling
-        shell: bash
-        run: |
-          python -m pip install -U pip wheel build
-          pip install ./pgo-wheel/*.whl --force-reinstall
-          # Install pydantic, which is a dependency for your examples
-          pip install pydantic
-
-          echo "Running PGO workload by importing 'safe' examples..."
-          # This runs all the top-level code (app creation, route registration)
-          # without triggering the `app.serve()` call in the `if __name__ == "__main__"` block.
-          # This is the perfect way to generate profile data for this code.
-          python -c "import examples.basic"
-          python -c "import examples.different_request_types"
-          python -c "import examples.fastrapi_types"
-          python -c "import examples.pydantic_example"
-
-      # Detect llvm-profdata properly on all platforms
-      - name: Detect LLVM profdata tool
-        id: detect-profdata
-        run: |
-          rust_host=$(rustc -Vv | grep host | awk '{print $2}')
-          toolchain=$(rustup show active-toolchain | cut -d ' ' -f 1)
-          sysroot=$(rustc --print sysroot)
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            echo "LLVM_PROFDATA=$(cygpath -w "$sysroot\\lib\\rustlib\\$rust_host\\bin\\llvm-profdata.exe")" >> "$GITHUB_ENV"
-          else
-            echo "LLVM_PROFDATA=$sysroot/lib/rustlib/$rust_host/bin/llvm-profdata" >> "$GITHUB_ENV"
-          fi
-        shell: bash
-
-      # Merge profiling data with OS-specific shells
-      - name: Merge PGO data (Linux/Mac)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: ${{ env.LLVM_PROFDATA }} merge -o merged.profdata profdata
-
-      - name: Merge PGO data (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          & "${{ env.LLVM_PROFDATA }}" merge -o merged.profdata profdata
-
-      - name: Build PGO-optimized abi3 wheel
-        uses: PyO3/maturin-action@v1
-        with:
-          manylinux: auto
-          args: >
-            --release
-            --out dist
-            --interpreter python3.9
-            --compatibility manylinux_2_28
-          rust-toolchain: stable
-        env:
-          RUSTFLAGS: '-Cprofile-use=${{ github.workspace }}/merged.profdata'
-
-      - name: Upload wheel artifact
+      - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: abi3-pgo-${{ matrix.os }}
-          path: dist/*.whl
+          name: wheels-linux-${{ matrix.platform.target }}
+          path: dist
 
-  publish:
-    name: Publish to PyPI or TestPyPI
-    runs-on: ubuntu-latest
-    needs: build
-    environment: publish
-    permissions:
-      id-token: write       # OIDC for PyPI
-      contents: read        # To checkout
-      attestations: write   # To publish attestations
-
+  musllinux:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: ubuntu-22.04
+            target: x86_64
+          - runner: ubuntu-22.04
+            target: x86
+          - runner: ubuntu-22.04
+            target: aarch64
+          - runner: ubuntu-22.04
+            target: armv7
     steps:
-      - name: Download all built artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          path: wheels
-          # Use a pattern to download all wheel artifacts
-          pattern: abi3-pgo-*
-          merge-multiple: true # Merge all OS wheels into one 'wheels' directory
-
-      - name: Show collected wheels
-        run: ls -R wheels
-
-      - name: Publish to PyPI (tagged release)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: pypa/gh-action-pypi-publish@release/v1
+          python-version: 3.x
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
         with:
-          packages-dir: wheels
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          manylinux: musllinux_1_2
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-musllinux-${{ matrix.platform.target }}
+          path: dist
+
+  windows:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: windows-latest
+            target: x64
+          - runner: windows-latest
+            target: x86
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.x
+          architecture: ${{ matrix.platform.target }}
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.platform.target }}
+          path: dist
+
+  macos:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: macos-13
+            target: x86_64
+          - runner: macos-14
+            target: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.x
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.platform.target }}
+          path: dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+    needs: [linux, musllinux, windows, macos, sdist]
+    permissions:
+      id-token: write
+      contents: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'wheels-*/*'
+      - name: Publish to PyPI
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        uses: PyO3/maturin-action@v1
         env:
-          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-
-      - name: Publish to TestPyPI (manual dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        uses: pypa/gh-action-pypi-publish@release/v1
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         with:
-          repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
-          packages-dir: wheels
-        env:
-          PYPI_API_TOKEN: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          command: upload
+          args: --non-interactive --skip-existing wheels-*/*
