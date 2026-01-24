@@ -5,12 +5,13 @@ import { Canvas } from "@react-three/fiber"
 import { Suspense } from "react"
 import { PerformanceMonitor } from "@react-three/drei"
 import Cursor from "./components/Cursor"
+import { isMobile } from "./utils/helper"
 
 export default function App() {
   return (
     <div className="w-screen min-h-screen h-screen cursor-none">
       {/* <GrainEffect /> */}
-      <Cursor />
+      {!isMobile && <Cursor />}
       <Canvas
         className="h-full w-full touch-auto"
         gl={{

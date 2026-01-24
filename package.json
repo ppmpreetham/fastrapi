@@ -19,6 +19,7 @@
     "@react-three/rapier": "^2.2.0",
     "@tailwindcss/vite": "^4.1.18",
     "@types/three": "^0.182.0",
+    "clsx": "^2.1.1",
     "gh-pages": "^6.3.0",
     "gsap": "^3.14.2",
     "postprocessing": "^6.38.0",

@@ -18,6 +18,7 @@ import RainDown from "./RainDown"
 import { Rotate0, Rotate1, Rotate2, Rotate3, Rotate4 } from "./ContentRotate"
 import Buildings from "../models/Buildings"
 import { CloudsMulti } from "../models/Cloud"
+import { isMobile } from "../utils/helper"
 
 const rotateComponents = [Rotate0, Rotate1, Rotate2, Rotate3, Rotate4]
 const length = rotateComponents.length
@@ -97,7 +98,7 @@ const Experience = () => {
 
   return (
     <>
-      <OrbitControls enableZoom={false} enablePan={false} />
+      {/* <OrbitControls enableZoom={false} enablePan={false} /> */}
       <SpotLight position={[0, 5, 0]} angle={0.5} intensity={50} />
 
       <Physics gravity={[0, -20, 0]}>
@@ -114,7 +115,7 @@ const Experience = () => {
               <CuboidCollider args={[50, 50, 1]} position={[0, 0, -1]} />
             </RigidBody>
 
-            <CloudsMulti count={40} planeScale={100} offset={[5, 5, 0]} />
+            {!isMobile && <CloudsMulti count={40} planeScale={100} offset={[5, 5, 0]} />}
             <CrystalField count={50} planeScale={40} offset={-2} />
             <ProximityCrystals count={120} radius={35} />
             {rainTriggered && <RainDown planeScale={40} />}
@@ -127,7 +128,7 @@ const Experience = () => {
             />
             <FastrapiModel />
             {rotateComponents.map((C, i) =>
-              count === i ? <C key={i} place={i % 2 === 1} /> : null
+              count === i ? <C key={i} place={i % 2 === 1} /> : null,
             )}
           </group>
         </ScrollControls>

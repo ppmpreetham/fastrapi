@@ -3,9 +3,7 @@ import { Html } from "@react-three/drei"
 import FrameworkChart from "./Chart"
 import { useThree } from "@react-three/fiber"
 import Features from "./Features"
-
-var isMobile =
-  typeof window !== "undefined" && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+import { isMobile } from "../utils/helper"
 
 export const Rotate0 = ({ place }: { place: boolean }) => {
   return (
@@ -23,17 +21,17 @@ export const Rotate1 = ({ place }: { place: boolean }) => {
   return (
     <group>
       <Html
-        position={[3, 3.5, -1]}
+        position={[isMobile ? 1.6 : 3, isMobile ? 2.5 : 3.5, -1]}
         center
-        scale={isMobile ? 0.7 : 0.3}
+        scale={isMobile ? 0.5 : 0.3}
         transform
         rotation={[0, Math.PI, 0]}
         occlude={false}
         zIndexRange={[0, 0]}
         portal={{ current: gl.domElement.parentNode as HTMLElement }}
-        className="fixed pointer-events-none"
+        className="fixed pointer-events-none mix-blend-difference"
       >
-        <FrameworkChart />
+        <FrameworkChart isMobile={isMobile} />
       </Html>
       <RotHeaderText
         place={place}
@@ -66,36 +64,41 @@ export const Rotate3 = ({ place }: { place: boolean }) => {
   return (
     <group>
       <RotSubText place={place} text="Just change" size={0.5} offset={[0, 1, 0]} />
-      <RotHeaderText place={place} text="ONE CHARACTER" />
+      <RotHeaderText
+        place={place}
+        text="ONE CHARACTER"
+        size={isMobile ? 0.5 : 2}
+        offset={isMobile ? [0, 0.35, 0] : [0, 0, 0]}
+      />
       {/* feat: show change from FastAPI to FastRAPI */}
     </group>
   )
 }
 
 export const Rotate4 = ({ place }: { place: boolean }) => {
-  // Boxes rain down from the sky when clicked on the Check Docs
-
-  // function PhysicsBoxes() {
-  //   return <div>ContentRotate</div>;
-  // }
-
   return (
     <group>
       <RotSubText
         place={place}
         text="5 mins to get started!"
-        size={0.5}
+        size={isMobile ? 0.4 : 0.5}
         offset={[0, 1.4, 0]}
         color="white"
       />
       <mesh
-        position={[0, 0, -0.01]}
+        position={[0, isMobile ? 0.5 : 0, 0.01]}
         onClick={() => window.dispatchEvent(new Event("triggerRainDocs"))}
       >
-        <planeGeometry args={[8, 2]} />
+        <planeGeometry args={isMobile ? [4, 1] : [8, 2]} />
         <meshBasicMaterial color="#c6ff00" />
       </mesh>
-      <RotHeaderText place={place} text="Check Docs" size={1.5} color="black" />
+      <RotHeaderText
+        place={place}
+        text="Check Docs"
+        size={isMobile ? 0.75 : 1.5}
+        color="black"
+        offset={[0, isMobile ? 0.5 : 0, 0.02]}
+      />
     </group>
   )
 }
