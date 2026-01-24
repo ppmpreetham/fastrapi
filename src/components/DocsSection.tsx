@@ -31,6 +31,7 @@ const DocsSection = () => {
 
   const docsButtonRef = useRef<HTMLDivElement>(null)
   const docsRef = useRef<HTMLAnchorElement>(null)
+  const checkRef = useRef<HTMLSpanElement>(null)
 
   const [rainTriggered, setRainTriggered] = useState(false)
   const [transitionComplete, setTransitionComplete] = useState(false)
@@ -61,7 +62,41 @@ const DocsSection = () => {
           },
           "+=2.5",
         ) // 1 + 2.5 more seconds =  3.5s
-        .to(docsRef.current, {})
+        .to(checkRef.current, {
+          opacity: 0,
+          onComplete: () => {
+            if (checkRef.current) {
+              checkRef.current.innerText = "FastRAPI"
+            }
+          },
+        })
+        .to(checkRef.current, {
+          opacity: 1,
+          duration: 2,
+        })
+        .to(
+          docsRef.current,
+          {
+            opacity: 1,
+            duration: 2,
+            color: "#c9ff61",
+          },
+          "<",
+        )
+        .to(
+          docsButtonRef.current,
+          {
+            backgroundColor: "#000000",
+            duration: 2,
+          },
+          "<",
+        )
+        .to(docsRef.current, {
+          // top left of the entire page
+          y: -window.innerHeight / 2 + 40,
+          scale: 0.25,
+          duration: 1.5,
+        })
     }
     window.addEventListener("triggerRainDocs", handler)
     return () => window.removeEventListener("triggerRainDocs", handler)
@@ -75,7 +110,7 @@ const DocsSection = () => {
         style={{ fontSize }}
       >
         <a ref={docsRef}>
-          <span>Check</span> <span>Docs</span>
+          <span ref={checkRef}>Check</span> <span>Docs</span>
         </a>
       </div>
       {/* <div className="flex justify-between items-start">
