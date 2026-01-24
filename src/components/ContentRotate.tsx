@@ -1,8 +1,8 @@
 import { RotHeaderText, RotSubText } from "./Texts"
 import { Html } from "@react-three/drei"
-import FrameworkChart from "./Chart"
+import FrameworkChart from "./HeroRotations/Chart"
 import { useThree } from "@react-three/fiber"
-import Features from "./Features"
+import Features from "./HeroRotations/Features"
 import { isMobile } from "../utils/helper"
 
 export const Rotate0 = ({ place }: { place: boolean }) => {

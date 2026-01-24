@@ -122,7 +122,7 @@ const Experience = () => {
             <Buildings
               min={[1, 1, 1]}
               max={[10, 10, 10]}
-              avoidRadius={12}
+              avoidRadius={13}
               count={100}
               planeScale={75}
             />

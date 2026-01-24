@@ -20,18 +20,6 @@ export default function App() {
         }}
         performance={{ min: 0.5 }}
         dpr={1}
-        // frameloop="demand"
-
-        // WEBGPU DOESNT WORK WELL WITH TEXT AND POSTPROCESSING YET
-        // gl={(props) => {
-        //   const renderer = new WebGPURenderer({
-        //     canvas: props.canvas as HTMLCanvasElement,
-        //     powerPreference: "high-performance",
-        //     antialias: true,
-        //     alpha: false,
-        //   });
-        //   return renderer.init().then(() => renderer);
-        // }}
       >
         <PerformanceMonitor></PerformanceMonitor>
         <color attach="background" args={["#022cfd"]} />
