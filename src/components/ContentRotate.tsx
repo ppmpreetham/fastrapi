@@ -61,6 +61,7 @@ export const Rotate2 = ({ place }: { place: boolean }) => {
   return <Features place={place} />
 }
 export const Rotate3 = ({ place }: { place: boolean }) => {
+  const { gl } = useThree()
   return (
     <group>
       <RotSubText place={place} text="Just change" size={0.5} offset={[0, 1, 0]} />
@@ -70,7 +71,21 @@ export const Rotate3 = ({ place }: { place: boolean }) => {
         size={isMobile ? 0.5 : 2}
         offset={isMobile ? [0, 0.35, 0] : [0, 0, 0]}
       />
-      {/* feat: show change from FastAPI to FastRAPI */}
+      <Html
+        position={[isMobile ? 0.5 : 4, isMobile ? 2.5 : 4.8, -1]}
+        center
+        scale={isMobile ? 0.5 : 0.3}
+        transform
+        rotation={[0, Math.PI, 0]}
+        occlude={false}
+        zIndexRange={[0, 0]}
+        portal={{ current: gl.domElement.parentNode as HTMLElement }}
+        className="fixed pointer-events-none mix-blend-difference"
+      >
+        <div className="w-screen h-screen flex items-center justify-center">
+          <img src="/images/diff.png" alt="Change from FastAPI to FastRAPI" />
+        </div>
+      </Html>
     </group>
   )
 }
