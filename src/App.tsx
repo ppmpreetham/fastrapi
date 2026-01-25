@@ -1,5 +1,5 @@
 import { Bloom, EffectComposer, Noise } from "@react-three/postprocessing"
-
+import clsx from "clsx"
 import Experience from "./components/Experience"
 import { Canvas } from "@react-three/fiber"
 import { Suspense, useState, useEffect } from "react"
@@ -20,8 +20,8 @@ export default function App() {
   }, [])
 
   return (
-    <div className="w-screen min-h-screen h-screen cursor-none">
-      {!isMobile && <Cursor />}
+    <div className={clsx("w-screen min-h-screen h-screen ", showThreeJS && "cursor-none")}>
+      {!isMobile && showThreeJS && <Cursor />}
       <DocsSection />
       {showThreeJS && (
         <Canvas

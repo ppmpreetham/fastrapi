@@ -22,3 +22,7 @@ html,
   font-family: "Random";
   src: url("/fonts/random.ttf") format("truetype");
 }
+
+[data-flip-id] {
+  will-change: transform;
+}
