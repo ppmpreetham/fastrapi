@@ -6,7 +6,7 @@ import { Suspense, useState, useEffect } from "react"
 import { PerformanceMonitor } from "@react-three/drei"
 import Cursor from "./components/Cursor"
 import { isMobile } from "./utils/helper"
-import DocsSection from "./components/DocsSection"
+import DocsTransition from "./components/DocsTransition"
 
 export default function App() {
   const [showThreeJS, setShowThreeJS] = useState(true)
@@ -22,7 +22,7 @@ export default function App() {
   return (
     <div className={clsx("w-screen min-h-screen h-screen ", showThreeJS && "cursor-none")}>
       {!isMobile && showThreeJS && <Cursor />}
-      <DocsSection />
+      <DocsTransition />
       {showThreeJS && (
         <Canvas
           className="h-full w-full touch-auto"
