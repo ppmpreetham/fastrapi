@@ -10,7 +10,7 @@ const DocsSection = () => {
   const [fontSize, setFontSize] = useState("9rem")
   const docsButtonRef = useRef<HTMLDivElement>(null)
   const docsRef = useRef<HTMLAnchorElement>(null)
-  const checkTextRef = useRef<HTMLSpanElement>(null)
+  const checkRef = useRef<HTMLSpanElement>(null)
 
   const [rainTriggered, setRainTriggered] = useState(false)
   const [transitionComplete, setTransitionComplete] = useState(false)
@@ -46,7 +46,7 @@ const DocsSection = () => {
         height: "100vh",
         backgroundColor: "#000000",
       })
-      gsap.set(checkTextRef.current, {
+      gsap.set(checkRef.current, {
         opacity: 1,
         color: "#c9ff61",
       })
@@ -55,10 +55,20 @@ const DocsSection = () => {
         color: "#c9ff61",
       })
 
-      if (checkTextRef.current) {
-        checkTextRef.current.innerText = "FastRAPI"
+      if (checkRef.current) {
+        checkRef.current.innerText = "FastRAPI"
       }
 
+      tl.to(docsRef.current, {
+        x: `calc(-50vw + 4rem)`,
+        y: `calc(-50vh + 2.5rem)`,
+        scale: 0.25,
+        duration: 1,
+        onComplete: () => {
+          setTransitionComplete(true)
+        },
+      })
+    } else {
       tl.to(docsButtonRef.current, {
         width: "100vw",
         height: "100vh",
@@ -68,16 +78,16 @@ const DocsSection = () => {
           window.dispatchEvent(new Event("hideThreeJS"))
         },
       })
-        .to(checkTextRef.current, {
+        .to(checkRef.current, {
           opacity: 0,
           duration: 0.5,
           onComplete: () => {
-            if (checkTextRef.current) {
-              checkTextRef.current.innerText = "FastRAPI"
+            if (checkRef.current) {
+              checkRef.current.innerText = "FastRAPI"
             }
           },
         })
-        .to(checkTextRef.current, {
+        .to(checkRef.current, {
           opacity: 1,
           color: "#c9ff61",
           duration: 1,
@@ -100,12 +110,14 @@ const DocsSection = () => {
           "<",
         )
         .to(docsRef.current, {
-          opacity: 0,
+          x: `calc(-50vw + 4rem)`,
+          y: `calc(-50vh + 2.5rem)`,
+          scale: 0.25,
           duration: 1,
-        })
-        .add(() => {
-          setTransitionComplete(true)
-          window.history.pushState({}, "", "/docs")
+          onComplete: () => {
+            setTransitionComplete(true)
+            window.history.pushState({}, "", "/docs")
+          },
         })
     }
 
@@ -150,47 +162,17 @@ const DocsSection = () => {
   }, [rainTriggered, directDocsAccess])
 
   return (
-    <>
-      <div className="fixed z-10 w-screen h-screen flex justify-center items-center font-random pointer-events-none will-change-transform">
-        <div
-          ref={docsButtonRef}
-          className="bg-primary-glow text-black flex justify-center items-center"
-          style={{ fontSize }}
-        >
-          <a ref={docsRef}>
-            <span ref={checkTextRef}>Check</span> <span>Docs</span>
-          </a>
-        </div>
-      </div>
-      <nav
-        className="fixed z-20 w-screen flex flex-row font-light text-xl justify-between p-4 pointer-events-auto text-primary"
-        style={{
-          opacity: directDocsAccess ? 1 : 0,
-          fontSize: "1.25rem",
-        }}
+    <div className="fixed z-10 w-screen h-screen flex justify-center items-center font-random pointer-events-none will-change-transform">
+      <div
+        ref={docsButtonRef}
+        className="bg-primary-glow text-black flex justify-center items-center"
+        style={{ fontSize }}
       >
-        <div className="flex flex-row gap-2">
-          <a href="/" className="flex items-center gap-2">
-            <img src="/fastrapi.png" alt="FastRAPI" />
-            {<span className="toFitState">FastRAPI</span>}
-          </a>
-        </div>
-        <div className="flex flex-row gap-2 p-4">
-          <a href="/docs" className="hover:underline">
-            {<span>Docs</span>}
-          </a>
-          <a href="/blog" className="hover:underline">
-            Blog
-          </a>
-          <a href="/sponsor" className="hover:underline">
-            Sponsor
-          </a>
-          <a href="/thing1" className="hover:underline">
-            THING1
-          </a>
-        </div>
-      </nav>
-    </>
+        <a ref={docsRef}>
+          <span ref={checkRef}>Check</span> <span>Docs</span>
+        </a>
+      </div>
+    </div>
   )
 }
 
