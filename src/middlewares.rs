@@ -353,11 +353,11 @@ pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     // Instead we just inject it into sys.modules below.
     let sys_modules = py.import("sys")?.getattr("modules")?;
 
-    // 1. fastrapi.middleware
+    // fastrapi.middleware
     parent.add_submodule(&middleware_module)?;
     sys_modules.set_item("fastrapi.middleware", &middleware_module)?;
 
-    // 2. fastrapi.middleware.cors (for backward compatibility)
+    // fastrapi.middleware.cors (for backward compatibility)
     middleware_module.add_submodule(&cors_module)?;
     sys_modules.set_item("fastrapi.middleware.cors", &cors_module)?;
 

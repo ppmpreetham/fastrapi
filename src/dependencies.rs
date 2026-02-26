@@ -1,6 +1,6 @@
 use crate::security::PySecurityScopes;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyTuple};
+use pyo3::types::{PyAny, PyDict};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]

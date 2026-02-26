@@ -16,6 +16,7 @@ pub static WEBSOCKET_ROUTES: Lazy<HashMap<String, Py<PyAny>>> =
 
 /// @app.websocket("/ws") decorator
 #[pyfunction]
+#[pyo3(signature = (path))]
 pub fn websocket(path: String) -> PyResult<Py<PyAny>> {
     let route_key = format!("WS {path}");
 

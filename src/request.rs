@@ -1,6 +1,6 @@
 use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
-use pyo3::{prelude::*, IntoPyObjectExt};
 use std::sync::{Arc, Mutex};
 
 #[pyclass(name = "Request", module = "fastrapi.request")]
@@ -128,7 +128,7 @@ impl PyRequest {
             }
 
             {
-                let mut consumed_guard = consumed.lock().unwrap();
+                let consumed_guard = consumed.lock().unwrap();
                 if *consumed_guard {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(
                         "Body stream already consumed",
@@ -176,8 +176,6 @@ impl PyRequest {
                     Ok(())
                 })?;
             }
-
-            unreachable!("Body reading loop should never exit normally");
         })
     }
 
