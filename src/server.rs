@@ -69,12 +69,21 @@ pub fn serve(py: Python, host: Option<String>, port: Option<u16>, app: &FastrAPI
                 info!("📚 Swagger UI at http://{}{}", addr, docs);
             }
 
-            axum::serve(
+            let server = axum::serve(
                 listener,
                 router.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .expect("Server error");
+            );
+
+            server
+                .with_graceful_shutdown(async {
+                    tokio::signal::ctrl_c()
+                        .await
+                        .expect("Failed to install Ctrl+C handler");
+
+                    info!("Shutting down...");
+                })
+                .await
+                .expect("Server error");
         });
     });
 
