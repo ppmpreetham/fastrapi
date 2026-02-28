@@ -1,5 +1,5 @@
 use crate::responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
-use crate::utils::py_any_to_json;
+use crate::utils::{local_guard, py_any_to_json};
 use crate::{ResponseType, RouteHandler, ROUTES};
 use axum::{
     http::{header, StatusCode},
@@ -145,7 +145,28 @@ pub async fn run_py_handler_no_args(
     rt_handle: tokio::runtime::Handle,
     route_key: Arc<str>,
 ) -> Response {
-    run_py_handler_with_params(rt_handle, route_key, HashMap::new(), HashMap::new(), None).await
+    rt_handle
+        .spawn_blocking(move || {
+            Python::attach(|py| {
+                let guard = local_guard(&*ROUTES);
+                let handler = match ROUTES.get(route_key.as_ref(), &guard) {
+                    Some(h) => h,
+                    None => return StatusCode::NOT_FOUND.into_response(),
+                };
+                let response_type = handler.response_type;
+                match handler.func.call0(py) {
+                    Ok(result) => {
+                        convert_response_by_type(py, &result.into_bound(py), response_type)
+                    }
+                    Err(e) => {
+                        e.print(py);
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    }
+                }
+            })
+        })
+        .await
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 #[inline(always)]

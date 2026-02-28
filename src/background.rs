@@ -37,19 +37,24 @@ impl PyBackgroundTasks {
             locked.clone()
         };
 
-        let mut handles = Vec::new();
+        let mut handles = Vec::with_capacity(tasks.len());
 
         for (func, args) in tasks {
-            let handle = tokio::spawn(async move {
+            let handle = tokio::task::spawn_blocking(move || {
                 Python::attach(|py| {
-                    let args_tuple = PyTuple::new(py, &args).expect("Failed to create tuple");
-                    match func.call1(py, &args_tuple) {
-                        Ok(_) => {}
+                    let args_tuple = match PyTuple::new(py, &args) {
+                        Ok(t) => t,
                         Err(e) => {
-                            error!("Background task error: {}", e);
-                            e.print(py);
+                            error!("Background task: failed to build args tuple: {}", e);
+                            return;
                         }
+                    };
+                    if let Err(e) = func.call1(py, &args_tuple) {
+                        error!("Background task error: {}", e);
+                        e.print(py);
                     }
+                    drop(args_tuple);
+                    drop(func);
                 });
             });
             handles.push(handle);
