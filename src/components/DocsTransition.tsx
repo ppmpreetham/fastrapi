@@ -59,7 +59,7 @@ const DocsTransition = () => {
         "<",
       )
       .add(() => {
-        navigate("/docs")
+        window.location.href = "https://docs.fastrapi.in"
       })
   }
 
