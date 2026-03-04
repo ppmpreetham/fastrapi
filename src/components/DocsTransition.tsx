@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import gsap from "gsap"
 import { useGSAP } from "@gsap/react"
-import { useNavigate } from "react-router-dom"
 import { isMobile } from "../utils/helper"
 
 const DocsTransition = () => {
@@ -10,7 +9,6 @@ const DocsTransition = () => {
   const docsRef = useRef<HTMLAnchorElement>(null)
   const checkRef = useRef<HTMLSpanElement>(null)
   const [rainTriggered, setRainTriggered] = useState(false)
-  const navigate = useNavigate()
 
   useEffect(() => {
     const calculateFontSize = () => {
