@@ -9,7 +9,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "deploy": "gh-pages -d dist"
+    "deploy": "cp CNAME dist/CNAME && gh-pages -d dist"
   },
   "dependencies": {
     "@gsap/react": "^2.1.2",

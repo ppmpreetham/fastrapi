@@ -1,4 +1,4 @@
-import React, { forwardRef } from "react"
+import { forwardRef } from "react"
 import { Text, useTexture } from "@react-three/drei"
 import { Mesh } from "three"
 
