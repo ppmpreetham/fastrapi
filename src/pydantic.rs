@@ -1,11 +1,11 @@
 use crate::utils::{json_to_py_object, py_to_response};
-use crate::ResponseType;
-use crate::RouteHandler;
+use crate::{PyHTMLResponse, PyPlainTextResponse, PyRedirectResponse, RouteHandler};
+use crate::{PyJSONResponse, ResponseType};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyModule, PyType};
+use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyType};
+use pyo3::{intern, prelude::*};
 use serde_json::Value;
 pub fn load_pydantic_model(py: Python<'_>, module: &str, class_name: &str) -> PyResult<Py<PyAny>> {
     let module = PyModule::import(py, module)?;
@@ -224,21 +224,41 @@ pub fn apply_body_and_validation(
     Ok(())
 }
 
-fn get_response_type(_py: Python, func: &Bound<PyAny>) -> ResponseType {
-    if let Ok(annotations) = func.getattr("__annotations__") {
-        if let Ok(dict) = annotations.cast::<pyo3::types::PyDict>() {
-            if let Ok(Some(return_annotation)) = dict.get_item("return") {
-                if let Ok(type_str) = return_annotation.extract::<String>() {
-                    return match type_str.as_str() {
-                        "HTMLResponse" => ResponseType::Html,
-                        "JSONResponse" => ResponseType::Json,
-                        "PlainTextResponse" => ResponseType::PlainText,
-                        "RedirectResponse" => ResponseType::Redirect,
-                        _ => ResponseType::Auto,
-                    };
-                }
-            }
+pub fn get_response_type(py: Python<'_>, func: &Bound<'_, PyAny>) -> ResponseType {
+    let result: PyResult<ResponseType> = (|| {
+        let annotations = func.getattr(intern!(py, "__annotations__"))?;
+        let dict = annotations.cast::<PyDict>()?;
+
+        let Some(ann) = dict.get_item(intern!(py, "return"))? else {
+            return Ok(ResponseType::Json);
+        };
+
+        if ann.is(&py.get_type::<PyJSONResponse>()) {
+            return Ok(ResponseType::Json);
+        } else if ann.is(&py.get_type::<PyPlainTextResponse>()) {
+            return Ok(ResponseType::PlainText);
+        } else if ann.is(&py.get_type::<PyHTMLResponse>()) {
+            return Ok(ResponseType::Html);
+        } else if ann.is(&py.get_type::<PyRedirectResponse>()) {
+            return Ok(ResponseType::Redirect);
         }
-    }
-    ResponseType::Auto
+
+        // fallback to native types
+        let type_name_bound = if let Ok(name) = ann.getattr(intern!(py, "__name__")) {
+            name
+        } else {
+            ann.str()?.into_any()
+        };
+
+        let name_str = type_name_bound.cast::<PyString>()?.to_str()?;
+
+        Ok(match name_str {
+            "dict" | "list" | "set" => ResponseType::Json,
+            "str" => ResponseType::PlainText,
+            _ if crate::pydantic::is_pydantic_model(py, &ann) => ResponseType::Json,
+            _ => ResponseType::Json, // Default fallback
+        })
+    })();
+
+    result.unwrap_or(ResponseType::Json)
 }

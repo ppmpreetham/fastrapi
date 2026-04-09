@@ -6,8 +6,8 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     Json,
 };
-use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use pyo3::{intern, prelude::*};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::error;
@@ -170,17 +170,48 @@ pub async fn run_py_handler_no_args(
 }
 
 #[inline(always)]
-fn convert_response_by_type(
+pub fn convert_response_by_type(
     py: Python,
     result: &Bound<PyAny>,
     response_type: ResponseType,
 ) -> Response {
+    if result.is_none() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
+    if result.hasattr(intern!(py, "status_code")).unwrap_or(false) {
+        if result.is_instance_of::<PyJSONResponse>() {
+            return convert_json_response(py, result);
+        } else if result.is_instance_of::<PyPlainTextResponse>() {
+            return convert_text_response(py, result);
+        } else if result.is_instance_of::<PyHTMLResponse>() {
+            return convert_html_response(py, result);
+        } else if result.is_instance_of::<PyRedirectResponse>() {
+            return convert_redirect_response(py, result);
+        }
+    }
+
+    // registrationType responseType
     match response_type {
+        ResponseType::Json => {
+            let json = crate::utils::py_any_to_json(py, result);
+            (StatusCode::OK, Json(json)).into_response()
+        }
+        ResponseType::PlainText => {
+            let text = result
+                .extract::<String>()
+                .unwrap_or_else(|_| result.to_string());
+
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                text,
+            )
+                .into_response()
+        }
         ResponseType::Html => convert_html_response(py, result),
-        ResponseType::Json => convert_json_response(py, result),
-        ResponseType::PlainText => convert_text_response(py, result),
         ResponseType::Redirect => convert_redirect_response(py, result),
-        ResponseType::Auto => convert_auto_response(py, result),
+        ResponseType::Auto => crate::utils::py_to_response(py, result),
     }
 }
 
