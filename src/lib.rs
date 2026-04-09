@@ -130,7 +130,7 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )
     );
 
-    // Backward compatibility: fastrapi.middleware.cors
+    // backward compatibility: fastrapi.middleware.cors
     submodule!(m, "middleware.cors", add_classes!(CORSMiddleware));
 
     submodule!(m, "websocket", add_classes!(PyWebSocket));

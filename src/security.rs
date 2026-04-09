@@ -1,7 +1,11 @@
 use pyo3::prelude::*;
 use pyo3_nest::add_classes;
 
-#[pyclass(name = "SecurityScopes", module = "fastrapi.security")]
+#[pyclass(
+    name = "SecurityScopes",
+    module = "fastrapi.security",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PySecurityScopes {
     #[pyo3(get)]

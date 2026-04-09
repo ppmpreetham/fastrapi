@@ -93,7 +93,7 @@ impl PyResponseValidationError {
 
 // --- HTTP Exceptions ---
 
-#[pyclass(extends = PyException, name = "HTTPException")]
+#[pyclass(extends = PyException, name = "HTTPException", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyHTTPException {
     #[pyo3(get)]
@@ -160,7 +160,7 @@ impl PyHTTPException {
 
 // --- WebSocket Exceptions ---
 
-#[pyclass(extends = PyException, name = "WebSocketException")]
+#[pyclass(extends = PyException, name = "WebSocketException", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyWebSocketException {
     #[pyo3(get)]

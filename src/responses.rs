@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::{pyclass, pymethods, Py, PyAny};
 
 // wrapper classes
-#[pyclass(name = "HTMLResponse")]
+#[pyclass(name = "HTMLResponse", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyHTMLResponse {
     #[pyo3(get)]
@@ -23,7 +23,7 @@ impl PyHTMLResponse {
     }
 }
 
-#[pyclass(name = "JSONResponse")]
+#[pyclass(name = "JSONResponse", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyJSONResponse {
     #[pyo3(get)]
@@ -44,7 +44,7 @@ impl PyJSONResponse {
     }
 }
 
-#[pyclass(name = "PlainTextResponse")]
+#[pyclass(name = "PlainTextResponse", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyPlainTextResponse {
     #[pyo3(get)]
@@ -65,7 +65,7 @@ impl PyPlainTextResponse {
     }
 }
 
-#[pyclass(name = "RedirectResponse")]
+#[pyclass(name = "RedirectResponse", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyRedirectResponse {
     #[pyo3(get)]

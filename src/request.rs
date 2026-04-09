@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
 use std::sync::{Arc, Mutex};
 
-#[pyclass(name = "Request", module = "fastrapi.request")]
+#[pyclass(name = "Request", module = "fastrapi.request", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyRequest {
     #[pyo3(get)]

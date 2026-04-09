@@ -32,7 +32,7 @@ pub fn extract_path_param_names(path: &str) -> Vec<String> {
 
 // --- Sentinels ---
 
-#[pyclass(name = "Unset")]
+#[pyclass(name = "Unset", skip_from_py_object)]
 #[derive(Clone)]
 pub struct Unset;
 
@@ -44,7 +44,7 @@ impl Unset {
     }
 }
 
-#[pyclass(name = "Undefined")]
+#[pyclass(name = "Undefined", skip_from_py_object)]
 #[derive(Clone)]
 pub struct Undefined;
 
@@ -58,7 +58,7 @@ impl Undefined {
 
 // --- Dependency Classes ---
 
-#[pyclass(name = "Depends", subclass)]
+#[pyclass(name = "Depends", subclass, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyDepends {
     #[pyo3(get)]
@@ -79,7 +79,7 @@ impl PyDepends {
     }
 }
 
-#[pyclass(name = "Security", extends = PyDepends)]
+#[pyclass(name = "Security", extends = PyDepends, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PySecurity {
     #[pyo3(get)]
@@ -107,7 +107,7 @@ impl PySecurity {
 // --- Parameter Classes ---
 
 // Query
-#[pyclass(name = "Query")]
+#[pyclass(name = "Query", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyQuery {
     #[pyo3(get)]
@@ -182,7 +182,7 @@ impl PyQuery {
 }
 
 // Path
-#[pyclass(name = "Path")]
+#[pyclass(name = "Path", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyPath {
     #[pyo3(get)]
@@ -257,7 +257,7 @@ impl PyPath {
 }
 
 // Body (embed, media_type)
-#[pyclass(name = "Body")]
+#[pyclass(name = "Body", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyBody {
     #[pyo3(get)]
@@ -340,7 +340,7 @@ impl PyBody {
 }
 
 // Cookie
-#[pyclass(name = "Cookie")]
+#[pyclass(name = "Cookie", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyCookie {
     #[pyo3(get)]
@@ -414,7 +414,7 @@ impl PyCookie {
     }
 }
 
-#[pyclass(name = "Header")]
+#[pyclass(name = "Header", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyHeader {
     #[pyo3(get)]
@@ -493,7 +493,7 @@ impl PyHeader {
 }
 
 // Form (media_type)
-#[pyclass(name = "Form")]
+#[pyclass(name = "Form", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyForm {
     #[pyo3(get)]
@@ -572,7 +572,7 @@ impl PyForm {
 }
 
 // File (file type)
-#[pyclass(name = "File")]
+#[pyclass(name = "File", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyFile {
     #[pyo3(get)]

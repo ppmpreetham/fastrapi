@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::error;
 
-#[pyclass(name = "BackgroundTasks")]
+#[pyclass(name = "BackgroundTasks", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyBackgroundTasks {
     tasks: Arc<Mutex<Vec<(Py<PyAny>, Vec<Py<PyAny>>)>>>,

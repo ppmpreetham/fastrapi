@@ -40,7 +40,7 @@ macro_rules! set_field {
 // ==== CORS MIDDLEWARE ==== //
 // ========================= //
 
-#[pyclass(name = "CORSMiddleware")]
+#[pyclass(name = "CORSMiddleware", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct CORSMiddleware {
     pub allow_origins: Vec<String>,
@@ -164,7 +164,7 @@ pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
 // ==== TRUSTED HOST MIDDLEWARE ==== //
 // ================================= //
 
-#[pyclass(name = "TrustedHostMiddleware")]
+#[pyclass(name = "TrustedHostMiddleware", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct TrustedHostMiddleware {
     pub allowed_hosts: Vec<String>,
@@ -203,7 +203,7 @@ pub fn parse_trusted_host_params(kwargs: &Bound<'_, PyDict>) -> PyResult<Trusted
 // ====GZIP MIDDLEWARE==== //
 // ======================= //
 
-#[pyclass(name = "GZipMiddleware")]
+#[pyclass(name = "GZipMiddleware", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct GZipMiddleware {
     pub minimum_size: u32,
@@ -242,7 +242,7 @@ pub fn parse_gzip_params(kwargs: &Bound<'_, PyDict>) -> PyResult<GZipMiddleware>
 // ====SESSION MIDDLEWARE==== //
 // ========================== //
 
-#[pyclass(name = "SessionMiddleware")]
+#[pyclass(name = "SessionMiddleware", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct SessionMiddleware {
     pub secret_key: String,
