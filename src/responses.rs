@@ -82,28 +82,3 @@ impl PyRedirectResponse {
         Self { url, status_code }
     }
 }
-
-pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    let py = parent.py();
-    let responses_module = PyModule::new(py, "responses")?;
-
-    responses_module.add_class::<PyJSONResponse>()?;
-    responses_module.add_class::<PyHTMLResponse>()?;
-    responses_module.add_class::<PyPlainTextResponse>()?;
-    responses_module.add_class::<PyRedirectResponse>()?;
-
-    parent.add_submodule(&responses_module)?;
-
-    let parent_name: String = parent.getattr("__name__")?.extract()?;
-    let base_name = if parent_name.ends_with(".fastrapi") {
-        parent_name.strip_suffix(".fastrapi").unwrap().to_string()
-    } else {
-        parent_name
-    };
-    let full_name = format!("{}.responses", base_name);
-    responses_module.setattr("__name__", &full_name)?;
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item(&full_name, &responses_module)?;
-    Ok(())
-}

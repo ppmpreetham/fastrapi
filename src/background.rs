@@ -65,8 +65,3 @@ impl PyBackgroundTasks {
         handles
     }
 }
-
-pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    submodule!(parent, "background", add_classes!(PyBackgroundTasks));
-    Ok(())
-}

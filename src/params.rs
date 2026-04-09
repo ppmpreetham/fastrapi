@@ -649,15 +649,3 @@ impl PyFile {
         }
     }
 }
-
-pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    submodule!(
-        parent,
-        "params",
-        add_classes!(
-            PyQuery, PyPath, PyBody, PyCookie, PyHeader, PyForm, PyFile, Unset, Undefined,
-            PyDepends, PySecurity
-        )
-    );
-    Ok(())
-}

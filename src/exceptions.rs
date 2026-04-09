@@ -202,20 +202,3 @@ impl PyFastrAPIDeprecationWarning {
         Self
     }
 }
-
-pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    submodule!(
-        parent,
-        "exceptions",
-        add_classes!(
-            PyFastrAPIError,
-            PyValidationException,
-            PyRequestValidationError,
-            PyResponseValidationError,
-            PyHTTPException,
-            PyWebSocketException,
-            PyFastrAPIDeprecationWarning
-        )
-    );
-    Ok(())
-}

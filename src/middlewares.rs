@@ -334,29 +334,6 @@ impl PyMiddleware {
     }
 }
 
-// =========================== //
-// ====MODULE REGISTRATION==== //
-// =========================== //
-
-pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Main middleware module
-    submodule!(
-        parent,
-        "middleware",
-        add_classes!(
-            CORSMiddleware,
-            TrustedHostMiddleware,
-            GZipMiddleware,
-            SessionMiddleware
-        )
-    );
-
-    // Backward compatibility: fastrapi.middleware.cors
-    submodule!(parent, "middleware.cors", add_classes!(CORSMiddleware));
-
-    Ok(())
-}
-
 struct PyRequestInfo {
     method: String,
     path: String,

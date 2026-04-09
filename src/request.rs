@@ -209,9 +209,3 @@ impl PyHTTPConnection {
         Self { scope }
     }
 }
-
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyRequest>()?;
-    m.add_class::<PyHTTPConnection>()?;
-    Ok(())
-}

@@ -27,8 +27,3 @@ impl PySecurityScopes {
         self.scopes.join(" ")
     }
 }
-
-pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    add_classes!(parent, PySecurityScopes);
-    Ok(())
-}

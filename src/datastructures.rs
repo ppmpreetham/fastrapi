@@ -66,8 +66,3 @@ impl PyUploadFile {
         pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(()) })
     }
 }
-
-pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    add_classes!(parent, PyUploadFile);
-    Ok(())
-}
