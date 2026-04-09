@@ -310,12 +310,23 @@ pub fn register_websocket_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
-
     let websocket_module = PyModule::new(py, "websocket")?;
     register_websocket_module(&websocket_module)?;
     parent.add_submodule(&websocket_module)?;
-    let sys_modules = py.import("sys")?.getattr("modules")?;
-    sys_modules.set_item("fastrapi.websocket", &websocket_module)?;
+
+    let raw: String = parent.getattr("__name__")?.extract()?;
+    let segments: Vec<&str> = raw.split('.').collect();
+    let base =
+        if segments.len() >= 2 && segments[segments.len() - 1] == segments[segments.len() - 2] {
+            segments[..segments.len() - 1].join(".")
+        } else {
+            raw
+        };
+    let full_name = format!("{}.websocket", base);
+    websocket_module.setattr("__name__", &full_name)?;
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item(&full_name, &websocket_module)?;
 
     Ok(())
 }

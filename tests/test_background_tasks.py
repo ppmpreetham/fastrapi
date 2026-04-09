@@ -1,6 +1,5 @@
 # tests/test_background_tasks.py
-from fastrapi import BackgroundTasks
-
+from fastrapi.background import BackgroundTasks
 
 def test_background_task(client, app, caplog):
     background_called = False

@@ -1,6 +1,6 @@
+use crate::{add_classes, submodule};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
-
 // --- Utilities ---
 
 /// from route patterns like "/users/{user_id}"
@@ -32,7 +32,7 @@ pub fn extract_path_param_names(path: &str) -> Vec<String> {
 
 // --- Sentinels ---
 
-#[pyclass(name = "_Unset")]
+#[pyclass(name = "Unset")]
 #[derive(Clone)]
 pub struct Unset;
 
@@ -650,18 +650,14 @@ impl PyFile {
     }
 }
 
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<Unset>()?;
-    m.add_class::<Undefined>()?;
-    m.add_class::<PyDepends>()?;
-    m.add_class::<PySecurity>()?;
-
-    m.add_class::<PyQuery>()?;
-    m.add_class::<PyPath>()?;
-    m.add_class::<PyBody>()?;
-    m.add_class::<PyCookie>()?;
-    m.add_class::<PyHeader>()?;
-    m.add_class::<PyForm>()?;
-    m.add_class::<PyFile>()?;
+pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
+    submodule!(
+        parent,
+        "params",
+        add_classes!(
+            PyQuery, PyPath, PyBody, PyCookie, PyHeader, PyForm, PyFile, Unset, Undefined,
+            PyDepends, PySecurity
+        )
+    );
     Ok(())
 }

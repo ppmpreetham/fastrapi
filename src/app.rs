@@ -176,7 +176,8 @@ impl FastrAPI {
         let default_response_class = if let Some(cls) = default_response_class {
             cls
         } else {
-            py.import("fastrapi.responses")?
+            py.import("fastrapi")?
+                .getattr("responses")?
                 .getattr("JSONResponse")?
                 .unbind()
         };

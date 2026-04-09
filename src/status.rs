@@ -214,10 +214,17 @@ pub fn create_status_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
 
     parent.add_submodule(&status_module)?;
 
-    // Register in sys.modules
+    let parent_name: String = parent.getattr("__name__")?.extract()?;
+    let base_name = if parent_name.ends_with(".fastrapi") {
+        parent_name.strip_suffix(".fastrapi").unwrap().to_string()
+    } else {
+        parent_name
+    };
+    let full_name = format!("{}.status", base_name);
+    status_module.setattr("__name__", &full_name)?;
     py.import("sys")?
         .getattr("modules")?
-        .set_item("fastrapi.status", &status_module)?;
+        .set_item(&full_name, &status_module)?;
 
     Ok(())
 }

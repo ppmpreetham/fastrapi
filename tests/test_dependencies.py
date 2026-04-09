@@ -1,6 +1,6 @@
 # tests/test_dependencies.py
 from fastrapi import Depends
-
+import pytest
 
 def test_sync_dependency(client, app, sample_dependency):
     @app.get("/user-info")

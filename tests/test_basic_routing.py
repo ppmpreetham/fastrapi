@@ -1,6 +1,6 @@
 import pytest
-from fastapi.testclient import TestClient
-from fastrapi import FastrAPI, Depends, Header, Query, Path, Form, File, UploadFile
+from fastrapi import FastrAPI, Depends, Header, Query, Path, Form, File
+from fastrapi.datastructures import UploadFile
 from fastrapi.responses import JSONResponse
 from fastrapi import HTTPException
 import asyncio

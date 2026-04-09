@@ -1,5 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyTuple};
+use pyo3_nest::{add_classes, submodule};
+
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::error;
@@ -65,14 +67,6 @@ impl PyBackgroundTasks {
 }
 
 pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    let py = parent.py();
-    let bg_module = PyModule::new(py, "background")?;
-    bg_module.add_class::<PyBackgroundTasks>()?;
-
-    parent.add_submodule(&bg_module)?;
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item("fastrapi.background", &bg_module)?;
-
+    submodule!(parent, "background", add_classes!(PyBackgroundTasks));
     Ok(())
 }

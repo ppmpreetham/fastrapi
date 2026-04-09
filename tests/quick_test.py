@@ -96,62 +96,60 @@ def run_tests():
             print(f"💥 {name}: {e}")
             tests_failed += 1
     
-    # Run tests
-    test("Basic GET", lambda: (
+    test("Basic GET", lambda: [
         r := client.get("/"),
-        assert r.status_code == 200,
-        assert r.json()["status"] == "ok"
-    )[-1])
+        r.status_code == 200,
+        r.json()["status"] == "ok"
+    ].count(True) == 2)
     
-    test("Path parameters", lambda: (
+    test("Path parameters", lambda: [
         r := client.get("/items/42"),
-        assert r.status_code == 200,
-        assert r.json()["item_id"] == 42
-    )[-1])
+        r.status_code == 200,
+        r.json()["item_id"] == 42
+    ].count(True) == 2)
     
-    test("Single Pydantic model", lambda: (
+    test("Single Pydantic model", lambda: [
         r := client.post("/users", json={"name": "Alice", "age": 30}),
-        assert r.status_code == 200,
-        assert r.json()["user"]["name"] == "Alice"
-    )[-1])
+        r.status_code == 200,
+        r.json()["user"]["name"] == "Alice"
+    ].count(True) == 2)
     
-    test("Multiple Pydantic models", lambda: (
+    test("Multiple Pydantic models", lambda: [
         r := client.post("/register", json={
             "user": {"name": "Bob", "age": 25},
             "address": {"street": "123 Main", "city": "NYC", "zip": "10001"}
         }),
-        assert r.status_code == 200,
-        assert r.json()["user"]["name"] == "Bob",
-        assert r.json()["address"]["city"] == "NYC"
-    )[-1])
+        r.status_code == 200,
+        r.json()["user"]["name"] == "Bob",
+        r.json()["address"]["city"] == "NYC"
+    ].count(True) == 3)
     
     test("Validation error", lambda: (
-        r := client.post("/users", json={"name": "Invalid"}),
-        assert r.status_code == 422
-    )[-1])
+        r := client.get("/users", json={"name": "Invalid"}),
+        r.status_code == 422
+    )[1])
     
-    test("HTTPException", lambda: (
+    test("HTTPException", lambda: [
         r := client.get("/error"),
-        assert r.status_code == 404,
-        assert r.json()["detail"] == "Not found"
-    )[-1])
+        r.status_code == 404,
+        r.json()["detail"] == "Not found"
+    ].count(True) == 2)
     
-    test("Dependencies", lambda: (
+    test("Dependencies", lambda: [
         r := client.get("/protected"),
-        assert r.status_code == 200,
-        assert r.json()["user"]["user_id"] == 123
-    )[-1])
+        r.status_code == 200,
+        r.json()["user"]["user_id"] == 123
+    ].count(True) == 2)
     
-    test("OpenAPI spec", lambda: (
+    test("OpenAPI spec", lambda: [
         r := client.get("/api-docs/openapi.json"),
-        assert r.status_code == 200,
+        r.status_code == 200,
         spec := r.json(),
-        assert spec["openapi"] == "3.0.0",
-        assert "User" in spec["components"]["schemas"],
-        assert "Address" in spec["components"]["schemas"]
-    )[-1])
-    
-    # Summary
+        spec["openapi"] == "3.0.0",
+        "User" in spec["components"]["schemas"],
+        "Address" in spec["components"]["schemas"]
+    ].count(True) == 4)
+
     print(f"\n{'='*50}")
     print(f"Tests Passed: {tests_passed}")
     print(f"Tests Failed: {tests_failed}")
@@ -164,6 +162,6 @@ def run_tests():
         print("⚠️  Some tests failed")
         return 1
 
-
 if __name__ == "__main__":
-    exit(run_tests())
+    import sys
+    sys.exit(run_tests())

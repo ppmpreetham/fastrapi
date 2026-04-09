@@ -6,6 +6,8 @@ use axum::{
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
+use pyo3_nest::{add_classes, submodule};
+
 use std::str::FromStr;
 use std::sync::Arc;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
@@ -337,29 +339,20 @@ impl PyMiddleware {
 // =========================== //
 
 pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    let py = parent.py();
-    let middleware_module = PyModule::new(py, "middleware")?;
+    // Main middleware module
+    submodule!(
+        parent,
+        "middleware",
+        add_classes!(
+            CORSMiddleware,
+            TrustedHostMiddleware,
+            GZipMiddleware,
+            SessionMiddleware
+        )
+    );
 
-    middleware_module.add_class::<CORSMiddleware>()?;
-    middleware_module.add_class::<TrustedHostMiddleware>()?;
-    middleware_module.add_class::<GZipMiddleware>()?;
-    middleware_module.add_class::<SessionMiddleware>()?;
-
-    // fastrapi.middleware.cors for backward compatibility
-    let cors_module = PyModule::new(py, "cors")?;
-    cors_module.add_class::<CORSMiddleware>()?;
-
-    // IF YOU ARE WONDERING WHY WE'RE NOT ADDING CORS_MODULE AS A SUBMODULE HERE, IT'S TO AVOID DOUBLE REGISTRATION ISSUES
-    // Instead we just inject it into sys.modules below.
-    let sys_modules = py.import("sys")?.getattr("modules")?;
-
-    // fastrapi.middleware
-    parent.add_submodule(&middleware_module)?;
-    sys_modules.set_item("fastrapi.middleware", &middleware_module)?;
-
-    // fastrapi.middleware.cors (for backward compatibility)
-    middleware_module.add_submodule(&cors_module)?;
-    sys_modules.set_item("fastrapi.middleware.cors", &cors_module)?;
+    // Backward compatibility: fastrapi.middleware.cors
+    submodule!(parent, "middleware.cors", add_classes!(CORSMiddleware));
 
     Ok(())
 }

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "fastrapi"
-version = "0.2.8"
+version = "0.2.9"
 description = "A high-performance Python API framework powered by Rust"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -22,12 +22,6 @@ classifiers = [
   "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
   "Topic :: Software Development :: Libraries :: Application Frameworks"
 ]
-dependencies = [
-    "fastapi>=0.124.4",
-    "httpx>=0.28.1",
-    "pydantic>=2.10.6",
-    "pytest>=8.3.5",
-]
 
 # If you have dependencies, add them here
 # dependencies = [
@@ -36,7 +30,8 @@ dependencies = [
 # ]
 
 # If you have optional dependencies, uncomment and adjust this section
-# [project.optional-dependencies]
+[project.optional-dependencies]
+pydantic = ["pydantic>=2.10.6"]
 # test = [
 #   "pytest",
 #   "pytest-cov"

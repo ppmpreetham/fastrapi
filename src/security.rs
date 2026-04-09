@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3_nest::add_classes;
 
 #[pyclass(name = "SecurityScopes", module = "fastrapi.security")]
 #[derive(Clone, Debug)]
@@ -23,7 +24,7 @@ impl PySecurityScopes {
     }
 }
 
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PySecurityScopes>()?;
+pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
+    add_classes!(parent, PySecurityScopes);
     Ok(())
 }
