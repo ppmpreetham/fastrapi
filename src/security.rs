@@ -1,6 +1,4 @@
 use pyo3::prelude::*;
-use pyo3_nest::add_classes;
-
 #[pyclass(
     name = "SecurityScopes",
     module = "fastrapi.security",

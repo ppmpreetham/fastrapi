@@ -1,7 +1,5 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes};
-use pyo3_nest::add_classes;
-
 #[pyclass(name = "UploadFile", module = "fastrapi.datastructures")]
 pub struct PyUploadFile {
     #[pyo3(get)]
