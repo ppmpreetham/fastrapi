@@ -3,8 +3,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList};
+use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList};
+use pyo3::{prelude::*, types::PyString};
 use serde_json::{json, Map, Value};
 use serde_pyobject::to_pyobject;
 
@@ -95,30 +95,30 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         return Value::Null;
     }
 
-    // Try scalar types first (ordered by frequency)
-    if let Ok(b) = value.extract::<bool>() {
-        return Value::Bool(b);
-    }
-    if let Ok(i) = value.extract::<i64>() {
-        return Value::Number(i.into());
-    }
-    if let Ok(f) = value.extract::<f64>() {
-        return serde_json::Number::from_f64(f)
-            .map(Value::Number)
-            .unwrap_or(Value::Null);
-    }
-    if let Ok(s) = value.extract::<String>() {
-        return Value::String(s);
-    }
-
-    // Try complex types
     if let Ok(dict) = value.cast::<PyDict>() {
         return py_dict_to_json(py, dict);
+    }
+    if let Ok(s) = value.cast::<PyString>() {
+        return Value::String(s.to_str().unwrap_or_default().to_string());
     }
     if let Ok(list) = value.cast::<PyList>() {
         return py_list_to_json(py, list);
     }
+    if let Ok(b) = value.cast::<PyBool>() {
+        return Value::Bool(b.is_true());
+    }
+    if let Ok(i) = value.cast::<PyInt>() {
+        if let Ok(v) = i.extract::<i64>() {
+            return Value::Number(v.into());
+        }
+    }
+    if let Ok(f) = value.cast::<PyFloat>() {
+        if let Ok(v) = f.extract::<f64>() {
+            return serde_json::Number::from_f64(v)
+                .map(Value::Number)
+                .unwrap_or(Value::Null);
+        }
+    }
 
-    // Fallback
     Value::String(format!("{:?}", value))
 }

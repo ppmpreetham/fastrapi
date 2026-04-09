@@ -179,19 +179,16 @@ pub fn convert_response_by_type(
         return StatusCode::NO_CONTENT.into_response();
     }
 
-    if result.hasattr(intern!(py, "status_code")).unwrap_or(false) {
-        if result.is_instance_of::<PyJSONResponse>() {
-            return convert_json_response(py, result);
-        } else if result.is_instance_of::<PyPlainTextResponse>() {
-            return convert_text_response(py, result);
-        } else if result.is_instance_of::<PyHTMLResponse>() {
-            return convert_html_response(py, result);
-        } else if result.is_instance_of::<PyRedirectResponse>() {
-            return convert_redirect_response(py, result);
-        }
+    if result.is_instance_of::<PyJSONResponse>() {
+        return convert_json_response(py, result);
+    } else if result.is_instance_of::<PyPlainTextResponse>() {
+        return convert_text_response(py, result);
+    } else if result.is_instance_of::<PyHTMLResponse>() {
+        return convert_html_response(py, result);
+    } else if result.is_instance_of::<PyRedirectResponse>() {
+        return convert_redirect_response(py, result);
     }
 
-    // registrationType responseType
     match response_type {
         ResponseType::Json => {
             let json = crate::utils::py_any_to_json(py, result);
@@ -201,7 +198,6 @@ pub fn convert_response_by_type(
             let text = result
                 .extract::<String>()
                 .unwrap_or_else(|_| result.to_string());
-
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -214,7 +210,6 @@ pub fn convert_response_by_type(
         ResponseType::Auto => crate::utils::py_to_response(py, result),
     }
 }
-
 #[inline(always)]
 fn convert_html_response(_py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyHTMLResponse>>() {
