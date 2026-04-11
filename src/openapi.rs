@@ -40,6 +40,7 @@ pub struct PathItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Operation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -323,23 +324,51 @@ pub fn build_openapi_spec(
                     });
                 }
             } else if validator_count > 1 {
-                let mut request_schemas = HashMap::new();
+                let mut properties = serde_json::Map::new();
+                let mut required_fields = Vec::new();
+
                 for (param_name, validator) in &handler.param_validators {
                     let validator_bound = validator.bind(py);
 
                     if let Some(schema) = extract_pydantic_schema(py, validator_bound) {
                         let schema_name = get_schema_name(validator_bound);
-                        schemas.insert(schema_name.clone(), schema.clone());
-                        request_schemas.insert(
+                        schemas.insert(schema_name.clone(), schema);
+                        properties.insert(
                             param_name.clone(),
-                            json!({
-                                "$ref": format!("#/components/schemas/{}", schema_name)
-                            }),
+                            json!({ "$ref": format!("#/components/schemas/{}", schema_name) }),
                         );
+                        required_fields.push(param_name.clone());
                     }
                 }
 
-                if !request_schemas.is_empty() {
+                if !properties.is_empty() {
+                    let func_name = handler
+                        .func
+                        .bind(py)
+                        .getattr("__name__")
+                        .ok()
+                        .and_then(|n| n.extract::<String>().ok())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    // "/register" -> "register"
+                    // "/users/{id}" -> "users__id_"
+                    let path_slug = path
+                        .trim_start_matches('/')
+                        .replace('/', "__")
+                        .replace('{', "_")
+                        .replace('}', "_");
+
+                    let wrapper_name = format!("Body_{}_{}_{}", func_name, path_slug, method);
+
+                    schemas.insert(
+                        wrapper_name.clone(),
+                        json!({
+                            "type": "object",
+                            "properties": properties,
+                            "required": required_fields,
+                        }),
+                    );
+
                     operation.request_body = Some(RequestBody {
                         required: true,
                         content: {
@@ -348,8 +377,7 @@ pub fn build_openapi_spec(
                                 "application/json".to_string(),
                                 MediaType {
                                     schema: json!({
-                                        "type": "object",
-                                        "properties": request_schemas,
+                                        "$ref": format!("#/components/schemas/{}", wrapper_name)
                                     }),
                                 },
                             );
