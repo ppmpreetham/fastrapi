@@ -8,4 +8,4 @@ def get_html() -> HTMLResponse:
     return HTMLResponse("<h1>Hello</h1>")
 
 if __name__ == "__main__":
-    api.serve("127.0.0.1", 8080)
+    api.serve("127.0.0.1", 8000)

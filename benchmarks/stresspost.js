@@ -16,7 +16,7 @@ export const options = {
   },
 };
 
-const BASE_URL = "http://127.0.0.1:8080/echo";
+const BASE_URL = "http://127.0.0.1:8000/echo";
 
 export default function () {
   const payload = JSON.stringify({

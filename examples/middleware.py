@@ -10,4 +10,4 @@ def auth_middleware(request):
         return {"error": "Unauthorized"}, 401
     return None
 
-app.serve("127.0.0.1", 8080)
+app.serve("127.0.0.1", 8000)

@@ -40,5 +40,5 @@ def info():
     return {"methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]}
 
 if __name__ == "__main__":
-    app.serve("127.0.0.1", 8080)
+    app.serve("127.0.0.1", 8000)
 

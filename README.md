@@ -65,17 +65,17 @@ def echo(data):
     return {"received": data}
 
 if __name__ == "__main__":
-    app.serve("127.0.0.1", 8080)
+    app.serve("127.0.0.1", 8000)
 ```
 
 ### Now, test it with:
 ```bash
-curl http://127.0.0.1:8080/hello
+curl http://127.0.0.1:8000/hello
 ```
 
 For the `POST` endpoint:
 ```bash
-curl --location 'http://127.0.0.1:8080/echo' \
+curl --location 'http://127.0.0.1:8000/echo' \
 --header 'Content-Type: application/json' \
 --data '{"foo": 123, "bar": [1, 2, 3]}'
 ```
@@ -98,7 +98,7 @@ class User(BaseModel):
 def create_user(data: User):
     return {"msg": f"Hello {data.name}, age {data.age}"}
 
-api.serve("127.0.0.1", 8080)
+api.serve("127.0.0.1", 8000)
 ```
 
 </details>
@@ -117,7 +117,7 @@ api = FastrAPI()
 def get_html() -> HTMLResponse:
     return HTMLResponse("<h1>Hello</h1>")
 
-api.serve("127.0.0.1", 8080)
+api.serve("127.0.0.1", 8000)
 ```
 
 </details>

@@ -24,14 +24,15 @@ pub fn websocket(path: String) -> PyResult<Py<PyAny>> {
         let closure = move |args: &Bound<'_, PyTuple>,
                             _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
-            let func = args.get_item(0)?;
-            let stored_func = func.clone().unbind();
+            let py = args.py();
+            let func_bound: Bound<'_, PyAny> = args.get_item(0)?;
+            let func_py = func_bound.unbind();
 
             WEBSOCKET_ROUTES
                 .pin()
-                .insert(route_key.clone(), stored_func);
+                .insert(route_key.clone(), func_py.clone_ref(py));
 
-            Ok(func.unbind())
+            Ok(func_py)
         };
 
         let py_func = PyCFunction::new_closure(py, None, None, closure)?;

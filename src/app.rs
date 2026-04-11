@@ -320,14 +320,16 @@ impl FastrAPI {
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
-            let func: Py<PyAny> = args.get_item(0)?.extract()?;
-            let py_middleware = PyMiddleware::new(func.clone_ref(py));
+            let func_bound: Bound<'_, PyAny> = args.get_item(0)?;
+            let func_py = func_bound.unbind();
+
+            let py_middleware = PyMiddleware::new(func_py.clone_ref(py));
             let middleware_id = format!("{}_{}", middleware_type, MIDDLEWARES.len());
             MIDDLEWARES
                 .pin()
                 .insert(middleware_id.clone(), Arc::new(py_middleware));
             info!("🔗 Registered middleware: {}", middleware_id);
-            Ok(func)
+            Ok(func_py)
         };
 
         PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
