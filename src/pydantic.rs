@@ -112,7 +112,7 @@ pub fn parse_route_metadata(
     Vec<String>,                              // path_params
     Vec<String>,                              // query_params
     Vec<String>,                              // body_params
-    Vec<crate::dependencies::DependencyInfo>, // dependencies
+    Vec<crate::dependencies::DependencyNode>, // dependencies
     bool,                                     // is_async
     bool,                                     // is_fast_path
 ) {

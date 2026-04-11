@@ -25,7 +25,7 @@ pub use app::FastrAPI;
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
 
-use crate::dependencies::DependencyInfo;
+use crate::dependencies::DependencyNode;
 use crate::middlewares::PyMiddleware;
 use once_cell::sync::Lazy;
 use papaya::HashMap as PapayaHashMap;
@@ -51,7 +51,7 @@ pub struct RouteHandler {
     pub path_param_names: Vec<String>,
     pub query_param_names: Vec<String>,
     pub body_param_names: Vec<String>,
-    pub dependencies: Vec<DependencyInfo>,
+    pub dependencies: Vec<DependencyNode>,
 }
 
 pub static ROUTES: Lazy<PapayaHashMap<String, RouteHandler>> =
