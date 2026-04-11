@@ -4,7 +4,7 @@ pub struct Config {}
 
 pub fn config() -> &'static Config {
     static CONFIG: LazyLock<Config> = LazyLock::new(|| {
-        Config {  
+        Config {
             // TODO: TBD
         }
     });
