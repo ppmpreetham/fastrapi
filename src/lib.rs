@@ -25,6 +25,7 @@ pub use app::FastrAPI;
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
 
+use crate::dependencies::DependencyInfo;
 use crate::middlewares::PyMiddleware;
 use once_cell::sync::Lazy;
 use papaya::HashMap as PapayaHashMap;
@@ -50,7 +51,7 @@ pub struct RouteHandler {
     pub path_param_names: Vec<String>,
     pub query_param_names: Vec<String>,
     pub body_param_names: Vec<String>,
-    pub dependencies: Vec<crate::dependencies::DependencyInfo>,
+    pub dependencies: Vec<DependencyInfo>,
 }
 
 pub static ROUTES: Lazy<PapayaHashMap<String, RouteHandler>> =
@@ -80,7 +81,6 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.setattr("__path__", py.eval(c"[]", None, None)?)?;
 
     m.add_class::<FastrAPI>()?;
-
     m.add("FastrAPI", m.getattr("FastrAPI")?)?;
 
     submodule!(
@@ -107,6 +107,7 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
             PyFastrAPIDeprecationWarning
         )
     );
+
     submodule!(
         m,
         "params",
@@ -115,6 +116,7 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
             PyDepends, PySecurity
         )
     );
+
     submodule!(m, "request", add_classes!(PyRequest, PyHTTPConnection));
     submodule!(m, "datastructures", add_classes!(PyUploadFile));
     submodule!(m, "background", add_classes!(PyBackgroundTasks));
@@ -132,7 +134,6 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // backward compatibility: fastrapi.middleware.cors
     submodule!(m, "middleware.cors", add_classes!(CORSMiddleware));
-
     submodule!(m, "websocket", add_classes!(PyWebSocket));
     let ws_mod = m.getattr("websocket")?.cast_into::<PyModule>()?;
     ws_mod.add_function(wrap_pyfunction!(crate::websocket::websocket, &ws_mod)?)?;
@@ -141,7 +142,7 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pydantic::register_pydantic_integration(m)?;
 
     // top level re-exports
-    // allows `from fastrapi import Query, Depends, HTTPException`
+    // for `from fastrapi import Query, Depends, HTTPException`
     m.add("Depends", m.getattr("params")?.getattr("Depends")?)?;
     m.add("Query", m.getattr("params")?.getattr("Query")?)?;
     m.add("Path", m.getattr("params")?.getattr("Path")?)?;

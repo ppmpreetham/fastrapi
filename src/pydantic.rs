@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyType};
 use pyo3::{intern, prelude::*};
+crate::dependencies::DependencyInfo
 use serde_json::Value;
 pub fn load_pydantic_model(py: Python<'_>, module: &str, class_name: &str) -> PyResult<Py<PyAny>> {
     let module = PyModule::import(py, module)?;
@@ -107,14 +108,14 @@ pub fn parse_route_metadata(
     func: &Bound<PyAny>,
     path: &str,
 ) -> (
-    Vec<(String, Py<PyAny>)>,                 // validators
-    ResponseType,                             // response_type
-    Vec<String>,                              // path_params
-    Vec<String>,                              // query_params
-    Vec<String>,                              // body_params
-    Vec<crate::dependencies::DependencyInfo>, // dependencies
-    bool,                                     // is_async
-    bool,                                     // is_fast_path
+    Vec<(String, Py<PyAny>)>, // validators
+    ResponseType,             // response_type
+    Vec<String>,              // path_params
+    Vec<String>,              // query_params
+    Vec<String>,              // body_params
+    Vec<DependencyInfo>,      // dependencies
+    bool,                     // is_async
+    bool,                     // is_fast_path
 ) {
     let response_type = get_response_type(py, func);
     let is_async = func

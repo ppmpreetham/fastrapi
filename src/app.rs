@@ -352,9 +352,8 @@ impl FastrAPI {
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
-            let func: Py<PyAny> = args.get_item(0)?.extract()?;
-            let func_bound = func.bind(py);
-
+            let func_bound: Bound<'_, PyAny> = args.get_item(0)?;
+            let func_py = func_bound.unbind();
             let (
                 param_validators,
                 response_type,
@@ -364,7 +363,7 @@ impl FastrAPI {
                 dependencies,
                 is_async,
                 is_fast_path,
-            ) = parse_route_metadata(py, func_bound, &path_for_closure);
+            ) = parse_route_metadata(py, func_py.bind(py), &path_for_closure);
 
             let needs_kwargs = !path_param_names.is_empty()
                 || !query_param_names.is_empty()
@@ -373,7 +372,7 @@ impl FastrAPI {
                 || !dependencies.is_empty();
 
             let handler = RouteHandler {
-                func: func.clone_ref(py),
+                func: func_py.clone_ref(py),
                 is_async,
                 is_fast_path,
                 needs_kwargs,
@@ -386,7 +385,7 @@ impl FastrAPI {
             };
 
             ROUTES.pin().insert(route_key.clone(), handler);
-            Ok(func)
+            Ok(func_py)
         };
 
         PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())

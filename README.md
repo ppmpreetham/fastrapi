@@ -3,11 +3,11 @@
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/fastrapi?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLUE&right_color=GREEN&left_text=Downloads)](https://pepy.tech/projects/fastrapi)
 
 <img src="https://raw.githubusercontent.com/ppmpreetham/fastrapi/refs/heads/main/readme/fastrapi.gif" width="100%" alt="FastRAPI GIF">
-FastrAPI is a high-performance web framework that supercharges your Python APIs with the power of Rust. Built on Axum and PyO3, it delivers unmatched speed, type safety, and developer-friendly Python syntax. Create robust, async-ready APIs with minimal overhead and maximum throughput. FastrAPI is your drop-in replacement for FastAPI, offering familiar syntax with up to 33x faster performance.
+FastrAPI is a high-performance web framework that supercharges your Python APIs with the power of Rust. Built on Axum and PyO3, it delivers unmatched speed, type safety, and developer-friendly Python syntax. Create robust, async-ready APIs with minimal overhead and maximum throughput. FastrAPI is your drop-in replacement for FastAPI, offering familiar syntax with up to 6x faster performance.
 
 ## Key Features
 
-- **Lightning Speed**: Powered by Rust and Axum, FastrAPI delivers up to **33x faster** performance than FastAPI, making your APIs scream.
+- **Lightning Speed**: Powered by Rust and Axum, FastrAPI delivers up to **6x faster** performance than FastAPI, making your APIs scream.
 - **Python-First**: Write clean, familiar Python code, no Rust knowledge needed. FastrAPI handles the heavy lifting behind the scenes.
 - **Ironclad Type Safety**: Inherits Rust's robust type system for rock-solid reliability, catching errors before they hit production.
 - **Pydantic Powered**: Seamless integration with Pydantic for effortless request and response validation, keeping your data in check.
@@ -18,7 +18,7 @@ FastrAPI is a high-performance web framework that supercharges your Python APIs 
 ---
 
 #### Is it as fast as claimed?
-Yes. Powered by Rust and Axum, FastrAPI outperforms FastAPI by up to 33x in real-world benchmarks, with no compromises on usability. Check it out [here](https://github.com/ppmpreetham/fastrapi?tab=readme-ov-file#performance)
+Yes. Powered by Rust and Axum, FastrAPI outperforms FastAPI by up to 6x in real-world benchmarks, with no compromises on usability. Check it out [here](https://github.com/ppmpreetham/fastrapi?tab=readme-ov-file#performance)
 
 ![FastRAPI vs other frameworks comparision](readme/BenchMark0_2_1.jpg)
 

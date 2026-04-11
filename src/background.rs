@@ -49,12 +49,11 @@ impl PyBackgroundTasks {
                             return;
                         }
                     };
-                    if let Err(e) = func.call1(py, &args_tuple) {
+                    if let Err(e) = func.into_bound(py).call1(&args_tuple) {
                         error!("Background task error: {}", e);
                         e.print(py);
                     }
                     drop(args_tuple);
-                    drop(func);
                 });
             });
             handles.push(handle);
