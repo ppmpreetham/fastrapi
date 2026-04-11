@@ -99,10 +99,9 @@ fn extract_and_flatten(
                     // Recurse first: sub-dependencies are inserted into flat_plan
                     // BEFORE the current function (post-order / topological sort)
                     if !visited.contains(&target_id) {
-                        let bound_target = target_callable;
                         extract_and_flatten(
                             py,
-                            &bound_target,
+                            &target_callable,
                             false,
                             Some(param_name_str),
                             flat_plan,
@@ -128,7 +127,7 @@ fn extract_and_flatten(
     // Post-order insert: this node goes in AFTER all its sub-dependencies
     flat_plan.push(DependencyNode {
         func_id,
-        func: func.clone().unbind(),
+        func: func.as_unbound().clone(),
         is_async,
         param_name: parent_param_name,
         scopes: current_scopes,
