@@ -387,7 +387,7 @@ pub async fn execute_py_middleware(
             py_dict.set_item("headers", headers_dict).ok();
 
             let middleware_func = middleware.func.bind(py);
-            match middleware_func.call1((py_dict,)) {
+            match middleware_func.as_borrowed().call1((py_dict,)) {
                 Ok(result) => {
                     // program must stop if middleware returns a Response object
                     if !result.is_none() {

@@ -1,3 +1,4 @@
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyCFunction, PyDict, PyTuple};
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use crate::middlewares::{
 use crate::pydantic::parse_route_metadata;
 use crate::websocket::websocket as ws_decorator;
 use crate::{RouteHandler, MIDDLEWARES, ROUTES};
+
 #[pyclass(name = "FastrAPI")]
 pub struct FastrAPI {
     #[pyo3(get, set)]
@@ -173,20 +175,20 @@ impl FastrAPI {
         separate_input_output_schemas: bool,
         openapi_external_docs: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
-        let default_response_class = if let Some(cls) = default_response_class {
-            cls
-        } else {
-            py.import("fastrapi")?
-                .getattr("responses")?
-                .getattr("JSONResponse")?
-                .unbind()
+        let default_response_class = match default_response_class {
+            Some(cls) => cls,
+            None => py
+                .import(intern!(py, "fastrapi"))?
+                .getattr(intern!(py, "responses"))?
+                .getattr(intern!(py, "JSONResponse"))?
+                .unbind(),
         };
 
-        let generate_unique_id_function = if let Some(func) = generate_unique_id_function {
-            func
-        } else {
-            py.eval(c"lambda route: route.__name__", None, None)?
-                .unbind()
+        let generate_unique_id_function = match generate_unique_id_function {
+            Some(func) => func,
+            None => py
+                .eval(c"lambda route: route.__name__", None, None)?
+                .unbind(),
         };
 
         Ok(Self {
@@ -240,42 +242,42 @@ impl FastrAPI {
         middleware_class: Py<PyAny>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let mw_bound = middleware_class.bind(py);
-        let cls_name = mw_bound.getattr("__name__")?.extract::<String>()?;
+        let cls_name = middleware_class.bind(py).getattr(intern!(py, "__name__"))?;
 
-        // empty dict if no kwargs provided
-        let empty_dict = PyDict::new(py);
-        let opts = kwargs.unwrap_or(&empty_dict);
+        // lazy dict if no kwargs
+        let default_dict;
+        let opts = match kwargs {
+            Some(dict) => dict,
+            None => {
+                default_dict = PyDict::new(py);
+                &default_dict
+            }
+        };
 
-        match cls_name.as_str() {
-            "CORSMiddleware" => {
-                self.cors_config = Some(parse_cors_params(opts)?);
-                info!("Enabled CORSMiddleware");
-            }
-            "TrustedHostMiddleware" => {
-                self.trusted_host_config = Some(parse_trusted_host_params(opts)?);
-                info!("Enabled TrustedHostMiddleware");
-            }
-            "GZipMiddleware" => {
-                self.gzip_config = Some(parse_gzip_params(opts)?);
-                info!("Enabled GZipMiddleware");
-            }
-            "SessionMiddleware" => {
-                self.session_config = Some(parse_session_params(opts)?);
-                info!("Enabled SessionMiddleware");
-            }
-            _ => {
-                // reject unknown classes
-                let msg = format!(
-                    "Middleware '{}' is not supported. Only CORSMiddleware, TrustedHostMiddleware, GZipMiddleware, and SessionMiddleware are allowed via add_middleware.", 
-                    cls_name
-                );
-                return Err(pyo3::exceptions::PyValueError::new_err(msg));
-            }
+        // .is() is O(1) so no match required
+        if cls_name.is(&intern!(py, "CORSMiddleware")) {
+            self.cors_config = Some(parse_cors_params(opts)?);
+            info!("Enabled CORSMiddleware");
+        } else if cls_name.is(&intern!(py, "TrustedHostMiddleware")) {
+            self.trusted_host_config = Some(parse_trusted_host_params(opts)?);
+            info!("Enabled TrustedHostMiddleware");
+        } else if cls_name.is(&intern!(py, "GZipMiddleware")) {
+            self.gzip_config = Some(parse_gzip_params(opts)?);
+            info!("Enabled GZipMiddleware");
+        } else if cls_name.is(&intern!(py, "SessionMiddleware")) {
+            self.session_config = Some(parse_session_params(opts)?);
+            info!("Enabled SessionMiddleware");
+        } else {
+            let msg = format!(
+                "Middleware '{}' is not supported. Only CORSMiddleware, TrustedHostMiddleware, GZipMiddleware, and SessionMiddleware are allowed via add_middleware.",
+                cls_name
+            );
+            return Err(pyo3::exceptions::PyValueError::new_err(msg));
         }
         Ok(())
     }
 
+    // wish these methods could be abstracted away by macros, but PyO3 doesn't support dynamic method creation or macros in impl blocks, so here we are :(
     fn get<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
         self.create_decorator("GET", path, py)
     }
@@ -305,7 +307,7 @@ impl FastrAPI {
     }
 
     // decorator for websockets: @app.websocket("/ws")
-    fn websocket<'py>(&self, path: String, _py: Python<'py>) -> PyResult<Py<PyAny>> {
+    fn websocket<'py>(&self, path: String) -> PyResult<Py<PyAny>> {
         if !path.starts_with('/') {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "WebSocket path must start with '/'",
@@ -320,32 +322,33 @@ impl FastrAPI {
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
-            let func_bound: Bound<'_, PyAny> = args.get_item(0)?;
-            let func_py = func_bound.unbind();
-
-            let py_middleware = PyMiddleware::new(func_py.clone_ref(py));
+            let func: Py<PyAny> = args.get_item(0)?.unbind(); // 0th item is the function being decorated
+            let py_middleware = PyMiddleware::new(func.clone_ref(py));
             let middleware_id = format!("{}_{}", middleware_type, MIDDLEWARES.len());
             MIDDLEWARES
                 .pin()
                 .insert(middleware_id.clone(), Arc::new(py_middleware));
             info!("🔗 Registered middleware: {}", middleware_id);
-            Ok(func_py)
+            Ok(func)
         };
-
-        PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
+        PyCFunction::new_closure(
+            py,
+            Some(c"middleware"),
+            Some(c"Registers middleware of given type"),
+            decorator,
+        )
+        .map(|f| f.into())
     }
 
     fn serve(&self, py: Python, host: Option<String>, port: Option<u16>) -> PyResult<()> {
         crate::server::serve(py, host, port, self)
     }
-}
 
-impl FastrAPI {
     fn create_decorator<'py>(
         &self,
         method: &str,
         path: String,
-        py: Python<'py>,
+        py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let route_key = format!("{} {}", method, path);
         let path_for_closure = path.clone();
@@ -354,8 +357,7 @@ impl FastrAPI {
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
-            let func_bound: Bound<'_, PyAny> = args.get_item(0)?;
-            let func_py = func_bound.unbind();
+            let func: Py<PyAny> = args.get_item(0)?.unbind(); // function name
             let (
                 param_validators,
                 response_type,
@@ -365,7 +367,7 @@ impl FastrAPI {
                 dependencies,
                 is_async,
                 is_fast_path,
-            ) = parse_route_metadata(py, func_py.bind(py), &path_for_closure);
+            ) = parse_route_metadata(py, func.bind(py), &path_for_closure);
 
             let needs_kwargs = !path_param_names.is_empty()
                 || !query_param_names.is_empty()
@@ -374,7 +376,7 @@ impl FastrAPI {
                 || !dependencies.is_empty();
 
             let handler = RouteHandler {
-                func: func_py.clone_ref(py),
+                func: func.clone_ref(py),
                 is_async,
                 is_fast_path,
                 needs_kwargs,
@@ -387,7 +389,7 @@ impl FastrAPI {
             };
 
             ROUTES.pin().insert(route_key.clone(), handler);
-            Ok(func_py)
+            Ok(func)
         };
 
         PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
