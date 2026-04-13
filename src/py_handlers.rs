@@ -1,13 +1,13 @@
 use crate::responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
 use crate::utils::{local_guard, py_any_to_json};
-use crate::{ResponseType, RouteHandler, ROUTES};
+use crate::{ResponseType, ROUTES};
 use axum::{
     http::{header, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     Json,
 };
-use pyo3::types::PyDict;
-use pyo3::{intern, prelude::*};
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyString};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::error;
@@ -19,6 +19,7 @@ pub async fn run_py_handler_with_params(
     query_params: HashMap<String, String>,
     payload: Option<serde_json::Value>,
 ) -> Response {
+    // TODO: If the route is sync, then use spawn_blocking, if it's async, use spawn and await the result
     match rt_handle
         .spawn_blocking(move || {
             Python::attach(|py| {
@@ -29,23 +30,28 @@ pub async fn run_py_handler_with_params(
                 };
 
                 let response_type = handler.response_type;
-                let py_func = handler.func.bind(py);
+                let py_func = handler.func.bind_borrowed(py);
 
                 let kwargs = if handler.needs_kwargs {
                     let dict = PyDict::new(py);
 
+                    // TODO: what if there are overlapping names between path, query and body params? should we prioritize one over the other? should we error out? should we namespace them in the kwargs?
                     // path params
                     for (k, v) in &path_params {
-                        dict.set_item(k, v).ok();
+                        // TODO: research if .ok() is enough here? should we log if it fails?
+                        let key = PyString::intern(py, k.as_str());
+                        dict.set_item(key, v).ok();
                     }
 
                     // query params
                     for (k, v) in &query_params {
-                        dict.set_item(k, v).ok();
+                        let key = PyString::intern(py, k.as_str());
+                        dict.set_item(key, v).ok();
                     }
 
                     // body / validation
                     if let Some(payload_val) = &payload {
+                        // TODO: use 422 error if it can't be parsed/validated
                         if let Err(resp) = crate::pydantic::apply_body_and_validation(
                             py,
                             handler,
@@ -63,7 +69,7 @@ pub async fn run_py_handler_with_params(
 
                 // PYTHON CALLING ONLY ONCE
                 let result = match kwargs {
-                    Some(ref kw) => py_func.call((), Some(kw)),
+                    Some(kw) => py_func.call((), Some(&kw)),
                     None => py_func.call0(),
                 };
 
@@ -80,49 +86,6 @@ pub async fn run_py_handler_with_params(
     {
         Ok(resp) => resp,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-fn run_slow_handler(
-    py: Python,
-    handler: &RouteHandler,
-    path_params: HashMap<String, String>,
-    query_params: HashMap<String, String>,
-    payload: Option<serde_json::Value>,
-) -> Response {
-    let py_func = handler.func.bind(py);
-
-    let kwargs = if handler.needs_kwargs {
-        Some(PyDict::new(py))
-    } else {
-        None
-    };
-
-    if let Some(kwargs) = kwargs {
-        for (k, v) in path_params {
-            kwargs.set_item(k, v).ok();
-        }
-        for (k, v) in query_params {
-            kwargs.set_item(k, v).ok();
-        }
-
-        let _payload = payload;
-
-        match py_func.call((), Some(&kwargs)) {
-            Ok(res) => convert_response_by_type(py, &res, handler.response_type),
-            Err(e) => {
-                e.print(py);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    } else {
-        match py_func.call0() {
-            Ok(res) => convert_response_by_type(py, &res, handler.response_type),
-            Err(e) => {
-                e.print(py);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
     }
 }
 
@@ -210,6 +173,7 @@ pub fn convert_response_by_type(
         ResponseType::Auto => crate::utils::py_to_response(py, result),
     }
 }
+
 #[inline(always)]
 fn convert_html_response(_py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyHTMLResponse>>() {
