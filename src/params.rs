@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
-// --- Utilities ---
+
+// utils
 
 /// from route patterns like "/users/{user_id}"
 pub fn extract_path_param_names(path: &str) -> Vec<String> {
@@ -29,7 +30,7 @@ pub fn extract_path_param_names(path: &str) -> Vec<String> {
     params
 }
 
-// --- Sentinels ---
+// sentinels
 
 #[pyclass(name = "Unset", skip_from_py_object)]
 #[derive(Clone)]
@@ -55,7 +56,7 @@ impl Undefined {
     }
 }
 
-// --- Dependency Classes ---
+// dependency classes
 
 #[pyclass(name = "Depends", subclass, skip_from_py_object)]
 #[derive(Clone)]
@@ -103,548 +104,190 @@ impl PySecurity {
     }
 }
 
-// --- Parameter Classes ---
+// macros
+
+/// Generates a standard param class (Query, Path, Cookie) with the shared field set.
+macro_rules! define_param {
+    // Query, Path, Cookie
+    (base: $struct_name:ident, $py_name:literal) => {
+        #[pyclass(name = $py_name, skip_from_py_object)]
+        #[derive(Clone)]
+        pub struct $struct_name {
+            #[pyo3(get)] pub default: Option<Py<PyAny>>,
+            #[pyo3(get)] pub alias: Option<String>,
+            #[pyo3(get)] pub title: Option<String>,
+            #[pyo3(get)] pub description: Option<String>,
+            #[pyo3(get)] pub gt: Option<f64>,
+            #[pyo3(get)] pub ge: Option<f64>,
+            #[pyo3(get)] pub lt: Option<f64>,
+            #[pyo3(get)] pub le: Option<f64>,
+            #[pyo3(get)] pub min_length: Option<usize>,
+            #[pyo3(get)] pub max_length: Option<usize>,
+            #[pyo3(get)] pub pattern: Option<String>,
+            #[pyo3(get)] pub deprecated: Option<bool>,
+            #[pyo3(get)] pub include_in_schema: bool,
+            #[pyo3(get)] pub examples: Option<Py<PyAny>>,
+        }
+        #[pymethods]
+        impl $struct_name {
+            #[new]
+            #[pyo3(signature = (default=None, *, alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
+            #[allow(clippy::too_many_arguments)]
+            fn new(
+                default: Option<Py<PyAny>>,
+                alias: Option<String>,
+                title: Option<String>,
+                description: Option<String>,
+                gt: Option<f64>, ge: Option<f64>, lt: Option<f64>, le: Option<f64>,
+                min_length: Option<usize>, max_length: Option<usize>,
+                pattern: Option<String>, deprecated: Option<bool>,
+                include_in_schema: bool, examples: Option<Py<PyAny>>,
+                _extra: Option<&Bound<'_, PyDict>>,
+            ) -> Self {
+                Self {
+                    default, alias, title, description,
+                    gt, ge, lt, le, min_length, max_length,
+                    pattern, deprecated, include_in_schema, examples,
+                }
+            }
+        }
+    };
+
+    // Header
+    (header: $struct_name:ident, $py_name:literal) => {
+        #[pyclass(name = $py_name, skip_from_py_object)]
+        #[derive(Clone)]
+        pub struct $struct_name {
+            #[pyo3(get)] pub default: Option<Py<PyAny>>,
+            #[pyo3(get)] pub alias: Option<String>,
+            #[pyo3(get)] pub convert_underscores: bool,
+            #[pyo3(get)] pub title: Option<String>,
+            #[pyo3(get)] pub description: Option<String>,
+            #[pyo3(get)] pub gt: Option<f64>,
+            #[pyo3(get)] pub ge: Option<f64>,
+            #[pyo3(get)] pub lt: Option<f64>,
+            #[pyo3(get)] pub le: Option<f64>,
+            #[pyo3(get)] pub min_length: Option<usize>,
+            #[pyo3(get)] pub max_length: Option<usize>,
+            #[pyo3(get)] pub pattern: Option<String>,
+            #[pyo3(get)] pub deprecated: Option<bool>,
+            #[pyo3(get)] pub include_in_schema: bool,
+            #[pyo3(get)] pub examples: Option<Py<PyAny>>,
+        }
+        #[pymethods]
+        impl $struct_name {
+            #[new]
+            #[pyo3(signature = (default=None, *, alias=None, convert_underscores=true, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
+            #[allow(clippy::too_many_arguments)]
+            fn new(
+                default: Option<Py<PyAny>>,
+                alias: Option<String>,
+                convert_underscores: bool,
+                title: Option<String>,
+                description: Option<String>,
+                gt: Option<f64>, ge: Option<f64>, lt: Option<f64>, le: Option<f64>,
+                min_length: Option<usize>, max_length: Option<usize>,
+                pattern: Option<String>, deprecated: Option<bool>,
+                include_in_schema: bool, examples: Option<Py<PyAny>>,
+                _extra: Option<&Bound<'_, PyDict>>,
+            ) -> Self {
+                Self {
+                    default, alias, convert_underscores, title, description,
+                    gt, ge, lt, le, min_length, max_length,
+                    pattern, deprecated, include_in_schema, examples,
+                }
+            }
+        }
+    };
+
+    // Body (embed + media_type), Form, File (media_type only)
+    (media: $struct_name:ident, $py_name:literal, $sig:tt,
+     ctor_head: { $($ctor_head_name:ident : $ctor_head_ty:ty),* },
+     extra_fields: { $($extra_field:ident : $extra_fty:ty),* },
+     self_head: { $($self_head:ident),* }
+    ) => {
+        #[pyclass(name = $py_name, skip_from_py_object)]
+        #[derive(Clone)]
+        pub struct $struct_name {
+            #[pyo3(get)] pub default: Option<Py<PyAny>>,
+            $(#[pyo3(get)] pub $extra_field: $extra_fty,)*
+            #[pyo3(get)] pub alias: Option<String>,
+            #[pyo3(get)] pub title: Option<String>,
+            #[pyo3(get)] pub description: Option<String>,
+            #[pyo3(get)] pub gt: Option<f64>,
+            #[pyo3(get)] pub ge: Option<f64>,
+            #[pyo3(get)] pub lt: Option<f64>,
+            #[pyo3(get)] pub le: Option<f64>,
+            #[pyo3(get)] pub min_length: Option<usize>,
+            #[pyo3(get)] pub max_length: Option<usize>,
+            #[pyo3(get)] pub pattern: Option<String>,
+            #[pyo3(get)] pub deprecated: Option<bool>,
+            #[pyo3(get)] pub include_in_schema: bool,
+            #[pyo3(get)] pub examples: Option<Py<PyAny>>,
+        }
+        #[pymethods]
+        impl $struct_name {
+            #[new]
+            #[pyo3(signature = $sig)]
+            #[allow(clippy::too_many_arguments)]
+            fn new(
+                default: Option<Py<PyAny>>,
+                $($ctor_head_name: $ctor_head_ty,)*
+                alias: Option<String>,
+                title: Option<String>,
+                description: Option<String>,
+                gt: Option<f64>, ge: Option<f64>, lt: Option<f64>, le: Option<f64>,
+                min_length: Option<usize>, max_length: Option<usize>,
+                pattern: Option<String>, deprecated: Option<bool>,
+                include_in_schema: bool, examples: Option<Py<PyAny>>,
+                _extra: Option<&Bound<'_, PyDict>>,
+            ) -> Self {
+                Self {
+                    default,
+                    $($self_head,)*
+                    alias, title, description,
+                    gt, ge, lt, le, min_length, max_length,
+                    pattern, deprecated, include_in_schema, examples,
+                }
+            }
+        }
+    };
+}
+
+// parameter classes
 
 // Query
-#[pyclass(name = "Query", skip_from_py_object)]
-#[derive(Clone)]
-pub struct PyQuery {
-    #[pyo3(get)]
-    pub default: Option<Py<PyAny>>,
-    #[pyo3(get)]
-    pub alias: Option<String>,
-    #[pyo3(get)]
-    pub title: Option<String>,
-    #[pyo3(get)]
-    pub description: Option<String>,
-    #[pyo3(get)]
-    pub gt: Option<f64>,
-    #[pyo3(get)]
-    pub ge: Option<f64>,
-    #[pyo3(get)]
-    pub lt: Option<f64>,
-    #[pyo3(get)]
-    pub le: Option<f64>,
-    #[pyo3(get)]
-    pub min_length: Option<usize>,
-    #[pyo3(get)]
-    pub max_length: Option<usize>,
-    #[pyo3(get)]
-    pub pattern: Option<String>,
-    #[pyo3(get)]
-    pub deprecated: Option<bool>,
-    #[pyo3(get)]
-    pub include_in_schema: bool,
-    #[pyo3(get)]
-    pub examples: Option<Py<PyAny>>,
-}
-
-#[pymethods]
-impl PyQuery {
-    #[new]
-    #[pyo3(signature = (default=None, *, alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        default: Option<Py<PyAny>>,
-        alias: Option<String>,
-        title: Option<String>,
-        description: Option<String>,
-        gt: Option<f64>,
-        ge: Option<f64>,
-        lt: Option<f64>,
-        le: Option<f64>,
-        min_length: Option<usize>,
-        max_length: Option<usize>,
-        pattern: Option<String>,
-        deprecated: Option<bool>,
-        include_in_schema: bool,
-        examples: Option<Py<PyAny>>,
-        _extra: Option<&Bound<'_, PyDict>>,
-    ) -> Self {
-        Self {
-            default,
-            alias,
-            title,
-            description,
-            gt,
-            ge,
-            lt,
-            le,
-            min_length,
-            max_length,
-            pattern,
-            deprecated,
-            include_in_schema,
-            examples,
-        }
-    }
-}
+define_param!(base: PyQuery, "Query");
 
 // Path
-#[pyclass(name = "Path", skip_from_py_object)]
-#[derive(Clone)]
-pub struct PyPath {
-    #[pyo3(get)]
-    pub default: Option<Py<PyAny>>,
-    #[pyo3(get)]
-    pub alias: Option<String>,
-    #[pyo3(get)]
-    pub title: Option<String>,
-    #[pyo3(get)]
-    pub description: Option<String>,
-    #[pyo3(get)]
-    pub gt: Option<f64>,
-    #[pyo3(get)]
-    pub ge: Option<f64>,
-    #[pyo3(get)]
-    pub lt: Option<f64>,
-    #[pyo3(get)]
-    pub le: Option<f64>,
-    #[pyo3(get)]
-    pub min_length: Option<usize>,
-    #[pyo3(get)]
-    pub max_length: Option<usize>,
-    #[pyo3(get)]
-    pub pattern: Option<String>,
-    #[pyo3(get)]
-    pub deprecated: Option<bool>,
-    #[pyo3(get)]
-    pub include_in_schema: bool,
-    #[pyo3(get)]
-    pub examples: Option<Py<PyAny>>,
-}
-
-#[pymethods]
-impl PyPath {
-    #[new]
-    #[pyo3(signature = (default=None, *, alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        default: Option<Py<PyAny>>,
-        alias: Option<String>,
-        title: Option<String>,
-        description: Option<String>,
-        gt: Option<f64>,
-        ge: Option<f64>,
-        lt: Option<f64>,
-        le: Option<f64>,
-        min_length: Option<usize>,
-        max_length: Option<usize>,
-        pattern: Option<String>,
-        deprecated: Option<bool>,
-        include_in_schema: bool,
-        examples: Option<Py<PyAny>>,
-        _extra: Option<&Bound<'_, PyDict>>,
-    ) -> Self {
-        Self {
-            default,
-            alias,
-            title,
-            description,
-            gt,
-            ge,
-            lt,
-            le,
-            min_length,
-            max_length,
-            pattern,
-            deprecated,
-            include_in_schema,
-            examples,
-        }
-    }
-}
-
-// Body (embed, media_type)
-#[pyclass(name = "Body", skip_from_py_object)]
-#[derive(Clone)]
-pub struct PyBody {
-    #[pyo3(get)]
-    pub default: Option<Py<PyAny>>,
-    #[pyo3(get)]
-    pub embed: Option<bool>,
-    #[pyo3(get)]
-    pub media_type: String,
-    #[pyo3(get)]
-    pub alias: Option<String>,
-    #[pyo3(get)]
-    pub title: Option<String>,
-    #[pyo3(get)]
-    pub description: Option<String>,
-    #[pyo3(get)]
-    pub gt: Option<f64>,
-    #[pyo3(get)]
-    pub ge: Option<f64>,
-    #[pyo3(get)]
-    pub lt: Option<f64>,
-    #[pyo3(get)]
-    pub le: Option<f64>,
-    #[pyo3(get)]
-    pub min_length: Option<usize>,
-    #[pyo3(get)]
-    pub max_length: Option<usize>,
-    #[pyo3(get)]
-    pub pattern: Option<String>,
-    #[pyo3(get)]
-    pub deprecated: Option<bool>,
-    #[pyo3(get)]
-    pub include_in_schema: bool,
-    #[pyo3(get)]
-    pub examples: Option<Py<PyAny>>,
-}
-
-#[pymethods]
-impl PyBody {
-    #[new]
-    #[pyo3(signature = (default=None, *, embed=None, media_type="application/json".to_string(), alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        default: Option<Py<PyAny>>,
-        embed: Option<bool>,
-        media_type: String,
-        alias: Option<String>,
-        title: Option<String>,
-        description: Option<String>,
-        gt: Option<f64>,
-        ge: Option<f64>,
-        lt: Option<f64>,
-        le: Option<f64>,
-        min_length: Option<usize>,
-        max_length: Option<usize>,
-        pattern: Option<String>,
-        deprecated: Option<bool>,
-        include_in_schema: bool,
-        examples: Option<Py<PyAny>>,
-        _extra: Option<&Bound<'_, PyDict>>,
-    ) -> Self {
-        Self {
-            default,
-            embed,
-            media_type,
-            alias,
-            title,
-            description,
-            gt,
-            ge,
-            lt,
-            le,
-            min_length,
-            max_length,
-            pattern,
-            deprecated,
-            include_in_schema,
-            examples,
-        }
-    }
-}
+define_param!(base: PyPath, "Path");
 
 // Cookie
-#[pyclass(name = "Cookie", skip_from_py_object)]
-#[derive(Clone)]
-pub struct PyCookie {
-    #[pyo3(get)]
-    pub default: Option<Py<PyAny>>,
-    #[pyo3(get)]
-    pub alias: Option<String>,
-    #[pyo3(get)]
-    pub title: Option<String>,
-    #[pyo3(get)]
-    pub description: Option<String>,
-    #[pyo3(get)]
-    pub gt: Option<f64>,
-    #[pyo3(get)]
-    pub ge: Option<f64>,
-    #[pyo3(get)]
-    pub lt: Option<f64>,
-    #[pyo3(get)]
-    pub le: Option<f64>,
-    #[pyo3(get)]
-    pub min_length: Option<usize>,
-    #[pyo3(get)]
-    pub max_length: Option<usize>,
-    #[pyo3(get)]
-    pub pattern: Option<String>,
-    #[pyo3(get)]
-    pub deprecated: Option<bool>,
-    #[pyo3(get)]
-    pub include_in_schema: bool,
-    #[pyo3(get)]
-    pub examples: Option<Py<PyAny>>,
-}
+define_param!(base: PyCookie, "Cookie");
 
-#[pymethods]
-impl PyCookie {
-    #[new]
-    #[pyo3(signature = (default=None, *, alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        default: Option<Py<PyAny>>,
-        alias: Option<String>,
-        title: Option<String>,
-        description: Option<String>,
-        gt: Option<f64>,
-        ge: Option<f64>,
-        lt: Option<f64>,
-        le: Option<f64>,
-        min_length: Option<usize>,
-        max_length: Option<usize>,
-        pattern: Option<String>,
-        deprecated: Option<bool>,
-        include_in_schema: bool,
-        examples: Option<Py<PyAny>>,
-        _extra: Option<&Bound<'_, PyDict>>,
-    ) -> Self {
-        Self {
-            default,
-            alias,
-            title,
-            description,
-            gt,
-            ge,
-            lt,
-            le,
-            min_length,
-            max_length,
-            pattern,
-            deprecated,
-            include_in_schema,
-            examples,
-        }
-    }
-}
+// Header
+define_param!(header: PyHeader, "Header");
 
-#[pyclass(name = "Header", skip_from_py_object)]
-#[derive(Clone)]
-pub struct PyHeader {
-    #[pyo3(get)]
-    pub default: Option<Py<PyAny>>,
-    #[pyo3(get)]
-    pub alias: Option<String>,
-    #[pyo3(get)]
-    pub convert_underscores: bool,
-    #[pyo3(get)]
-    pub title: Option<String>,
-    #[pyo3(get)]
-    pub description: Option<String>,
-    #[pyo3(get)]
-    pub gt: Option<f64>,
-    #[pyo3(get)]
-    pub ge: Option<f64>,
-    #[pyo3(get)]
-    pub lt: Option<f64>,
-    #[pyo3(get)]
-    pub le: Option<f64>,
-    #[pyo3(get)]
-    pub min_length: Option<usize>,
-    #[pyo3(get)]
-    pub max_length: Option<usize>,
-    #[pyo3(get)]
-    pub pattern: Option<String>,
-    #[pyo3(get)]
-    pub deprecated: Option<bool>,
-    #[pyo3(get)]
-    pub include_in_schema: bool,
-    #[pyo3(get)]
-    pub examples: Option<Py<PyAny>>,
-}
-
-#[pymethods]
-impl PyHeader {
-    #[new]
-    #[pyo3(signature = (default=None, *, alias=None, convert_underscores=true, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        default: Option<Py<PyAny>>,
-        alias: Option<String>,
-        convert_underscores: bool,
-        title: Option<String>,
-        description: Option<String>,
-        gt: Option<f64>,
-        ge: Option<f64>,
-        lt: Option<f64>,
-        le: Option<f64>,
-        min_length: Option<usize>,
-        max_length: Option<usize>,
-        pattern: Option<String>,
-        deprecated: Option<bool>,
-        include_in_schema: bool,
-        examples: Option<Py<PyAny>>,
-        _extra: Option<&Bound<'_, PyDict>>,
-    ) -> Self {
-        Self {
-            default,
-            alias,
-            convert_underscores,
-            title,
-            description,
-            gt,
-            ge,
-            lt,
-            le,
-            min_length,
-            max_length,
-            pattern,
-            deprecated,
-            include_in_schema,
-            examples,
-        }
-    }
-}
+// Body (embed, media_type)
+define_param!(media: PyBody, "Body",
+    (default=None, *, embed=None, media_type="application/json".to_string(), alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra),
+    ctor_head: { embed: Option<bool>, media_type: String },
+    extra_fields: { embed: Option<bool>, media_type: String },
+    self_head: { embed, media_type }
+);
 
 // Form (media_type)
-#[pyclass(name = "Form", skip_from_py_object)]
-#[derive(Clone)]
-pub struct PyForm {
-    #[pyo3(get)]
-    pub default: Option<Py<PyAny>>,
-    #[pyo3(get)]
-    pub media_type: String,
-    #[pyo3(get)]
-    pub alias: Option<String>,
-    #[pyo3(get)]
-    pub title: Option<String>,
-    #[pyo3(get)]
-    pub description: Option<String>,
-    #[pyo3(get)]
-    pub gt: Option<f64>,
-    #[pyo3(get)]
-    pub ge: Option<f64>,
-    #[pyo3(get)]
-    pub lt: Option<f64>,
-    #[pyo3(get)]
-    pub le: Option<f64>,
-    #[pyo3(get)]
-    pub min_length: Option<usize>,
-    #[pyo3(get)]
-    pub max_length: Option<usize>,
-    #[pyo3(get)]
-    pub pattern: Option<String>,
-    #[pyo3(get)]
-    pub deprecated: Option<bool>,
-    #[pyo3(get)]
-    pub include_in_schema: bool,
-    #[pyo3(get)]
-    pub examples: Option<Py<PyAny>>,
-}
+define_param!(media: PyForm, "Form",
+    (default=None, *, media_type="application/x-www-form-urlencoded".to_string(), alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra),
+    ctor_head: { media_type: String },
+    extra_fields: { media_type: String },
+    self_head: { media_type }
+);
 
-#[pymethods]
-impl PyForm {
-    #[new]
-    #[pyo3(signature = (default=None, *, media_type="application/x-www-form-urlencoded".to_string(), alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        default: Option<Py<PyAny>>,
-        media_type: String,
-        alias: Option<String>,
-        title: Option<String>,
-        description: Option<String>,
-        gt: Option<f64>,
-        ge: Option<f64>,
-        lt: Option<f64>,
-        le: Option<f64>,
-        min_length: Option<usize>,
-        max_length: Option<usize>,
-        pattern: Option<String>,
-        deprecated: Option<bool>,
-        include_in_schema: bool,
-        examples: Option<Py<PyAny>>,
-        _extra: Option<&Bound<'_, PyDict>>,
-    ) -> Self {
-        Self {
-            default,
-            media_type,
-            alias,
-            title,
-            description,
-            gt,
-            ge,
-            lt,
-            le,
-            min_length,
-            max_length,
-            pattern,
-            deprecated,
-            include_in_schema,
-            examples,
-        }
-    }
-}
-
-// File (file type)
-#[pyclass(name = "File", skip_from_py_object)]
-#[derive(Clone)]
-pub struct PyFile {
-    #[pyo3(get)]
-    pub default: Option<Py<PyAny>>,
-    #[pyo3(get)]
-    pub media_type: String,
-    #[pyo3(get)]
-    pub alias: Option<String>,
-    #[pyo3(get)]
-    pub title: Option<String>,
-    #[pyo3(get)]
-    pub description: Option<String>,
-    #[pyo3(get)]
-    pub gt: Option<f64>,
-    #[pyo3(get)]
-    pub ge: Option<f64>,
-    #[pyo3(get)]
-    pub lt: Option<f64>,
-    #[pyo3(get)]
-    pub le: Option<f64>,
-    #[pyo3(get)]
-    pub min_length: Option<usize>,
-    #[pyo3(get)]
-    pub max_length: Option<usize>,
-    #[pyo3(get)]
-    pub pattern: Option<String>,
-    #[pyo3(get)]
-    pub deprecated: Option<bool>,
-    #[pyo3(get)]
-    pub include_in_schema: bool,
-    #[pyo3(get)]
-    pub examples: Option<Py<PyAny>>,
-}
-
-#[pymethods]
-impl PyFile {
-    #[new]
-    #[pyo3(signature = (default=None, *, media_type="multipart/form-data".to_string(), alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        default: Option<Py<PyAny>>,
-        media_type: String,
-        alias: Option<String>,
-        title: Option<String>,
-        description: Option<String>,
-        gt: Option<f64>,
-        ge: Option<f64>,
-        lt: Option<f64>,
-        le: Option<f64>,
-        min_length: Option<usize>,
-        max_length: Option<usize>,
-        pattern: Option<String>,
-        deprecated: Option<bool>,
-        include_in_schema: bool,
-        examples: Option<Py<PyAny>>,
-        _extra: Option<&Bound<'_, PyDict>>,
-    ) -> Self {
-        Self {
-            default,
-            media_type,
-            alias,
-            title,
-            description,
-            gt,
-            ge,
-            lt,
-            le,
-            min_length,
-            max_length,
-            pattern,
-            deprecated,
-            include_in_schema,
-            examples,
-        }
-    }
-}
+// File
+define_param!(media: PyFile, "File",
+    (default=None, *, media_type="multipart/form-data".to_string(), alias=None, title=None, description=None, gt=None, ge=None, lt=None, le=None, min_length=None, max_length=None, pattern=None, deprecated=None, include_in_schema=true, examples=None, **_extra),
+    ctor_head: { media_type: String },
+    extra_fields: { media_type: String },
+    self_head: { media_type }
+);
