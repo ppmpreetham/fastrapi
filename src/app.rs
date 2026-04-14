@@ -332,8 +332,8 @@ impl FastrAPI {
         PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
     }
 
-    fn serve(&self, py: Python, host: Option<String>, port: Option<u16>) -> PyResult<()> {
-        crate::server::serve(py, host, port, self)
+    fn serve(slf: Py<Self>, py: Python, host: Option<String>, port: Option<u16>) -> PyResult<()> {
+        crate::server::serve(py, host, port, slf)
     }
 }
 

@@ -201,6 +201,67 @@ if __name__ == "__main__":
 
 </details>
 
+
+<details>
+  <summary>Show Lifespan Example</summary>
+
+```python
+from contextlib import asynccontextmanager
+from fastrapi import FastrAPI
+
+shared = {}
+
+@asynccontextmanager
+async def lifespan(app: FastrAPI):
+    shared["ready"] = True
+    app.title = "FastrAPI with lifespan"
+    try:
+        yield
+    finally:
+        shared.clear()
+
+app = FastrAPI(lifespan=lifespan)
+
+@app.get("/health")
+def health():
+    return {"ready": shared.get("ready", False), "title": app.title}
+
+app.serve("127.0.0.1", 8080)
+```
+
+If you provide `lifespan=...`, legacy `on_startup` and `on_shutdown` handlers are not called.
+
+</details>
+
+
+<details>
+  <summary>Show Startup / Shutdown Example</summary>
+
+```python
+from fastrapi import FastrAPI
+
+events = []
+
+def startup():
+    events.append("startup")
+
+async def shutdown():
+    events.append("shutdown")
+
+app = FastrAPI(
+    on_startup=[startup],
+    on_shutdown=[shutdown],
+)
+
+@app.get("/events")
+def get_events():
+    return {"events": events}
+
+app.serve("127.0.0.1", 8080)
+```
+
+</details>
+
 ## Performance
 Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn across multiple worker configurations.
 
@@ -244,7 +305,7 @@ Some advanced features are still in development like:
 - [ ] Logging/metrics
 - [ ] A nice logging tool
 - [ ] Async Middleware support
-- [ ] Lifespan Events (@app.on_startup / @app.on_shutdown)
+- [x] Lifespan Events (`lifespan=`, `on_startup`, `on_shutdown`)
 - [ ] Better error handling (currently shows Rust errors)
 - [ ] Rate limiter (even FastAPI doesn't have it)
 - [x] Websockets
@@ -262,7 +323,6 @@ Some advanced features are still in development like:
 - [ ] app.mount() for static files & sub-apps
 - [ ] @app.exception_handler() + app.add_exception_handler()
 - [ ] Proper Python-friendly error pages (no Rust tracebacks in production)
-- [ ] lifespan= context manager (modern style)
 - [ ] app.openapi() method (customizable spec)
 - [ ] app.state (mutable app-wide state)
 - [ ] app.openapi_tags= ordering in Swagger UI
