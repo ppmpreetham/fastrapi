@@ -7,11 +7,12 @@ use axum::{
     Json, Router,
 };
 use once_cell::sync::Lazy;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{info, Level};
+use tracing::{error, info, Level};
 
 // middleware Libraries
 use tower_http::compression::{predicate::SizeAbove, CompressionLayer};
@@ -41,7 +42,17 @@ pub struct AppState {
     pub rt_handle: tokio::runtime::Handle,
 }
 
-pub fn serve(py: Python, host: Option<String>, port: Option<u16>, app: &FastrAPI) -> PyResult<()> {
+struct EnteredLifespan {
+    manager: Py<PyAny>,
+    event_loop: Py<PyAny>,
+}
+
+pub fn serve(
+    py: Python<'_>,
+    host: Option<String>,
+    port: Option<u16>,
+    app: Py<FastrAPI>,
+) -> PyResult<()> {
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .with_target(false)
@@ -53,16 +64,43 @@ pub fn serve(py: Python, host: Option<String>, port: Option<u16>, app: &FastrAPI
     let rt_handle = PYTHON_RUNTIME.handle().clone();
     let app_state = AppState { rt_handle };
 
-    let docs_url = app.docs_url.clone();
-    let openapi_url = app.openapi_url.clone();
+    let app_bound = app.bind(py);
+    let app_config = app_bound.borrow();
+
+    let docs_url = app_config.docs_url.clone();
+    let openapi_url = app_config.openapi_url.clone();
     let docs_url_for_log = docs_url.clone();
+    let on_startup = app_config
+        .on_startup
+        .as_ref()
+        .map(|handler| handler.clone_ref(py));
+    let on_shutdown = app_config
+        .on_shutdown
+        .as_ref()
+        .map(|handler| handler.clone_ref(py));
+    let lifespan = app_config
+        .lifespan
+        .as_ref()
+        .map(|handler| handler.clone_ref(py));
+    let app = app.clone_ref(py);
 
-    let router = build_router(py, app_state.clone(), docs_url, openapi_url, app);
+    let router = build_router(py, app_state.clone(), docs_url, openapi_url, &app_config);
+    drop(app_config);
 
-    py.detach(move || {
-        PYTHON_RUNTIME.block_on(async move {
-            let addr = format!("{}:{}", host, port);
-            let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
+    let server_thread = std::thread::spawn(move || {
+        let entered_lifespan = match run_startup_phase(app, lifespan, on_startup) {
+            Ok(entered) => entered,
+            Err(err) => {
+                log_python_error("startup failed", err);
+                return;
+            }
+        };
+
+        let addr = format!("{}:{}", host, port);
+        let server_result = PYTHON_RUNTIME.block_on(async move {
+            let listener = TcpListener::bind(&addr)
+                .await
+                .map_err(|err| err.to_string())?;
 
             info!("🚀 FastrAPI running at http://{}", addr);
             if let Some(docs) = &docs_url_for_log {
@@ -83,11 +121,194 @@ pub fn serve(py: Python, host: Option<String>, port: Option<u16>, app: &FastrAPI
                     info!("Shutting down...");
                 })
                 .await
-                .expect("Server error");
+                .map_err(|err| err.to_string())
         });
+
+        if let Err(err) = server_result {
+            error!("Server error: {}", err);
+        }
+
+        if let Err(err) = run_shutdown_phase(entered_lifespan, on_shutdown) {
+            log_python_error("shutdown failed", err);
+        }
     });
 
+    py.detach(move || server_thread.join())
+        .map_err(|_| PyRuntimeError::new_err("Server thread panicked"))?;
+
     Ok(())
+}
+
+fn run_startup_phase(
+    app: Py<FastrAPI>,
+    lifespan: Option<Py<PyAny>>,
+    on_startup: Option<Py<PyAny>>,
+) -> PyResult<Option<EnteredLifespan>> {
+    if let Some(lifespan_handler) = lifespan {
+        return enter_lifespan(app, lifespan_handler).map(Some);
+    }
+
+    if let Some(startup_handlers) = on_startup {
+        run_lifecycle_handlers(startup_handlers)?;
+    }
+
+    Ok(None)
+}
+
+fn run_shutdown_phase(
+    entered_lifespan: Option<EnteredLifespan>,
+    on_shutdown: Option<Py<PyAny>>,
+) -> PyResult<()> {
+    if let Some(entered) = entered_lifespan {
+        return exit_lifespan(entered);
+    }
+
+    if let Some(shutdown_handlers) = on_shutdown {
+        run_lifecycle_handlers(shutdown_handlers)?;
+    }
+
+    Ok(())
+}
+
+fn run_lifecycle_handlers(handlers: Py<PyAny>) -> PyResult<()> {
+    for handler in extract_lifecycle_handlers(&handlers)? {
+        run_lifecycle_handler(handler)?;
+    }
+
+    Ok(())
+}
+
+fn extract_lifecycle_handlers(handlers: &Py<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+    Python::attach(|py| {
+        let handlers_bound = handlers.bind(py);
+        let builtins = py.import("builtins")?;
+
+        if builtins
+            .call_method1("callable", (handlers_bound,))?
+            .extract::<bool>()?
+        {
+            return Ok(vec![handlers.clone_ref(py)]);
+        }
+
+        let mut extracted = Vec::new();
+        for item in handlers_bound.try_iter()? {
+            let handler = item?.unbind();
+            if !builtins
+                .call_method1("callable", (handler.bind(py),))?
+                .extract::<bool>()?
+            {
+                return Err(PyTypeError::new_err(
+                    "Lifecycle handlers must be callables or iterables of callables",
+                ));
+            }
+            extracted.push(handler);
+        }
+
+        Ok(extracted)
+    })
+}
+
+fn run_lifecycle_handler(handler: Py<PyAny>) -> PyResult<()> {
+    let is_async = Python::attach(|py| -> PyResult<bool> {
+        py.import("inspect")?
+            .call_method1("iscoroutinefunction", (handler.bind(py),))?
+            .extract()
+    })?;
+
+    if is_async {
+        Python::attach(|py| -> PyResult<()> {
+            let coroutine = handler.bind(py).call0()?;
+            run_awaitable_in_new_loop(py, coroutine)
+        })?;
+    } else {
+        Python::attach(|py| -> PyResult<()> {
+            handler.bind(py).call0()?;
+            Ok(())
+        })?;
+    }
+
+    Ok(())
+}
+
+fn enter_lifespan(app: Py<FastrAPI>, lifespan: Py<PyAny>) -> PyResult<EnteredLifespan> {
+    Python::attach(|py| -> PyResult<EnteredLifespan> {
+        let event_loop = create_event_loop(py)?;
+        let manager = lifespan.bind(py).call1((app.clone_ref(py),))?;
+        let awaitable = manager.call_method0("__aenter__")?;
+
+        if let Err(err) = run_awaitable_in_loop(py, event_loop.bind(py), awaitable) {
+            shutdown_async_generators(event_loop.bind(py));
+            close_event_loop(py, event_loop.bind(py));
+            return Err(err);
+        }
+
+        Ok(EnteredLifespan {
+            manager: manager.unbind(),
+            event_loop,
+        })
+    })
+}
+
+fn exit_lifespan(entered_lifespan: EnteredLifespan) -> PyResult<()> {
+    Python::attach(|py| -> PyResult<()> {
+        let event_loop = entered_lifespan.event_loop.bind(py);
+        let awaitable = entered_lifespan
+            .manager
+            .bind(py)
+            .call_method1("__aexit__", (py.None(), py.None(), py.None()))?;
+        let result = run_awaitable_in_loop(py, event_loop, awaitable);
+        shutdown_async_generators(event_loop);
+        close_event_loop(py, event_loop);
+        result
+    })?;
+
+    Ok(())
+}
+
+fn create_event_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let asyncio = py.import("asyncio")?;
+    let event_loop = asyncio.call_method0("new_event_loop")?;
+    asyncio.call_method1("set_event_loop", (&event_loop,))?;
+    Ok(event_loop.unbind())
+}
+
+fn run_awaitable_in_new_loop(py: Python<'_>, awaitable: Bound<'_, PyAny>) -> PyResult<()> {
+    let event_loop = create_event_loop(py)?;
+    let result = run_awaitable_in_loop(py, event_loop.bind(py), awaitable);
+    shutdown_async_generators(event_loop.bind(py));
+    close_event_loop(py, event_loop.bind(py));
+    result
+}
+
+fn run_awaitable_in_loop(
+    py: Python<'_>,
+    event_loop: &Bound<'_, PyAny>,
+    awaitable: Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let asyncio = py.import("asyncio")?;
+    asyncio.call_method1("set_event_loop", (event_loop,))?;
+    event_loop.call_method1("run_until_complete", (awaitable,))?;
+
+    Ok(())
+}
+
+fn shutdown_async_generators(event_loop: &Bound<'_, PyAny>) {
+    if let Ok(shutdown_asyncgens) = event_loop.call_method0("shutdown_asyncgens") {
+        let _ = event_loop.call_method1("run_until_complete", (shutdown_asyncgens,));
+    }
+}
+
+fn close_event_loop(py: Python<'_>, event_loop: &Bound<'_, PyAny>) {
+    if let Ok(asyncio) = py.import("asyncio") {
+        let _ = asyncio.call_method1("set_event_loop", (py.None(),));
+    }
+
+    let _ = event_loop.call_method0("close");
+}
+
+fn log_python_error(context: &str, err: PyErr) {
+    error!("{}: {}", context, err);
+    Python::attach(|py| err.print(py));
 }
 
 fn build_router(
