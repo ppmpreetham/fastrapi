@@ -8,6 +8,10 @@ use pyo3::{prelude::*, types::PyString};
 use serde_json::{json, Map, Value};
 use serde_pyobject::to_pyobject;
 
+pub mod guard;
+pub mod json;
+pub mod path;
+
 // for local reads (fast, non-Send for sync blocks like spawn_blocking)
 pub fn local_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::LocalGuard<'_> {
     map.guard()

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::error;
 
+#[inline(always)]
 pub async fn run_py_handler_with_params(
     rt_handle: tokio::runtime::Handle,
     route_key: Arc<str>,
@@ -89,6 +90,7 @@ pub async fn run_py_handler_with_params(
     }
 }
 
+#[inline(always)]
 pub async fn run_py_handler_with_args(
     rt_handle: tokio::runtime::Handle,
     route_key: Arc<str>,
@@ -104,6 +106,7 @@ pub async fn run_py_handler_with_args(
     .await
 }
 
+#[inline(always)]
 pub async fn run_py_handler_no_args(
     rt_handle: tokio::runtime::Handle,
     route_key: Arc<str>,
@@ -170,7 +173,7 @@ pub fn convert_response_by_type(
         }
         ResponseType::Html => convert_html_response(py, result),
         ResponseType::Redirect => convert_redirect_response(py, result),
-        ResponseType::Auto => crate::utils::py_to_response(py, result),
+        ResponseType::Auto => convert_auto_response(py, result),
     }
 }
 

@@ -3,76 +3,49 @@ use pyo3::types::PyModule;
 use pyo3_nest::{add_classes, submodule};
 
 mod app;
-mod background;
-mod config;
-mod datastructures;
-mod dependencies;
-mod exceptions;
-mod middlewares;
-mod openapi;
-mod params;
-mod py_handlers;
-mod pydantic;
-mod request;
-mod responses;
-mod security;
+pub mod bridge;
+pub mod config;
+pub mod core;
+pub mod datastructures;
+pub mod middleware;
+pub mod openapi;
+pub mod params;
+pub mod python;
+pub mod security;
 mod server;
-mod status;
-mod utils;
-mod websocket;
+pub mod types;
+pub mod utils;
 
 pub use app::FastrAPI;
-pub use request::{PyHTTPConnection, PyRequest};
-pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
+pub use core::{RouteHandler, ROUTES};
+pub use middleware::MIDDLEWARES;
+pub use python::response::{
+    PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse,
+};
+pub use types::request::{PyHTTPConnection, PyRequest};
+pub use types::response::ResponseType;
 
-use crate::dependencies::DependencyNode;
-use crate::middlewares::PyMiddleware;
-use once_cell::sync::Lazy;
-use papaya::HashMap as PapayaHashMap;
-use std::sync::Arc;
+pub(crate) use bridge::call_python as py_handlers;
+pub(crate) use middleware as middlewares;
+pub(crate) use python::dependencies;
+pub(crate) use python::models as pydantic;
+pub(crate) use python::response as responses;
+pub(crate) use python::websocket as websocket;
+pub(crate) use types::status as status;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResponseType {
-    Json,
-    Html,
-    PlainText,
-    Redirect,
-    Auto,
-}
-
-#[derive(Clone)]
-pub struct RouteHandler {
-    pub func: Py<PyAny>,
-    pub is_async: bool,
-    pub is_fast_path: bool,
-    pub param_validators: Vec<(String, Py<PyAny>)>,
-    pub response_type: ResponseType,
-    pub needs_kwargs: bool,
-    pub path_param_names: Vec<String>,
-    pub query_param_names: Vec<String>,
-    pub body_param_names: Vec<String>,
-    pub dependencies: Vec<DependencyNode>,
-}
-
-pub static ROUTES: Lazy<PapayaHashMap<String, RouteHandler>> =
-    Lazy::new(|| PapayaHashMap::with_capacity(128));
-
-pub static MIDDLEWARES: Lazy<PapayaHashMap<String, Arc<PyMiddleware>>> =
-    Lazy::new(|| PapayaHashMap::with_capacity(16));
-
-use background::PyBackgroundTasks;
-use datastructures::PyUploadFile;
-use exceptions::{
+use crate::datastructures::PyUploadFile;
+use crate::python::background::PyBackgroundTasks;
+use crate::python::exceptions::{
     PyFastrAPIDeprecationWarning, PyFastrAPIError, PyHTTPException, PyRequestValidationError,
     PyResponseValidationError, PyValidationException, PyWebSocketException,
 };
-use middlewares::{CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware};
+use crate::python::websocket::PyWebSocket;
+use crate::security::PySecurityScopes;
+use middleware::{CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware};
 use params::{
-    PyBody, PyCookie, PyDepends, PyFile, PyForm, PyHeader, PyPath, PyQuery, PySecurity, Undefined,
-    Unset,
+    PyBody, PyCookie, PyDepends, PyFile, PyForm, PyHeader, PyPath, PyQuery, PySecurity,
+    Undefined, Unset,
 };
-use security::PySecurityScopes;
-use websocket::PyWebSocket;
 
 #[pymodule(gil_used = false)]
 fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -132,17 +105,14 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )
     );
 
-    // backward compatibility: fastrapi.middleware.cors
     submodule!(m, "middleware.cors", add_classes!(CORSMiddleware));
     submodule!(m, "websocket", add_classes!(PyWebSocket));
     let ws_mod = m.getattr("websocket")?.cast_into::<PyModule>()?;
-    ws_mod.add_function(wrap_pyfunction!(crate::websocket::websocket, &ws_mod)?)?;
+    ws_mod.add_function(wrap_pyfunction!(crate::python::websocket::websocket, &ws_mod)?)?;
 
     status::create_status_submodule(m)?;
     pydantic::register_pydantic_integration(m)?;
 
-    // top level re-exports
-    // for `from fastrapi import Query, Depends, HTTPException`
     m.add("Depends", m.getattr("params")?.getattr("Depends")?)?;
     m.add("Query", m.getattr("params")?.getattr("Query")?)?;
     m.add("Path", m.getattr("params")?.getattr("Path")?)?;

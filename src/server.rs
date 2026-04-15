@@ -21,6 +21,7 @@ use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
 // internal Imports
 use crate::app::FastrAPI;
+use crate::core::AppState;
 use crate::middlewares::build_cors_layer;
 use crate::openapi::build_openapi_spec;
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
@@ -36,11 +37,6 @@ static PYTHON_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
         .build()
         .expect("Failed to create Python runtime")
 });
-
-#[derive(Clone)]
-pub struct AppState {
-    pub rt_handle: tokio::runtime::Handle,
-}
 
 struct EnteredLifespan {
     manager: Py<PyAny>,
