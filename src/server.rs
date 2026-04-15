@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
 };
 use once_cell::sync::Lazy;
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+use pyo3::exceptions::{PyKeyboardInterrupt, PyTypeError};
 use pyo3::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -47,6 +47,11 @@ struct EnteredLifespan {
     event_loop: Py<PyAny>,
 }
 
+struct PreparedLifecycleHandler {
+    callable: Py<PyAny>,
+    is_async: bool,
+}
+
 pub fn serve(
     py: Python<'_>,
     host: Option<String>,
@@ -70,14 +75,8 @@ pub fn serve(
     let docs_url = app_config.docs_url.clone();
     let openapi_url = app_config.openapi_url.clone();
     let docs_url_for_log = docs_url.clone();
-    let on_startup = app_config
-        .on_startup
-        .as_ref()
-        .map(|handler| handler.clone_ref(py));
-    let on_shutdown = app_config
-        .on_shutdown
-        .as_ref()
-        .map(|handler| handler.clone_ref(py));
+    let on_startup = prepare_lifecycle_handlers(py, app_config.on_startup.as_ref())?;
+    let on_shutdown = prepare_lifecycle_handlers(py, app_config.on_shutdown.as_ref())?;
     let lifespan = app_config
         .lifespan
         .as_ref()
@@ -87,7 +86,7 @@ pub fn serve(
     let router = build_router(py, app_state.clone(), docs_url, openapi_url, &app_config);
     drop(app_config);
 
-    let server_thread = std::thread::spawn(move || {
+    py.detach(move || {
         let entered_lifespan = match run_startup_phase(app, lifespan, on_startup) {
             Ok(entered) => entered,
             Err(err) => {
@@ -128,13 +127,14 @@ pub fn serve(
             error!("Server error: {}", err);
         }
 
-        if let Err(err) = run_shutdown_phase(entered_lifespan, on_shutdown) {
-            log_python_error("shutdown failed", err);
+        if entered_lifespan.is_some() || on_shutdown.is_some() {
+            clear_pending_interrupt();
+
+            if let Err(err) = run_shutdown_phase(entered_lifespan, on_shutdown) {
+                log_python_error("shutdown failed", err);
+            }
         }
     });
-
-    py.detach(move || server_thread.join())
-        .map_err(|_| PyRuntimeError::new_err("Server thread panicked"))?;
 
     Ok(())
 }
@@ -142,7 +142,7 @@ pub fn serve(
 fn run_startup_phase(
     app: Py<FastrAPI>,
     lifespan: Option<Py<PyAny>>,
-    on_startup: Option<Py<PyAny>>,
+    on_startup: Option<Vec<PreparedLifecycleHandler>>,
 ) -> PyResult<Option<EnteredLifespan>> {
     if let Some(lifespan_handler) = lifespan {
         return enter_lifespan(app, lifespan_handler).map(Some);
@@ -157,7 +157,7 @@ fn run_startup_phase(
 
 fn run_shutdown_phase(
     entered_lifespan: Option<EnteredLifespan>,
-    on_shutdown: Option<Py<PyAny>>,
+    on_shutdown: Option<Vec<PreparedLifecycleHandler>>,
 ) -> PyResult<()> {
     if let Some(entered) = entered_lifespan {
         return exit_lifespan(entered);
@@ -170,61 +170,86 @@ fn run_shutdown_phase(
     Ok(())
 }
 
-fn run_lifecycle_handlers(handlers: Py<PyAny>) -> PyResult<()> {
-    for handler in extract_lifecycle_handlers(&handlers)? {
-        run_lifecycle_handler(handler)?;
-    }
-
-    Ok(())
-}
-
-fn extract_lifecycle_handlers(handlers: &Py<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
-    Python::attach(|py| {
-        let handlers_bound = handlers.bind(py);
-        let builtins = py.import("builtins")?;
-
-        if builtins
-            .call_method1("callable", (handlers_bound,))?
-            .extract::<bool>()?
-        {
-            return Ok(vec![handlers.clone_ref(py)]);
-        }
-
-        let mut extracted = Vec::new();
-        for item in handlers_bound.try_iter()? {
-            let handler = item?.unbind();
-            if !builtins
-                .call_method1("callable", (handler.bind(py),))?
-                .extract::<bool>()?
-            {
-                return Err(PyTypeError::new_err(
-                    "Lifecycle handlers must be callables or iterables of callables",
-                ));
+fn run_lifecycle_handlers(handlers: Vec<PreparedLifecycleHandler>) -> PyResult<()> {
+    Python::attach(|py| -> PyResult<()> {
+        let mut event_loop = None;
+        let result = (|| {
+            for handler in handlers {
+                run_lifecycle_handler(py, handler, &mut event_loop)?;
             }
-            extracted.push(handler);
+
+            Ok(())
+        })();
+
+        if let Some(event_loop) = event_loop.as_ref() {
+            shutdown_async_generators(event_loop.bind(py));
+            close_event_loop(py, event_loop.bind(py));
         }
 
-        Ok(extracted)
+        result
     })
 }
 
-fn run_lifecycle_handler(handler: Py<PyAny>) -> PyResult<()> {
-    let is_async = Python::attach(|py| -> PyResult<bool> {
-        py.import("inspect")?
-            .call_method1("iscoroutinefunction", (handler.bind(py),))?
-            .extract()
-    })?;
+fn prepare_lifecycle_handlers(
+    py: Python<'_>,
+    handlers: Option<&Py<PyAny>>,
+) -> PyResult<Option<Vec<PreparedLifecycleHandler>>> {
+    let inspect = py.import("inspect")?.into_any();
 
-    if is_async {
-        Python::attach(|py| -> PyResult<()> {
-            let coroutine = handler.bind(py).call0()?;
-            run_awaitable_in_new_loop(py, coroutine)
-        })?;
+    handlers
+        .map(|handlers| {
+            extract_lifecycle_handlers(py, handlers)?
+                .into_iter()
+                .map(|callable| {
+                    let is_async = is_async_callable(&inspect, callable.bind(py))?;
+                    Ok(PreparedLifecycleHandler { callable, is_async })
+                })
+                .collect()
+        })
+        .transpose()
+}
+
+fn extract_lifecycle_handlers(py: Python<'_>, handlers: &Py<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+    let handlers_bound = handlers.bind(py);
+
+    if handlers_bound.is_callable() {
+        return Ok(vec![handlers.clone_ref(py)]);
+    }
+
+    let mut extracted = Vec::new();
+    for item in handlers_bound.try_iter()? {
+        let handler = item?.unbind();
+        if !handler.bind(py).is_callable() {
+            return Err(PyTypeError::new_err(
+                "Lifecycle handlers must be callables or iterables of callables",
+            ));
+        }
+        extracted.push(handler);
+    }
+
+    Ok(extracted)
+}
+
+fn is_async_callable(inspect: &Bound<'_, PyAny>, callable: &Bound<'_, PyAny>) -> PyResult<bool> {
+    inspect
+        .call_method1("iscoroutinefunction", (callable,))?
+        .extract()
+}
+
+fn run_lifecycle_handler(
+    py: Python<'_>,
+    handler: PreparedLifecycleHandler,
+    event_loop: &mut Option<Py<PyAny>>,
+) -> PyResult<()> {
+    if handler.is_async {
+        if event_loop.is_none() {
+            *event_loop = Some(create_event_loop(py)?);
+        }
+
+        let coroutine = handler.callable.bind(py).call0()?;
+        run_awaitable_in_loop(py, event_loop.as_ref().unwrap().bind(py), coroutine)?;
     } else {
-        Python::attach(|py| -> PyResult<()> {
-            handler.bind(py).call0()?;
-            Ok(())
-        })?;
+        handler.callable.bind(py).call0()?;
     }
 
     Ok(())
@@ -272,14 +297,6 @@ fn create_event_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
     Ok(event_loop.unbind())
 }
 
-fn run_awaitable_in_new_loop(py: Python<'_>, awaitable: Bound<'_, PyAny>) -> PyResult<()> {
-    let event_loop = create_event_loop(py)?;
-    let result = run_awaitable_in_loop(py, event_loop.bind(py), awaitable);
-    shutdown_async_generators(event_loop.bind(py));
-    close_event_loop(py, event_loop.bind(py));
-    result
-}
-
 fn run_awaitable_in_loop(
     py: Python<'_>,
     event_loop: &Bound<'_, PyAny>,
@@ -304,6 +321,16 @@ fn close_event_loop(py: Python<'_>, event_loop: &Bound<'_, PyAny>) {
     }
 
     let _ = event_loop.call_method0("close");
+}
+
+fn clear_pending_interrupt() {
+    Python::attach(|py| {
+        if let Err(err) = py.check_signals() {
+            if !err.is_instance_of::<PyKeyboardInterrupt>(py) {
+                log_python_error("signal handler failed", err);
+            }
+        }
+    });
 }
 
 fn log_python_error(context: &str, err: PyErr) {
