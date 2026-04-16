@@ -1,18 +1,14 @@
+use crate::globals::WEBSOCKET_ROUTES;
 use axum::{extract::Extension, response::IntoResponse};
 use bytes::Bytes;
 use fastwebsockets::{upgrade, FragmentCollector, Frame, OpCode};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
-use once_cell::sync::Lazy;
-use papaya::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict, PyTuple};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::error;
-
-pub static WEBSOCKET_ROUTES: Lazy<HashMap<String, Py<PyAny>>> =
-    Lazy::new(|| HashMap::with_capacity(32));
 
 /// @app.websocket("/ws") decorator
 #[pyfunction]
@@ -31,7 +27,6 @@ pub fn websocket(path: String) -> PyResult<Py<PyAny>> {
             WEBSOCKET_ROUTES
                 .pin()
                 .insert(route_key.clone(), func_py.clone_ref(py));
-
             Ok(func_py)
         };
 
@@ -69,11 +64,11 @@ async fn handle_connection(
     let ws_stream = fut.await?;
     let mut ws = FragmentCollector::new(ws_stream);
     let handler: Py<PyAny> = {
-        let guard = crate::utils::local_guard(&*WEBSOCKET_ROUTES);
-        WEBSOCKET_ROUTES
-            .get(&*route_key, &guard)
+        let guard = WEBSOCKET_ROUTES.pin();
+        guard
+            .get(&*route_key)
             .cloned()
-            .ok_or("Route not found")?
+            .ok_or("WebSocket route not found")?
     };
 
     let (tx_to_rust, mut rx_from_python) = mpsc::channel::<WSMessage>(1024);

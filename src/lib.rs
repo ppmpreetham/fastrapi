@@ -8,6 +8,7 @@ mod config;
 mod datastructures;
 mod dependencies;
 mod exceptions;
+mod globals;
 mod middlewares;
 mod openapi;
 mod params;
@@ -20,16 +21,13 @@ mod server;
 mod status;
 mod utils;
 mod websocket;
-
 pub use app::FastrAPI;
+pub use globals::{config, BASEMODEL_TYPE, MIDDLEWARES, PYTHON_RUNTIME, ROUTES, WEBSOCKET_ROUTES};
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
 
 use crate::dependencies::DependencyNode;
-use crate::middlewares::PyMiddleware;
-use once_cell::sync::Lazy;
 use papaya::HashMap as PapayaHashMap;
-use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResponseType {
@@ -53,12 +51,6 @@ pub struct RouteHandler {
     pub body_param_names: Vec<String>,
     pub dependencies: Vec<DependencyNode>,
 }
-
-pub static ROUTES: Lazy<PapayaHashMap<String, RouteHandler>> =
-    Lazy::new(|| PapayaHashMap::with_capacity(128));
-
-pub static MIDDLEWARES: Lazy<PapayaHashMap<String, Arc<PyMiddleware>>> =
-    Lazy::new(|| PapayaHashMap::with_capacity(16));
 
 use background::PyBackgroundTasks;
 use datastructures::PyUploadFile;
@@ -143,6 +135,10 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // top level re-exports
     // for `from fastrapi import Query, Depends, HTTPException`
+    m.add(
+        "SecurityScopes",
+        m.getattr("security")?.getattr("SecurityScopes")?,
+    )?;
     m.add("Depends", m.getattr("params")?.getattr("Depends")?)?;
     m.add("Query", m.getattr("params")?.getattr("Query")?)?;
     m.add("Path", m.getattr("params")?.getattr("Path")?)?;

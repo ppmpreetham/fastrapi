@@ -6,7 +6,6 @@ use axum::{
     routing::*,
     Json, Router,
 };
-use once_cell::sync::Lazy;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use std::net::SocketAddr;
@@ -25,17 +24,8 @@ use crate::middlewares::build_cors_layer;
 use crate::openapi::build_openapi_spec;
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
 use crate::utils::local_guard;
-use crate::websocket::{ws_handler, WEBSOCKET_ROUTES};
-use crate::{MIDDLEWARES, ROUTES};
-
-static PYTHON_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(num_cpus::get().max(4).min(16))
-        .thread_name("python-handler")
-        .enable_all()
-        .build()
-        .expect("Failed to create Python runtime")
-});
+use crate::websocket::ws_handler;
+use crate::{MIDDLEWARES, PYTHON_RUNTIME, ROUTES, WEBSOCKET_ROUTES};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -345,8 +335,7 @@ fn build_router(
     }
 
     // Websockets
-    let guard = crate::utils::local_guard(&*WEBSOCKET_ROUTES);
-    for (key, _) in WEBSOCKET_ROUTES.iter(&guard) {
+    for (key, _value) in WEBSOCKET_ROUTES.pin().iter() {
         let parts: Vec<&str> = key.splitn(2, ' ').collect();
         if parts.len() != 2 || parts[0] != "WS" {
             continue;

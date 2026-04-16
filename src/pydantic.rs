@@ -1,4 +1,5 @@
 use crate::utils::{json_to_py_object, py_to_response};
+use crate::BASEMODEL_TYPE;
 use crate::{PyHTMLResponse, PyPlainTextResponse, PyRedirectResponse, RouteHandler};
 use crate::{PyJSONResponse, ResponseType};
 use axum::http::StatusCode;
@@ -7,6 +8,7 @@ use axum::Json;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyType};
 use pyo3::{intern, prelude::*};
 use serde_json::Value;
+
 pub fn load_pydantic_model(py: Python<'_>, module: &str, class_name: &str) -> PyResult<Py<PyAny>> {
     let module = PyModule::import(py, module)?;
     let cls = module.getattr(class_name)?;
@@ -40,48 +42,37 @@ pub fn validate_with_pydantic<'py>(
     }
 }
 
-pub fn call_with_pydantic_validation<'py>(
-    py: Python<'py>,
-    route_func: &Bound<'py, PyAny>,
-    model_class: &Bound<'py, PyAny>,
-    payload: &Value,
-) -> Response {
-    match validate_with_pydantic(py, model_class, payload) {
-        Ok(validated_obj) => match route_func.call1((validated_obj,)) {
-            Ok(result) => py_to_response(py, &result),
-            Err(err) => {
-                err.print(py);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        },
-        Err(validation_error) => validation_error,
-    }
+fn initialize_basemodel(py: Python<'_>) -> Option<Py<PyType>> {
+    let pydantic = py.import("pydantic").ok()?;
+    let base_model = pydantic.getattr("BaseModel").ok()?;
+    base_model.cast_into::<PyType>().ok().map(|ty| ty.unbind())
 }
 
 pub fn is_pydantic_model(py: Python<'_>, type_hint: &Bound<'_, PyAny>) -> bool {
-    if !type_hint.is_instance_of::<PyType>() {
+    let Ok(type_obj) = type_hint.cast::<PyType>() else {
         return false;
-    }
+    };
 
-    if type_hint.hasattr("model_validate").unwrap_or(false) {
+    if type_obj.hasattr("model_validate").unwrap_or(false)
+        || type_obj.hasattr("model_fields").unwrap_or(false)
+        || type_obj.hasattr("__pydantic_validator__").unwrap_or(false)   // strong v2 signal
+        || type_obj.hasattr("__pydantic_core_schema__").unwrap_or(false)
+    {
         return true;
     }
 
-    if type_hint.hasattr("model_fields").unwrap_or(false) {
-        return true;
+    if let Some(base_model) = BASEMODEL_TYPE.get() {
+        return type_obj.is_subclass(base_model.bind(py)).unwrap_or(false);
     }
 
-    if let Ok(pydantic) = py.import("pydantic") {
-        if let Ok(base_model) = pydantic.getattr("BaseModel") {
-            if let Ok(base_model_type) = base_model.cast::<PyType>() {
-                if let Ok(type_obj) = type_hint.cast::<PyType>() {
-                    return type_obj.is_subclass(base_model_type).unwrap_or(false);
-                }
-            }
-        }
+    if let Some(base_model_type) = initialize_basemodel(py) {
+        let _ = BASEMODEL_TYPE.set(base_model_type);
+        type_obj
+            .is_subclass(BASEMODEL_TYPE.get().unwrap().bind(py))
+            .unwrap_or(false)
+    } else {
+        false
     }
-
-    false
 }
 
 #[pyfunction]
@@ -261,4 +252,22 @@ pub fn get_response_type(py: Python<'_>, func: &Bound<'_, PyAny>) -> ResponseTyp
     })();
 
     result.unwrap_or(ResponseType::Json)
+}
+
+pub fn call_with_pydantic_validation<'py>(
+    py: Python<'py>,
+    route_func: &Bound<'py, PyAny>,
+    model_class: &Bound<'py, PyAny>,
+    payload: &Value,
+) -> Response {
+    match validate_with_pydantic(py, model_class, payload) {
+        Ok(validated_obj) => match route_func.call1((validated_obj,)) {
+            Ok(result) => py_to_response(py, &result),
+            Err(err) => {
+                err.print(py);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        },
+        Err(validation_error) => validation_error,
+    }
 }
