@@ -20,7 +20,7 @@ use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
 // internal Imports
 use crate::app::FastrAPI;
-use crate::middlewares::build_cors_layer;
+use crate::middleware::build_cors_layer;
 use crate::openapi::build_openapi_spec;
 use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_args};
 use crate::utils::local_guard;
@@ -418,11 +418,9 @@ fn build_router(
             let middleware = middleware_ref.clone();
 
             app = app.layer(axum_middleware::from_fn(move |req, next| {
-            let middleware = middleware.clone();
-            async move {
-                crate::middlewares::execute_py_middleware(middleware, req, next).await
-            }
-        }));
+                let middleware = middleware.clone();
+                async move { crate::middleware::execute_py_middleware(middleware, req, next).await }
+            }));
         }
     }
 

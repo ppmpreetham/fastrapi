@@ -4,7 +4,7 @@ use pyo3::types::{PyAny, PyCFunction, PyDict, PyTuple};
 use std::sync::Arc;
 use tracing::info;
 
-use crate::middlewares::{
+use crate::middleware::{
     parse_cors_params, parse_gzip_params, parse_session_params, parse_trusted_host_params,
     PyMiddleware,
 };

@@ -9,7 +9,7 @@ mod datastructures;
 mod dependencies;
 mod exceptions;
 mod globals;
-mod middlewares;
+mod middleware;
 mod openapi;
 mod params;
 mod py_handlers;
@@ -34,7 +34,7 @@ use exceptions::{
     PyFastrAPIDeprecationWarning, PyFastrAPIError, PyHTTPException, PyRequestValidationError,
     PyResponseValidationError, PyValidationException, PyWebSocketException,
 };
-use middlewares::{CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware};
+use middleware::{CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware};
 use params::{
     PyBody, PyCookie, PyDepends, PyFile, PyForm, PyHeader, PyPath, PyQuery, PySecurity, Undefined,
     Unset,
