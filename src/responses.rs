@@ -9,7 +9,7 @@ use tracing::error;
 
 use pyo3::{pyclass, pymethods, Py, PyAny};
 
-use crate::ResponseType;
+use crate::types::response::ResponseType;
 
 // wrapper classes
 #[pyclass(name = "HTMLResponse", skip_from_py_object)]

@@ -1,3 +1,4 @@
+use crate::types::route::RouteHandler;
 use crate::utils::py_dict_to_json;
 use papaya::HashMap as PapayaMap;
 use pyo3::prelude::*;
@@ -205,10 +206,7 @@ fn extract_param_info(
     (description, schema, required)
 }
 
-pub fn build_openapi_spec(
-    py: Python,
-    routes: &PapayaMap<String, crate::RouteHandler>,
-) -> OpenApiSpec {
+pub fn build_openapi_spec(py: Python, routes: &PapayaMap<String, RouteHandler>) -> OpenApiSpec {
     let mut spec = OpenApiSpec::default();
     let mut schemas: HashMap<String, JsonValue> = HashMap::new();
     let guard = routes.guard();

@@ -1,7 +1,11 @@
+use crate::types::response::ResponseType;
+use crate::types::route::RouteHandler;
+
 use crate::utils::{json_to_py_object, py_to_response};
 use crate::BASEMODEL_TYPE;
-use crate::{PyHTMLResponse, PyPlainTextResponse, PyRedirectResponse, RouteHandler};
-use crate::{PyJSONResponse, ResponseType};
+use crate::{PyHTMLResponse, PyPlainTextResponse, PyRedirectResponse};
+
+use crate::PyJSONResponse;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

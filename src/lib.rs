@@ -19,38 +19,14 @@ mod responses;
 mod security;
 mod server;
 mod status;
+pub mod types;
 mod utils;
 mod websocket;
 pub use app::FastrAPI;
 pub use globals::{config, BASEMODEL_TYPE, MIDDLEWARES, PYTHON_RUNTIME, ROUTES, WEBSOCKET_ROUTES};
+use papaya::HashMap as PapayaHashMap;
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
-
-use crate::dependencies::DependencyNode;
-use papaya::HashMap as PapayaHashMap;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResponseType {
-    Json,
-    Html,
-    PlainText,
-    Redirect,
-    Auto,
-}
-
-#[derive(Clone)]
-pub struct RouteHandler {
-    pub func: Py<PyAny>,
-    pub is_async: bool,
-    pub is_fast_path: bool,
-    pub param_validators: Vec<(String, Py<PyAny>)>,
-    pub response_type: ResponseType,
-    pub needs_kwargs: bool,
-    pub path_param_names: Vec<String>,
-    pub query_param_names: Vec<String>,
-    pub body_param_names: Vec<String>,
-    pub dependencies: Vec<DependencyNode>,
-}
 
 use background::PyBackgroundTasks;
 use datastructures::PyUploadFile;

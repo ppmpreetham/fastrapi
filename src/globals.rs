@@ -1,5 +1,6 @@
 use crate::middlewares::PyMiddleware;
-use crate::{PapayaHashMap, RouteHandler};
+use crate::types::route::RouteHandler;
+use crate::PapayaHashMap;
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;

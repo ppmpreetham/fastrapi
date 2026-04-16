@@ -27,9 +27,9 @@ pub struct DependencyNode {
     pub injection_plan: Vec<(String, InjectionType)>,
 }
 
-/// Parses dependencies and flattens them into a topologically sorted list
-/// (post-order traversal). Sub-dependencies always appear before their parents,
-/// so execution is a simple linear `for` loop with no recursion at request time.
+/// parses dependencies and flattens them into a topologically sorted list
+/// (post-order traversal). sub-dependencies always appear before their parents,
+/// so execution is a simple linear for loop with no recursion at request time.
 pub fn parse_dependencies(py: Python, func: &Bound<PyAny>) -> PyResult<Vec<DependencyNode>> {
     let mut flat_plan = Vec::new();
     let mut visited = HashSet::new();
@@ -96,8 +96,6 @@ fn extract_and_flatten(
                     let target_id = target_callable.as_ptr() as u64;
                     sub_deps.push((param_name_str.clone(), target_id));
 
-                    // Recurse first: sub-dependencies are inserted into flat_plan
-                    // BEFORE the current function (post-order / topological sort)
                     if !visited.contains(&target_id) {
                         extract_and_flatten(
                             py,
@@ -183,9 +181,6 @@ fn build_injection_plan(
     Ok(plan)
 }
 
-/// Executes the flat dependency plan linearly.
-/// Because the plan is topologically sorted, each dependency's sub-dependencies
-/// are guaranteed to be in `cache` before it runs. No recursion, no boxing.
 pub async fn execute_dependencies(
     flat_plan: &[DependencyNode],
     request_data: Py<PyDict>,
@@ -206,7 +201,6 @@ pub async fn execute_dependencies(
             }
         }
 
-        // Build kwargs by borrowing directly from cache — no cloning of cached values
         let (py_kwargs, is_async) = Python::attach(|py| -> PyResult<(Py<PyDict>, bool)> {
             let final_kwargs = PyDict::new(py);
             let req_dict = request_data.bind(py);
@@ -272,7 +266,6 @@ pub async fn execute_dependencies(
             })?
         };
 
-        // Propagate top-level results to the route handler
         if dep.is_top_level {
             if let Some(name) = &dep.param_name {
                 final_results.insert(name.clone(), result.clone());
