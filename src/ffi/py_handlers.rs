@@ -1,5 +1,3 @@
-// ── py_handlers.rs ────────────────────────────────────────────────────────────
-
 use crate::ffi::exceptions::PyHTTPException;
 use crate::ffi::pydantic;
 use crate::globals::ROUTES;
@@ -18,14 +16,10 @@ use std::sync::Arc;
 
 type DependencyResults = std::collections::HashMap<String, Arc<Py<PyAny>>>;
 
-// ── pure-Rust handler lookup, no GIL needed ───────────────────────────────────
-
 fn load_handler(route_key: &Arc<str>) -> Option<Arc<RouteHandler>> {
     let guard = local_guard(&*ROUTES);
     ROUTES.get(route_key.as_ref(), &guard).cloned()
 }
-
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 fn python_error_to_response(py: Python<'_>, err: PyErr) -> Response {
     if let Ok(http_error) = err.value(py).extract::<PyRef<'_, PyHTTPException>>() {
@@ -122,8 +116,6 @@ async fn prepare_request_context(
     }
 }
 
-// ── handler dispatch ──────────────────────────────────────────────────────────
-
 async fn call_sync_handler(
     rt_handle: tokio::runtime::Handle,
     handler: Arc<RouteHandler>,
@@ -213,8 +205,6 @@ async fn call_async_handler(
     }
 }
 
-// ── public entry points ───────────────────────────────────────────────────────
-
 pub async fn run_py_handler_with_request(
     rt_handle: tokio::runtime::Handle,
     route_key: Arc<str>,
@@ -226,8 +216,6 @@ pub async fn run_py_handler_with_request(
         None => return StatusCode::NOT_FOUND.into_response(),
     };
 
-    // ── fast path: sync handler + no dependencies ──────────────────────────────
-    // Single GIL acquisition inside spawn_blocking — never touches the tokio thread.
     if !handler.is_async && handler.dependencies.is_empty() {
         return rt_handle
             .spawn_blocking(move || {
