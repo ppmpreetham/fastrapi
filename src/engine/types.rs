@@ -1,7 +1,9 @@
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use crate::middleware::{CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware};
+use crate::http::middleware::{
+    CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware,
+};
 
 #[pyclass(name = "FastrAPI")]
 pub struct FastrAPI {

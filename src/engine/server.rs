@@ -1,3 +1,4 @@
+use super::types::FastrAPI;
 use axum::{
     body::to_bytes,
     extract::{ConnectInfo, Extension, Path, Request},
@@ -20,18 +21,17 @@ use tower_sessions::cookie::Key;
 use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
 // internal Imports
-use crate::app::FastrAPI;
-use crate::middleware::{
+use crate::ffi::py_handlers::{run_py_handler_no_args, run_py_handler_with_request};
+use crate::globals::{MIDDLEWARES, PYTHON_RUNTIME, ROUTES, WEBSOCKET_ROUTES};
+use crate::http::middleware::{
     build_cors_layer, parse_cors_params, parse_gzip_params, parse_session_params,
     parse_trusted_host_params, CORSMiddleware, GZipMiddleware, SessionMiddleware,
     TrustedHostMiddleware,
 };
-use crate::openapi::build_openapi_spec;
-use crate::py_handlers::{run_py_handler_no_args, run_py_handler_with_request};
-use crate::types::route::{RequestInput, RouteHandler};
-use crate::utils::local_guard;
-use crate::websocket::ws_handler;
-use crate::{MIDDLEWARES, PYTHON_RUNTIME, ROUTES, WEBSOCKET_ROUTES};
+use crate::http::websocket::ws_handler;
+use crate::routing::types::{RequestInput, RouteHandler};
+use crate::utils::openapi::build_openapi_spec;
+use crate::utils::utils::local_guard;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -569,7 +569,7 @@ fn build_router(
     if let Some(docs) = docs_url {
         app = app.route(
             &docs,
-            get(|| async { Html(include_str!("../static/swagger-ui.html")) }),
+            get(|| async { Html(include_str!("../../static/swagger-ui.html")) }),
         );
     }
 
@@ -618,7 +618,9 @@ fn build_router(
 
             app = app.layer(axum_middleware::from_fn(move |req, next| {
                 let middleware = middleware.clone();
-                async move { crate::middleware::execute_py_middleware(middleware, req, next).await }
+                async move {
+                    crate::http::middleware::execute_py_middleware(middleware, req, next).await
+                }
             }));
         }
     }

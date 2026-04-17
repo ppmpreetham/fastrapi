@@ -2,29 +2,32 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3_nest::{add_classes, submodule};
 
-mod app;
-mod background;
-mod config;
-mod datastructures;
-mod dependencies;
-mod exceptions;
+pub mod engine;
+pub mod ffi;
+pub mod http;
 mod globals;
-mod middleware;
-mod openapi;
-mod params;
-mod py_handlers;
-mod pydantic;
-mod request;
-mod responses;
-mod security;
-mod server;
-mod status;
+pub mod routing;
 pub mod types;
-mod utils;
-mod websocket;
-pub use app::FastrAPI;
+pub mod utils;
+
+pub use engine::app;
+pub use engine::background;
+pub use engine::server;
+pub use ffi::datastructures;
+pub use ffi::exceptions;
+pub use ffi::py_handlers;
+pub use ffi::pydantic;
 pub use globals::{config, BASEMODEL_TYPE, MIDDLEWARES, PYTHON_RUNTIME, ROUTES, WEBSOCKET_ROUTES};
-use papaya::HashMap as PapayaHashMap;
+pub use http::middleware;
+pub use http::request;
+pub use http::responses;
+pub use http::status;
+pub use http::websocket;
+pub use routing::dependencies;
+pub use routing::params;
+pub use routing::security;
+
+pub use app::FastrAPI;
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
 
@@ -100,17 +103,14 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )
     );
 
-    // backward compatibility: fastrapi.middleware.cors
     submodule!(m, "middleware.cors", add_classes!(CORSMiddleware));
     submodule!(m, "websocket", add_classes!(PyWebSocket));
     let ws_mod = m.getattr("websocket")?.cast_into::<PyModule>()?;
-    ws_mod.add_function(wrap_pyfunction!(crate::websocket::websocket, &ws_mod)?)?;
+    ws_mod.add_function(wrap_pyfunction!(crate::http::websocket::websocket, &ws_mod)?)?;
 
     status::create_status_submodule(m)?;
     pydantic::register_pydantic_integration(m)?;
 
-    // top level re-exports
-    // for `from fastrapi import Query, Depends, HTTPException`
     m.add(
         "SecurityScopes",
         m.getattr("security")?.getattr("SecurityScopes")?,

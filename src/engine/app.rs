@@ -4,16 +4,16 @@ use pyo3::types::{PyAny, PyCFunction, PyDict, PyString, PyTuple};
 use std::sync::Arc;
 use tracing::info;
 
-use crate::middleware::{
+use super::server;
+pub use super::types::FastrAPI;
+use crate::ffi::pydantic::parse_route_metadata;
+use crate::globals::{MIDDLEWARES, ROUTES};
+use crate::http::middleware::{
     parse_cors_params, parse_gzip_params, parse_session_params, parse_trusted_host_params,
     PyMiddleware,
 };
-use crate::pydantic::parse_route_metadata;
-use crate::types::route::RouteHandler;
-use crate::websocket::websocket as ws_decorator;
-use crate::{MIDDLEWARES, ROUTES};
-
-pub use crate::types::fastrapi::FastrAPI;
+use crate::http::websocket::websocket as ws_decorator;
+use crate::routing::types::RouteHandler;
 
 #[pymethods]
 impl FastrAPI {
@@ -275,7 +275,7 @@ impl FastrAPI {
     }
 
     fn serve(slf: Py<Self>, py: Python, host: Option<String>, port: Option<u16>) -> PyResult<()> {
-        crate::server::serve(py, host, port, slf)
+        server::serve(py, host, port, slf)
     }
 
     fn create_decorator<'py>(

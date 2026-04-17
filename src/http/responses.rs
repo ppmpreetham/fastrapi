@@ -1,4 +1,4 @@
-use crate::utils::py_any_to_json;
+use crate::utils::utils::{py_any_to_json, py_to_response};
 use axum::{
     http::{header, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
@@ -115,7 +115,7 @@ pub fn convert_response_by_type(
 
     match response_type {
         ResponseType::Json => {
-            let json = crate::utils::py_any_to_json(py, result);
+            let json = py_any_to_json(py, result);
             (StatusCode::OK, Json(json)).into_response()
         }
         ResponseType::PlainText => {
@@ -131,7 +131,7 @@ pub fn convert_response_by_type(
         }
         ResponseType::Html => convert_html_response(py, result),
         ResponseType::Redirect => convert_redirect_response(py, result),
-        ResponseType::Auto => crate::utils::py_to_response(py, result),
+        ResponseType::Auto => py_to_response(py, result),
     }
 }
 

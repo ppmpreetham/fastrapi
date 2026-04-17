@@ -1,8 +1,12 @@
+use crate::globals::BASEMODEL_TYPE;
+use crate::http::responses::{
+    PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse,
+};
+use crate::routing::dependencies::{self, DependencyNode};
+use crate::routing::params;
+use crate::routing::types::{ParameterSource, ParsedParameter, RequestInput, RouteHandler};
 use crate::types::response::ResponseType;
-use crate::types::route::{ParameterSource, ParsedParameter, RequestInput, RouteHandler};
-use crate::utils::{json_to_py_object, py_to_response};
-use crate::BASEMODEL_TYPE;
-use crate::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
+use crate::utils::utils::{json_to_py_object, py_to_response};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -142,7 +146,7 @@ pub struct ParsedRouteMetadata {
     pub path_param_names: Vec<String>,
     pub query_param_names: Vec<String>,
     pub body_param_names: Vec<String>,
-    pub dependencies: Vec<crate::dependencies::DependencyNode>,
+    pub dependencies: Vec<DependencyNode>,
     pub dependency_needs_request: bool,
     pub parsed_params: Vec<ParsedParameter>,
     pub is_async: bool,
@@ -159,9 +163,9 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         .map(|f| (f & 0x80) != 0)
         .unwrap_or(false);
 
-    let path_param_names = crate::params::extract_path_param_names(path);
-    let dependencies =
-        crate::dependencies::parse_dependencies(py, func, &path_param_names).unwrap_or_default();
+    let path_param_names = params::extract_path_param_names(path);
+    let dependencies = dependencies::parse_dependencies(py, func, &path_param_names)
+        .unwrap_or_default();
 
     let dependency_needs_request = dependencies.iter().any(|dep| dep.needs_request_object);
     let dep_param_names: HashSet<String> = dependencies
@@ -193,7 +197,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                 continue;
             }
 
-            let mut parsed_param = crate::params::parse_parameter_spec(
+            let mut parsed_param = params::parse_parameter_spec(
                 py,
                 &param_name,
                 &param_obj,
@@ -589,7 +593,7 @@ pub fn get_response_type(py: Python<'_>, func: &Bound<'_, PyAny>) -> ResponseTyp
         Ok(match name_str {
             "dict" | "list" | "set" => ResponseType::Json,
             "str" => ResponseType::PlainText,
-            _ if crate::pydantic::is_pydantic_model(py, &ann) => ResponseType::Json,
+            _ if self::is_pydantic_model(py, &ann) => ResponseType::Json,
             _ => ResponseType::Json,
         })
     })();

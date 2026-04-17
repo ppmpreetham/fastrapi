@@ -167,7 +167,7 @@ impl PyHTTPException {
     pub fn to_response(&self, py: Python<'_>) -> Response {
         let status =
             StatusCode::try_from(self.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let detail_json = crate::utils::py_any_to_json(py, self.detail.bind(py));
+        let detail_json = crate::utils::utils::py_any_to_json(py, self.detail.bind(py));
         (status, Json(json!({ "detail": detail_json }))).into_response()
     }
 }

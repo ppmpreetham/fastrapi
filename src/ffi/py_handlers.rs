@@ -1,12 +1,13 @@
 // ── py_handlers.rs ────────────────────────────────────────────────────────────
 
-use crate::dependencies::{self, DependencyExecutionError};
-use crate::exceptions::PyHTTPException;
-use crate::request::PyRequest;
-use crate::responses::convert_response_by_type;
-use crate::types::route::{RequestInput, RouteHandler};
-use crate::utils::local_guard;
-use crate::ROUTES;
+use crate::ffi::exceptions::PyHTTPException;
+use crate::ffi::pydantic;
+use crate::globals::ROUTES;
+use crate::http::request::PyRequest;
+use crate::http::responses::convert_response_by_type;
+use crate::routing::dependencies::{self, DependencyExecutionError};
+use crate::routing::types::{RequestInput, RouteHandler};
+use crate::utils::utils::local_guard;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -102,7 +103,7 @@ async fn prepare_request_context(
                     };
 
                     let kwargs = PyDict::new(py);
-                    crate::pydantic::apply_request_data(
+                    pydantic::apply_request_data(
                         py,
                         &handler,
                         &request_input,
@@ -232,7 +233,7 @@ pub async fn run_py_handler_with_request(
             .spawn_blocking(move || {
                 Python::attach(|py| {
                     let kwargs = PyDict::new(py);
-                    if let Err(resp) = crate::pydantic::apply_request_data(
+                    if let Err(resp) = pydantic::apply_request_data(
                         py,
                         &handler,
                         &request_input,

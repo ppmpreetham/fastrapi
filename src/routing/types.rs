@@ -1,5 +1,5 @@
-use super::response::ResponseType;
-use crate::dependencies::DependencyNode;
+use crate::routing::dependencies::DependencyNode;
+use crate::types::response::ResponseType;
 use pyo3::{Py, PyAny};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ pub struct ParsedParameter {
     pub constraints: ParameterConstraints,
     pub param_object: Option<Py<PyAny>>,
     pub is_pydantic_model: bool,
-    pub scalar_kind: crate::pydantic::ScalarKind,
+    pub scalar_kind: crate::ffi::pydantic::ScalarKind,
 }
 
 #[derive(Clone, Debug, Default)]

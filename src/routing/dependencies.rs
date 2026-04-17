@@ -1,5 +1,7 @@
-use crate::security::PySecurityScopes;
-use crate::types::route::{ParsedParameter, RequestInput};
+use super::params;
+use super::security::PySecurityScopes;
+use super::types::{ParsedParameter, RequestInput};
+use crate::ffi::pydantic;
 use axum::response::Response;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -144,7 +146,7 @@ fn extract_and_flatten(
         }
 
         if let Ok(default) = param_obj.getattr("default") {
-            if crate::params::is_inspect_empty(py, &default) {
+            if params::is_inspect_empty(py, &default) {
                 continue;
             }
 
@@ -269,8 +271,7 @@ fn build_injection_plan(
         }
 
         if !special {
-            let parsed_param =
-                crate::params::parse_parameter_spec(py, &name, &param, path_param_names)?;
+            let parsed_param = params::parse_parameter_spec(py, &name, &param, path_param_names)?;
             plan.push((name, InjectionType::Parameter(parsed_param)));
         }
     }
@@ -296,7 +297,7 @@ fn build_dependency_kwargs(
             }
             InjectionType::Parameter(parameter) => {
                 if let Some(value) =
-                    crate::pydantic::resolve_parameter_value(py, parameter, request_input)
+                    pydantic::resolve_parameter_value(py, parameter, request_input)
                         .map_err(DependencyExecutionError::Response)?
                 {
                     final_kwargs.set_item(arg_name, value)?;

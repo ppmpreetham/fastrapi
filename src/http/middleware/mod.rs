@@ -30,6 +30,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use std::sync::Arc;
 use tracing::{debug, error};
+use crate::utils::utils::py_to_response;
 
 mod cors;
 mod gzip;
@@ -94,7 +95,7 @@ pub async fn execute_py_middleware(
             match middleware_func.as_borrowed().call1((py_dict,)) {
                 Ok(result) => {
                     if !result.is_none() {
-                        return crate::utils::py_to_response(py, &result);
+                        return py_to_response(py, &result);
                     }
 
                     (StatusCode::NO_CONTENT, "CONTINUE").into_response()

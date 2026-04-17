@@ -1,4 +1,5 @@
 use crate::globals::WEBSOCKET_ROUTES;
+use crate::utils::utils::{json_to_py_object, py_any_to_json};
 use axum::{extract::Extension, response::IntoResponse};
 use bytes::Bytes;
 use fastwebsockets::{upgrade, FragmentCollector, Frame, OpCode};
@@ -212,7 +213,7 @@ impl PyWebSocket {
         py: Python<'py>,
         data: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let json_str = crate::utils::py_any_to_json(py, data).to_string();
+        let json_str = py_any_to_json(py, data).to_string();
         self.send_text(py, json_str)
     }
 
@@ -264,7 +265,7 @@ impl PyWebSocket {
                     Python::attach(|py| {
                         let json: serde_json::Value = serde_json::from_str(&text)
                             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-                        Ok(crate::utils::json_to_py_object(py, &json))
+                        Ok(json_to_py_object(py, &json))
                     })
                 }
                 Some(WSMessage::Close) | None => Err(pyo3::exceptions::PyConnectionError::new_err(

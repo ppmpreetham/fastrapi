@@ -1,5 +1,6 @@
-use crate::types::route::ParameterSource;
-use crate::utils::py_dict_to_json;
+use crate::ffi::pydantic;
+use crate::routing::types::{ParameterConstraints, ParameterSource, RouteHandler};
+use super::utils::py_dict_to_json;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde::{Deserialize, Serialize};
@@ -157,7 +158,7 @@ fn python_type_to_openapi_type(py: Python, type_hint: &Bound<PyAny>) -> JsonValu
         }
     }
 
-    if crate::pydantic::is_pydantic_model(py, type_hint) {
+    if pydantic::is_pydantic_model(py, type_hint) {
         let schema_name = get_schema_name(type_hint);
         return json!({"$ref": format!("#/components/schemas/{}", schema_name)});
     }
@@ -165,10 +166,7 @@ fn python_type_to_openapi_type(py: Python, type_hint: &Bound<PyAny>) -> JsonValu
     json!({"type": "string"})
 }
 
-fn apply_parameter_constraints(
-    mut schema: JsonValue,
-    constraints: &crate::types::route::ParameterConstraints,
-) -> JsonValue {
+fn apply_parameter_constraints(mut schema: JsonValue, constraints: &ParameterConstraints) -> JsonValue {
     if let Some(object) = schema.as_object_mut() {
         if let Some(gt) = constraints.gt {
             object.insert("exclusiveMinimum".to_string(), json!(gt));
@@ -197,7 +195,7 @@ fn apply_parameter_constraints(
 
 pub fn build_openapi_spec(
     py: Python<'_>,
-    routes: &papaya::HashMap<String, std::sync::Arc<crate::types::route::RouteHandler>>,
+    routes: &papaya::HashMap<String, std::sync::Arc<RouteHandler>>,
     title: &str,
     version: &str,
     description: &str,

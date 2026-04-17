@@ -2,7 +2,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use std::sync::Arc;
 
-use crate::types::route::{ParameterConstraints, ParameterSource, ParsedParameter};
+use super::types::{ParameterConstraints, ParameterSource, ParsedParameter};
+use crate::ffi::pydantic;
 
 // utils
 
@@ -144,7 +145,7 @@ pub fn parse_parameter_spec(
 
     let is_pydantic_model = annotation
         .as_ref()
-        .map(|annotation| crate::pydantic::is_pydantic_model(py, annotation.bind(py)))
+        .map(|annotation| pydantic::is_pydantic_model(py, annotation.bind(py)))
         .unwrap_or(false);
 
     let default = param_obj.getattr("default")?;
@@ -205,7 +206,7 @@ pub fn parse_parameter_spec(
         constraints,
         param_object,
         is_pydantic_model,
-        scalar_kind: crate::pydantic::ScalarKind::Other,
+        scalar_kind: pydantic::ScalarKind::Other,
     })
 }
 
