@@ -7,5 +7,4 @@ app = FastrAPI()
 def hello() -> JSONResponse:
     return {"Hello": "World"}
 
-if __name__ == "__main__":
-    app.serve("127.0.0.1", 8000)
+app.serve("127.0.0.1", 8000)

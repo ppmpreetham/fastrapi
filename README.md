@@ -305,18 +305,19 @@ Some advanced features are still in development like:
 - [ ] Logging/metrics
 - [ ] A nice logging tool
 - [ ] Async Middleware support
+- [x] Built-in middleware setup (`add_middleware` for CORS, GZip, Session, TrustedHost)
 - [x] Lifespan Events (`lifespan=`, `on_startup`, `on_shutdown`)
 - [ ] Better error handling (currently shows Rust errors)
 - [ ] Rate limiter (even FastAPI doesn't have it)
 - [x] Websockets
 - [x] Form/Multipart support
+- [x] Generated OpenAPI JSON + Swagger docs (`/api-docs/openapi.json`, `/docs`)
 - [ ] Sub-APIs / Includes
 - [x] Security Utilities (OAuth2, JWT, etc.)
-- [ ] Hot Reloading
 - [x] Rust integration
 - [x] Dependency injection
-- [x] Static file serving (UploadFile + axum::extract::Multipart)
-- [ ] Testing support
+- [x] Route parameter parsing (`Path`, `Query`, body models, `Depends`, `Security`)
+- [ ] File uploads (`UploadFile` + multipart parsing)
 - [ ] GraphQL support
 - [ ] APIRouter + include_router(prefix=..., tags=..., dependencies=...)
 - [ ] Respect response_model=None (allow raw Response / RedirectResponse returns)

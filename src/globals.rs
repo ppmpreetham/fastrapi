@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 pub static WEBSOCKET_ROUTES: Lazy<PapayaHashMap<String, Py<PyAny>>> =
     Lazy::new(|| PapayaHashMap::with_capacity(32));
 
-pub static ROUTES: Lazy<PapayaHashMap<String, RouteHandler>> =
+pub static ROUTES: Lazy<PapayaHashMap<String, Arc<RouteHandler>>> =
     Lazy::new(|| PapayaHashMap::with_capacity(128));
 
 pub static MIDDLEWARES: Lazy<PapayaHashMap<String, Arc<PyMiddleware>>> =

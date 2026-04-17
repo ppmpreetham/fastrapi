@@ -1,6 +1,5 @@
-use crate::types::route::RouteHandler;
+use crate::types::route::ParameterSource;
 use crate::utils::py_dict_to_json;
-use papaya::HashMap as PapayaMap;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde::{Deserialize, Serialize};
@@ -166,52 +165,57 @@ fn python_type_to_openapi_type(py: Python, type_hint: &Bound<PyAny>) -> JsonValu
     json!({"type": "string"})
 }
 
-fn extract_param_info(
-    py: Python,
-    param_obj: &Bound<PyAny>,
-) -> (Option<String>, Option<JsonValue>, bool) {
-    let mut description = None;
-    let mut schema = None;
-    let mut required = true;
-
-    if let Ok(default) = param_obj.getattr("default") {
-        if let Ok(type_name) = default.get_type().name() {
-            let type_str = type_name.to_string();
-
-            if ["Query", "Path", "Header", "Cookie", "Body", "Form", "File"]
-                .contains(&type_str.as_str())
-            {
-                if let Ok(desc) = default.getattr("description") {
-                    if !desc.is_none() {
-                        description = desc.extract::<String>().ok();
-                    }
-                }
-
-                if let Ok(def_val) = default.getattr("default") {
-                    required = def_val.is_none();
-                }
-            } else if !default.is_none() {
-                required = false;
-            }
+fn apply_parameter_constraints(
+    mut schema: JsonValue,
+    constraints: &crate::types::route::ParameterConstraints,
+) -> JsonValue {
+    if let Some(object) = schema.as_object_mut() {
+        if let Some(gt) = constraints.gt {
+            object.insert("exclusiveMinimum".to_string(), json!(gt));
+        }
+        if let Some(ge) = constraints.ge {
+            object.insert("minimum".to_string(), json!(ge));
+        }
+        if let Some(lt) = constraints.lt {
+            object.insert("exclusiveMaximum".to_string(), json!(lt));
+        }
+        if let Some(le) = constraints.le {
+            object.insert("maximum".to_string(), json!(le));
+        }
+        if let Some(min_length) = constraints.min_length {
+            object.insert("minLength".to_string(), json!(min_length));
+        }
+        if let Some(max_length) = constraints.max_length {
+            object.insert("maxLength".to_string(), json!(max_length));
+        }
+        if let Some(pattern) = &constraints.pattern {
+            object.insert("pattern".to_string(), json!(pattern.as_str()));
         }
     }
-
-    // type annotation
-    if let Ok(annotation) = param_obj.getattr("annotation") {
-        if !annotation.is_none() {
-            schema = Some(python_type_to_openapi_type(py, &annotation));
-        }
-    }
-
-    (description, schema, required)
+    schema
 }
 
-pub fn build_openapi_spec(py: Python, routes: &PapayaMap<String, RouteHandler>) -> OpenApiSpec {
+pub fn build_openapi_spec(
+    py: Python<'_>,
+    routes: &papaya::HashMap<String, std::sync::Arc<crate::types::route::RouteHandler>>,
+    title: &str,
+    version: &str,
+    description: &str,
+) -> serde_json::Value {
     let mut spec = OpenApiSpec::default();
+    spec.info.title = title.to_string();
+    spec.info.version = version.to_string();
+    spec.info.description = if description.is_empty() {
+        None
+    } else {
+        Some(description.to_string())
+    };
+
     let mut schemas: HashMap<String, JsonValue> = HashMap::new();
     let guard = routes.guard();
 
     for (route_key, handler) in routes.iter(&guard) {
+        let handler = handler.as_ref();
         let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
         if parts.len() != 2 {
             continue;
@@ -240,51 +244,28 @@ pub fn build_openapi_spec(py: Python, routes: &PapayaMap<String, RouteHandler>) 
 
         let mut parameters = Vec::new();
 
-        if let Ok(inspect) = py.import("inspect") {
-            if let Ok(sig) = inspect.call_method1("signature", (handler.func.bind(py),)) {
-                if let Ok(params) = sig.getattr("parameters") {
-                    if let Ok(params_dict) = params.cast::<PyDict>() {
-                        for (param_name_obj, param_obj) in params_dict.iter() {
-                            let param_name = param_name_obj.extract::<String>().unwrap_or_default();
+        for param in &handler.parsed_params {
+            let location = match param.source {
+                ParameterSource::Path => "path",
+                ParameterSource::Query => "query",
+                ParameterSource::Header => "header",
+                ParameterSource::Cookie => "cookie",
+                ParameterSource::Body => continue,
+            };
 
-                            if param_name == "self" || param_name == "cls" || param_name == "return"
-                            {
-                                continue;
-                            }
+            let schema = param
+                .annotation
+                .as_ref()
+                .map(|annotation| python_type_to_openapi_type(py, annotation.bind(py)))
+                .unwrap_or_else(|| json!({"type": "string"}));
 
-                            let (description, schema, required) =
-                                extract_param_info(py, &param_obj);
-
-                            let location = if handler.path_param_names.contains(&param_name) {
-                                "path"
-                            } else if handler.query_param_names.contains(&param_name) {
-                                "query"
-                            } else if let Ok(default) = param_obj.getattr("default") {
-                                if let Ok(type_name) = default.get_type().name() {
-                                    let type_str = type_name.to_string();
-                                    match type_str.as_str() {
-                                        "Header" => "header",
-                                        "Cookie" => "cookie",
-                                        _ => continue,
-                                    }
-                                } else {
-                                    continue;
-                                }
-                            } else {
-                                continue;
-                            };
-
-                            parameters.push(Parameter {
-                                name: param_name,
-                                location: location.to_string(),
-                                required: Some(required || location == "path"),
-                                schema: schema.or(Some(json!({"type": "string"}))),
-                                description,
-                            });
-                        }
-                    }
-                }
-            }
+            parameters.push(Parameter {
+                name: param.external_name.clone(),
+                location: location.to_string(),
+                required: Some(param.required || location == "path"),
+                schema: Some(apply_parameter_constraints(schema, &param.constraints)),
+                description: param.description.clone(),
+            });
         }
 
         if !parameters.is_empty() {
@@ -404,7 +385,7 @@ pub fn build_openapi_spec(py: Python, routes: &PapayaMap<String, RouteHandler>) 
         );
 
         // 422 for validation errors
-        if !handler.param_validators.is_empty() || operation.parameters.is_some() {
+        if !handler.param_validators.is_empty() || !handler.parsed_params.is_empty() {
             operation.responses.insert(
                 "422".to_string(),
                 Response {
@@ -451,5 +432,5 @@ pub fn build_openapi_spec(py: Python, routes: &PapayaMap<String, RouteHandler>) 
         components.schemas = schemas;
     }
     debug!("Built OpenAPI spec with {} paths", spec.paths.len());
-    spec
+    serde_json::to_value(spec).unwrap_or_else(|_| json!({}))
 }

@@ -18,6 +18,18 @@ pub struct PyRequest {
     _is_consumed: Arc<Mutex<bool>>,
 }
 
+impl PyRequest {
+    pub fn from_scope(py: Python<'_>, scope: Py<PyAny>) -> Self {
+        Self {
+            scope,
+            receive: py.None(),
+            send: py.None(),
+            _body: Arc::new(Mutex::new(None)),
+            _is_consumed: Arc::new(Mutex::new(false)),
+        }
+    }
+}
+
 #[pymethods]
 impl PyRequest {
     #[new]

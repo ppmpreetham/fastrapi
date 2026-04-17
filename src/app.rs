@@ -1,6 +1,6 @@
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyCFunction, PyDict, PyTuple};
+use pyo3::types::{PyAny, PyCFunction, PyDict, PyString, PyTuple};
 use std::sync::Arc;
 use tracing::info;
 
@@ -163,7 +163,8 @@ impl FastrAPI {
         middleware_class: Py<PyAny>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let cls_name = middleware_class.bind(py).getattr(intern!(py, "__name__"))?;
+        let class_name_obj = middleware_class.bind(py).getattr(intern!(py, "__name__"))?;
+        let class_name = class_name_obj.cast::<PyString>()?.to_str()?.to_owned();
 
         // lazy dict if no kwargs
         let default_dict;
@@ -175,54 +176,66 @@ impl FastrAPI {
             }
         };
 
-        // .is() is O(1) so no match required
-        if cls_name.is(&intern!(py, "CORSMiddleware")) {
-            self.cors_config = Some(parse_cors_params(opts)?);
-            info!("Enabled CORSMiddleware");
-        } else if cls_name.is(&intern!(py, "TrustedHostMiddleware")) {
-            self.trusted_host_config = Some(parse_trusted_host_params(opts)?);
-            info!("Enabled TrustedHostMiddleware");
-        } else if cls_name.is(&intern!(py, "GZipMiddleware")) {
-            self.gzip_config = Some(parse_gzip_params(opts)?);
-            info!("Enabled GZipMiddleware");
-        } else if cls_name.is(&intern!(py, "SessionMiddleware")) {
-            self.session_config = Some(parse_session_params(opts)?);
-            info!("Enabled SessionMiddleware");
-        } else {
-            let msg = format!(
-                "Middleware '{}' is not supported. Only CORSMiddleware, TrustedHostMiddleware, GZipMiddleware, and SessionMiddleware are allowed via add_middleware.",
-                cls_name
-            );
-            return Err(pyo3::exceptions::PyValueError::new_err(msg));
+        match class_name.as_str() {
+            "CORSMiddleware" => {
+                self.cors_config = Some(parse_cors_params(opts)?);
+                info!("Enabled CORSMiddleware");
+            }
+            "TrustedHostMiddleware" => {
+                self.trusted_host_config = Some(parse_trusted_host_params(opts)?);
+                info!("Enabled TrustedHostMiddleware");
+            }
+            "GZipMiddleware" => {
+                self.gzip_config = Some(parse_gzip_params(opts)?);
+                info!("Enabled GZipMiddleware");
+            }
+            "SessionMiddleware" => {
+                self.session_config = Some(parse_session_params(opts)?);
+                info!("Enabled SessionMiddleware");
+            }
+            _ => {
+                let msg = format!(
+                    "Middleware '{}' is not supported. Only CORSMiddleware, TrustedHostMiddleware, GZipMiddleware, and SessionMiddleware are allowed via add_middleware.",
+                    class_name
+                );
+                return Err(pyo3::exceptions::PyValueError::new_err(msg));
+            }
         }
         Ok(())
     }
 
     // wish these methods could be abstracted away by macros, but PyO3 doesn't support dynamic method creation or macros in impl blocks, so here we are :(
+    #[pyo3(signature = (path))]
     fn get<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
         self.create_decorator("GET", path, py)
     }
 
+    #[pyo3(signature = (path))]
     fn post<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
         self.create_decorator("POST", path, py)
     }
 
+    #[pyo3(signature = (path))]
     fn put<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
         self.create_decorator("PUT", path, py)
     }
 
+    #[pyo3(signature = (path))]
     fn delete<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
         self.create_decorator("DELETE", path, py)
     }
 
+    #[pyo3(signature = (path))]
     fn patch<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
         self.create_decorator("PATCH", path, py)
     }
 
+    #[pyo3(signature = (path))]
     fn options<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
         self.create_decorator("OPTIONS", path, py)
     }
 
+    #[pyo3(signature = (path))]
     fn head<'py>(&self, path: String, py: Python<'py>) -> PyResult<Py<PyAny>> {
         self.create_decorator("HEAD", path, py)
     }
@@ -278,36 +291,30 @@ impl FastrAPI {
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
-            let func: Py<PyAny> = args.get_item(0)?.unbind(); // function name
-            let (
-                param_validators,
-                response_type,
-                path_param_names,
-                query_param_names,
-                body_param_names,
-                dependencies,
-                is_async,
-                is_fast_path,
-            ) = parse_route_metadata(py, func.bind(py), &path_for_closure);
+            let func: Py<PyAny> = args.get_item(0)?.unbind();
+            let metadata = parse_route_metadata(py, &func.bind(py), &path_for_closure);
 
-            let needs_kwargs = !path_param_names.is_empty()
-                || !query_param_names.is_empty()
-                || !body_param_names.is_empty()
-                || !param_validators.is_empty()
-                || !dependencies.is_empty();
+            let needs_kwargs = !metadata.path_param_names.is_empty()
+                || !metadata.query_param_names.is_empty()
+                || !metadata.body_param_names.is_empty()
+                || !metadata.param_validators.is_empty()
+                || !metadata.dependencies.is_empty()
+                || !metadata.parsed_params.is_empty();
 
-            let handler = RouteHandler {
+            let handler = Arc::new(RouteHandler {
                 func: func.clone_ref(py),
-                is_async,
-                is_fast_path,
+                is_async: metadata.is_async,
+                is_fast_path: metadata.is_fast_path,
+                dependency_needs_request: metadata.dependency_needs_request,
                 needs_kwargs,
-                param_validators,
-                response_type,
-                path_param_names,
-                query_param_names,
-                body_param_names,
-                dependencies,
-            };
+                param_validators: metadata.param_validators,
+                response_type: metadata.response_type,
+                path_param_names: metadata.path_param_names,
+                query_param_names: metadata.query_param_names,
+                body_param_names: metadata.body_param_names,
+                dependencies: metadata.dependencies,
+                parsed_params: metadata.parsed_params,
+            });
 
             ROUTES.pin().insert(route_key.clone(), handler);
             Ok(func)

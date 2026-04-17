@@ -1,6 +1,6 @@
 [package]
 name = "fastrapi"
-version = "0.2.9"
+version = "0.2.10"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -39,6 +39,7 @@ fastwebsockets = { version = "0.10.0", features = ["upgrade", "with_axum"]}
 bytes = "1.11.1"
 async-recursion = "1.1.1"
 pyo3-nest = "0.1.4"
+regex = "1"
 
 [profile.release]
 codegen-units = 1
