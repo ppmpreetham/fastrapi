@@ -1,7 +1,8 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 #[pyclass(name = "Request", module = "fastrapi.request", skip_from_py_object)]
 #[derive(Clone)]
@@ -14,8 +15,7 @@ pub struct PyRequest {
     pub send: Py<PyAny>,
 
     // Cache for the body if it has been read once
-    _body: Arc<Mutex<Option<Vec<u8>>>>,
-    _is_consumed: Arc<Mutex<bool>>,
+    _body: Arc<OnceCell<Arc<[u8]>>>,
 }
 
 impl PyRequest {
@@ -24,8 +24,7 @@ impl PyRequest {
             scope,
             receive: py.None(),
             send: py.None(),
-            _body: Arc::new(Mutex::new(None)),
-            _is_consumed: Arc::new(Mutex::new(false)),
+            _body: Arc::new(OnceCell::new()),
         }
     }
 }
@@ -55,8 +54,7 @@ impl PyRequest {
             scope,
             receive: receive.unwrap_or_else(|| py.None()),
             send: send.unwrap_or_else(|| py.None()),
-            _body: Arc::new(Mutex::new(None)),
-            _is_consumed: Arc::new(Mutex::new(false)),
+            _body: Arc::new(OnceCell::new()),
         })
     }
 
@@ -122,72 +120,72 @@ impl PyRequest {
             .and_then(|m| m.extract::<String>().ok())
             .unwrap_or_default()
             .to_ascii_uppercase();
-
         if !matches!(method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE") {
             return Ok(PyBytes::new(py, &[]).into_any());
         }
 
         let receive = self.receive.clone();
-        let cache = self._body.clone();
-        let consumed = self._is_consumed.clone();
+        let body_cell = self._body.clone();
+        let content_length = Python::attach(|py| -> Option<usize> {
+            let scope = self.scope.bind(py);
+            let headers = scope.get_item("headers").ok()?;
+            for header in headers.try_iter().ok()? {
+                let tuple = header.ok()?;
+                let key_obj = tuple.get_item(0).ok()?;
+                let key: &[u8] = key_obj.extract().ok()?;
+                if key.eq_ignore_ascii_case(b"content-length") {
+                    let val_obj = tuple.get_item(1).ok()?;
+                    let val: &[u8] = val_obj.extract().ok()?;
+                    return std::str::from_utf8(val).ok()?.parse().ok();
+                }
+            }
+            None
+        });
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            {
-                let cache_guard = cache.lock().unwrap();
-                if let Some(cached) = &*cache_guard {
-                    return Python::attach(|py| Ok(PyBytes::new(py, cached).into_any().unbind()));
-                }
-            }
+            let body: Arc<[u8]> = body_cell
+                .get_or_try_init(|| async {
+                    let mut full_body = if let Some(len) = content_length {
+                        Vec::with_capacity(len)
+                    } else {
+                        Vec::new()
+                    };
+                    loop {
+                        let message = {
+                            let fut = Python::attach(|py| {
+                                let awaitable = receive.bind(py).call0()?;
+                                pyo3_async_runtimes::tokio::into_future(awaitable)
+                            })?;
 
-            {
-                let consumed_guard = consumed.lock().unwrap();
-                if *consumed_guard {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        "Body stream already consumed",
-                    ));
-                }
-            }
-
-            let mut full_body = Vec::new();
-
-            loop {
-                let message = {
-                    let fut = Python::attach(|py| {
-                        let awaitable = receive.bind(py).call0()?;
-                        pyo3_async_runtimes::tokio::into_future(awaitable)
-                    })?;
-
-                    fut.await?
-                };
-
-                Python::attach(|py| -> PyResult<()> {
-                    let msg = message.bind(py);
-                    let typ: String = msg.get_item("type")?.extract()?;
-
-                    if typ != "http.request" {
-                        return Ok(());
+                            fut.await?
+                        };
+                        let mut done = false;
+                        Python::attach(|py| -> PyResult<()> {
+                            let msg = message.bind(py);
+                            let typ: String = msg.get_item("type")?.extract()?;
+                            if typ != "http.request" {
+                                return Ok(());
+                            }
+                            if let Ok(body_item) = msg.get_item("body") {
+                                let bytes: Vec<u8> = body_item.extract()?;
+                                full_body.extend_from_slice(&bytes);
+                            }
+                            let more_body: bool =
+                                msg.get_item("more_body")?.extract().unwrap_or(false);
+                            if !more_body {
+                                done = true;
+                            }
+                            Ok(())
+                        })?;
+                        if done {
+                            break;
+                        }
                     }
-
-                    if let Ok(body_item) = msg.get_item("body") {
-                        let bytes: Vec<u8> = body_item.extract()?;
-                        full_body.extend(bytes);
-                    }
-
-                    let more_body: bool = msg.get_item("more_body")?.extract().unwrap_or(false);
-
-                    if !more_body {
-                        let mut cache_guard = cache.lock().unwrap();
-                        *cache_guard = Some(full_body.clone());
-
-                        let mut consumed_guard = consumed.lock().unwrap();
-                        *consumed_guard = true;
-
-                        return Ok(());
-                    }
-
-                    Ok(())
-                })?;
-            }
+                    Ok::<Arc<[u8]>, PyErr>(full_body.into())
+                })
+                .await?
+                .clone();
+            Python::attach(|py| Ok(PyBytes::new(py, &body).into_any().unbind()))
         })
     }
 
