@@ -71,7 +71,7 @@ export const Rotate3 = ({ place }: { place: boolean }) => {
         size={isMobile ? 0.5 : 2}
         offset={isMobile ? [0, 0.35, 0] : [0, 0, 0]}
       />
-      <Html
+      {/* <Html
         position={[isMobile ? 0.5 : 4, isMobile ? 2.5 : 4.8, -1]}
         center
         scale={isMobile ? 0.5 : 0.3}
@@ -80,12 +80,12 @@ export const Rotate3 = ({ place }: { place: boolean }) => {
         occlude={false}
         zIndexRange={[0, 0]}
         portal={{ current: gl.domElement.parentNode as HTMLElement }}
-        className="fixed pointer-events-none mix-blend-difference"
+        className="fixed pointer-events-none mix-blend-difference bg-red-600"
       >
-        <div className="w-screen h-screen flex items-center justify-center">
+        <div className="absolute bottom-0 left-0 w-screen h-screen flex items-center justify-center">
           <img src="/images/diff.png" alt="Change from FastAPI to FastRAPI" />
         </div>
-      </Html>
+      </Html> */}
     </group>
   )
 }
