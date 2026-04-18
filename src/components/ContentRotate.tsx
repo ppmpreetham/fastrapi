@@ -109,7 +109,7 @@ export const Rotate4 = ({ place }: { place: boolean }) => {
       </mesh>
       <RotHeaderText
         place={place}
-        text="Check Docs"
+        text="Check Repo"
         size={isMobile ? 0.75 : 1.5}
         color="black"
         offset={[0, 0, 0.02]}
