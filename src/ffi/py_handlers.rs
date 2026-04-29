@@ -164,10 +164,9 @@ async fn call_async_handler(
     kwargs: Option<Py<PyDict>>,
     dependency_results: Option<DependencyResults>,
 ) -> Response {
-    let response_type = handler.response_type;
-    let future = match rt_handle
+    match rt_handle
         .spawn_blocking(move || {
-            Python::attach(|py| -> Result<_, Response> {
+            Python::attach(|py| {
                 let mut kwargs = kwargs;
                 if kwargs.is_none() && dependency_results.is_some() {
                     kwargs = Some(PyDict::new(py).unbind());
@@ -175,7 +174,11 @@ async fn call_async_handler(
 
                 if let Some(results) = dependency_results {
                     if let Some(kwargs_ref) = kwargs.as_ref() {
-                        merge_dependency_results(kwargs_ref.bind(py), results)?;
+                        if let Err(response) =
+                            merge_dependency_results(kwargs_ref.bind(py), results)
+                        {
+                            return response;
+                        }
                     }
                 }
 
@@ -183,25 +186,41 @@ async fn call_async_handler(
                 let coroutine = match &kwargs {
                     Some(kw) => py_func.call((), Some(&kw.bind(py))),
                     None => py_func.call0(),
-                }
-                .map_err(|err| python_error_to_response(py, err))?;
+                };
+                let coroutine = match coroutine {
+                    Ok(coroutine) => coroutine,
+                    Err(err) => return python_error_to_response(py, err),
+                };
 
-                pyo3_async_runtimes::tokio::into_future(coroutine)
-                    .map_err(|err| python_error_to_response(py, err))
+                let asyncio = match py.import("asyncio") {
+                    Ok(asyncio) => asyncio,
+                    Err(err) => return python_error_to_response(py, err),
+                };
+                let event_loop = match asyncio.call_method0("new_event_loop") {
+                    Ok(event_loop) => event_loop,
+                    Err(err) => return python_error_to_response(py, err),
+                };
+                if let Err(err) = asyncio.call_method1("set_event_loop", (&event_loop,)) {
+                    return python_error_to_response(py, err);
+                }
+
+                let result = event_loop.call_method1("run_until_complete", (coroutine,));
+                if let Ok(shutdown_asyncgens) = event_loop.call_method0("shutdown_asyncgens") {
+                    let _ = event_loop.call_method1("run_until_complete", (shutdown_asyncgens,));
+                }
+                let _ = asyncio.call_method1("set_event_loop", (py.None(),));
+                let _ = event_loop.call_method0("close");
+
+                match result {
+                    Ok(result) => convert_response_by_type(py, &result, handler.response_type),
+                    Err(err) => python_error_to_response(py, err),
+                }
             })
         })
         .await
     {
-        Ok(Ok(future)) => future,
-        Ok(Err(response)) => return response,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
-    match future.await {
-        Ok(result) => {
-            Python::attach(|py| convert_response_by_type(py, &result.bind(py), response_type))
-        }
-        Err(err) => Python::attach(|py| python_error_to_response(py, err)),
+        Ok(response) => response,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
