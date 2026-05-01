@@ -265,6 +265,18 @@ app.serve("127.0.0.1", 8080)
 ## Performance
 Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn across multiple worker configurations.
 
+### Benchmarking Locally
+
+For real benchmark numbers, build the PyO3 extension in release mode first:
+
+```bash
+maturin develop --release
+python examples/basic.py
+k6 run benchmarks/stress.js
+```
+
+If you benchmark a debug build, Rust-side overhead will be much higher and the numbers will be misleading.
+
 ### 🖥️ Test Environment
 - **Kernel:** 6.16.8-arch3-1  
 - **CPU:** AMD Ryzen 7 7735HS (16 cores, 4.83 GHz)  

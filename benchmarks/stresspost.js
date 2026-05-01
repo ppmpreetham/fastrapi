@@ -1,3 +1,8 @@
+// if you're testing this, run it with the command:
+// maturin develop --release
+// k6 run benchmarks/stresspost.js
+// make sure that you have k6 installed: https://k6.io/docs/getting-started/installation/
+
 import http from "k6/http";
 import { check, sleep } from "k6";
 import { Trend } from "k6/metrics";
