@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 
 
@@ -218,6 +220,59 @@ def test_async_route_result_is_returned(run_server):
     response = httpx.get(f"{server}/async")
     assert response.status_code == 200
     assert response.json() == {"async": True}
+
+
+def test_concurrent_async_requests_overlap(run_server):
+    server = run_server(
+        """
+        import asyncio
+        import threading
+
+        from fastrapi import FastrAPI
+
+        app = FastrAPI()
+        lock = threading.Lock()
+        state = {{"active": 0, "max_active": 0}}
+
+
+        @app.get("/health")
+        def health():
+            return {{"status": "ok"}}
+
+
+        @app.get("/slow")
+        async def slow(index: int):
+            with lock:
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+            await asyncio.sleep(0.2)
+            with lock:
+                state["active"] -= 1
+            return {{"index": index}}
+
+
+        @app.get("/stats")
+        def stats():
+            return dict(state)
+
+
+        app.serve(host="127.0.0.1", port={port})
+        """
+    )
+
+    async def fetch_all():
+        async with httpx.AsyncClient(base_url=server, timeout=5.0) as client:
+            responses = await asyncio.gather(
+                *(client.get("/slow", params={"index": index}) for index in range(4))
+            )
+            stats = await client.get("/stats")
+        return responses, stats
+
+    responses, stats = asyncio.run(fetch_all())
+
+    assert [response.status_code for response in responses] == [200, 200, 200, 200]
+    assert sorted(response.json()["index"] for response in responses) == [0, 1, 2, 3]
+    assert stats.json()["max_active"] > 1
 
 
 def test_openapi_and_docs_are_served(run_server):

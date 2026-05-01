@@ -103,6 +103,7 @@ pub fn parse_dependencies(
 ) -> PyResult<Vec<DependencyNode>> {
     let mut flat_plan = Vec::new();
     let mut visited = HashSet::new();
+    let mut visiting = HashSet::new();
     extract_and_flatten(
         py,
         func,
@@ -113,6 +114,7 @@ pub fn parse_dependencies(
         true,
         &mut flat_plan,
         &mut visited,
+        &mut visiting,
         false,
     )?;
     flat_plan.retain(|node| node.param_name.is_some());
@@ -129,8 +131,21 @@ fn extract_and_flatten(
     use_cache: bool,
     flat_plan: &mut Vec<DependencyNode>,
     visited: &mut HashSet<u64>,
+    visiting: &mut HashSet<u64>,
     duplicate_node: bool,
 ) -> PyResult<()> {
+    let func_id = func.as_ptr() as u64;
+    if visiting.contains(&func_id) {
+        return Ok(());
+    }
+
+    let already_visited = visited.contains(&func_id);
+    if already_visited && !duplicate_node {
+        return Ok(());
+    }
+
+    visiting.insert(func_id);
+
     let signature = get_signature(py, func)?;
     let parameters = signature.getattr(intern!(py, "parameters"))?;
 
@@ -200,15 +215,10 @@ fn extract_and_flatten(
                 child_use_cache,
                 flat_plan,
                 visited,
+                visiting,
                 visited.contains(&target_id),
             )?;
         }
-    }
-
-    let func_id = func.as_ptr() as u64;
-    let already_visited = visited.contains(&func_id);
-    if already_visited && !duplicate_node {
-        return Ok(());
     }
 
     let (injection_plan, needs_request_object) =
@@ -229,6 +239,7 @@ fn extract_and_flatten(
     if !already_visited {
         visited.insert(func_id);
     }
+    visiting.remove(&func_id);
 
     Ok(())
 }

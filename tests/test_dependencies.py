@@ -64,3 +64,59 @@ def test_dependency_cache_and_subdependencies(run_server):
     assert data["a"] != data["b"]
     assert data["a"]["value"] == 8
     assert data["b"]["value"] == 8
+
+
+def test_dependency_cycle_does_not_recurse_forever(run_server):
+    server = run_server(
+        """
+        import inspect
+
+        from fastrapi import Depends, FastrAPI
+
+        app = FastrAPI()
+
+
+        def dependency_a(b):
+            return {{"a": b}}
+
+
+        def dependency_b(a):
+            return {{"b": a}}
+
+
+        dependency_a.__signature__ = inspect.Signature(
+            [
+                inspect.Parameter(
+                    "b",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    default=Depends(dependency_b),
+                )
+            ]
+        )
+        dependency_b.__signature__ = inspect.Signature(
+            [
+                inspect.Parameter(
+                    "a",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    default=Depends(dependency_a),
+                )
+            ]
+        )
+
+
+        @app.get("/health")
+        def health():
+            return {{"status": "ok"}}
+
+
+        @app.get("/cycle")
+        def cycle(value=Depends(dependency_a)):
+            return value
+
+
+        app.serve(host="127.0.0.1", port={port})
+        """
+    )
+
+    response = httpx.get(f"{server}/cycle", timeout=2.0)
+    assert response.status_code == 500

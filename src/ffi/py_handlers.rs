@@ -64,6 +64,14 @@ fn create_request_object(py: Python<'_>, request_input: &RequestInput) -> PyResu
     Ok(Py::new(py, py_request)?.into_any())
 }
 
+fn configure_windows_selector_event_loop_policy(asyncio: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Ok(policy) = asyncio.getattr("WindowsSelectorEventLoopPolicy") {
+        let policy = policy.call0()?;
+        asyncio.call_method1("set_event_loop_policy", (policy,))?;
+    }
+    Ok(())
+}
+
 fn merge_dependency_results(
     kwargs: &Bound<'_, PyDict>,
     dependency_results: DependencyResults,
@@ -196,6 +204,9 @@ async fn call_async_handler(
                     Ok(asyncio) => asyncio,
                     Err(err) => return python_error_to_response(py, err),
                 };
+                if let Err(err) = configure_windows_selector_event_loop_policy(&asyncio) {
+                    return python_error_to_response(py, err);
+                }
                 let event_loop = match asyncio.call_method0("new_event_loop") {
                     Ok(event_loop) => event_loop,
                     Err(err) => return python_error_to_response(py, err),
