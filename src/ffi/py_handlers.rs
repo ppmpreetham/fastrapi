@@ -230,6 +230,61 @@ pub async fn run_py_handler_with_request(
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
 
+    // Sync handler with only sync deps: collapse prepare + execute_dependencies
+    // + call into a single spawn_blocking + Python::attach. Two thread hops
+    // become one; the per-dep attach in the async path also goes away.
+    if !handler.is_async && handler.all_deps_sync {
+        return rt_handle
+            .spawn_blocking(move || {
+                Python::attach(|py| {
+                    let request_object = if handler.dependency_needs_request {
+                        match create_request_object(py, &request_input) {
+                            Ok(req) => Some(req),
+                            Err(err) => return python_error_to_response(py, err),
+                        }
+                    } else {
+                        None
+                    };
+
+                    let kwargs = PyDict::new(py);
+                    if let Err(resp) = pydantic::apply_request_data(
+                        py,
+                        &handler,
+                        &request_input,
+                        payload.as_ref(),
+                        &kwargs,
+                    ) {
+                        return resp;
+                    }
+
+                    let dep_results = match dependencies::execute_dependencies_sync(
+                        py,
+                        &handler.dependencies,
+                        &request_input,
+                        request_object,
+                    ) {
+                        Ok(results) => results,
+                        Err(DependencyExecutionError::Response(response)) => return response,
+                        Err(DependencyExecutionError::Python(err)) => {
+                            return python_error_to_response(py, err);
+                        }
+                    };
+
+                    if let Err(response) = merge_dependency_results(&kwargs, dep_results) {
+                        return response;
+                    }
+
+                    let py_func = handler.func.bind(py);
+                    match py_func.call((), Some(&kwargs)) {
+                        Ok(result) => convert_response_by_type(py, &result, handler.response_type),
+                        Err(err) => python_error_to_response(py, err),
+                    }
+                })
+            })
+            .await
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+
     let (request_input, request_object, kwargs) =
         match prepare_request_context(rt_handle.clone(), handler.clone(), request_input, payload)
             .await

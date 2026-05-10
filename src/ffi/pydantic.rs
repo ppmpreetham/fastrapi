@@ -148,6 +148,7 @@ pub struct ParsedRouteMetadata {
     pub body_param_names: Vec<Py<PyString>>,
     pub dependencies: Vec<DependencyNode>,
     pub dependency_needs_request: bool,
+    pub all_deps_sync: bool,
     pub parsed_params: Vec<ParsedParameter>,
     pub is_async: bool,
     pub is_fast_path: bool,
@@ -168,6 +169,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         dependencies::parse_dependencies(py, func, &path_param_names).unwrap_or_default();
 
     let dependency_needs_request = dependencies.iter().any(|dep| dep.needs_request_object);
+    let all_deps_sync = dependencies.iter().all(|dep| !dep.is_async);
     let dep_param_names: HashSet<String> = dependencies
         .iter()
         .filter_map(|d| d.param_name.clone())
@@ -244,6 +246,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         body_param_names,
         dependencies,
         dependency_needs_request,
+        all_deps_sync,
         parsed_params,
         is_async,
         is_fast_path,

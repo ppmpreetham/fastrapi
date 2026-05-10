@@ -103,6 +103,7 @@ impl PyAPIRouter {
                 is_async: metadata.is_async,
                 is_fast_path: metadata.is_fast_path,
                 dependency_needs_request: metadata.dependency_needs_request,
+                all_deps_sync: metadata.all_deps_sync,
                 needs_kwargs,
                 param_validators: metadata.param_validators,
                 response_type: metadata.response_type,

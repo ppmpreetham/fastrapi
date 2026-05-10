@@ -88,6 +88,7 @@ pub struct RouteHandler {
     pub is_async: bool,
     pub is_fast_path: bool,
     pub dependency_needs_request: bool,
+    pub all_deps_sync: bool,
     pub param_validators: Vec<(String, Py<PyAny>)>,
     pub response_type: ResponseType,
     pub needs_kwargs: bool,
