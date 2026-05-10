@@ -3,10 +3,20 @@ from pydantic import BaseModel
 
 app = FastrAPI()
 
+
+class EchoBody(BaseModel):
+    message: str
+    timestamp: int | None = None
+
+
+class UpdateBody(BaseModel):
+    data: dict
+
+
 @app.get("/")
 def hello():
     return {"Hello": "World"}
-    
+
 @app.get("/hello")
 def hello():
     return {"Hello": "World"}
@@ -16,20 +26,20 @@ def add():
     return {"sum": 1 + 2}
 
 @app.post("/echo")
-def echo(data):
-    return {"received": data}
+def echo(data: EchoBody):
+    return {"received": data.model_dump()}
 
 @app.put("/update")
-def update(data):
-    return {"updated": data, "status": "success"}
+def update(data: UpdateBody):
+    return {"updated": data.model_dump(), "status": "success"}
 
 @app.delete("/remove")
-def remove(data):
-    return {"deleted": data, "timestamp": "2025-09-28"}
+def remove(data: UpdateBody):
+    return {"deleted": data.model_dump(), "timestamp": "2025-09-28"}
 
 @app.patch("/modify")
-def modify(data):
-    return {"modified": data, "changes": "applied"}
+def modify(data: UpdateBody):
+    return {"modified": data.model_dump(), "changes": "applied"}
 
 @app.head("/status")
 def status():

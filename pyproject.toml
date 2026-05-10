@@ -22,6 +22,9 @@ classifiers = [
   "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
   "Topic :: Software Development :: Libraries :: Application Frameworks"
 ]
+dependencies = [
+    "pydantic>=2.10.6",
+]
 
 # If you have dependencies, add them here
 # dependencies = [
