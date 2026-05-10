@@ -405,7 +405,8 @@ async fn extract_payload(
         return Ok(None);
     }
 
-    serde_json::from_slice(&body)
+    let mut buf = body.to_vec();
+    simd_json::serde::from_slice(&mut buf)
         .map(Some)
         .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response())
 }
