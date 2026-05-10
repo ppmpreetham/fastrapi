@@ -1,15 +1,51 @@
 use axum::{
-    http::StatusCode,
+    body::Body,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
+use bytes::{BufMut, BytesMut};
 use pyo3::types::{
     PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet,
     PyTuple,
 };
 use pyo3::{prelude::*, types::PyString};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use serde_pyobject::to_pyobject;
+use std::cell::RefCell;
+
+thread_local! {
+    /// Per-thread JSON response buffer. `serde_json::to_writer` writes here,
+    /// then we `split()` off the written portion as immutable `Bytes` (zero
+    /// copy) and feed it directly into the response body. The cell keeps the
+    /// underlying allocation across requests so steady-state response building
+    /// pays no buffer alloc.
+    static RESPONSE_BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(1024));
+}
+
+/// Serialize a `serde_json::Value` into an axum JSON response, reusing a
+/// per-thread `BytesMut` buffer. Replaces `Json(value).into_response()`.
+#[inline]
+pub fn json_response(value: &Value) -> Response {
+    json_response_with_status(StatusCode::OK, value)
+}
+
+#[inline]
+pub fn json_response_with_status(status: StatusCode, value: &Value) -> Response {
+    let bytes = RESPONSE_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+        // BytesMut implements bytes::BufMut; serde_json::to_writer can write
+        // into anything io::Write. BytesMut::writer() bridges the two.
+        let _ = serde_json::to_writer((&mut *buf).writer(), value);
+        buf.split().freeze()
+    });
+
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(bytes))
+        .unwrap()
+}
 
 // for local reads (fast, non-Send for sync blocks like spawn_blocking)
 pub fn local_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::LocalGuard<'_> {
@@ -40,33 +76,36 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Response {
     }
 
     if let Ok(dict) = obj.cast::<PyDict>() {
-        return Json(py_dict_to_json(py, dict)).into_response();
+        return json_response(&py_dict_to_json(py, dict));
     }
     if let Ok(list) = obj.cast::<PyList>() {
-        return Json(py_list_to_json(py, list)).into_response();
+        return json_response(&py_list_to_json(py, list));
     }
 
     // bool BEFORE int — `True`/`False` are instances of int in Python.
     if let Ok(b) = obj.cast::<PyBool>() {
-        return Json(json!(b.is_true())).into_response();
+        return json_response(&Value::Bool(b.is_true()));
     }
     if let Ok(s) = obj.cast::<PyString>() {
-        return Json(json!(s.to_str().unwrap_or_default())).into_response();
+        return json_response(&Value::String(s.to_str().unwrap_or_default().to_owned()));
     }
     if let Ok(i) = obj.cast::<PyInt>() {
         if let Ok(v) = i.extract::<i64>() {
-            return Json(json!(v)).into_response();
+            return json_response(&Value::Number(v.into()));
         }
     }
     if let Ok(f) = obj.cast::<PyFloat>() {
         if let Ok(v) = f.extract::<f64>() {
-            return Json(json!(v)).into_response();
+            if let Some(n) = serde_json::Number::from_f64(v) {
+                return json_response(&Value::Number(n));
+            }
+            return json_response(&Value::Null);
         }
     }
 
     // Anything else: route through the recursive walker which handles
     // tuple/set/frozenset/bytes/datetime/UUID/Decimal/Enum/dataclass/BaseModel.
-    Json(py_any_to_json(py, obj)).into_response()
+    json_response(&py_any_to_json(py, obj))
 }
 
 /// dict to JSON conversion with capacity hint

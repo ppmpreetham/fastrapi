@@ -1,8 +1,7 @@
-use crate::utils::utils::{py_any_to_json, py_to_response};
+use crate::utils::utils::{json_response, json_response_with_status, py_any_to_json, py_to_response};
 use axum::{
     http::{header, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
-    Json,
 };
 use pyo3::prelude::*;
 use tracing::error;
@@ -116,7 +115,7 @@ pub fn convert_response_by_type(
     match response_type {
         ResponseType::Json => {
             let json = py_any_to_json(py, result);
-            (StatusCode::OK, Json(json)).into_response()
+            json_response(&json)
         }
         ResponseType::PlainText => {
             let text = result
@@ -151,7 +150,7 @@ pub fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyJSONResponse>>() {
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
         let json = py_any_to_json(py, &resp.content.bind(py));
-        (status_code, Json(json)).into_response()
+        json_response_with_status(status_code, &json)
     } else {
         error!("Expected JSONResponse, but got another type.");
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -194,5 +193,5 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
         return StatusCode::NO_CONTENT.into_response();
     }
     let json = py_any_to_json(py, result);
-    (StatusCode::OK, Json(json)).into_response()
+    json_response(&json)
 }
