@@ -668,14 +668,14 @@ fn build_router(
 }
 
 async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> Response {
-    let method = match *req.method() {
-        axum::http::Method::GET => HttpMethod::GET,
-        axum::http::Method::POST => HttpMethod::POST,
-        axum::http::Method::PUT => HttpMethod::PUT,
-        axum::http::Method::DELETE => HttpMethod::DELETE,
-        axum::http::Method::PATCH => HttpMethod::PATCH,
-        axum::http::Method::OPTIONS => HttpMethod::OPTIONS,
-        axum::http::Method::HEAD => HttpMethod::HEAD,
+    let method = match req.method().as_str().as_bytes() {
+        b"GET" => HttpMethod::GET,
+        b"POST" => HttpMethod::POST,
+        b"PUT" => HttpMethod::PUT,
+        b"DELETE" => HttpMethod::DELETE,
+        b"PATCH" => HttpMethod::PATCH,
+        b"OPTIONS" => HttpMethod::OPTIONS,
+        b"HEAD" => HttpMethod::HEAD,
         _ => return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response(),
     };
     let path = req.uri().path();
