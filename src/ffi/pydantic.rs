@@ -137,6 +137,11 @@ fn test_model(
 
 pub fn register_pydantic_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(test_model, m)?)?;
+    if BASEMODEL_TYPE.get().is_none() {
+        if let Some(base_model_type) = initialize_basemodel(m.py()) {
+            let _ = BASEMODEL_TYPE.set(base_model_type);
+        }
+    }
     Ok(())
 }
 
