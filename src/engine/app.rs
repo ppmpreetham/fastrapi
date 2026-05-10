@@ -524,31 +524,9 @@ impl FastrAPI {
         prefix: String,
         tags: Option<Py<PyAny>>,
     ) -> PyResult<()> {
-        let base = self.router.bind(py);
-        let base_ref = base.borrow();
-
-        let tag_vec: Vec<String> = if let Some(ref tags_obj) = tags {
-            let tags_bound = tags_obj.bind(py);
-            if let Ok(iter) = tags_bound.try_iter() {
-                iter.filter_map(|item| item.ok()?.extract::<String>().ok())
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        base_ref
-            .sub_routers
-            .lock()
-            .unwrap()
-            .push(crate::routing::types::SubRouterMount {
-                router: router,
-                prefix,
-                tags: tag_vec,
-            });
-
-        Ok(())
+        self.router
+            .bind(py)
+            .borrow()
+            .include_router(py, router, prefix, tags)
     }
 }

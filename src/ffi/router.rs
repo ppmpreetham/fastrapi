@@ -514,7 +514,7 @@ impl PyAPIRouter {
     }
 
     #[pyo3(signature = (router, *, prefix="".to_string(), tags=None))]
-    fn include_router(
+    pub fn include_router(
         &self,
         py: Python<'_>,
         router: Py<PyAPIRouter>,
