@@ -10,8 +10,8 @@ pub enum RouteMatch<'a> {
 
 #[derive(Clone)]
 pub struct FrozenRouter {
-    static_routes: [AHashMap<String, Arc<RouteHandler>>; HTTP_METHOD_COUNT],
-    param_routes: [matchit::Router<Arc<RouteHandler>>; HTTP_METHOD_COUNT],
+    static_routes: [AHashMap<Box<str>, Arc<RouteHandler>>; HTTP_METHOD_COUNT],
+    param_routes: [Option<matchit::Router<Arc<RouteHandler>>>; HTTP_METHOD_COUNT],
     websocket_routes: AHashMap<String, Py<PyAny>>,
 }
 
@@ -19,10 +19,11 @@ impl FrozenRouter {
     #[inline(always)]
     pub fn resolve<'a>(&'a self, method: HttpMethod, path: &'a str) -> Option<RouteMatch<'a>> {
         let idx = method as usize;
-        if let Some(handler) = self.static_routes[idx].get(path) {
+        let normalized = normalize_lookup(path);
+        if let Some(handler) = self.static_routes[idx].get(normalized.as_ref()) {
             return Some(RouteMatch::Static(handler.clone()));
         }
-        let matched = self.param_routes[idx].at(path).ok()?;
+        let matched = self.param_routes[idx].as_ref()?.at(path).ok()?;
         Some(RouteMatch::Params(matched.value.clone(), matched.params))
     }
 
@@ -33,7 +34,7 @@ impl FrozenRouter {
 }
 
 pub struct FrozenRouterBuilder {
-    static_routes: [AHashMap<String, Arc<RouteHandler>>; HTTP_METHOD_COUNT],
+    static_routes: [AHashMap<Box<str>, Arc<RouteHandler>>; HTTP_METHOD_COUNT],
     param_entries: [Vec<(String, Arc<RouteHandler>)>; HTTP_METHOD_COUNT],
     websocket_routes: AHashMap<String, Py<PyAny>>,
 }
@@ -54,7 +55,7 @@ impl FrozenRouterBuilder {
         if has_params {
             self.param_entries[idx].push((normalized.into_owned(), handler));
         } else {
-            self.static_routes[idx].insert(normalized.into_owned(), handler);
+            self.static_routes[idx].insert(normalized.into_owned().into_boxed_str(), handler);
         }
     }
 
@@ -65,18 +66,19 @@ impl FrozenRouterBuilder {
     }
 
     pub fn build(self) -> FrozenRouter {
-        let param_routes = {
-            let mut arr: [matchit::Router<Arc<RouteHandler>>; HTTP_METHOD_COUNT] =
-                std::array::from_fn(|_| matchit::Router::new());
-            for (idx, entries) in self.param_entries.into_iter().enumerate() {
-                for (path, handler) in entries {
-                    if let Err(e) = arr[idx].insert(&path, handler) {
-                        tracing::warn!("Failed to insert parameterized route '{}': {}", path, e);
-                    }
+        let param_routes = std::array::from_fn(|idx| {
+            let entries = &self.param_entries[idx];
+            if entries.is_empty() {
+                return None;
+            }
+            let mut router = matchit::Router::new();
+            for (path, handler) in entries {
+                if let Err(e) = router.insert(path, handler.clone()) {
+                    tracing::warn!("Failed to insert parameterized route '{}': {}", path, e);
                 }
             }
-            arr
-        };
+            Some(router)
+        });
 
         FrozenRouter {
             static_routes: self.static_routes,
@@ -117,30 +119,40 @@ fn normalize_lookup(input: &str) -> Cow<'_, str> {
 
 fn normalize_register(input: &str) -> (Cow<'_, str>, bool) {
     let base = normalize_lookup(input);
-    if !base.contains('{') {
+    let bytes = base.as_bytes();
+    let mut has_params = false;
+    let mut in_param = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                if bytes.get(i + 1) == Some(&b'{') {
+                    i += 2;
+                    continue;
+                }
+                if in_param {
+                    return (base, false);
+                }
+                in_param = true;
+                has_params = true;
+            }
+
+            b'}' => {
+                if bytes.get(i + 1) == Some(&b'}') {
+                    i += 2;
+                    continue;
+                }
+                if !in_param {
+                    return (base, false);
+                }
+                in_param = false;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if in_param {
         return (base, false);
     }
-
-    let mut normalized = String::with_capacity(base.len());
-    let mut chars = base.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '{' {
-            normalized.push(':');
-            let mut found_close = false;
-            for next in chars.by_ref() {
-                if next == '}' {
-                    found_close = true;
-                    break;
-                }
-                normalized.push(next);
-            }
-            if !found_close {
-                panic!("Invalid route: missing closing '}}' in {}", input);
-            }
-        } else {
-            normalized.push(c);
-        }
-    }
-
-    (Cow::Owned(normalized), true)
+    (base, has_params)
 }
