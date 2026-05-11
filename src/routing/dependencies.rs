@@ -103,6 +103,7 @@ pub fn parse_dependencies(
 ) -> PyResult<Vec<DependencyNode>> {
     let mut flat_plan = Vec::new();
     let mut visited = HashSet::new();
+    let mut visiting = HashSet::new();
     extract_and_flatten(
         py,
         func,
@@ -113,6 +114,8 @@ pub fn parse_dependencies(
         true,
         &mut flat_plan,
         &mut visited,
+        &mut visiting,
+        false,
     )?;
     flat_plan.retain(|node| node.param_name.is_some());
     Ok(flat_plan)
@@ -128,7 +131,21 @@ fn extract_and_flatten(
     use_cache: bool,
     flat_plan: &mut Vec<DependencyNode>,
     visited: &mut HashSet<u64>,
+    visiting: &mut HashSet<u64>,
+    duplicate_node: bool,
 ) -> PyResult<()> {
+    let func_id = func.as_ptr() as u64;
+    if visiting.contains(&func_id) {
+        return Ok(());
+    }
+
+    let already_visited = visited.contains(&func_id);
+    if already_visited && !duplicate_node {
+        return Ok(());
+    }
+
+    visiting.insert(func_id);
+
     let signature = get_signature(py, func)?;
     let parameters = signature.getattr(intern!(py, "parameters"))?;
 
@@ -188,25 +205,20 @@ fn extract_and_flatten(
             let target_id = target_callable.as_ptr() as u64;
             sub_deps.push((param_name_str.clone(), target_id));
 
-            if !visited.contains(&target_id) {
-                extract_and_flatten(
-                    py,
-                    &target_callable,
-                    path_param_names,
-                    is_top_level && parent_param_name.is_none(),
-                    Some(param_name_str),
-                    child_scopes,
-                    child_use_cache,
-                    flat_plan,
-                    visited,
-                )?;
-            }
+            extract_and_flatten(
+                py,
+                &target_callable,
+                path_param_names,
+                is_top_level && parent_param_name.is_none(),
+                Some(param_name_str),
+                child_scopes,
+                child_use_cache,
+                flat_plan,
+                visited,
+                visiting,
+                visited.contains(&target_id),
+            )?;
         }
-    }
-
-    let func_id = func.as_ptr() as u64;
-    if visited.contains(&func_id) {
-        return Ok(());
     }
 
     let (injection_plan, needs_request_object) =
@@ -224,7 +236,10 @@ fn extract_and_flatten(
         injection_plan,
         needs_request_object,
     });
-    visited.insert(func_id);
+    if !already_visited {
+        visited.insert(func_id);
+    }
+    visiting.remove(&func_id);
 
     Ok(())
 }
@@ -296,9 +311,8 @@ fn build_dependency_kwargs(
                 }
             }
             InjectionType::Parameter(parameter) => {
-                if let Some(value) =
-                    pydantic::resolve_parameter_value(py, parameter, request_input)
-                        .map_err(DependencyExecutionError::Response)?
+                if let Some(value) = pydantic::resolve_parameter_value(py, parameter, request_input)
+                    .map_err(DependencyExecutionError::Response)?
                 {
                     final_kwargs.set_item(arg_name, value)?;
                 }

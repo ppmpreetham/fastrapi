@@ -263,9 +263,18 @@ fn exit_lifespan(entered_lifespan: EnteredLifespan) -> PyResult<()> {
 
 fn create_event_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let asyncio = py.import("asyncio")?;
+    configure_windows_selector_event_loop_policy(&asyncio)?;
     let event_loop = asyncio.call_method0("new_event_loop")?;
     asyncio.call_method1("set_event_loop", (&event_loop,))?;
     Ok(event_loop.unbind())
+}
+
+fn configure_windows_selector_event_loop_policy(asyncio: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Ok(policy) = asyncio.getattr("WindowsSelectorEventLoopPolicy") {
+        let policy = policy.call0()?;
+        asyncio.call_method1("set_event_loop_policy", (policy,))?;
+    }
+    Ok(())
 }
 
 fn run_awaitable_in_new_loop(py: Python<'_>, awaitable: Bound<'_, PyAny>) -> PyResult<()> {

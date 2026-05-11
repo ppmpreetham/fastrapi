@@ -32,10 +32,11 @@ classifiers = [
 # If you have optional dependencies, uncomment and adjust this section
 [project.optional-dependencies]
 pydantic = ["pydantic>=2.10.6"]
-# test = [
-#   "pytest",
-#   "pytest-cov"
-# ]
+test = [
+  "httpx>=0.27",
+  "pydantic>=2.10.6",
+  "pytest>=8",
+]
 
 [project.urls]
 homepage = "https://github.com/ppmpreetham/fastrapi"
