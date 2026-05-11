@@ -562,6 +562,20 @@ pub fn apply_request_data(
     apply_body_and_validation(py, handler, payload, kwargs)
 }
 
+pub fn get_response_type_from_class(py: Python<'_>, cls: &Bound<'_, PyAny>) -> ResponseType {
+    if cls.is(&py.get_type::<PyJSONResponse>()) {
+        ResponseType::Json
+    } else if cls.is(&py.get_type::<PyPlainTextResponse>()) {
+        ResponseType::PlainText
+    } else if cls.is(&py.get_type::<PyHTMLResponse>()) {
+        ResponseType::Html
+    } else if cls.is(&py.get_type::<PyRedirectResponse>()) {
+        ResponseType::Redirect
+    } else {
+        ResponseType::Auto
+    }
+}
+
 pub fn get_response_type(py: Python<'_>, func: &Bound<'_, PyAny>) -> ResponseType {
     let result: PyResult<ResponseType> = (|| {
         let annotations = func.getattr(intern!(py, "__annotations__"))?;
@@ -608,7 +622,7 @@ pub fn call_with_pydantic_validation<'py>(
 ) -> Response {
     match validate_with_pydantic(py, model_class, payload) {
         Ok(validated_obj) => match route_func.call1((validated_obj,)) {
-            Ok(result) => py_to_response(py, &result),
+            Ok(result) => py_to_response(py, &result, axum::http::StatusCode::OK),
             Err(err) => {
                 err.print(py);
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()

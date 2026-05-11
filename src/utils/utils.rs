@@ -25,19 +25,23 @@ thread_local! {
 /// Serialize a `serde_json::Value` into an axum JSON response, reusing a
 /// per-thread `BytesMut` buffer. Replaces `Json(value).into_response()`.
 #[inline]
-pub fn json_response(value: &Value) -> Response {
-    json_response_with_status(StatusCode::OK, value)
+pub fn json_response(py: Python<'_>, value: &Value) -> Response {
+    json_response_with_status(py, StatusCode::OK, value)
 }
 
 #[inline]
-pub fn json_response_with_status(status: StatusCode, value: &Value) -> Response {
+pub fn json_response_with_status(py: Python<'_>, status: StatusCode, value: &Value) -> Response {
     let bytes = RESPONSE_BUF.with(|cell| {
-        let mut buf = cell.borrow_mut();
+        let mut buf = cell.take();
         buf.clear();
         // BytesMut implements bytes::BufMut; serde_json::to_writer can write
         // into anything io::Write. BytesMut::writer() bridges the two.
-        let _ = serde_json::to_writer((&mut *buf).writer(), value);
-        buf.split().freeze()
+        py.detach(|| {
+            let _ = serde_json::to_writer((&mut buf).writer(), value);
+        });
+        let bytes = buf.split().freeze();
+        cell.replace(buf);
+        bytes
     });
 
     Response::builder()
@@ -70,39 +74,48 @@ pub fn json_to_py_object(py: Python<'_>, value: &Value) -> Py<PyAny> {
 }
 
 #[inline]
-pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Response {
+pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>, status: StatusCode) -> Response {
     if obj.is_none() {
-        return StatusCode::NO_CONTENT.into_response();
+        let final_status = if status == StatusCode::OK {
+            StatusCode::NO_CONTENT
+        } else {
+            status
+        };
+        return final_status.into_response();
     }
 
     if let Ok(dict) = obj.cast::<PyDict>() {
-        return json_response(&py_dict_to_json(py, dict));
+        return json_response_with_status(py, status, &py_dict_to_json(py, dict));
     }
     if let Ok(list) = obj.cast::<PyList>() {
-        return json_response(&py_list_to_json(py, list));
+        return json_response_with_status(py, status, &py_list_to_json(py, list));
     }
 
     // bool BEFORE int — `True`/`False` are instances of int in Python.
     if let Ok(b) = obj.cast::<PyBool>() {
-        return json_response(&Value::Bool(b.is_true()));
+        return json_response_with_status(py, status, &Value::Bool(b.is_true()));
     }
     if let Ok(s) = obj.cast::<PyString>() {
-        return json_response(&Value::String(s.to_str().unwrap_or_default().to_owned()));
+        return json_response_with_status(
+            py,
+            status,
+            &Value::String(s.to_str().unwrap_or_default().to_owned()),
+        );
     }
     if let Ok(i) = obj.cast::<PyInt>() {
         if let Ok(v) = i.extract::<i64>() {
-            return json_response(&Value::Number(v.into()));
+            return json_response_with_status(py, status, &Value::Number(v.into()));
         }
     }
     if let Ok(f) = obj.cast::<PyFloat>() {
         if let Ok(v) = f.extract::<f64>() {
             if let Some(n) = serde_json::Number::from_f64(v) {
-                return json_response(&Value::Number(n));
+                return json_response_with_status(py, status, &Value::Number(n));
             }
-            return json_response(&Value::Null);
+            return json_response_with_status(py, status, &Value::Null);
         }
     }
-    json_response(&py_any_to_json(py, obj))
+    json_response_with_status(py, status, &py_any_to_json(py, obj))
 }
 
 #[inline]
