@@ -146,7 +146,10 @@ async fn prepare_request_context(
                         None
                     };
 
-                    let kwargs = PyDict::new(py);
+                    let kwargs = match &handler.kwargs_template {
+                        Some(tpl) => tpl.bind(py).copy().unwrap_or_else(|_| PyDict::new(py)),
+                        None => PyDict::new(py),
+                    };
                     pydantic::apply_request_data(
                         py,
                         &handler,
@@ -196,7 +199,7 @@ async fn call_sync_handler(
                     None => py_func.call0(),
                 };
                 match result {
-                    Ok(result) => convert_response_by_type(py, &result, handler.response_type),
+                    Ok(result) => convert_response_by_type(py, &result, &handler),
                     Err(err) => python_error_to_response(py, err),
                 }
             })
@@ -214,7 +217,7 @@ async fn call_async_handler(
     kwargs: Option<Py<PyDict>>,
     dependency_results: Option<DependencyResults>,
 ) -> Response {
-    let response_type = handler.response_type;
+    let handler_clone = handler.clone();
     let future = match rt_handle
         .spawn_blocking(move || {
             Python::attach(|py| -> Result<_, Response> {
@@ -229,7 +232,7 @@ async fn call_async_handler(
                     }
                 }
 
-                let py_func = handler.func.bind(py);
+                let py_func = handler_clone.func.bind(py);
                 let coroutine = match &kwargs {
                     Some(kw) => py_func.call((), Some(&kw.bind(py))),
                     None => py_func.call0(),
@@ -249,7 +252,7 @@ async fn call_async_handler(
 
     match future.await {
         Ok(result) => {
-            Python::attach(|py| convert_response_by_type(py, &result.bind(py), response_type))
+            Python::attach(|py| convert_response_by_type(py, &result.bind(py), &handler))
         }
         Err(err) => Python::attach(|py| python_error_to_response(py, err)),
     }
@@ -268,7 +271,10 @@ pub async fn run_py_handler_with_request(
                 Python::attach(|py| {
                     let request_input =
                         build_request_input_from_parts(&request_parts, &param_ranges);
-                    let kwargs = PyDict::new(py);
+                    let kwargs = match &handler.kwargs_template {
+                        Some(tpl) => tpl.bind(py).copy().unwrap_or_else(|_| PyDict::new(py)),
+                        None => PyDict::new(py),
+                    };
                     if let Err(resp) = pydantic::apply_request_data(
                         py,
                         &handler,
@@ -280,7 +286,7 @@ pub async fn run_py_handler_with_request(
                     }
                     let py_func = handler.func.bind(py);
                     match py_func.call((), Some(&kwargs)) {
-                        Ok(result) => convert_response_by_type(py, &result, handler.response_type),
+                        Ok(result) => convert_response_by_type(py, &result, &handler),
                         Err(err) => python_error_to_response(py, err),
                     }
                 })
@@ -304,7 +310,10 @@ pub async fn run_py_handler_with_request(
                         None
                     };
 
-                    let kwargs = PyDict::new(py);
+                    let kwargs = match &handler.kwargs_template {
+                        Some(tpl) => tpl.bind(py).copy().unwrap_or_else(|_| PyDict::new(py)),
+                        None => PyDict::new(py),
+                    };
                     if let Err(resp) = pydantic::apply_request_data(
                         py,
                         &handler,
@@ -334,7 +343,7 @@ pub async fn run_py_handler_with_request(
 
                     let py_func = handler.func.bind(py);
                     match py_func.call((), Some(&kwargs)) {
-                        Ok(result) => convert_response_by_type(py, &result, handler.response_type),
+                        Ok(result) => convert_response_by_type(py, &result, &handler),
                         Err(err) => python_error_to_response(py, err),
                     }
                 })

@@ -58,6 +58,9 @@ impl PyAPIRouter {
         py: Python<'_>,
         method: HttpMethod,
         path: String,
+        status_code: Option<u16>,
+        response_model: Option<Py<PyAny>>,
+        response_class: Option<Py<PyAny>>,
         tags: Option<Py<PyAny>>,
         summary: Option<String>,
         description: Option<String>,
@@ -69,6 +72,15 @@ impl PyAPIRouter {
                 "Cannot modify router after it has been frozen",
             ));
         }
+        
+        let default_status = status_code
+            .map(|c| {
+                axum::http::StatusCode::from_u16(c).map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err("status_code must be between 100 and 599")
+                })
+            })
+            .transpose()?;
+
         let mut merged_tags = self.tags.clone();
         if let Some(route_tags) = tags {
             let tag_list = route_tags.bind(py);
@@ -85,6 +97,8 @@ impl PyAPIRouter {
         let deprecated = deprecated.or(self.deprecated);
         let path_for_closure = path.clone();
         let routes = Arc::clone(&self.route_entries);
+        let response_model_capture = response_model.clone();
+        let response_class_capture = response_class.clone();
         let decorator = move |args: &Bound<'_, PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
@@ -92,10 +106,26 @@ impl PyAPIRouter {
             let func: Py<PyAny> = args.get_item(0)?.unbind();
             let metadata =
                 crate::ffi::pydantic::parse_route_metadata(py, &func.bind(py), &path_for_closure);
+            
+            let final_response_type = if let Some(cls) = &response_class_capture {
+                crate::ffi::pydantic::get_response_type_from_class(py, &cls.bind(py))
+            } else {
+                metadata.response_type
+            };
+            
             let needs_kwargs = !metadata.body_param_names.is_empty()
                 || !metadata.param_validators.is_empty()
                 || !metadata.dependencies.is_empty()
                 || !metadata.parsed_params.is_empty();
+            let kwargs_template = if needs_kwargs {
+                let d = pyo3::types::PyDict::new(py);
+                for p in &metadata.parsed_params {
+                    let _ = d.set_item(p.name_py.bind(py), py.None());
+                }
+                Some(d.unbind())
+            } else {
+                None
+            };
             let handler = Arc::new(crate::routing::types::RouteHandler {
                 func: func.clone_ref(py),
                 is_async: metadata.is_async,
@@ -103,11 +133,15 @@ impl PyAPIRouter {
                 dependency_needs_request: metadata.dependency_needs_request,
                 all_deps_sync: metadata.all_deps_sync,
                 needs_kwargs,
+                kwargs_template,
                 param_validators: metadata.param_validators,
-                response_type: metadata.response_type,
+                response_type: final_response_type,
                 body_param_names: metadata.body_param_names,
                 dependencies: metadata.dependencies,
                 parsed_params: metadata.parsed_params,
+                default_status,
+                response_model: response_model_capture.clone(),
+                response_class: response_class_capture.clone(),
             });
             let entry = RouteEntry {
                 method,
@@ -251,6 +285,9 @@ impl PyAPIRouter {
             py,
             HttpMethod::GET,
             path,
+            status_code,
+            response_model.clone(),
+            response_class.clone(),
             tags,
             summary,
             description,
@@ -292,6 +329,9 @@ impl PyAPIRouter {
             py,
             HttpMethod::POST,
             path,
+            status_code,
+            response_model.clone(),
+            response_class.clone(),
             tags,
             summary,
             description,
@@ -333,6 +373,9 @@ impl PyAPIRouter {
             py,
             HttpMethod::PUT,
             path,
+            status_code,
+            response_model.clone(),
+            response_class.clone(),
             tags,
             summary,
             description,
@@ -374,6 +417,9 @@ impl PyAPIRouter {
             py,
             HttpMethod::DELETE,
             path,
+            status_code,
+            response_model.clone(),
+            response_class.clone(),
             tags,
             summary,
             description,
@@ -415,6 +461,9 @@ impl PyAPIRouter {
             py,
             HttpMethod::PATCH,
             path,
+            status_code,
+            response_model.clone(),
+            response_class.clone(),
             tags,
             summary,
             description,
@@ -456,6 +505,9 @@ impl PyAPIRouter {
             py,
             HttpMethod::OPTIONS,
             path,
+            status_code,
+            response_model.clone(),
+            response_class.clone(),
             tags,
             summary,
             description,
@@ -497,6 +549,9 @@ impl PyAPIRouter {
             py,
             HttpMethod::HEAD,
             path,
+            status_code,
+            response_model.clone(),
+            response_class.clone(),
             tags,
             summary,
             description,

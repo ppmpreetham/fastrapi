@@ -173,9 +173,13 @@ pub struct RouteHandler {
     pub param_validators: Vec<(String, Py<PyAny>)>,
     pub response_type: ResponseType,
     pub needs_kwargs: bool,
+    pub kwargs_template: Option<Py<pyo3::types::PyDict>>,
     pub body_param_names: Vec<Py<PyString>>,
     pub dependencies: Vec<DependencyNode>,
     pub parsed_params: Vec<ParsedParameter>,
+    pub default_status: Option<axum::http::StatusCode>,
+    pub response_model: Option<Py<PyAny>>,
+    pub response_class: Option<Py<PyAny>>,
 }
 
 #[derive(Clone)]
