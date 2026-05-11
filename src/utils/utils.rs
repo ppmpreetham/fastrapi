@@ -102,13 +102,9 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Response {
             return json_response(&Value::Null);
         }
     }
-
-    // Anything else: route through the recursive walker which handles
-    // tuple/set/frozenset/bytes/datetime/UUID/Decimal/Enum/dataclass/BaseModel.
     json_response(&py_any_to_json(py, obj))
 }
 
-/// dict to JSON conversion with capacity hint
 #[inline]
 pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
     let mut map = Map::with_capacity(dict.len());
@@ -121,7 +117,6 @@ pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
     Value::Object(map)
 }
 
-/// list to JSON conversion with capacity hint
 #[inline]
 pub fn py_list_to_json(py: Python<'_>, list: &Bound<'_, PyList>) -> Value {
     let mut vec = Vec::with_capacity(list.len());
@@ -224,7 +219,6 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         return bytes_to_json(b.as_bytes());
     }
     if let Ok(b) = value.cast::<PyByteArray>() {
-        // SAFETY: we copy into a Value immediately, no Python re-entry in between.
         let snapshot: Vec<u8> = unsafe { b.as_bytes().to_vec() };
         return bytes_to_json(&snapshot);
     }
@@ -248,7 +242,6 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         }
     }
     if let Ok(true) = value.hasattr("isoformat") {
-        // datetime / date / time
         if let Ok(s) = value.call_method0("isoformat") {
             if let Ok(s) = s.cast_into::<PyString>() {
                 return Value::String(s.to_str().unwrap_or_default().to_owned());
@@ -279,8 +272,6 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         }
     }
     if let Ok(true) = value.hasattr("value") {
-        // Enum / IntEnum / StrEnum — also catches anything else with a `.value`,
-        // but those are rare in handler return types and the recurse is safe.
         let is_enum = value
             .get_type()
             .getattr("__bases__")
@@ -309,8 +300,6 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         }
     }
 
-    // Last resort: `str(value)` — better than Debug-format which leaks
-    // pointer addresses (`<User object at 0x7f...>`).
     if let Ok(s) = value.str() {
         if let Ok(s) = s.to_str() {
             return Value::String(s.to_owned());
@@ -323,7 +312,6 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
 fn bytes_to_json(b: &[u8]) -> Value {
     match std::str::from_utf8(b) {
         Ok(s) => Value::String(s.to_owned()),
-        // No base64 dep — emit a list of byte ints. Lossless and serde-clean.
         Err(_) => Value::Array(b.iter().map(|&x| Value::Number(x.into())).collect()),
     }
 }

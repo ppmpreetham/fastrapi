@@ -1,6 +1,6 @@
 use super::types::FastrAPI;
 use axum::{
-    body::to_bytes,
+    body::{to_bytes, Body},
     extract::{Extension, Request},
     http::StatusCode,
     middleware::{self as axum_middleware, Next},
@@ -10,6 +10,7 @@ use axum::{
 };
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
+use smallvec::SmallVec;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -21,8 +22,6 @@ use tower_sessions::cookie::Key;
 use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
 // internal Imports
-use crate::http::websocket::ws_handler;
-use crate::routing::types::RequestInput;
 use crate::utils::openapi::build_openapi_spec;
 use crate::utils::utils::local_guard;
 use crate::{
@@ -41,7 +40,7 @@ use crate::{
     },
     routing::router::RouteMatch,
 };
-use std::collections::HashMap;
+use crate::{http::websocket::ws_handler, routing::types::PathParamRange};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -317,94 +316,13 @@ fn log_python_error(context: &str, err: PyErr) {
     Python::attach(|py| err.print(py));
 }
 
-fn parse_query_string(query: Option<&str>) -> HashMap<String, String> {
-    let mut params = HashMap::new();
-
-    let Some(query) = query else {
-        return params;
-    };
-
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if !key.is_empty() {
-            params.insert(key.to_string(), value.to_string());
-        }
-    }
-
-    params
-}
-
-fn parse_cookie_header(cookie_header: Option<&str>) -> HashMap<String, String> {
-    let mut cookies = HashMap::new();
-
-    let Some(cookie_header) = cookie_header else {
-        return cookies;
-    };
-
-    for cookie in cookie_header.split(';') {
-        let trimmed = cookie.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let (name, value) = trimmed.split_once('=').unwrap_or((trimmed, ""));
-        cookies.insert(name.trim().to_string(), value.trim().to_string());
-    }
-
-    cookies
-}
-
-fn build_request_input(request: &Request, path_params: HashMap<String, String>) -> RequestInput {
-    let query_string = request.uri().query().unwrap_or("").to_string();
-    let headers = request
-        .headers()
-        .iter()
-        .filter_map(|(name, value)| {
-            value
-                .to_str()
-                .ok()
-                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
-        })
-        .collect::<HashMap<_, _>>();
-
-    let cookies = parse_cookie_header(
-        request
-            .headers()
-            .get("cookie")
-            .and_then(|value| value.to_str().ok()),
-    );
-
-    RequestInput {
-        method: request.method().as_str().to_string(),
-        path: request.uri().path().to_string(),
-        query_params: parse_query_string(request.uri().query()),
-        query_string,
-        path_params,
-        headers,
-        cookies,
-    }
-}
-
-async fn extract_payload(
-    request: Request,
-    expects_body: bool,
-) -> Result<Option<serde_json::Value>, Response> {
-    if !expects_body {
-        return Ok(None);
-    }
-
-    let body = to_bytes(request.into_body(), usize::MAX)
+async fn extract_payload(body: Body) -> Result<Option<serde_json::Value>, Response> {
+    let body = to_bytes(body, usize::MAX)
         .await
         .map_err(|_| (StatusCode::BAD_REQUEST, "Failed to read request body").into_response())?;
-
     if body.is_empty() {
         return Ok(None);
     }
-
     let mut buf = body.to_vec();
     simd_json::serde::from_slice(&mut buf)
         .map(Some)
@@ -679,8 +597,9 @@ async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> R
         b"HEAD" => HttpMethod::HEAD,
         _ => return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response(),
     };
-    let path = req.uri().path();
-    let route_match = match router.resolve(method, path) {
+
+    let path_str = req.uri().path();
+    let route_match = match router.resolve(method, path_str) {
         Some(v) => v,
         None => return axum::http::StatusCode::NOT_FOUND.into_response(),
     };
@@ -689,28 +608,50 @@ async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> R
         RouteMatch::Static(handler) => (handler, None),
         RouteMatch::Params(handler, params) => (handler, Some(params)),
     };
+
     if !handler.needs_kwargs {
         return run_py_handler_no_args(state.rt_handle, handler).await;
     }
-    let path_params = if let Some(params) = params_iter {
+
+    let path_base = path_str.as_ptr() as usize;
+    let param_ranges: SmallVec<[PathParamRange; 4]> = if let Some(params) = params_iter {
         params
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| {
+                let start = v.as_ptr() as usize - path_base;
+                debug_assert!(
+                    start <= path_str.len(),
+                    "matchit returned a string outside the input path"
+                );
+                let key_static: &'static str = unsafe { std::mem::transmute(k) };
+                PathParamRange {
+                    key: key_static,
+                    start,
+                    end: start + v.len(),
+                }
+            })
             .collect()
     } else {
-        HashMap::new()
+        SmallVec::new()
     };
 
+    let (request_parts, body) = req.into_parts();
     let expects_body = !handler.body_param_names.is_empty() || !handler.param_validators.is_empty();
-
-    let request_input = build_request_input(&req, path_params);
     let payload = if !expects_body {
         None
     } else {
-        match extract_payload(req, true).await {
+        match extract_payload(body).await {
             Ok(p) => p,
             Err(resp) => return resp,
         }
     };
-    run_py_handler_with_request(state.rt_handle, handler, request_input, payload).await
+
+    run_py_handler_with_request(
+        state.rt_handle,
+        handler,
+        request_parts,
+        param_ranges,
+        payload,
+    )
+    .await
 }

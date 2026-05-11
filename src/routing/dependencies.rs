@@ -283,7 +283,7 @@ fn build_dependency_kwargs(
     py: Python<'_>,
     dep: &DependencyNode,
     cache: &HashMap<u64, SharedPyObject>,
-    request_input: &RequestInput,
+    request_input: &RequestInput<'_>,
     request: Option<&SharedPyObject>,
 ) -> Result<Py<PyDict>, DependencyExecutionError> {
     let final_kwargs = PyDict::new(py);
@@ -296,9 +296,8 @@ fn build_dependency_kwargs(
                 }
             }
             InjectionType::Parameter(parameter) => {
-                if let Some(value) =
-                    pydantic::resolve_parameter_value(py, parameter, request_input)
-                        .map_err(DependencyExecutionError::Response)?
+                if let Some(value) = pydantic::resolve_parameter_value(py, parameter, request_input)
+                    .map_err(DependencyExecutionError::Response)?
                 {
                     final_kwargs.set_item(arg_name, value)?;
                 }
@@ -324,7 +323,7 @@ fn build_dependency_kwargs(
 pub fn execute_dependencies_sync(
     py: Python<'_>,
     flat_plan: &[DependencyNode],
-    request_input: &RequestInput,
+    request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
 ) -> Result<HashMap<String, SharedPyObject>, DependencyExecutionError> {
     let request = request.map(Arc::new);
@@ -348,8 +347,7 @@ pub fn execute_dependencies_sync(
             }
         }
 
-        let py_kwargs =
-            build_dependency_kwargs(py, dep, &cache, request_input, request.as_ref())?;
+        let py_kwargs = build_dependency_kwargs(py, dep, &cache, request_input, request.as_ref())?;
         let bound_func = dep.func.bind(py);
         let bound_kwargs = py_kwargs.bind(py);
         let result: SharedPyObject = Arc::new(bound_func.call((), Some(bound_kwargs))?.unbind());
@@ -370,7 +368,7 @@ pub fn execute_dependencies_sync(
 
 pub async fn execute_dependencies(
     flat_plan: &[DependencyNode],
-    request_input: &RequestInput,
+    request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
 ) -> Result<HashMap<String, SharedPyObject>, DependencyExecutionError> {
     let request = request.map(Arc::new);

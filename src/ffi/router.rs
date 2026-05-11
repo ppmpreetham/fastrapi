@@ -92,9 +92,7 @@ impl PyAPIRouter {
             let func: Py<PyAny> = args.get_item(0)?.unbind();
             let metadata =
                 crate::ffi::pydantic::parse_route_metadata(py, &func.bind(py), &path_for_closure);
-            let needs_kwargs = !metadata.path_param_names.is_empty()
-                || !metadata.query_param_names.is_empty()
-                || !metadata.body_param_names.is_empty()
+            let needs_kwargs = !metadata.body_param_names.is_empty()
                 || !metadata.param_validators.is_empty()
                 || !metadata.dependencies.is_empty()
                 || !metadata.parsed_params.is_empty();
@@ -107,8 +105,6 @@ impl PyAPIRouter {
                 needs_kwargs,
                 param_validators: metadata.param_validators,
                 response_type: metadata.response_type,
-                path_param_names: metadata.path_param_names,
-                query_param_names: metadata.query_param_names,
                 body_param_names: metadata.body_param_names,
                 dependencies: metadata.dependencies,
                 parsed_params: metadata.parsed_params,

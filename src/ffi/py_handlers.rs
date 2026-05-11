@@ -3,14 +3,16 @@ use crate::ffi::pydantic;
 use crate::http::request::PyRequest;
 use crate::http::responses::convert_response_by_type;
 use crate::routing::dependencies::{self, DependencyExecutionError};
-use crate::routing::types::{RequestInput, RouteHandler};
+use crate::routing::types::{PathParamRange, RequestInput, RouteHandler};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use once_cell;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 type DependencyResults = std::collections::HashMap<String, Arc<Py<PyAny>>>;
@@ -23,33 +25,37 @@ fn python_error_to_response(py: Python<'_>, err: PyErr) -> Response {
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
-fn create_request_object(py: Python<'_>, request_input: &RequestInput) -> PyResult<Py<PyAny>> {
+fn create_request_object(py: Python<'_>, request_input: &RequestInput<'_>) -> PyResult<Py<PyAny>> {
     let scope = PyDict::new(py);
     scope.set_item(intern!(py, "type"), intern!(py, "http"))?;
-    scope.set_item(intern!(py, "method"), request_input.method.as_str())?;
-    scope.set_item(intern!(py, "path"), request_input.path.as_str())?;
-    scope.set_item(intern!(py, "query_string"), request_input.query_string.as_str())?;
+    scope.set_item(intern!(py, "method"), request_input.method)?;
+    scope.set_item(intern!(py, "path"), request_input.path)?;
+    scope.set_item(intern!(py, "query_string"), request_input.query_string)?;
 
     let path_params = PyDict::new(py);
-    for (key, value) in &request_input.path_params {
-        path_params.set_item(key, value)?;
+    if let Some(params) = request_input.path_params.get() {
+        for (key, value) in params {
+            path_params.set_item(key, value)?;
+        }
     }
     scope.set_item(intern!(py, "path_params"), path_params)?;
 
     let query_params = PyDict::new(py);
-    for (key, value) in &request_input.query_params {
-        query_params.set_item(key, value)?;
+    for (key, value) in request_input.get_all_query_params() {
+        query_params.set_item(key.as_ref(), value.as_ref())?;
     }
     scope.set_item(intern!(py, "query_params"), query_params)?;
 
     let headers = PyDict::new(py);
-    for (key, value) in &request_input.headers {
-        headers.set_item(key, value)?;
+    for (key, value) in request_input.headers.iter() {
+        if let Ok(val) = value.to_str() {
+            headers.set_item(key.as_str(), val)?;
+        }
     }
     scope.set_item(intern!(py, "headers"), headers)?;
 
     let cookies = PyDict::new(py);
-    for (key, value) in &request_input.cookies {
+    for (key, value) in request_input.get_all_cookies() {
         cookies.set_item(key, value)?;
     }
     scope.set_item(intern!(py, "cookies"), cookies)?;
@@ -71,16 +77,66 @@ fn merge_dependency_results(
     Ok(())
 }
 
+fn build_request_input_from_parts<'a>(
+    parts: &'a axum::http::request::Parts,
+    param_ranges: &'a [PathParamRange],
+) -> RequestInput<'a> {
+    let path_str = parts.uri.path();
+    let path_params = once_cell::sync::OnceCell::new();
+
+    if !param_ranges.is_empty() {
+        let path_params_vec: SmallVec<[(&'a str, &'a str); 8]> = param_ranges
+            .iter()
+            .map(|r| (r.key, &path_str[r.start..r.end]))
+            .collect();
+        let _ = path_params.set(path_params_vec);
+    }
+
+    RequestInput {
+        method: parts.method.as_str(),
+        path: path_str,
+        query_string: parts.uri.query().unwrap_or(""),
+        raw_cookies: parts
+            .headers
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+        headers: &parts.headers,
+        path_params,
+        query_params: once_cell::sync::OnceCell::new(),
+        cookies: once_cell::sync::OnceCell::new(),
+    }
+}
+
 async fn prepare_request_context(
     rt_handle: tokio::runtime::Handle,
     handler: Arc<RouteHandler>,
-    request_input: RequestInput,
+    parts: axum::http::request::Parts,
+    param_ranges: SmallVec<[PathParamRange; 4]>,
     payload: Option<serde_json::Value>,
-) -> Result<(RequestInput, Option<Py<PyAny>>, Py<PyDict>), Response> {
+) -> Result<
+    (
+        axum::http::request::Parts,
+        SmallVec<[PathParamRange; 4]>,
+        Option<Py<PyAny>>,
+        Py<PyDict>,
+    ),
+    Response,
+> {
     match rt_handle
         .spawn_blocking(move || {
             Python::attach(
-                |py| -> Result<(RequestInput, Option<Py<PyAny>>, Py<PyDict>), Response> {
+                |py| -> Result<
+                    (
+                        axum::http::request::Parts,
+                        SmallVec<[PathParamRange; 4]>,
+                        Option<Py<PyAny>>,
+                        Py<PyDict>,
+                    ),
+                    Response,
+                > {
+                    let request_input = build_request_input_from_parts(&parts, &param_ranges);
+
                     let request_object = if handler.dependency_needs_request {
                         match create_request_object(py, &request_input) {
                             Ok(req) => Some(req),
@@ -98,8 +154,8 @@ async fn prepare_request_context(
                         payload.as_ref(),
                         &kwargs,
                     )?;
-
-                    Ok((request_input, request_object, kwargs.unbind()))
+                    drop(request_input);
+                    Ok((parts, param_ranges, request_object, kwargs.unbind()))
                 },
             )
         })
@@ -202,13 +258,16 @@ async fn call_async_handler(
 pub async fn run_py_handler_with_request(
     rt_handle: tokio::runtime::Handle,
     handler: Arc<RouteHandler>,
-    request_input: RequestInput,
+    request_parts: axum::http::request::Parts,
+    param_ranges: SmallVec<[PathParamRange; 4]>,
     payload: Option<serde_json::Value>,
 ) -> Response {
     if !handler.is_async && handler.dependencies.is_empty() {
         return rt_handle
             .spawn_blocking(move || {
                 Python::attach(|py| {
+                    let request_input =
+                        build_request_input_from_parts(&request_parts, &param_ranges);
                     let kwargs = PyDict::new(py);
                     if let Err(resp) = pydantic::apply_request_data(
                         py,
@@ -230,13 +289,12 @@ pub async fn run_py_handler_with_request(
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
 
-    // Sync handler with only sync deps: collapse prepare + execute_dependencies
-    // + call into a single spawn_blocking + Python::attach. Two thread hops
-    // become one; the per-dep attach in the async path also goes away.
     if !handler.is_async && handler.all_deps_sync {
         return rt_handle
             .spawn_blocking(move || {
                 Python::attach(|py| {
+                    let request_input =
+                        build_request_input_from_parts(&request_parts, &param_ranges);
                     let request_object = if handler.dependency_needs_request {
                         match create_request_object(py, &request_input) {
                             Ok(req) => Some(req),
@@ -285,14 +343,20 @@ pub async fn run_py_handler_with_request(
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
 
-    let (request_input, request_object, kwargs) =
-        match prepare_request_context(rt_handle.clone(), handler.clone(), request_input, payload)
-            .await
-        {
-            Ok(res) => res,
-            Err(response) => return response,
-        };
+    let (parts, ranges, request_object, kwargs) = match prepare_request_context(
+        rt_handle.clone(),
+        handler.clone(),
+        request_parts,
+        param_ranges,
+        payload,
+    )
+    .await
+    {
+        Ok(res) => res,
+        Err(response) => return response,
+    };
 
+    let request_input = build_request_input_from_parts(&parts, &ranges);
     let dependency_results = if handler.dependencies.is_empty() {
         None
     } else {

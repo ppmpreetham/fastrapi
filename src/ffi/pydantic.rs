@@ -13,6 +13,7 @@ use axum::Json;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple, PyType};
 use pyo3::{intern, prelude::*};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Default)]
@@ -148,8 +149,6 @@ pub fn register_pydantic_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
 pub struct ParsedRouteMetadata {
     pub param_validators: Vec<(String, Py<PyAny>)>,
     pub response_type: ResponseType,
-    pub path_param_names: Vec<Py<PyString>>,
-    pub query_param_names: Vec<Py<PyString>>,
     pub body_param_names: Vec<Py<PyString>>,
     pub dependencies: Vec<DependencyNode>,
     pub dependency_needs_request: bool,
@@ -181,7 +180,6 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         .collect();
 
     let mut param_validators = Vec::new();
-    let mut query_param_names = Vec::new();
     let mut body_param_names = Vec::new();
     let mut parsed_params = Vec::new();
 
@@ -214,7 +212,6 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
             }
 
             match parsed_param.source {
-                ParameterSource::Query => query_param_names.push(parsed_param.name.clone()),
                 ParameterSource::Body => {
                     body_param_names.push(parsed_param.name.clone());
                     if parsed_param.is_pydantic_model {
@@ -239,15 +236,11 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
             .map(|n| PyString::new(py, &n).unbind())
             .collect()
     };
-    let path_param_names = intern_all(path_param_names);
-    let query_param_names = intern_all(query_param_names);
     let body_param_names = intern_all(body_param_names);
 
     ParsedRouteMetadata {
         param_validators,
         response_type,
-        path_param_names,
-        query_param_names,
         body_param_names,
         dependencies,
         dependency_needs_request,
@@ -383,31 +376,24 @@ fn validate_scalar_constraints(
 
 fn raw_value_for_parameter<'a>(
     param: &ParsedParameter,
-    request_input: &'a RequestInput,
-) -> Option<&'a str> {
+    request_input: &'a RequestInput<'_>,
+) -> Option<Cow<'a, str>> {
     match param.source {
         ParameterSource::Path => request_input
-            .path_params
-            .get(&param.external_name)
-            .or_else(|| request_input.path_params.get(&param.name))
-            .map(String::as_str),
+            .get_path_param(&param.external_name)
+            .or_else(|| request_input.get_path_param(&param.name))
+            .map(Cow::Borrowed),
         ParameterSource::Query => request_input
-            .query_params
-            .get(&param.external_name)
-            .or_else(|| request_input.query_params.get(&param.name))
-            .map(String::as_str),
+            .get_query_param(&param.external_name)
+            .or_else(|| request_input.get_query_param(&param.name)),
         ParameterSource::Header => request_input
-            .headers
-            .get(&param.external_name.to_ascii_lowercase())
-            .or_else(|| request_input.headers.get(&param.external_name))
-            .or_else(|| request_input.headers.get(&param.name.to_ascii_lowercase()))
-            .or_else(|| request_input.headers.get(&param.name))
-            .map(String::as_str),
+            .get_header(&param.external_name)
+            .or_else(|| request_input.get_header(&param.name))
+            .map(Cow::Borrowed),
         ParameterSource::Cookie => request_input
-            .cookies
-            .get(&param.external_name)
-            .or_else(|| request_input.cookies.get(&param.name))
-            .map(String::as_str),
+            .get_cookie(&param.external_name)
+            .or_else(|| request_input.get_cookie(&param.name))
+            .map(Cow::Borrowed),
         ParameterSource::Body => None,
     }
 }
@@ -415,7 +401,7 @@ fn raw_value_for_parameter<'a>(
 pub fn resolve_parameter_value(
     py: Python<'_>,
     param: &ParsedParameter,
-    request_input: &RequestInput,
+    request_input: &RequestInput<'_>,
 ) -> Result<Option<Py<PyAny>>, Response> {
     let Some(raw) = raw_value_for_parameter(param, request_input) else {
         if param.has_default {
@@ -436,7 +422,7 @@ pub fn resolve_parameter_value(
         return Ok(None);
     };
 
-    let value = convert_scalar_value(py, raw, param)?;
+    let value = convert_scalar_value(py, &raw, param)?;
     // validate_scalar_constraints is now pure Rust — no py needed in signature.
     validate_scalar_constraints(param, value.bind(py))?;
     Ok(Some(value))
@@ -553,7 +539,7 @@ fn apply_body_and_validation(
 pub fn apply_request_data(
     py: Python,
     handler: &RouteHandler,
-    request_input: &RequestInput,
+    request_input: &RequestInput<'_>,
     payload: Option<&serde_json::Value>,
     kwargs: &Bound<'_, PyDict>,
 ) -> Result<(), Response> {

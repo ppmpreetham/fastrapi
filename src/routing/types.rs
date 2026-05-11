@@ -1,9 +1,11 @@
 use crate::router::PyAPIRouter;
 use crate::routing::dependencies::DependencyNode;
 use crate::types::response::ResponseType;
+use once_cell::sync::OnceCell;
 use pyo3::types::PyString;
 use pyo3::{Py, PyAny};
-use std::collections::HashMap;
+use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -71,15 +73,94 @@ pub struct ParsedParameter {
     pub scalar_kind: crate::ffi::pydantic::ScalarKind,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct RequestInput {
-    pub method: String,
-    pub path: String,
-    pub query_string: String,
-    pub path_params: HashMap<String, String>,
-    pub query_params: HashMap<String, String>,
-    pub headers: HashMap<String, String>,
-    pub cookies: HashMap<String, String>,
+#[derive(Clone, Debug)]
+pub struct PathParamRange {
+    pub key: &'static str,
+    pub start: usize,
+    pub end: usize,
+}
+
+pub struct RequestInput<'a> {
+    pub method: &'a str,
+    pub path: &'a str,
+    pub query_string: &'a str,
+    pub raw_cookies: &'a str,
+
+    pub path_params: OnceCell<SmallVec<[(&'a str, &'a str); 8]>>,
+    pub query_params: OnceCell<SmallVec<[(Cow<'a, str>, Cow<'a, str>); 8]>>,
+    pub headers: &'a axum::http::HeaderMap,
+    pub cookies: OnceCell<SmallVec<[(&'a str, &'a str); 8]>>,
+}
+
+impl<'a> RequestInput<'a> {
+    pub fn get_path_param(&self, key: &str) -> Option<&'a str> {
+        self.path_params
+            .get()?
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+    }
+
+    pub fn get_all_query_params(&self) -> &SmallVec<[(Cow<'a, str>, Cow<'a, str>); 8]> {
+        self.query_params.get_or_init(|| {
+            let mut result = SmallVec::new();
+            if self.query_string.is_empty() {
+                return result;
+            }
+            for pair in self.query_string.split('&') {
+                if pair.is_empty() {
+                    continue;
+                }
+                let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                let key_cow = match k.contains('%') || k.contains('+') {
+                    true => Cow::Owned(percent_encoding::percent_decode_str(&k.replace('+', " ")).decode_utf8_lossy().into_owned()),
+                    false => Cow::Borrowed(k),
+                };
+                let val_cow = match v.contains('%') || v.contains('+') {
+                    true => Cow::Owned(percent_encoding::percent_decode_str(&v.replace('+', " ")).decode_utf8_lossy().into_owned()),
+                    false => Cow::Borrowed(v),
+                };
+                result.push((key_cow, val_cow));
+            }
+            result
+        })
+    }
+
+    pub fn get_query_param(&self, key: &str) -> Option<Cow<'a, str>> {
+        self.get_all_query_params()
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }
+
+    pub fn get_all_cookies(&self) -> &SmallVec<[(&'a str, &'a str); 8]> {
+        self.cookies.get_or_init(|| {
+            let mut result = SmallVec::new();
+            if self.raw_cookies.is_empty() {
+                return result;
+            }
+            for cookie in self.raw_cookies.split(';') {
+                let trimmed = cookie.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let (name, value) = trimmed.split_once('=').unwrap_or((trimmed, ""));
+                result.push((name.trim(), value.trim()));
+            }
+            result
+        })
+    }
+
+    pub fn get_cookie(&self, key: &str) -> Option<&'a str> {
+        self.get_all_cookies()
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+    }
+
+    pub fn get_header(&self, key: &str) -> Option<&'a str> {
+        self.headers.get(key).and_then(|v| v.to_str().ok())
+    }
 }
 
 #[derive(Clone)]
@@ -92,8 +173,6 @@ pub struct RouteHandler {
     pub param_validators: Vec<(String, Py<PyAny>)>,
     pub response_type: ResponseType,
     pub needs_kwargs: bool,
-    pub path_param_names: Vec<Py<PyString>>,
-    pub query_param_names: Vec<Py<PyString>>,
     pub body_param_names: Vec<Py<PyString>>,
     pub dependencies: Vec<DependencyNode>,
     pub parsed_params: Vec<ParsedParameter>,
