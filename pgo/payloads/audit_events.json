@@ -1,0 +1,26 @@
+{
+  "tenant_id": "tenant-prod-17",
+  "events": [
+    {
+      "actor": "jordan.lee@example.com",
+      "action": "user.login",
+      "target": "session",
+      "ip": "203.0.113.10",
+      "result": "success"
+    },
+    {
+      "actor": "alice@example.com",
+      "action": "role.update",
+      "target": "user:42",
+      "ip": "203.0.113.11",
+      "result": "success"
+    },
+    {
+      "actor": "service-account@example.com",
+      "action": "api_key.rotate",
+      "target": "key:gateway",
+      "ip": "203.0.113.12",
+      "result": "success"
+    }
+  ]
+}

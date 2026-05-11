@@ -1,0 +1,37 @@
+{
+  "batch_id": "batch-2026-05-11-001",
+  "events": [
+    {
+      "event_id": "evt-0001",
+      "name": "page_view",
+      "source": "web",
+      "timestamp": "2026-05-11T10:00:00Z",
+      "properties": {
+        "path": "/docs",
+        "duration_ms": 183,
+        "user_agent": "Mozilla/5.0"
+      }
+    },
+    {
+      "event_id": "evt-0002",
+      "name": "checkout_started",
+      "source": "web",
+      "timestamp": "2026-05-11T10:00:04Z",
+      "properties": {
+        "cart_id": "cart-9f20",
+        "item_count": 4,
+        "currency": "USD"
+      }
+    },
+    {
+      "event_id": "evt-0003",
+      "name": "api_token_created",
+      "source": "admin",
+      "timestamp": "2026-05-11T10:00:08Z",
+      "properties": {
+        "scope": "read:orders",
+        "tenant_id": "tenant-prod-17"
+      }
+    }
+  ]
+}

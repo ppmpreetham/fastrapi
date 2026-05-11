@@ -1,0 +1,13 @@
+{
+  "display_name": "Jordan L.",
+  "timezone": "America/Los_Angeles",
+  "preferences": {
+    "theme": "system",
+    "email_digest": "weekly",
+    "alerts": {
+      "billing": true,
+      "deployments": true,
+      "marketing": false
+    }
+  }
+}

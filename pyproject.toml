@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.9,<2.0"]
+requires = ["maturin>=1.9,<2.0", "pydantic>=2.10.6"]
 build-backend = "maturin"
 
 [project]
@@ -48,4 +48,7 @@ repository = "https://github.com/ppmpreetham/fastrapi.git"
 # fastrapi-cli = "fastrapi:main_cli"
 
 [tool.maturin]
+bindings = "pyo3"
 features = ["pyo3/extension-module"]
+include = [{ path = "pgo/**/*", format = "sdist" }]
+pgo-command = "python -m pgo.train"

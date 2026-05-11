@@ -1,0 +1,18 @@
+{
+  "cart_id": "cart-9f20",
+  "currency": "USD",
+  "items": [
+    {
+      "sku": "sku-1001",
+      "quantity": 1,
+      "unit_price": 129.0
+    },
+    {
+      "sku": "sku-2002",
+      "quantity": 3,
+      "unit_price": 89.5
+    }
+  ],
+  "coupon_codes": ["SPRING10"],
+  "shipping_method": "ground"
+}

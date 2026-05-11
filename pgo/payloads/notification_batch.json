@@ -1,0 +1,27 @@
+{
+  "template": "billing_threshold",
+  "channel": "email",
+  "recipients": [
+    {
+      "email": "jordan.lee@example.com",
+      "variables": {
+        "usage": "82%",
+        "account": "Acme Platform"
+      }
+    },
+    {
+      "email": "alice@example.com",
+      "variables": {
+        "usage": "82%",
+        "account": "Acme Platform"
+      }
+    },
+    {
+      "email": "ops@example.com",
+      "variables": {
+        "usage": "82%",
+        "account": "Acme Platform"
+      }
+    }
+  ]
+}

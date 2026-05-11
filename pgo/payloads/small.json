@@ -1,0 +1,9 @@
+{
+  "message": "hello from pgo",
+  "request_id": "req-small-0001",
+  "flags": {
+    "preview": true,
+    "retry": false
+  },
+  "count": 3
+}

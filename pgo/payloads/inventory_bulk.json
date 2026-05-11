@@ -1,0 +1,21 @@
+{
+  "warehouse": "iad-1",
+  "updates": [
+    {
+      "sku": "sku-1001",
+      "available": 128,
+      "reserved": 7
+    },
+    {
+      "sku": "sku-2002",
+      "available": 89,
+      "reserved": 14
+    },
+    {
+      "sku": "sku-3003",
+      "available": 512,
+      "reserved": 31
+    }
+  ],
+  "source": "cycle-count"
+}
