@@ -1,6 +1,7 @@
 /target
 NUL.*
 benchsrc/
+src/components/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

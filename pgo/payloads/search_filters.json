@@ -1,0 +1,25 @@
+{
+  "query": "api observability",
+  "facets": {
+    "category": ["platform", "developer-tools"],
+    "price": {
+      "min": 25,
+      "max": 250
+    },
+    "regions": ["us-east-1", "us-west-2", "eu-west-1"]
+  },
+  "sort": [
+    {
+      "field": "relevance",
+      "direction": "desc"
+    },
+    {
+      "field": "updated_at",
+      "direction": "desc"
+    }
+  ],
+  "page": {
+    "limit": 25,
+    "offset": 50
+  }
+}

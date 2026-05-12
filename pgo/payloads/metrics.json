@@ -1,0 +1,21 @@
+{
+  "service": "checkout-api",
+  "window_seconds": 60,
+  "series": [
+    {
+      "name": "http.server.duration",
+      "unit": "ms",
+      "points": [12.4, 18.9, 22.1, 15.7, 10.3]
+    },
+    {
+      "name": "http.server.requests",
+      "unit": "count",
+      "points": [128, 134, 141, 137, 150]
+    },
+    {
+      "name": "queue.depth",
+      "unit": "count",
+      "points": [4, 3, 6, 2, 1]
+    }
+  ]
+}

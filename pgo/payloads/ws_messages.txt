@@ -1,0 +1,7 @@
+TODO: later - websocket PGO traffic is intentionally not wired into train.py yet.
+connect
+subscribe:orders
+{"type":"ping","timestamp":"2026-05-11T10:00:00Z"}
+{"type":"chat.message","room":"support","body":"Can you see this message?"}
+{"type":"unsubscribe","topic":"orders"}
+disconnect

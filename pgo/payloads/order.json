@@ -1,0 +1,25 @@
+{
+  "order_id": "ord-1001",
+  "customer_id": 42,
+  "status": "processing",
+  "lines": [
+    {
+      "sku": "sku-1001",
+      "quantity": 2,
+      "unit_price": 129.0
+    },
+    {
+      "sku": "sku-2002",
+      "quantity": 1,
+      "unit_price": 89.5
+    }
+  ],
+  "shipping_address": {
+    "line1": "123 Market Street",
+    "city": "San Francisco",
+    "region": "CA",
+    "postal_code": "94105",
+    "country": "US"
+  },
+  "notes": "Deliver during business hours."
+}

@@ -1,0 +1,14 @@
+{
+  "resource_type": "article",
+  "resource_id": "post-2026-05-pgo",
+  "author": {
+    "id": 42,
+    "name": "Jordan Lee"
+  },
+  "body": "This release profile caught several hot paths in routing and JSON response handling.",
+  "mentions": ["preetham"],
+  "metadata": {
+    "client": "web",
+    "locale": "en-US"
+  }
+}

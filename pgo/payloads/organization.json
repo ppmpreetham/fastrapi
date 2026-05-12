@@ -1,0 +1,36 @@
+{
+  "organization_id": "org-17",
+  "name": "Acme Platform",
+  "plan": "enterprise",
+  "teams": [
+    {
+      "team_id": "team-api",
+      "name": "API Platform",
+      "members": [
+        {
+          "id": 42,
+          "role": "owner"
+        },
+        {
+          "id": 2,
+          "role": "developer"
+        }
+      ]
+    },
+    {
+      "team_id": "team-ops",
+      "name": "Operations",
+      "members": [
+        {
+          "id": 7,
+          "role": "admin"
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "sso_required": true,
+    "audit_log_export": true,
+    "allowed_regions": ["us-east-1", "us-west-2"]
+  }
+}

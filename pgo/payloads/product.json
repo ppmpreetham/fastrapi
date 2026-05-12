@@ -1,0 +1,12 @@
+{
+  "sku": "sku-1001",
+  "name": "API Gateway Enterprise",
+  "price": 129.0,
+  "currency": "USD",
+  "tags": ["gateway", "api", "enterprise", "observability"],
+  "metadata": {
+    "tier": "enterprise",
+    "region": "global",
+    "features": ["routing", "rate-limits", "analytics", "audit-log"]
+  }
+}

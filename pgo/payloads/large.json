@@ -1,0 +1,84 @@
+{
+  "dataset": "customer_activity_export",
+  "generated_at": "2026-05-11T10:00:00Z",
+  "accounts": [
+    {
+      "account_id": "acct-0001",
+      "name": "Northwind Retail",
+      "tier": "enterprise",
+      "contacts": [
+        {
+          "name": "Maya Patel",
+          "email": "maya.patel@example.com",
+          "role": "owner"
+        },
+        {
+          "name": "Noah Williams",
+          "email": "noah.williams@example.com",
+          "role": "billing"
+        }
+      ],
+      "usage": {
+        "requests_30d": 1250432,
+        "errors_30d": 431,
+        "p95_latency_ms": 42.7,
+        "features": ["routing", "webhooks", "analytics", "audit_logs"]
+      },
+      "notes": "Large JSON fixture with nested objects, arrays, strings, floats, integers, and booleans."
+    },
+    {
+      "account_id": "acct-0002",
+      "name": "Contoso Health",
+      "tier": "business",
+      "contacts": [
+        {
+          "name": "Elena Garcia",
+          "email": "elena.garcia@example.com",
+          "role": "admin"
+        },
+        {
+          "name": "Owen Kim",
+          "email": "owen.kim@example.com",
+          "role": "developer"
+        }
+      ],
+      "usage": {
+        "requests_30d": 843221,
+        "errors_30d": 219,
+        "p95_latency_ms": 38.2,
+        "features": ["routing", "rate_limits", "dashboards"]
+      },
+      "notes": "Repeated shape keeps serialization hot while varying scalar values."
+    },
+    {
+      "account_id": "acct-0003",
+      "name": "Globex Logistics",
+      "tier": "enterprise",
+      "contacts": [
+        {
+          "name": "Sam Rivera",
+          "email": "sam.rivera@example.com",
+          "role": "owner"
+        },
+        {
+          "name": "Avery Brooks",
+          "email": "avery.brooks@example.com",
+          "role": "security"
+        }
+      ],
+      "usage": {
+        "requests_30d": 2209341,
+        "errors_30d": 742,
+        "p95_latency_ms": 51.4,
+        "features": ["routing", "webhooks", "analytics", "audit_logs", "sso"]
+      },
+      "notes": "Enough bytes to exercise request parsing and response echo paths in the trainer."
+    }
+  ],
+  "summary": {
+    "total_accounts": 3,
+    "total_requests_30d": 4302994,
+    "contains_personal_data": false,
+    "export_format": "json"
+  }
+}

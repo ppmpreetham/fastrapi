@@ -1,0 +1,20 @@
+{
+  "subject": "High latency on order creation",
+  "priority": "high",
+  "requester": {
+    "id": 42,
+    "name": "Jordan Lee",
+    "age": 34,
+    "email": "jordan.lee@example.com",
+    "roles": ["admin"],
+    "address": {
+      "line1": "123 Market Street",
+      "city": "San Francisco",
+      "region": "CA",
+      "postal_code": "94105",
+      "country": "US"
+    }
+  },
+  "message": "Order creation has been above the latency objective for the last 20 minutes.",
+  "tags": ["latency", "orders", "production"]
+}
