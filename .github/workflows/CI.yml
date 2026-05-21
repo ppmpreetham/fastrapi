@@ -24,11 +24,6 @@ jobs:
             pgo_args: --pgo
             before_script_linux: |
               rustup component add llvm-tools
-              python -m ensurepip --upgrade || true
-              if python -m pip --version >/dev/null 2>&1; then
-                python -m pip install --upgrade pip
-                python -m pip install "pydantic>=2.10.6"
-              fi
           - runner: ubuntu-22.04
             target: x86
             pgo_args: ''
@@ -116,9 +111,6 @@ jobs:
         with:
           python-version: 3.x
           architecture: ${{ matrix.platform.target }}
-      - name: Install PGO training dependencies
-        if: ${{ matrix.platform.pgo_args != '' }}
-        run: python -m pip install "pydantic>=2.10.6"
       - name: Install PGO LLVM tools
         if: ${{ matrix.platform.pgo_args != '' }}
         run: rustup component add llvm-tools
@@ -150,9 +142,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
-      - name: Install PGO training dependencies
-        if: ${{ matrix.platform.pgo_args != '' }}
-        run: python -m pip install "pydantic>=2.10.6"
       - name: Install PGO LLVM tools
         if: ${{ matrix.platform.pgo_args != '' }}
         run: rustup component add llvm-tools

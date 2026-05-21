@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -16,6 +17,41 @@ BASE = f"http://{HOST}:{PORT}"
 DEFAULT_ITERATIONS = 3000
 PAYLOAD_DIR = Path(__file__).resolve().parent / "payloads"
 EXPECTED_ERROR_STATUSES = {400, 401, 403, 404, 405, 422}
+TRAINING_DEPENDENCIES = ["pydantic>=2.10.6"]
+
+
+def ensure_training_dependencies():
+    try:
+        import pydantic  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "ensurepip", "--upgrade"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
+    pip_cmd = [sys.executable, "-m", "pip", "install", *TRAINING_DEPENDENCIES]
+    try:
+        subprocess.check_call(pip_cmd)
+        return
+    except (OSError, subprocess.CalledProcessError):
+        pass
+
+    uv = shutil.which("uv")
+    if uv:
+        subprocess.check_call(
+            [uv, "pip", "install", "--python", sys.executable, *TRAINING_DEPENDENCIES]
+        )
+        return
+
+    subprocess.check_call(pip_cmd)
 
 
 def load_payloads():
@@ -190,6 +226,7 @@ def run_workload(iterations):
 
 
 def main():
+    ensure_training_dependencies()
     iterations = int(os.environ.get("PGO_ITERATIONS", DEFAULT_ITERATIONS))
     proc = subprocess.Popen([sys.executable, "-m", "pgo.app"])
 

@@ -23,16 +23,13 @@ wheels = [
 name = "fastrapi"
 version = "0.2.10"
 source = { editable = "." }
-
-[package.optional-dependencies]
-pydantic = [
+dependencies = [
     { name = "pydantic", version = "2.10.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
     { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", marker = "extra == 'pydantic'", specifier = ">=2.10.6" }]
-provides-extras = ["pydantic"]
+requires-dist = [{ name = "pydantic", specifier = ">=2.10.6" }]
 
 [[package]]
 name = "pydantic"

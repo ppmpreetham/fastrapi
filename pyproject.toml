@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.9,<2.0", "pydantic>=2.10.6"]
+requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -23,15 +23,12 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Application Frameworks"
 ]
 
-# If you have dependencies, add them here
-# dependencies = [
-#   "dependency1",
-#   "dependency2>=1.0.0"
-# ]
+dependencies = [
+  "pydantic>=2.10.6"
+]
 
 # If you have optional dependencies, uncomment and adjust this section
-[project.optional-dependencies]
-pydantic = ["pydantic>=2.10.6"]
+# [project.optional-dependencies]
 # test = [
 #   "pytest",
 #   "pytest-cov"
