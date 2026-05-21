@@ -93,7 +93,7 @@ def run_static_routes():
 
 
 def run_read_routes(index):
-    user_id = (index % 3) + 1
+    user_id = [1, 2, 42][index % 3]
     sku = "sku-1001" if index % 2 == 0 else "sku-2002"
 
     request(f"/users/{user_id}")
