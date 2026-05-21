@@ -1,7 +1,7 @@
 use super::types::FastrAPI;
 use axum::{
-    body::to_bytes,
-    extract::{ConnectInfo, Extension, Path, Request},
+    body::{to_bytes, Body},
+    extract::{Extension, Request},
     http::StatusCode,
     middleware::{self as axum_middleware, Next},
     response::{Html, IntoResponse, Response},
@@ -10,6 +10,7 @@ use axum::{
 };
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
+use smallvec::SmallVec;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -21,17 +22,25 @@ use tower_sessions::cookie::Key;
 use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
 // internal Imports
-use crate::ffi::py_handlers::{run_py_handler_no_args, run_py_handler_with_request};
-use crate::globals::{MIDDLEWARES, PYTHON_RUNTIME, ROUTES, WEBSOCKET_ROUTES};
-use crate::http::middleware::{
-    build_cors_layer, parse_cors_params, parse_gzip_params, parse_session_params,
-    parse_trusted_host_params, CORSMiddleware, GZipMiddleware, SessionMiddleware,
-    TrustedHostMiddleware,
-};
-use crate::http::websocket::ws_handler;
-use crate::routing::types::{RequestInput, RouteHandler};
 use crate::utils::openapi::build_openapi_spec;
 use crate::utils::utils::local_guard;
+use crate::{
+    ffi::py_handlers::{run_py_handler_no_args, run_py_handler_with_request},
+    routing::router::{FrozenRouter, FrozenRouterBuilder},
+};
+use crate::{
+    globals::{MIDDLEWARES, PYTHON_RUNTIME},
+    routing::types::HttpMethod,
+};
+use crate::{
+    http::middleware::{
+        build_cors_layer, parse_cors_params, parse_gzip_params, parse_session_params,
+        parse_trusted_host_params, CORSMiddleware, GZipMiddleware, SessionMiddleware,
+        TrustedHostMiddleware,
+    },
+    routing::router::RouteMatch,
+};
+use crate::{http::websocket::ws_handler, routing::types::PathParamRange};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -307,98 +316,15 @@ fn log_python_error(context: &str, err: PyErr) {
     Python::attach(|py| err.print(py));
 }
 
-fn parse_query_string(query: Option<&str>) -> std::collections::HashMap<String, String> {
-    let mut params = std::collections::HashMap::new();
-
-    let Some(query) = query else {
-        return params;
-    };
-
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if !key.is_empty() {
-            params.insert(key.to_string(), value.to_string());
-        }
-    }
-
-    params
-}
-
-fn parse_cookie_header(cookie_header: Option<&str>) -> std::collections::HashMap<String, String> {
-    let mut cookies = std::collections::HashMap::new();
-
-    let Some(cookie_header) = cookie_header else {
-        return cookies;
-    };
-
-    for cookie in cookie_header.split(';') {
-        let trimmed = cookie.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let (name, value) = trimmed.split_once('=').unwrap_or((trimmed, ""));
-        cookies.insert(name.trim().to_string(), value.trim().to_string());
-    }
-
-    cookies
-}
-
-fn build_request_input(
-    request: &Request,
-    path_params: std::collections::HashMap<String, String>,
-) -> RequestInput {
-    let query_string = request.uri().query().unwrap_or("").to_string();
-    let headers = request
-        .headers()
-        .iter()
-        .filter_map(|(name, value)| {
-            value
-                .to_str()
-                .ok()
-                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-
-    let cookies = parse_cookie_header(
-        request
-            .headers()
-            .get("cookie")
-            .and_then(|value| value.to_str().ok()),
-    );
-
-    RequestInput {
-        method: request.method().as_str().to_string(),
-        path: request.uri().path().to_string(),
-        query_params: parse_query_string(request.uri().query()),
-        query_string,
-        path_params,
-        headers,
-        cookies,
-    }
-}
-
-async fn extract_payload(
-    request: Request,
-    expects_body: bool,
-) -> Result<Option<serde_json::Value>, Response> {
-    if !expects_body {
-        return Ok(None);
-    }
-
-    let body = to_bytes(request.into_body(), usize::MAX)
+async fn extract_payload(body: Body) -> Result<Option<serde_json::Value>, Response> {
+    let body = to_bytes(body, usize::MAX)
         .await
         .map_err(|_| (StatusCode::BAD_REQUEST, "Failed to read request body").into_response())?;
-
     if body.is_empty() {
         return Ok(None);
     }
-
-    serde_json::from_slice(&body)
+    let mut buf = body.to_vec();
+    simd_json::serde::from_slice(&mut buf)
         .map(Some)
         .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response())
 }
@@ -508,48 +434,36 @@ fn build_router(
         &mut session_config,
     );
 
-    // Route registration
-    let guard = local_guard(&*ROUTES);
-    for entry in ROUTES.iter(&guard) {
-        let (route_key, handler) = entry;
-        let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
-        if parts.len() != 2 {
-            continue;
-        }
-        let method = parts[0];
-        let path = parts[1].to_string();
-        app = register_route(
-            app,
-            method,
-            path,
-            route_key.as_str().into(),
-            handler.as_ref(),
-            app_state.clone(),
-        );
+    let base_router = app_config.router.bind(py);
+    let base_ref = base_router.borrow();
+    base_ref.freeze(py);
+    let flat = base_ref.flatten(py);
+
+    let mut frozen_router_builder = FrozenRouterBuilder::new();
+    for route in &flat.0 {
+        frozen_router_builder.add_route(route.method, route.path.clone(), route.handler.clone());
     }
+    let frozen_router = Arc::new(frozen_router_builder.build());
 
-    // Websockets
-    for (key, _value) in WEBSOCKET_ROUTES.pin().iter() {
-        let parts: Vec<&str> = key.splitn(2, ' ').collect();
-        if parts.len() != 2 || parts[0] != "WS" {
-            continue;
-        }
-        let path = parts[1].to_string();
-        let route_key = Arc::new(key.clone());
-
+    for ws in &flat.1 {
+        let path = ws.path.clone();
+        let handler = ws.handler.clone_ref(py);
+        let rt_handle = app_state.rt_handle.clone();
         app = app.route(
             &path,
-            get({
-                let rt_handle = app_state.rt_handle.clone();
-                move |ws| ws_handler(ws, Extension(route_key.clone()), Extension(rt_handle))
+            get(move |ws_upgrade| {
+                ws_handler(
+                    ws_upgrade,
+                    Extension(handler.clone()),
+                    Extension(rt_handle.clone()),
+                )
             }),
         );
     }
 
-    // OpenAPI
     let openapi_json = Arc::new(build_openapi_spec(
         py,
-        &*ROUTES,
+        &base_ref,
         &app_config.title,
         &app_config.version,
         &app_config.description,
@@ -565,13 +479,18 @@ fn build_router(
             }
         }),
     );
-
     if let Some(docs) = docs_url {
         app = app.route(
             &docs,
             get(|| async { Html(include_str!("../../static/swagger-ui.html")) }),
         );
     }
+
+    app = app.fallback({
+        let router = frozen_router.clone();
+        let state = app_state.clone();
+        axum::routing::any(move |req: Request| async move { dispatch(router, state, req).await })
+    });
 
     // =========================== //
     // ==== LAYER APPLICATION ==== //
@@ -581,7 +500,6 @@ fn build_router(
     if let Some(config) = session_config {
         info!("🍪 Layer: Sessions");
         let key = Key::from(config.secret_key.as_bytes());
-
         let store = MemoryStore::default();
 
         let layer = SessionManagerLayer::new(store)
@@ -603,7 +521,7 @@ fn build_router(
 
     // L2: GZip
     if let Some(config) = gzip_config {
-        info!("🗜️ Layer: GZip (min: {} bytes)", config.minimum_size);
+        info!("🗜️  Layer: GZip (min: {} bytes)", config.minimum_size);
         let predicate = SizeAbove::new(config.minimum_size as u16);
         app = app.layer(CompressionLayer::new().compress_when(predicate));
     }
@@ -615,7 +533,6 @@ fn build_router(
         let guard = local_guard(&*MIDDLEWARES);
         for (_key, middleware_ref) in MIDDLEWARES.iter(&guard) {
             let middleware = middleware_ref.clone();
-
             app = app.layer(axum_middleware::from_fn(move |req, next| {
                 let middleware = middleware.clone();
                 async move {
@@ -627,11 +544,9 @@ fn build_router(
 
     // L4: CORS
     if let Some(config) = cors_config {
-        info!("🛡️ Layer: CORS");
+        info!("🛡️  Layer: CORS");
         match build_cors_layer(&config) {
-            Ok(layer) => {
-                app = app.layer(layer);
-            }
+            Ok(layer) => app = app.layer(layer),
             Err(e) => eprintln!("Error building CORS layer: {:?}", e),
         }
     }
@@ -671,95 +586,72 @@ fn build_router(
     app.layer(Extension(app_state))
 }
 
-// Helper
-fn register_route(
-    app: Router,
-    method: &str,
-    path: String,
-    route_key: Arc<str>,
-    handler: &RouteHandler,
-    _state: AppState,
-) -> Router {
-    let has_path_params = !handler.path_param_names.is_empty();
-    let needs_request_context = handler.needs_kwargs;
-    let expects_body = !handler.body_param_names.is_empty() || !handler.param_validators.is_empty();
+async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> Response {
+    let method = match req.method().as_str().as_bytes() {
+        b"GET" => HttpMethod::GET,
+        b"POST" => HttpMethod::POST,
+        b"PUT" => HttpMethod::PUT,
+        b"DELETE" => HttpMethod::DELETE,
+        b"PATCH" => HttpMethod::PATCH,
+        b"OPTIONS" => HttpMethod::OPTIONS,
+        b"HEAD" => HttpMethod::HEAD,
+        _ => return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response(),
+    };
 
-    if !needs_request_context {
-        let route_key_clone = Arc::clone(&route_key);
-        let handler = move |Extension(state): Extension<AppState>,
-                            ConnectInfo(_addr): ConnectInfo<SocketAddr>| {
-            let route_key = Arc::clone(&route_key_clone);
-            async move { run_py_handler_no_args(state.rt_handle, route_key).await }
-        };
+    let path_str = req.uri().path();
+    let route_match = match router.resolve(method, path_str) {
+        Some(v) => v,
+        None => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
 
-        return match method {
-            "GET" => app.route(&path, get(handler)),
-            "HEAD" => app.route(&path, head(handler)),
-            "OPTIONS" => app.route(&path, options(handler)),
-            "POST" => app.route(&path, post(handler)),
-            "PUT" => app.route(&path, put(handler)),
-            "DELETE" => app.route(&path, delete(handler)),
-            "PATCH" => app.route(&path, patch(handler)),
-            _ => app,
-        };
+    let (handler, params_iter) = match route_match {
+        RouteMatch::Static(handler) => (handler, None),
+        RouteMatch::Params(handler, params) => (handler, Some(params)),
+    };
+
+    if !handler.needs_kwargs {
+        return run_py_handler_no_args(state.rt_handle, handler).await;
     }
 
-    if has_path_params {
-        let route_key_clone = Arc::clone(&route_key);
-        let request_handler =
-            move |Path(path_params): Path<std::collections::HashMap<String, String>>,
-                  Extension(state): Extension<AppState>,
-                  ConnectInfo(_addr): ConnectInfo<SocketAddr>,
-                  request: Request| {
-                let route_key = Arc::clone(&route_key_clone);
-                async move {
-                    let request_input = build_request_input(&request, path_params);
-                    let payload = match extract_payload(request, expects_body).await {
-                        Ok(payload) => payload,
-                        Err(response) => return response,
-                    };
-
-                    run_py_handler_with_request(state.rt_handle, route_key, request_input, payload)
-                        .await
+    let path_base = path_str.as_ptr() as usize;
+    let param_ranges: SmallVec<[PathParamRange; 4]> = if let Some(params) = params_iter {
+        params
+            .iter()
+            .map(|(k, v)| {
+                let start = v.as_ptr() as usize - path_base;
+                debug_assert!(
+                    start <= path_str.len(),
+                    "matchit returned a string outside the input path"
+                );
+                let key_static: &'static str = unsafe { std::mem::transmute(k) };
+                PathParamRange {
+                    key: key_static,
+                    start,
+                    end: start + v.len(),
                 }
-            };
+            })
+            .collect()
+    } else {
+        SmallVec::new()
+    };
 
-        return match method {
-            "GET" => app.route(&path, get(request_handler)),
-            "HEAD" => app.route(&path, head(request_handler)),
-            "OPTIONS" => app.route(&path, options(request_handler)),
-            "POST" => app.route(&path, post(request_handler)),
-            "PUT" => app.route(&path, put(request_handler)),
-            "DELETE" => app.route(&path, delete(request_handler)),
-            "PATCH" => app.route(&path, patch(request_handler)),
-            _ => app,
-        };
-    }
-
-    let route_key_clone = Arc::clone(&route_key);
-    let request_handler = move |Extension(state): Extension<AppState>,
-                                ConnectInfo(_addr): ConnectInfo<SocketAddr>,
-                                request: Request| {
-        let route_key = Arc::clone(&route_key_clone);
-        async move {
-            let request_input = build_request_input(&request, std::collections::HashMap::new());
-            let payload = match extract_payload(request, expects_body).await {
-                Ok(payload) => payload,
-                Err(response) => return response,
-            };
-
-            run_py_handler_with_request(state.rt_handle, route_key, request_input, payload).await
+    let (request_parts, body) = req.into_parts();
+    let expects_body = !handler.body_param_names.is_empty() || !handler.param_validators.is_empty();
+    let payload = if !expects_body {
+        None
+    } else {
+        match extract_payload(body).await {
+            Ok(p) => p,
+            Err(resp) => return resp,
         }
     };
 
-    match method {
-        "GET" => app.route(&path, get(request_handler)),
-        "HEAD" => app.route(&path, head(request_handler)),
-        "OPTIONS" => app.route(&path, options(request_handler)),
-        "POST" => app.route(&path, post(request_handler)),
-        "PUT" => app.route(&path, put(request_handler)),
-        "DELETE" => app.route(&path, delete(request_handler)),
-        "PATCH" => app.route(&path, patch(request_handler)),
-        _ => app,
-    }
+    run_py_handler_with_request(
+        state.rt_handle,
+        handler,
+        request_parts,
+        param_ranges,
+        payload,
+    )
+    .await
 }

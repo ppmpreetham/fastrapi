@@ -283,7 +283,7 @@ fn build_dependency_kwargs(
     py: Python<'_>,
     dep: &DependencyNode,
     cache: &HashMap<u64, SharedPyObject>,
-    request_input: &RequestInput,
+    request_input: &RequestInput<'_>,
     request: Option<&SharedPyObject>,
 ) -> Result<Py<PyDict>, DependencyExecutionError> {
     let final_kwargs = PyDict::new(py);
@@ -296,9 +296,8 @@ fn build_dependency_kwargs(
                 }
             }
             InjectionType::Parameter(parameter) => {
-                if let Some(value) =
-                    pydantic::resolve_parameter_value(py, parameter, request_input)
-                        .map_err(DependencyExecutionError::Response)?
+                if let Some(value) = pydantic::resolve_parameter_value(py, parameter, request_input)
+                    .map_err(DependencyExecutionError::Response)?
                 {
                     final_kwargs.set_item(arg_name, value)?;
                 }
@@ -318,9 +317,58 @@ fn build_dependency_kwargs(
     Ok(final_kwargs.unbind())
 }
 
+/// Synchronous variant of `execute_dependencies` for the case where every
+/// dep in the plan is sync. Runs inside an existing `Python::attach`, so it
+/// avoids the per-dep attach/detach the async path pays.
+pub fn execute_dependencies_sync(
+    py: Python<'_>,
+    flat_plan: &[DependencyNode],
+    request_input: &RequestInput<'_>,
+    request: Option<Py<PyAny>>,
+) -> Result<HashMap<String, SharedPyObject>, DependencyExecutionError> {
+    let request = request.map(Arc::new);
+    let mut cache: HashMap<u64, SharedPyObject> = HashMap::with_capacity(flat_plan.len());
+    let mut final_results: HashMap<String, SharedPyObject> = HashMap::with_capacity(
+        flat_plan
+            .iter()
+            .filter(|node| node.is_top_level && node.param_name.is_some())
+            .count(),
+    );
+
+    for dep in flat_plan {
+        if dep.use_cache {
+            if let Some(cached_val) = cache.get(&dep.func_id) {
+                if dep.is_top_level {
+                    if let Some(name) = &dep.param_name {
+                        final_results.insert(name.clone(), Arc::clone(cached_val));
+                    }
+                }
+                continue;
+            }
+        }
+
+        let py_kwargs = build_dependency_kwargs(py, dep, &cache, request_input, request.as_ref())?;
+        let bound_func = dep.func.bind(py);
+        let bound_kwargs = py_kwargs.bind(py);
+        let result: SharedPyObject = Arc::new(bound_func.call((), Some(bound_kwargs))?.unbind());
+
+        if dep.is_top_level {
+            if let Some(name) = &dep.param_name {
+                final_results.insert(name.clone(), Arc::clone(&result));
+            }
+        }
+
+        if dep.use_cache {
+            cache.insert(dep.func_id, result);
+        }
+    }
+
+    Ok(final_results)
+}
+
 pub async fn execute_dependencies(
     flat_plan: &[DependencyNode],
-    request_input: &RequestInput,
+    request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
 ) -> Result<HashMap<String, SharedPyObject>, DependencyExecutionError> {
     let request = request.map(Arc::new);

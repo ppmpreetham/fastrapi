@@ -1,16 +1,9 @@
+use crate::http::middleware::PyMiddleware;
 use once_cell::sync::Lazy;
 use papaya::HashMap as PapayaHashMap;
 use pyo3::prelude::*;
 use pyo3::types::PyType;
-use crate::http::middleware::PyMiddleware;
-use crate::routing::types::RouteHandler;
 use std::sync::{Arc, OnceLock};
-
-pub static WEBSOCKET_ROUTES: Lazy<PapayaHashMap<String, Py<PyAny>>> =
-    Lazy::new(|| PapayaHashMap::with_capacity(32));
-
-pub static ROUTES: Lazy<PapayaHashMap<String, Arc<RouteHandler>>> =
-    Lazy::new(|| PapayaHashMap::with_capacity(128));
 
 pub static MIDDLEWARES: Lazy<PapayaHashMap<String, Arc<PyMiddleware>>> =
     Lazy::new(|| PapayaHashMap::with_capacity(16));

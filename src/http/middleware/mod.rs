@@ -95,7 +95,7 @@ pub async fn execute_py_middleware(
             match middleware_func.as_borrowed().call1((py_dict,)) {
                 Ok(result) => {
                     if !result.is_none() {
-                        return py_to_response(py, &result);
+                        return py_to_response(py, &result, axum::http::StatusCode::OK);
                     }
 
                     (StatusCode::NO_CONTENT, "CONTINUE").into_response()

@@ -1,8 +1,9 @@
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use crate::http::middleware::{
-    CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware,
+use crate::{
+    http::middleware::{CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware},
+    router::PyAPIRouter,
 };
 
 #[pyclass(name = "FastrAPI")]
@@ -85,4 +86,7 @@ pub struct FastrAPI {
     pub trusted_host_config: Option<TrustedHostMiddleware>,
     pub gzip_config: Option<GZipMiddleware>,
     pub session_config: Option<SessionMiddleware>,
+
+    #[pyo3(get)]
+    pub router: Py<PyAPIRouter>,
 }

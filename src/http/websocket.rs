@@ -1,4 +1,3 @@
-use crate::globals::WEBSOCKET_ROUTES;
 use crate::utils::utils::{json_to_py_object, py_any_to_json};
 use axum::{extract::Extension, response::IntoResponse};
 use bytes::Bytes;
@@ -6,45 +5,19 @@ use fastwebsockets::{upgrade, FragmentCollector, Frame, OpCode};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use pyo3::prelude::*;
-use pyo3::types::{PyCFunction, PyDict, PyTuple};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::error;
 
-/// @app.websocket("/ws") decorator
-#[pyfunction]
-#[pyo3(signature = (path))]
-pub fn websocket(path: String) -> PyResult<Py<PyAny>> {
-    let route_key = format!("WS {path}");
-
-    Python::attach(|py| {
-        let closure = move |args: &Bound<'_, PyTuple>,
-                            _kwargs: Option<&Bound<'_, PyDict>>|
-              -> PyResult<Py<PyAny>> {
-            let py = args.py();
-            let func_bound: Bound<'_, PyAny> = args.get_item(0)?;
-            let func_py = func_bound.unbind();
-
-            WEBSOCKET_ROUTES
-                .pin()
-                .insert(route_key.clone(), func_py.clone_ref(py));
-            Ok(func_py)
-        };
-
-        let py_func = PyCFunction::new_closure(py, None, None, closure)?;
-        Ok(py_func.into_any().unbind())
-    })
-}
-
 pub async fn ws_handler(
     ws: upgrade::IncomingUpgrade,
-    Extension(route_key): Extension<Arc<String>>,
+    Extension(handler): Extension<Py<PyAny>>,
     Extension(_rt_handle): Extension<tokio::runtime::Handle>,
 ) -> impl IntoResponse {
     let (response, fut) = ws.upgrade().expect("WebSocket upgrade failed");
 
     tokio::task::spawn(async move {
-        if let Err(e) = handle_connection(fut, route_key).await {
+        if let Err(e) = handle_connection(fut, handler).await {
             error!("WebSocket error: {e}");
         }
     });
@@ -60,17 +33,10 @@ enum WSMessage {
 
 async fn handle_connection(
     fut: upgrade::UpgradeFut,
-    route_key: Arc<String>,
+    handler: Py<PyAny>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ws_stream = fut.await?;
     let mut ws = FragmentCollector::new(ws_stream);
-    let handler: Py<PyAny> = {
-        let guard = WEBSOCKET_ROUTES.pin();
-        guard
-            .get(&*route_key)
-            .cloned()
-            .ok_or("WebSocket route not found")?
-    };
 
     let (tx_to_rust, mut rx_from_python) = mpsc::channel::<WSMessage>(1024);
     let (tx_to_python, rx_from_rust) = mpsc::channel::<WSMessage>(1024);

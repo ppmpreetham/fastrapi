@@ -1,11 +1,13 @@
-use crate::ffi::pydantic;
-use crate::routing::types::{ParameterConstraints, ParameterSource, RouteHandler};
 use super::utils::py_dict_to_json;
+use crate::ffi::pydantic;
+use crate::router::PyAPIRouter;
+use crate::routing::types::{HttpMethod, ParameterConstraints, ParameterSource, RouteHandler};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,7 +168,10 @@ fn python_type_to_openapi_type(py: Python, type_hint: &Bound<PyAny>) -> JsonValu
     json!({"type": "string"})
 }
 
-fn apply_parameter_constraints(mut schema: JsonValue, constraints: &ParameterConstraints) -> JsonValue {
+fn apply_parameter_constraints(
+    mut schema: JsonValue,
+    constraints: &ParameterConstraints,
+) -> JsonValue {
     if let Some(object) = schema.as_object_mut() {
         if let Some(gt) = constraints.gt {
             object.insert("exclusiveMinimum".to_string(), json!(gt));
@@ -195,7 +200,7 @@ fn apply_parameter_constraints(mut schema: JsonValue, constraints: &ParameterCon
 
 pub fn build_openapi_spec(
     py: Python<'_>,
-    routes: &papaya::HashMap<String, std::sync::Arc<RouteHandler>>,
+    router: &PyAPIRouter,
     title: &str,
     version: &str,
     description: &str,
@@ -209,19 +214,11 @@ pub fn build_openapi_spec(
         Some(description.to_string())
     };
 
+    let collected = collect_routes(py, router);
+
     let mut schemas: HashMap<String, JsonValue> = HashMap::new();
-    let guard = routes.guard();
-
-    for (route_key, handler) in routes.iter(&guard) {
-        let handler = handler.as_ref();
-        let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
-        if parts.len() != 2 {
-            continue;
-        }
-
-        let method = parts[0].to_lowercase();
-        let path = parts[1].to_string();
-
+    for (path, method, handler, tags) in collected {
+        let method = method.as_str().to_lowercase();
         let description = handler
             .func
             .bind(py)
@@ -234,7 +231,11 @@ pub fn build_openapi_spec(
         let mut operation = Operation {
             summary: Some(format!("{} {}", method.to_uppercase(), path)),
             description,
-            tags: None,
+            tags: if tags.is_empty() {
+                None
+            } else {
+                Some(tags.clone())
+            },
             parameters: None,
             request_body: None,
             responses: HashMap::new(),
@@ -431,4 +432,15 @@ pub fn build_openapi_spec(
     }
     debug!("Built OpenAPI spec with {} paths", spec.paths.len());
     serde_json::to_value(spec).unwrap_or_else(|_| json!({}))
+}
+
+fn collect_routes(
+    py: Python<'_>,
+    router: &PyAPIRouter,
+) -> Vec<(String, HttpMethod, Arc<RouteHandler>, Vec<String>)> {
+    let flat = router.flatten(py);
+    flat.0
+        .iter()
+        .map(|r| (r.path.clone(), r.method, r.handler.clone(), r.tags.clone()))
+        .collect()
 }

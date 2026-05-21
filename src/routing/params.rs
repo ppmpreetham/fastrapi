@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{PyAny, PyDict, PyString};
 use std::sync::Arc;
 
 use super::types::{ParameterConstraints, ParameterSource, ParsedParameter};
@@ -196,6 +196,7 @@ pub fn parse_parameter_spec(
 
     Ok(ParsedParameter {
         name: param_name.to_string(),
+        name_py: PyString::new(py, param_name).unbind(),
         external_name,
         source,
         annotation,

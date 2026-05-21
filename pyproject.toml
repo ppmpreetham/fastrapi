@@ -33,6 +33,9 @@ classifiers = [
   "Operating System :: OS Independent",
   "License :: OSI Approved :: MIT License",
 ]
+dependencies = [
+    "pydantic>=2.10.6",
+]
 
 dependencies = [
   "pydantic>=2.10.6"
@@ -60,3 +63,6 @@ bindings = "pyo3"
 features = ["pyo3/extension-module"]
 include = [{ path = "pgo/**/*", format = "sdist" }]
 pgo-command = "python -m pgo.train"
+
+[tool.uv]
+package = false

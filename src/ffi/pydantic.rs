@@ -13,6 +13,7 @@ use axum::Json;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple, PyType};
 use pyo3::{intern, prelude::*};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Default)]
@@ -137,17 +138,21 @@ fn test_model(
 
 pub fn register_pydantic_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(test_model, m)?)?;
+    if BASEMODEL_TYPE.get().is_none() {
+        if let Some(base_model_type) = initialize_basemodel(m.py()) {
+            let _ = BASEMODEL_TYPE.set(base_model_type);
+        }
+    }
     Ok(())
 }
 
 pub struct ParsedRouteMetadata {
     pub param_validators: Vec<(String, Py<PyAny>)>,
     pub response_type: ResponseType,
-    pub path_param_names: Vec<String>,
-    pub query_param_names: Vec<String>,
-    pub body_param_names: Vec<String>,
+    pub body_param_names: Vec<Py<PyString>>,
     pub dependencies: Vec<DependencyNode>,
     pub dependency_needs_request: bool,
+    pub all_deps_sync: bool,
     pub parsed_params: Vec<ParsedParameter>,
     pub is_async: bool,
     pub is_fast_path: bool,
@@ -164,17 +169,17 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         .unwrap_or(false);
 
     let path_param_names = params::extract_path_param_names(path);
-    let dependencies = dependencies::parse_dependencies(py, func, &path_param_names)
-        .unwrap_or_default();
+    let dependencies =
+        dependencies::parse_dependencies(py, func, &path_param_names).unwrap_or_default();
 
     let dependency_needs_request = dependencies.iter().any(|dep| dep.needs_request_object);
+    let all_deps_sync = dependencies.iter().all(|dep| !dep.is_async);
     let dep_param_names: HashSet<String> = dependencies
         .iter()
         .filter_map(|d| d.param_name.clone())
         .collect();
 
     let mut param_validators = Vec::new();
-    let mut query_param_names = Vec::new();
     let mut body_param_names = Vec::new();
     let mut parsed_params = Vec::new();
 
@@ -197,12 +202,8 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                 continue;
             }
 
-            let mut parsed_param = params::parse_parameter_spec(
-                py,
-                &param_name,
-                &param_obj,
-                &path_param_names,
-            )?;
+            let mut parsed_param =
+                params::parse_parameter_spec(py, &param_name, &param_obj, &path_param_names)?;
 
             if !parsed_param.is_pydantic_model {
                 if let Some(ann) = &parsed_param.annotation {
@@ -211,7 +212,6 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
             }
 
             match parsed_param.source {
-                ParameterSource::Query => query_param_names.push(parsed_param.name.clone()),
                 ParameterSource::Body => {
                     body_param_names.push(parsed_param.name.clone());
                     if parsed_param.is_pydantic_model {
@@ -230,14 +230,21 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
 
     let is_fast_path = parsed_params.is_empty() && dependencies.is_empty() && !is_async;
 
+    let intern_all = |names: Vec<String>| -> Vec<Py<PyString>> {
+        names
+            .into_iter()
+            .map(|n| PyString::new(py, &n).unbind())
+            .collect()
+    };
+    let body_param_names = intern_all(body_param_names);
+
     ParsedRouteMetadata {
         param_validators,
         response_type,
-        path_param_names,
-        query_param_names,
         body_param_names,
         dependencies,
         dependency_needs_request,
+        all_deps_sync,
         parsed_params,
         is_async,
         is_fast_path,
@@ -369,31 +376,24 @@ fn validate_scalar_constraints(
 
 fn raw_value_for_parameter<'a>(
     param: &ParsedParameter,
-    request_input: &'a RequestInput,
-) -> Option<&'a str> {
+    request_input: &'a RequestInput<'_>,
+) -> Option<Cow<'a, str>> {
     match param.source {
         ParameterSource::Path => request_input
-            .path_params
-            .get(&param.external_name)
-            .or_else(|| request_input.path_params.get(&param.name))
-            .map(String::as_str),
+            .get_path_param(&param.external_name)
+            .or_else(|| request_input.get_path_param(&param.name))
+            .map(Cow::Borrowed),
         ParameterSource::Query => request_input
-            .query_params
-            .get(&param.external_name)
-            .or_else(|| request_input.query_params.get(&param.name))
-            .map(String::as_str),
+            .get_query_param(&param.external_name)
+            .or_else(|| request_input.get_query_param(&param.name)),
         ParameterSource::Header => request_input
-            .headers
-            .get(&param.external_name.to_ascii_lowercase())
-            .or_else(|| request_input.headers.get(&param.external_name))
-            .or_else(|| request_input.headers.get(&param.name.to_ascii_lowercase()))
-            .or_else(|| request_input.headers.get(&param.name))
-            .map(String::as_str),
+            .get_header(&param.external_name)
+            .or_else(|| request_input.get_header(&param.name))
+            .map(Cow::Borrowed),
         ParameterSource::Cookie => request_input
-            .cookies
-            .get(&param.external_name)
-            .or_else(|| request_input.cookies.get(&param.name))
-            .map(String::as_str),
+            .get_cookie(&param.external_name)
+            .or_else(|| request_input.get_cookie(&param.name))
+            .map(Cow::Borrowed),
         ParameterSource::Body => None,
     }
 }
@@ -401,7 +401,7 @@ fn raw_value_for_parameter<'a>(
 pub fn resolve_parameter_value(
     py: Python<'_>,
     param: &ParsedParameter,
-    request_input: &RequestInput,
+    request_input: &RequestInput<'_>,
 ) -> Result<Option<Py<PyAny>>, Response> {
     let Some(raw) = raw_value_for_parameter(param, request_input) else {
         if param.has_default {
@@ -422,7 +422,7 @@ pub fn resolve_parameter_value(
         return Ok(None);
     };
 
-    let value = convert_scalar_value(py, raw, param)?;
+    let value = convert_scalar_value(py, &raw, param)?;
     // validate_scalar_constraints is now pure Rust — no py needed in signature.
     validate_scalar_constraints(param, value.bind(py))?;
     Ok(Some(value))
@@ -434,11 +434,10 @@ fn apply_body_and_validation(
     payload: Option<&serde_json::Value>,
     kwargs: &Bound<'_, PyDict>,
 ) -> Result<(), Response> {
-    // Build a set once — O(1) lookups below instead of O(n) linear scans.
     let known_body_params: HashSet<&str> = handler
         .body_param_names
         .iter()
-        .map(String::as_str)
+        .filter_map(|s| s.bind(py).to_str().ok())
         .chain(handler.param_validators.iter().map(|(n, _)| n.as_str()))
         .collect();
 
@@ -465,7 +464,7 @@ fn apply_body_and_validation(
                     .as_ref()
                     .map(|d| d.clone_ref(py))
                     .unwrap_or_else(|| py.None());
-                kwargs.set_item(param.name.as_str(), value).ok();
+                kwargs.set_item(param.name_py.bind(py), value).ok();
             }
         }
         return Ok(());
@@ -482,12 +481,12 @@ fn apply_body_and_validation(
                 .map(|(_, v)| v.bind(py))
                 .ok_or_else(|| validation_error_response("Body validator is not registered"))?;
             let validated = validate_with_pydantic(py, &validator, payload)?;
-            kwargs.set_item(param.name.as_str(), validated).ok();
+            kwargs.set_item(param.name_py.bind(py), validated).ok();
             return Ok(());
         }
 
         kwargs
-            .set_item(param.name.as_str(), json_to_py_object(py, payload))
+            .set_item(param.name_py.bind(py), json_to_py_object(py, payload))
             .ok();
         return Ok(());
     }
@@ -510,10 +509,10 @@ fn apply_body_and_validation(
                     .map(|(_, v)| v.bind(py))
                     .ok_or_else(|| validation_error_response("Body validator is not registered"))?;
                 let validated = validate_with_pydantic(py, &validator, value)?;
-                kwargs.set_item(param.name.as_str(), validated).ok();
+                kwargs.set_item(param.name_py.bind(py), validated).ok();
             } else {
                 kwargs
-                    .set_item(param.name.as_str(), json_to_py_object(py, value))
+                    .set_item(param.name_py.bind(py), json_to_py_object(py, value))
                     .ok();
             }
             continue;
@@ -525,7 +524,7 @@ fn apply_body_and_validation(
                 .as_ref()
                 .map(|d| d.clone_ref(py))
                 .unwrap_or_else(|| py.None());
-            kwargs.set_item(param.name.as_str(), default_value).ok();
+            kwargs.set_item(param.name_py.bind(py), default_value).ok();
         } else if param.required {
             return Err(validation_error_response(format!(
                 "Missing field: {}",
@@ -540,14 +539,14 @@ fn apply_body_and_validation(
 pub fn apply_request_data(
     py: Python,
     handler: &RouteHandler,
-    request_input: &RequestInput,
+    request_input: &RequestInput<'_>,
     payload: Option<&serde_json::Value>,
     kwargs: &Bound<'_, PyDict>,
 ) -> Result<(), Response> {
     let body_set: HashSet<&str> = handler
         .body_param_names
         .iter()
-        .map(String::as_str)
+        .filter_map(|s| s.bind(py).to_str().ok())
         .chain(handler.param_validators.iter().map(|(n, _)| n.as_str()))
         .collect();
 
@@ -556,11 +555,25 @@ pub fn apply_request_data(
             continue;
         }
         if let Some(value) = resolve_parameter_value(py, param, request_input)? {
-            kwargs.set_item(param.name.as_str(), value).ok();
+            kwargs.set_item(param.name_py.bind(py), value).ok();
         }
     }
 
     apply_body_and_validation(py, handler, payload, kwargs)
+}
+
+pub fn get_response_type_from_class(py: Python<'_>, cls: &Bound<'_, PyAny>) -> ResponseType {
+    if cls.is(&py.get_type::<PyJSONResponse>()) {
+        ResponseType::Json
+    } else if cls.is(&py.get_type::<PyPlainTextResponse>()) {
+        ResponseType::PlainText
+    } else if cls.is(&py.get_type::<PyHTMLResponse>()) {
+        ResponseType::Html
+    } else if cls.is(&py.get_type::<PyRedirectResponse>()) {
+        ResponseType::Redirect
+    } else {
+        ResponseType::Auto
+    }
 }
 
 pub fn get_response_type(py: Python<'_>, func: &Bound<'_, PyAny>) -> ResponseType {
@@ -609,7 +622,7 @@ pub fn call_with_pydantic_validation<'py>(
 ) -> Response {
     match validate_with_pydantic(py, model_class, payload) {
         Ok(validated_obj) => match route_func.call1((validated_obj,)) {
-            Ok(result) => py_to_response(py, &result),
+            Ok(result) => py_to_response(py, &result, axum::http::StatusCode::OK),
             Err(err) => {
                 err.print(py);
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
