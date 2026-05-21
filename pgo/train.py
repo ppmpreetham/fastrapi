@@ -17,7 +17,7 @@ BASE = f"http://{HOST}:{PORT}"
 DEFAULT_ITERATIONS = 3000
 PAYLOAD_DIR = Path(__file__).resolve().parent / "payloads"
 EXPECTED_ERROR_STATUSES = {400, 401, 403, 404, 405, 422}
-TRAINING_DEPENDENCIES = ["pydantic>=2.10.6"]
+TRAINING_DEPENDENCIES = ["pydantic>=2.9.0"]
 
 
 def ensure_training_dependencies():

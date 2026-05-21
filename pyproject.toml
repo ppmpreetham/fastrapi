@@ -34,11 +34,7 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
 ]
 dependencies = [
-    "pydantic>=2.10.6",
-]
-
-dependencies = [
-  "pydantic>=2.10.6"
+    "pydantic>=2.9.0",
 ]
 
 # If you have optional dependencies, uncomment and adjust this section
