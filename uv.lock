@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.10.6" }]
+requires-dist = [{ name = "pydantic", specifier = ">=2.9.0" }]
 
 [[package]]
 name = "pydantic"
