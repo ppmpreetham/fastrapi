@@ -21,22 +21,16 @@ jobs:
         platform:
           - runner: ubuntu-22.04
             target: x86_64
-            pgo_args: --pgo
           - runner: ubuntu-22.04
             target: x86
-            pgo_args: ''
           - runner: ubuntu-22.04
             target: aarch64
-            pgo_args: ''
           - runner: ubuntu-22.04
             target: armv7
-            pgo_args: ''
           - runner: ubuntu-22.04
             target: s390x
-            pgo_args: ''
           - runner: ubuntu-22.04
             target: ppc64le
-            pgo_args: ''
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,10 +40,9 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter ${{ matrix.platform.pgo_args }}
+          args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
-          before-script-linux: python -m pip install "pydantic>=2.10.6"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -94,24 +87,19 @@ jobs:
         platform:
           - runner: windows-latest
             target: x64
-            pgo_args: --pgo
           - runner: windows-latest
             target: x86
-            pgo_args: ''
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
           architecture: ${{ matrix.platform.target }}
-      - name: Install PGO training dependencies
-        if: ${{ matrix.platform.pgo_args != '' }}
-        run: python -m pip install "pydantic>=2.10.6"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter ${{ matrix.platform.pgo_args }}
+          args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -126,23 +114,18 @@ jobs:
         platform:
           - runner: macos-15
             target: x86_64
-            pgo_args: ''
           - runner: macos-14
             target: aarch64
-            pgo_args: --pgo
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
-      - name: Install PGO training dependencies
-        if: ${{ matrix.platform.pgo_args != '' }}
-        run: python -m pip install "pydantic>=2.10.6"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter ${{ matrix.platform.pgo_args }}
+          args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
         uses: actions/upload-artifact@v4

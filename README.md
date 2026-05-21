@@ -18,27 +18,33 @@ FastrAPI is a high-performance web framework that supercharges your Python APIs 
 ---
 
 #### Is it as fast as claimed?
+
 Yes. Powered by Rust and Axum, FastrAPI outperforms FastAPI by up to 6x in real-world benchmarks, with no compromises on usability. Check it out [here](https://github.com/ppmpreetham/fastrapi?tab=readme-ov-file#performance)
 
 ![FastRAPI vs other frameworks comparision](readme/BenchMark0_2_1.jpg)
 
 #### Do I need to know Rust?
+
 Nope. FastrAPI lets you write 100% Python code while leveraging Rust's performance under the hood.
 
 #### Can it handle complex APIs?
+
 Absolutely. With full Pydantic integration and async support, FastrAPI scales effortlessly for small projects and enterprise-grade APIs alike.
 
 #### Will it keep up with FastAPI updates?
+
 Yes. FastrAPI mirrors FastAPI's decorator-based syntax, ensuring compatibility and instant access to familiar workflows.
 
 ## Installation
 
 ### uv
+
 ```bash
 uv install fastrapi
 ```
 
 ### pip
+
 ```bash
 pip install fastrapi
 ```
@@ -69,17 +75,18 @@ if __name__ == "__main__":
 ```
 
 ### Now, test it with:
+
 ```bash
 curl http://127.0.0.1:8000/hello
 ```
 
 For the `POST` endpoint:
+
 ```bash
 curl --location 'http://127.0.0.1:8000/echo' \
 --header 'Content-Type: application/json' \
 --data '{"foo": 123, "bar": [1, 2, 3]}'
 ```
-
 
 <details>
   <summary>Show Pydantic example</summary>
@@ -102,7 +109,6 @@ api.serve("127.0.0.1", 8000)
 ```
 
 </details>
-
 
 <details>
   <summary>Show ResponseTypes Example</summary>
@@ -140,7 +146,7 @@ app = FastrAPI()
 
 # TrustedHost Middleware
 app.add_middleware(
-    TrustedHostMiddleware, 
+    TrustedHostMiddleware,
     allowed_hosts=["127.0.0.1", "localhost", "127.0.0.1:8000"],
     www_redirect=True
 )
@@ -156,7 +162,7 @@ app.add_middleware(
 
 # 3. GZip Middleware
 app.add_middleware(
-    GZipMiddleware, 
+    GZipMiddleware,
     minimum_size=500,
     compresslevel=9
 )
@@ -171,7 +177,6 @@ app.add_middleware(
 )
 
 # ROUTES
-# WARNING: ALWAYS return JSONResponse if it's JSON, to ensure proper serialization
 @app.get("/")
 def index() -> JSONResponse:
     return JSONResponse({"status": "running"})
@@ -201,7 +206,6 @@ if __name__ == "__main__":
 
 </details>
 
-
 <details>
   <summary>Show Lifespan Example</summary>
 
@@ -214,7 +218,7 @@ shared = {}
 @asynccontextmanager
 async def lifespan(app: FastrAPI):
     shared["ready"] = True
-    app.title = "FastrAPI with lifespan"
+    app.title = "FastrAPI && lifespan"
     try:
         yield
     finally:
@@ -229,10 +233,9 @@ def health():
 app.serve("127.0.0.1", 8080)
 ```
 
-If you provide `lifespan=...`, legacy `on_startup` and `on_shutdown` handlers are not called.
+If you provide `lifespan=...`, `on_startup` and `on_shutdown` handlers are not called.
 
 </details>
-
 
 <details>
   <summary>Show Startup / Shutdown Example</summary>
@@ -263,6 +266,7 @@ app.serve("127.0.0.1", 8080)
 </details>
 
 ## Performance
+
 Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn across multiple worker configurations.
 
 ### Benchmarking Locally
@@ -278,42 +282,45 @@ k6 run benchmarks/stress.js
 If you benchmark a debug build, Rust-side overhead will be much higher and the numbers will be misleading.
 
 ### 🖥️ Test Environment
-- **Kernel:** 6.16.8-arch3-1  
-- **CPU:** AMD Ryzen 7 7735HS (16 cores, 4.83 GHz)  
-- **Memory:** 15 GB  
-- **Load Test:** 20 Virtual Users (VUs), 30s  
+
+- **Kernel:** 6.16.8-arch3-1
+- **CPU:** AMD Ryzen 7 7735HS (16 cores, 4.83 GHz)
+- **Memory:** 15 GB
+- **Load Test:** 20 Virtual Users (VUs), 30s
 
 ### ⚡ Benchmark Results
 
-| Framework                              | Avg Latency (ms) | Median Latency (ms) | Requests/sec | P95 Latency (ms) | P99 Latency (ms) |
-|----------------------------------------|------------------|---------------------|---------------|------------------|------------------|
-| **FASTRAPI**                           | **0.59**         | **0.00**            | **31360**     | **2.39**         | **11.12**        |
-| FastAPI + Guvicorn (workers: 1)        | 21.08            | 19.67               | 937           | 38.47            | 93.42            |
-| FastAPI + Guvicorn (workers: 16)       | 4.84             | 4.17                | 3882          | 10.22            | 81.20            |
+| Framework                        | Avg Latency (ms) | Median Latency (ms) | Requests/sec | P95 Latency (ms) | P99 Latency (ms) |
+| -------------------------------- | ---------------- | ------------------- | ------------ | ---------------- | ---------------- |
+| **FASTRAPI**                     | **0.59**         | **0.00**            | **31360**    | **2.39**         | **11.12**        |
+| FastAPI + Guvicorn (workers: 1)  | 21.08            | 19.67               | 937          | 38.47            | 93.42            |
+| FastAPI + Guvicorn (workers: 16) | 4.84             | 4.17                | 3882         | 10.22            | 81.20            |
 
-> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency ,  making it **~33× faster** than FastAPI + Guvicorn with 1 worker.
+> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency , making it **~33× faster** than FastAPI + Guvicorn with 1 worker.
 
 ## Comparison: FastAPI vs FastRAPI
 
-| Area                              | FastAPI                                               | FastRAPI                                                    | FastRAPI wins? |
-|-----------------------------------|-------------------------------------------------------|-------------------------------------------------------------|----------------|
-| Dependency resolution             | Runtime `inspect` + reflection every request          | One-time parsing at decorator → pre-built injection plan    | ✅             |
-| Fast-path for trivial endpoints   | No special case: full kwargs/dependency work always  | `is_fast_path` flag → skip deps, validation, kwargs         | ✅             |
-| Route lookup speed                | Starlette regex router (slows with many routes)       | `papaya` concurrent hashmap → O(1) lookup                   | ✅             |
-| Middleware usability (Python)     | `@app.middleware` often buggy / limited               | Clean, working decorator + real execution                   | ✅             |
-| Background tasks reliability      | Fire-and-forget, errors usually swallowed             | Proper `JoinHandle` + error logging                         | ✅             |
-| WebSocket implementation          | Starlette (solid but heavy)                           | Custom with bounded channels + clean async pump             | ✅             |
-| Startup-time error detection      | Almost everything deferred to runtime                 | Full signature + dependency analysis at decorator time      | ✅             |
-| Concurrency & resource safety     | asyncio + threadpool                                  | Native Tokio + Rust memory & thread safety                  | ✅             |
-| Deployment footprint              | Heavy (uvicorn + many deps)                           | Tiny Rust binary + optional Python runtime                  | ✅             |
-| Scaling to 10,000+ routes         | Noticeable slowdown                                   | Stays fast thanks to hashmap lookup                         | ✅             |
-| JSON serialization flexibility    | Hard to swap (monkey-patch needed)                    | Trivial to plug orjson / sonic-rs / simdjson                | ✅             |
-| `response_model=None` + raw Response return | Fully supported                                     | serialization                                       | ❌ (for now)   |
-| `APIRouter` + `include_router()`  | Yes, mature ecosystem                                 | Not yet implemented                                         | ❌ (for now)   |
-| `app.mount()` / `StaticFiles`     | Yes                                                   | Not yet implemented                                         | ❌ (for now)   |
+| Area                                        | FastAPI                                             | FastRAPI                                                 | FastRAPI wins? |
+| ------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------- | -------------- |
+| Dependency resolution                       | Runtime `inspect` + reflection every request        | One-time parsing at decorator → pre-built injection plan | ✅             |
+| Fast-path for trivial endpoints             | No special case: full kwargs/dependency work always | `is_fast_path` flag → skip deps, validation, kwargs      | ✅             |
+| Route lookup speed                          | Starlette regex router (slows with many routes)     | `papaya` concurrent hashmap → O(1) lookup                | ✅             |
+| Middleware usability (Python)               | `@app.middleware` often buggy / limited             | Clean, working decorator + real execution                | ✅             |
+| Background tasks reliability                | Fire-and-forget, errors usually swallowed           | Proper `JoinHandle` + error logging                      | ✅             |
+| WebSocket implementation                    | Starlette (solid but heavy)                         | Custom with bounded channels + clean async pump          | ✅             |
+| Startup-time error detection                | Almost everything deferred to runtime               | Full signature + dependency analysis at decorator time   | ✅             |
+| Concurrency & resource safety               | asyncio + threadpool                                | Native Tokio + Rust memory & thread safety               | ✅             |
+| Deployment footprint                        | Heavy (uvicorn + many deps)                         | Tiny Rust binary + optional Python runtime               | ✅             |
+| Scaling to 10,000+ routes                   | Noticeable slowdown                                 | Stays fast thanks to hashmap lookup                      | ✅             |
+| JSON serialization flexibility              | Hard to swap (monkey-patch needed)                  | Trivial to plug orjson / sonic-rs / simdjson             | ✅             |
+| `response_model=None` + raw Response return | Fully supported                                     | serialization                                            | ❌ (for now)   |
+| `APIRouter` + `include_router()`            | Yes, mature ecosystem                               | Not yet implemented                                      | ❌ (for now)   |
+| `app.mount()` / `StaticFiles`               | Yes                                                 | Not yet implemented                                      | ❌ (for now)   |
 
 ## Current Limitations
+
 Some advanced features are still in development like:
+
 - [ ] Logging/metrics
 - [ ] A nice logging tool
 - [ ] Async Middleware support
@@ -322,14 +329,14 @@ Some advanced features are still in development like:
 - [ ] Better error handling (currently shows Rust errors)
 - [ ] Rate limiter (even FastAPI doesn't have it)
 - [x] Websockets
-- [x] Form/Multipart support
+- [ ] Form/Multipart support
+- [ ] File uploads (`UploadFile` + multipart parsing)
 - [x] Generated OpenAPI JSON + Swagger docs (`/api-docs/openapi.json`, `/docs`)
 - [ ] Sub-APIs / Includes
 - [x] Security Utilities (OAuth2, JWT, etc.)
 - [x] Rust integration
 - [x] Dependency injection
 - [x] Route parameter parsing (`Path`, `Query`, body models, `Depends`, `Security`)
-- [ ] File uploads (`UploadFile` + multipart parsing)
 - [ ] GraphQL support
 - [ ] APIRouter + include_router(prefix=..., tags=..., dependencies=...)
 - [ ] Respect response_model=None (allow raw Response / RedirectResponse returns)
@@ -351,6 +358,7 @@ Some advanced features are still in development like:
 - [ ] Rust → Python FFI helpers for fast endpoints
 
 ## Contributing
+
 Contributions are welcome! Please feel free to submit a Pull Request.
 
 - Fork the repository
@@ -362,11 +370,14 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 Check out [CONTRIBUTING.md](CONTRIBUTING.md) for more details.
 
 ## License
+
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
+
 Inspired by [FastAPI](https://github.com/fastapi/fastapis)
 Built with [PyO3](https://github.com/PyO3/pyo3/) and [Axum](https://github.com/tokio-rs/axum/)
 
 ## Star History
+
 [![Star History Chart](https://api.star-history.com/svg?repos=ppmpreetham/fastrapi&type=Date)](https://star-history.com/#ppmpreetham/fastrapi&Date)
