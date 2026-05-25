@@ -243,13 +243,13 @@ pub fn build_openapi_spec(
 
         let mut parameters = Vec::new();
 
-        for param in &handler.parsed_params {
+        handler.parsed_params.iter().for_each(|param| {
             let location = match param.source {
                 ParameterSource::Path => "path",
                 ParameterSource::Query => "query",
                 ParameterSource::Header => "header",
                 ParameterSource::Cookie => "cookie",
-                ParameterSource::Body => continue,
+                ParameterSource::Body => return,
             };
 
             let schema = param
@@ -265,7 +265,7 @@ pub fn build_openapi_spec(
                 schema: Some(apply_parameter_constraints(schema, &param.constraints)),
                 description: param.description.clone(),
             });
-        }
+        });
 
         if !parameters.is_empty() {
             operation.parameters = Some(parameters);
@@ -305,19 +305,22 @@ pub fn build_openapi_spec(
                 let mut properties = serde_json::Map::new();
                 let mut required_fields = Vec::new();
 
-                for (param_name, validator) in &handler.param_validators {
-                    let validator_bound = validator.bind(py);
+                handler
+                    .param_validators
+                    .iter()
+                    .for_each(|(param_name, validator)| {
+                        let validator_bound = validator.bind(py);
 
-                    if let Some(schema) = extract_pydantic_schema(py, validator_bound) {
-                        let schema_name = get_schema_name(validator_bound);
-                        schemas.insert(schema_name.clone(), schema);
-                        properties.insert(
-                            param_name.clone(),
-                            json!({ "$ref": format!("#/components/schemas/{}", schema_name) }),
-                        );
-                        required_fields.push(param_name.clone());
-                    }
-                }
+                        if let Some(schema) = extract_pydantic_schema(py, validator_bound) {
+                            let schema_name = get_schema_name(validator_bound);
+                            schemas.insert(schema_name.clone(), schema);
+                            properties.insert(
+                                param_name.clone(),
+                                json!({ "$ref": format!("#/components/schemas/{}", schema_name) }),
+                            );
+                            required_fields.push(param_name.clone());
+                        }
+                    });
 
                 if !properties.is_empty() {
                     let func_name = handler

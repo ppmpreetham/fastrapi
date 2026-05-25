@@ -121,10 +121,14 @@ fn annotation_display_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Opt
 
 fn extract_string_list(value: &Bound<'_, PyAny>) -> Option<Vec<String>> {
     let mut values = Vec::new();
-    for item in value.try_iter().ok()? {
-        let item = item.ok()?;
-        values.push(item.extract::<String>().ok()?);
-    }
+    value.try_iter().ok()?.for_each(|item_res| {
+        if let Ok(item) = item_res {
+            if let Ok(s) = item.extract::<String>() {
+                values.push(s);
+            }
+        }
+    });
+
     Some(values)
 }
 

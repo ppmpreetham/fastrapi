@@ -1,8 +1,10 @@
 use crate::routing::types::{
     FlatRoute, FlatWebSocket, HttpMethod, RouteEntry, SubRouterMount, WebSocketEntry,
 };
+use hyper::StatusCode;
 use pyo3::prelude::{pyclass, pymethods, Bound, Py, PyAny, PyAnyMethods, PyResult, Python};
-use pyo3::types::{PyCFunction, PyDict, PyTuple};
+use pyo3::types::{IntoPyDict, PyCFunction, PyDict, PyTuple};
+use pyo3::types::{PyString, PyStringMethods};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -53,6 +55,7 @@ impl PyAPIRouter {
             cached_flat: Arc::new(Mutex::new(None)),
         }
     }
+
     pub fn create_method_decorator(
         &self,
         py: Python<'_>,
@@ -75,7 +78,7 @@ impl PyAPIRouter {
 
         let default_status = status_code
             .map(|c| {
-                axum::http::StatusCode::from_u16(c).map_err(|_| {
+                StatusCode::from_u16(c).map_err(|_| {
                     pyo3::exceptions::PyValueError::new_err(
                         "status_code must be between 100 and 599",
                     )
@@ -84,28 +87,35 @@ impl PyAPIRouter {
             .transpose()?;
 
         let mut merged_tags = self.tags.clone();
+
         if let Some(route_tags) = tags {
             let tag_list = route_tags.bind(py);
+
             if let Ok(iter) = tag_list.try_iter() {
-                for item in iter.flatten() {
-                    if let Ok(tag) = item.extract::<String>() {
-                        if !merged_tags.contains(&tag) {
-                            merged_tags.push(tag);
+                iter.flatten().for_each(|item| {
+                    if let Ok(py_str) = item.cast::<PyString>() {
+                        if let Ok(tag_slice) = py_str.to_str() {
+                            if !merged_tags.iter().any(|t| t == tag_slice) {
+                                merged_tags.push(tag_slice.to_string());
+                            }
                         }
                     }
-                }
+                });
             }
         }
+
         let deprecated = deprecated.or(self.deprecated);
         let path_for_closure = path.clone();
         let routes = Arc::clone(&self.route_entries);
         let response_model_capture = response_model.clone();
         let response_class_capture = response_class.clone();
+
         let decorator = move |args: &Bound<'_, PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.unbind();
+
             let metadata =
                 crate::ffi::pydantic::parse_route_metadata(py, &func.bind(py), &path_for_closure);
 
@@ -119,17 +129,21 @@ impl PyAPIRouter {
                 || !metadata.param_validators.is_empty()
                 || !metadata.dependencies.is_empty()
                 || !metadata.parsed_params.is_empty();
+
             let kwargs_template = if needs_kwargs {
-                let d = pyo3::types::PyDict::new(py);
-                for p in &metadata.parsed_params {
-                    let _ = d.set_item(p.name_py.bind(py), py.None());
-                }
+                let pairs = metadata
+                    .parsed_params
+                    .iter()
+                    .map(|p| (p.name_py.bind(py), py.None()));
+
+                let d = pairs.into_py_dict(py)?;
                 Some(d.unbind())
             } else {
                 None
             };
 
             let deps_empty = metadata.dependencies.is_empty();
+
             let execution_mode = match (
                 metadata.is_async,
                 deps_empty,
@@ -172,6 +186,7 @@ impl PyAPIRouter {
                 response_class: response_class_capture.clone(),
                 execution_mode,
             });
+
             let entry = RouteEntry {
                 method,
                 path: path_for_closure.clone(),
@@ -182,9 +197,12 @@ impl PyAPIRouter {
                 deprecated,
                 include_in_schema,
             };
+
             routes.lock().unwrap().push(entry);
+
             Ok(func)
         };
+
         PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
     }
 
@@ -639,59 +657,62 @@ fn flatten_router(py: Python<'_>, root: &PyAPIRouter) -> (Vec<FlatRoute>, Vec<Fl
         let full_prefix = join_path(&prefix, &router_prefix);
 
         let mut current_tags = parent_tags.clone();
-        for tag in &router.tags {
-            if !current_tags.contains(tag) {
-                current_tags.push(tag.clone());
+        current_tags = router.tags.iter().fold(current_tags, |mut tags, tag| {
+            if !tags.contains(tag) {
+                tags.push(tag.clone());
             }
-        }
+            tags
+        });
 
         let route_entries = {
             let guard = router.route_entries.lock().unwrap();
             guard.clone()
         };
-        for entry in route_entries {
-            let full_path = join_path(&full_prefix, &entry.path);
+        routes.extend(route_entries.into_iter().map(|entry| {
             let mut tags = current_tags.clone();
-            for tag in &entry.tags {
+            entry.tags.iter().for_each(|tag| {
                 if !tags.contains(tag) {
                     tags.push(tag.clone());
                 }
-            }
-            routes.push(FlatRoute {
-                method: entry.method,
-                path: full_path,
-                handler: entry.handler.clone(),
-                tags,
             });
-        }
+
+            FlatRoute {
+                method: entry.method,
+                path: join_path(&full_prefix, &entry.path),
+                handler: entry.handler,
+                tags,
+            }
+        }));
 
         let ws_entries = {
             let guard = router.websocket_entries.lock().unwrap();
             guard.clone()
         };
-        for ws in ws_entries {
-            let full_path = join_path(&full_prefix, &ws.path);
-            ws_routes.push(FlatWebSocket {
-                path: full_path,
-                handler: ws.handler.clone_ref(py),
-            });
-        }
+        ws_routes.extend(ws_entries.into_iter().map(|ws| FlatWebSocket {
+            path: join_path(&full_prefix, &ws.path),
+            handler: ws.handler.clone_ref(py),
+        }));
 
         let subs = {
             let guard = router.sub_routers.lock().unwrap();
             guard.clone()
         };
-        for sub in subs {
+        subs.into_iter().for_each(|sub| {
             let sub_router = sub.router.bind(py).borrow();
             let mut sub_tags = current_tags.clone();
-            for tag in &sub.tags {
+
+            sub.tags.iter().for_each(|tag| {
                 if !sub_tags.contains(tag) {
                     sub_tags.push(tag.clone());
                 }
-            }
-            let sub_prefix = join_path(&full_prefix, &sub.prefix);
-            stack.push((sub_router.clone(), sub_prefix, sub_tags));
-        }
+            });
+
+            stack.push((
+                sub_router.clone(),
+                join_path(&full_prefix, &sub.prefix),
+                sub_tags,
+            ));
+        });
     }
     (routes, ws_routes)
 }

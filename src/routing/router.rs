@@ -72,11 +72,12 @@ impl FrozenRouterBuilder {
                 return None;
             }
             let mut router = matchit::Router::new();
-            for (path, handler) in entries {
+            entries.into_iter().for_each(|(path, handler)| {
                 if let Err(e) = router.insert(path, handler.clone()) {
                     tracing::warn!("Failed to insert parameterized route '{}': {}", path, e);
                 }
-            }
+            });
+
             Some(router)
         });
 

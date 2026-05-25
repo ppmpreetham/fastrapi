@@ -127,10 +127,10 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>, status: StatusCode
 pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
     let mut map = Map::with_capacity(dict.len());
 
-    for (key, value) in dict.iter() {
+    dict.iter().for_each(|(key, value)| {
         let k = json_key_for(&key);
         map.insert(k, py_any_to_json(py, &value));
-    }
+    });
 
     Value::Object(map)
 }
@@ -139,15 +139,13 @@ pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
 pub fn py_list_to_json(py: Python<'_>, list: &Bound<'_, PyList>) -> Value {
     let mut vec = Vec::with_capacity(list.len());
 
-    for item in list.iter() {
-        vec.push(py_any_to_json(py, &item));
-    }
+    vec.extend(list.iter().map(|item| py_any_to_json(py, &item)));
 
     Value::Array(vec)
 }
 
 /// Coerce any Python dict key into a JSON-acceptable string.
-/// JSON object keys must be strings — for non-string keys we use repr-style
+/// JSON object keys must be strings :  for non-string keys we use repr-style
 /// `str(key)`, matching Python `json.dumps` with `default=str` behavior on
 /// non-string keys (after `sort_keys`/`skipkeys` are off).
 #[inline]
@@ -196,7 +194,7 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         if let Ok(v) = i.extract::<i64>() {
             return Value::Number(v.into());
         }
-        // bigints that don't fit in i64 — fall back to string to preserve precision.
+        // bigints that don't fit in i64: fall back to string to preserve precision.
         if let Ok(s) = value.str() {
             if let Ok(s) = s.to_str() {
                 return Value::String(s.to_owned());
@@ -213,23 +211,20 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
 
     if let Ok(tuple) = value.cast::<PyTuple>() {
         let mut vec = Vec::with_capacity(tuple.len());
-        for item in tuple.iter() {
-            vec.push(py_any_to_json(py, &item));
-        }
+        vec.extend(tuple.iter().map(|item| py_any_to_json(py, &item)));
+
         return Value::Array(vec);
     }
     if let Ok(set) = value.cast::<PySet>() {
         let mut vec = Vec::with_capacity(set.len());
-        for item in set.iter() {
-            vec.push(py_any_to_json(py, &item));
-        }
+        vec.extend(set.iter().map(|item| py_any_to_json(py, &item)));
+
         return Value::Array(vec);
     }
     if let Ok(fset) = value.cast::<PyFrozenSet>() {
         let mut vec = Vec::with_capacity(fset.len());
-        for item in fset.iter() {
-            vec.push(py_any_to_json(py, &item));
-        }
+        vec.extend(fset.iter().map(|item| py_any_to_json(py, &item)));
+
         return Value::Array(vec);
     }
 

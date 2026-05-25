@@ -457,16 +457,17 @@ fn apply_body_and_validation(
         if body_params.iter().any(|p| p.required) {
             return Err(validation_error_response("Request body is required"));
         }
-        for param in body_params {
+        body_params.into_iter().for_each(|param| {
             if param.has_default {
                 let value = param
                     .default_value
                     .as_ref()
                     .map(|d| d.clone_ref(py))
                     .unwrap_or_else(|| py.None());
-                kwargs.set_item(param.name_py.bind(py), value).ok();
+                let _ = kwargs.set_item(param.name_py.bind(py), value);
             }
-        }
+        });
+
         return Ok(());
     };
 
@@ -550,14 +551,22 @@ pub fn apply_request_data(
         .chain(handler.param_validators.iter().map(|(n, _)| n.as_str()))
         .collect();
 
-    for param in &handler.parsed_params {
-        if matches!(param.source, ParameterSource::Body) || body_set.contains(param.name.as_str()) {
-            continue;
-        }
-        if let Some(value) = resolve_parameter_value(py, param, request_input)? {
-            kwargs.set_item(param.name_py.bind(py), value).ok();
-        }
-    }
+    handler
+        .parsed_params
+        .iter()
+        .try_for_each(|param| -> Result<(), axum::response::Response> {
+            if matches!(param.source, ParameterSource::Body)
+                || body_set.contains(param.name.as_str())
+            {
+                return Ok(());
+            }
+
+            if let Some(value) = resolve_parameter_value(py, param, request_input)? {
+                let _ = kwargs.set_item(param.name_py.bind(py), value);
+            }
+
+            Ok(())
+        })?;
 
     apply_body_and_validation(py, handler, payload, kwargs)
 }

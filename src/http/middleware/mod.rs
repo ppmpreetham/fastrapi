@@ -20,6 +20,7 @@ macro_rules! set_field {
     };
 }
 
+use crate::utils::utils::py_to_response;
 use axum::{
     extract::Request,
     http::StatusCode,
@@ -30,7 +31,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use std::sync::Arc;
 use tracing::{debug, error};
-use crate::utils::utils::py_to_response;
 
 mod cors;
 mod gzip;
@@ -86,9 +86,9 @@ pub async fn execute_py_middleware(
             py_dict.set_item("query", req_info.query).ok();
 
             let headers_dict = PyDict::new(py);
-            for (k, v) in req_info.headers {
-                headers_dict.set_item(k, v).ok();
-            }
+            req_info.headers.into_iter().for_each(|(k, v)| {
+                let _ = headers_dict.set_item(k, v);
+            });
             py_dict.set_item("headers", headers_dict).ok();
 
             let middleware_func = middleware.func.bind(py);

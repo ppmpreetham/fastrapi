@@ -12,25 +12,24 @@ pub fn extract_path_param_names(path: &str) -> Vec<String> {
     let mut params = Vec::new();
     let mut in_param = false;
     let mut current_param = String::new();
-    for c in path.chars() {
-        match c {
-            '{' => {
-                in_param = true;
-                current_param.clear();
+    path.chars().for_each(|c| match c {
+        '{' => {
+            in_param = true;
+            current_param.clear();
+        }
+        '}' => {
+            if in_param && !current_param.is_empty() {
+                params.push(current_param.clone());
             }
-            '}' => {
-                if in_param && !current_param.is_empty() {
-                    params.push(current_param.clone());
-                }
-                in_param = false;
-            }
-            _ => {
-                if in_param {
-                    current_param.push(c);
-                }
+            in_param = false;
+        }
+        _ => {
+            if in_param {
+                current_param.push(c);
             }
         }
-    }
+    });
+
     params
 }
 

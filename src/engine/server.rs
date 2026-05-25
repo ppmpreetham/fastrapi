@@ -181,10 +181,9 @@ fn run_shutdown_phase(
     Ok(())
 }
 fn run_lifecycle_handlers(py: Python<'_>, handlers: Py<PyAny>) -> PyResult<()> {
-    for handler in extract_lifecycle_handlers(py, &handlers)? {
-        run_lifecycle_handler(py, handler)?;
-    }
-    Ok(())
+    extract_lifecycle_handlers(py, &handlers)?
+        .into_iter()
+        .try_for_each(|handler| run_lifecycle_handler(py, handler))
 }
 
 fn extract_lifecycle_handlers<'py>(
@@ -393,7 +392,7 @@ fn merge_declared_middlewares(
         return;
     };
 
-    for item in iter.flatten() {
+    iter.flatten().for_each(|item| {
         if let Err(err) = apply_declared_middleware(
             py,
             &item,
@@ -404,7 +403,7 @@ fn merge_declared_middlewares(
         ) {
             log_python_error("middleware setup failed", err);
         }
-    }
+    });
 }
 
 fn build_router(
@@ -436,26 +435,28 @@ fn build_router(
     let flat = base_ref.flatten(py);
 
     let mut frozen_router_builder = FrozenRouterBuilder::new();
-    for route in &flat.0 {
+    flat.0.iter().for_each(|route| {
         frozen_router_builder.add_route(route.method, route.path.clone(), route.handler.clone());
-    }
+    });
+
     let frozen_router = Arc::new(frozen_router_builder.build());
 
-    for ws in &flat.1 {
+    app = flat.1.iter().fold(app, |current_app, ws| {
         let path = ws.path.clone();
         let handler = ws.handler.clone_ref(py);
         let rt_handle = app_state.rt_handle.clone();
-        app = app.route(
+
+        current_app.route(
             &path,
-            get(move |ws_upgrade| {
+            axum::routing::get(move |ws_upgrade| {
                 ws_handler(
                     ws_upgrade,
-                    Extension(handler.clone()),
-                    Extension(rt_handle.clone()),
+                    axum::Extension(handler.clone()),
+                    axum::Extension(rt_handle.clone()),
                 )
             }),
-        );
-    }
+        )
+    });
 
     let openapi_json = Arc::new(build_openapi_spec(
         py,

@@ -143,19 +143,21 @@ impl<'a> RequestInput<'a> {
     pub fn get_all_cookies(&self) -> &SmallVec<[(&'a str, &'a str); 8]> {
         self.cookies.get_or_init(|| {
             let mut result = SmallVec::new();
-            for header_value in self.headers.get_all(axum::http::header::COOKIE) {
-                let Ok(raw_cookie) = header_value.to_str() else {
-                    continue;
-                };
-                for cookie in raw_cookie.split(';') {
-                    let trimmed = cookie.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    let (name, value) = trimmed.split_once('=').unwrap_or((trimmed, ""));
-                    result.push((name.trim(), value.trim()));
-                }
-            }
+            self.headers
+                .get_all(axum::http::header::COOKIE)
+                .iter()
+                .filter_map(|header_value| header_value.to_str().ok())
+                .for_each(|raw_cookie| {
+                    raw_cookie
+                        .split(';')
+                        .map(|c| c.trim())
+                        .filter(|c| !c.is_empty())
+                        .for_each(|cookie| {
+                            let (name, value) = cookie.split_once('=').unwrap_or((cookie, ""));
+                            result.push((name.trim(), value.trim()));
+                        });
+                });
+
             result
         })
     }
