@@ -84,7 +84,6 @@ pub struct RequestInput<'a> {
     pub method: &'a str,
     pub path: &'a str,
     pub query_string: &'a str,
-    pub raw_cookies: &'a str,
 
     pub path_params: OnceCell<SmallVec<[(&'a str, &'a str); 8]>>,
     pub query_params: OnceCell<SmallVec<[(Cow<'a, str>, Cow<'a, str>); 8]>>,
@@ -113,11 +112,19 @@ impl<'a> RequestInput<'a> {
                 }
                 let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
                 let key_cow = match k.contains('%') || k.contains('+') {
-                    true => Cow::Owned(percent_encoding::percent_decode_str(&k.replace('+', " ")).decode_utf8_lossy().into_owned()),
+                    true => Cow::Owned(
+                        percent_encoding::percent_decode_str(&k.replace('+', " "))
+                            .decode_utf8_lossy()
+                            .into_owned(),
+                    ),
                     false => Cow::Borrowed(k),
                 };
                 let val_cow = match v.contains('%') || v.contains('+') {
-                    true => Cow::Owned(percent_encoding::percent_decode_str(&v.replace('+', " ")).decode_utf8_lossy().into_owned()),
+                    true => Cow::Owned(
+                        percent_encoding::percent_decode_str(&v.replace('+', " "))
+                            .decode_utf8_lossy()
+                            .into_owned(),
+                    ),
                     false => Cow::Borrowed(v),
                 };
                 result.push((key_cow, val_cow));
@@ -136,16 +143,18 @@ impl<'a> RequestInput<'a> {
     pub fn get_all_cookies(&self) -> &SmallVec<[(&'a str, &'a str); 8]> {
         self.cookies.get_or_init(|| {
             let mut result = SmallVec::new();
-            if self.raw_cookies.is_empty() {
-                return result;
-            }
-            for cookie in self.raw_cookies.split(';') {
-                let trimmed = cookie.trim();
-                if trimmed.is_empty() {
+            for header_value in self.headers.get_all(axum::http::header::COOKIE) {
+                let Ok(raw_cookie) = header_value.to_str() else {
                     continue;
+                };
+                for cookie in raw_cookie.split(';') {
+                    let trimmed = cookie.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let (name, value) = trimmed.split_once('=').unwrap_or((trimmed, ""));
+                    result.push((name.trim(), value.trim()));
                 }
-                let (name, value) = trimmed.split_once('=').unwrap_or((trimmed, ""));
-                result.push((name.trim(), value.trim()));
             }
             result
         })
@@ -180,6 +189,7 @@ pub struct RouteHandler {
     pub default_status: Option<axum::http::StatusCode>,
     pub response_model: Option<Py<PyAny>>,
     pub response_class: Option<Py<PyAny>>,
+    pub execution_mode: crate::ffi::py_handlers::ExecutionMode,
 }
 
 #[derive(Clone)]

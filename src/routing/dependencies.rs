@@ -5,21 +5,41 @@ use crate::ffi::pydantic;
 use axum::response::Response;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyString, PyTuple};
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple};
+use smallvec::SmallVec;
+use std::collections::HashMap;
 
-type SharedPyObject = Arc<Py<PyAny>>;
+type SharedPyObject = Py<PyAny>;
+
+struct ParserKeys<'py> {
+    parameters: &'py Bound<'py, PyString>,
+    items: &'py Bound<'py, PyString>,
+    default: &'py Bound<'py, PyString>,
+    dependency: &'py Bound<'py, PyString>,
+    annotation: &'py Bound<'py, PyString>,
+    scopes: &'py Bound<'py, PyString>,
+    use_cache: &'py Bound<'py, PyString>,
+}
+
+impl<'py> ParserKeys<'py> {
+    fn new(py: Python<'py>) -> Self {
+        Self {
+            parameters: intern!(py, "parameters"),
+            items: intern!(py, "items"),
+            default: intern!(py, "default"),
+            dependency: intern!(py, "dependency"),
+            annotation: intern!(py, "annotation"),
+            scopes: intern!(py, "scopes"),
+            use_cache: intern!(py, "use_cache"),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum InjectionType {
-    /// Holds the `func_id` of the sub-dependency for O(1) cache lookup.
-    Dependency(u64),
-    /// A resolved request parameter.
+    Dependency(usize),
     Parameter(ParsedParameter),
-    /// The Request object.
     Request,
-    /// Security scopes injected for Security(...).
     SecurityScopes,
 }
 
@@ -47,22 +67,37 @@ impl From<PyErr> for DependencyExecutionError {
     }
 }
 
-fn get_signature<'py>(py: Python<'py>, func: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+fn get_signature<'py>(
+    py: Python<'py>,
+    func: &Bound<'py, PyAny>,
+    inspect: &Bound<'py, PyModule>,
+) -> PyResult<Bound<'py, PyAny>> {
     if let Ok(signature) = func.getattr(intern!(py, "__signature__")) {
         return Ok(signature);
     }
-
-    py.import(intern!(py, "inspect"))?
-        .call_method1(intern!(py, "signature"), (func,))
+    inspect.call_method1(intern!(py, "signature"), (func,))
 }
 
-fn is_async_callable(func: &Bound<'_, PyAny>) -> bool {
-    func.getattr("__code__")
-        .ok()
-        .and_then(|code| code.getattr("co_flags").ok())
-        .and_then(|flags| flags.extract::<u32>().ok())
-        .map(|flags| flags & 0x80 != 0)
-        .unwrap_or(false)
+fn is_async_callable(
+    py: Python<'_>,
+    inspect: &Bound<'_, PyModule>,
+    func: &Bound<'_, PyAny>,
+) -> bool {
+    if let Ok(is_coroutine) = inspect.call_method1(intern!(py, "iscoroutinefunction"), (func,)) {
+        if is_coroutine.is_truthy().unwrap_or(false) {
+            return true;
+        }
+    }
+    if let Ok(call_method) = func.getattr(intern!(py, "__call__")) {
+        if let Ok(is_coroutine) =
+            inspect.call_method1(intern!(py, "iscoroutinefunction"), (call_method,))
+        {
+            if is_coroutine.is_truthy().unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn annotation_display_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Option<String> {
@@ -93,18 +128,20 @@ fn extract_string_list(value: &Bound<'_, PyAny>) -> Option<Vec<String>> {
     Some(values)
 }
 
-/// Parse dependencies and flatten them into a topologically sorted list.
-/// Sub-dependencies always appear before their parents so execution is a
-/// simple linear pass at request time.
 pub fn parse_dependencies(
     py: Python,
     func: &Bound<PyAny>,
     path_param_names: &[String],
 ) -> PyResult<Vec<DependencyNode>> {
+    let inspect = py.import(intern!(py, "inspect"))?;
+    let keys = ParserKeys::new(py);
     let mut flat_plan = Vec::new();
-    let mut visited = HashSet::new();
+    let mut visited = HashMap::new();
+
     extract_and_flatten(
         py,
+        &inspect,
+        &keys,
         func,
         path_param_names,
         true,
@@ -114,12 +151,15 @@ pub fn parse_dependencies(
         &mut flat_plan,
         &mut visited,
     )?;
-    flat_plan.retain(|node| node.param_name.is_some());
+
+    flat_plan.pop();
     Ok(flat_plan)
 }
 
 fn extract_and_flatten(
     py: Python,
+    inspect: &Bound<'_, PyModule>,
+    keys: &ParserKeys<'_>,
     func: &Bound<PyAny>,
     path_param_names: &[String],
     is_top_level: bool,
@@ -127,14 +167,22 @@ fn extract_and_flatten(
     scopes: Vec<String>,
     use_cache: bool,
     flat_plan: &mut Vec<DependencyNode>,
-    visited: &mut HashSet<u64>,
-) -> PyResult<()> {
-    let signature = get_signature(py, func)?;
-    let parameters = signature.getattr(intern!(py, "parameters"))?;
+    visited: &mut HashMap<u64, usize>,
+) -> PyResult<usize> {
+    let func_id = func.as_ptr() as u64;
 
-    let mut sub_deps: Vec<(String, u64)> = Vec::new();
+    if use_cache {
+        if let Some(&idx) = visited.get(&func_id) {
+            return Ok(idx);
+        }
+    }
 
-    let items = parameters.call_method0(intern!(py, "items"))?;
+    let signature = get_signature(py, func, inspect)?;
+    let parameters = signature.getattr(keys.parameters)?;
+
+    let mut sub_deps: SmallVec<[(String, usize); 4]> = SmallVec::new();
+    let items = parameters.call_method0(keys.items)?;
+
     for item in items.try_iter()? {
         let pair = item?.cast_into::<PyTuple>()?;
         let param_name = pair.get_item(0)?;
@@ -145,19 +193,21 @@ fn extract_and_flatten(
             continue;
         }
 
-        if let Ok(default) = param_obj.getattr("default") {
+        if let Ok(default) = param_obj.getattr(keys.default) {
             if params::is_inspect_empty(py, &default) {
                 continue;
             }
 
-            let type_name = default.get_type().name()?.to_string();
-            if type_name != "Depends" && type_name != "Security" {
+            let is_depends = default.hasattr(keys.dependency).unwrap_or(false);
+            let is_security = default.hasattr(keys.scopes).unwrap_or(false);
+
+            if !is_depends && !is_security {
                 continue;
             }
 
-            let target_callable = if let Ok(dep) = default.getattr("dependency") {
+            let target_callable = if let Ok(dep) = default.getattr(keys.dependency) {
                 if dep.is_none() {
-                    if let Ok(annotation) = param_obj.getattr("annotation") {
+                    if let Ok(annotation) = param_obj.getattr(keys.annotation) {
                         annotation
                     } else {
                         continue;
@@ -169,9 +219,9 @@ fn extract_and_flatten(
                 continue;
             };
 
-            let child_scopes = if type_name == "Security" {
+            let child_scopes = if is_security {
                 default
-                    .getattr("scopes")
+                    .getattr(keys.scopes)
                     .ok()
                     .and_then(|value| extract_string_list(&value))
                     .unwrap_or_default()
@@ -180,66 +230,66 @@ fn extract_and_flatten(
             };
 
             let child_use_cache = default
-                .getattr("use_cache")
+                .getattr(keys.use_cache)
                 .ok()
                 .and_then(|value| value.is_truthy().ok())
                 .unwrap_or(true);
 
-            let target_id = target_callable.as_ptr() as u64;
-            sub_deps.push((param_name_str.clone(), target_id));
+            let target_index = extract_and_flatten(
+                py,
+                inspect,
+                keys,
+                &target_callable,
+                path_param_names,
+                is_top_level && parent_param_name.is_none(),
+                Some(param_name_str.clone()),
+                child_scopes,
+                child_use_cache,
+                flat_plan,
+                visited,
+            )?;
 
-            if !visited.contains(&target_id) {
-                extract_and_flatten(
-                    py,
-                    &target_callable,
-                    path_param_names,
-                    is_top_level && parent_param_name.is_none(),
-                    Some(param_name_str),
-                    child_scopes,
-                    child_use_cache,
-                    flat_plan,
-                    visited,
-                )?;
-            }
+            sub_deps.push((param_name_str, target_index));
         }
     }
 
-    let func_id = func.as_ptr() as u64;
-    if visited.contains(&func_id) {
-        return Ok(());
-    }
-
     let (injection_plan, needs_request_object) =
-        build_injection_plan(py, func, path_param_names, &sub_deps)?;
-    let is_async = is_async_callable(func);
+        build_injection_plan(py, func, path_param_names, &sub_deps, inspect, keys)?;
+    let is_async = is_async_callable(py, inspect, func);
 
+    let node_index = flat_plan.len();
     flat_plan.push(DependencyNode {
         func_id,
         func: func.as_unbound().clone(),
         is_async,
-        param_name: parent_param_name,
+        param_name: parent_param_name, // Restored Rust String
         scopes,
         use_cache,
         is_top_level,
-        injection_plan,
+        injection_plan, // Restored Rust String tuples
         needs_request_object,
     });
-    visited.insert(func_id);
 
-    Ok(())
+    if use_cache {
+        visited.insert(func_id, node_index);
+    }
+
+    Ok(node_index)
 }
 
 fn build_injection_plan(
     py: Python,
     func: &Bound<PyAny>,
     path_param_names: &[String],
-    sub_deps: &[(String, u64)],
+    sub_deps: &[(String, usize)],
+    inspect: &Bound<'_, PyModule>,
+    keys: &ParserKeys<'_>,
 ) -> PyResult<(Vec<(String, InjectionType)>, bool)> {
     let mut plan = Vec::new();
     let mut needs_request_object = false;
-    let signature = get_signature(py, func)?;
-    let parameters_any = signature.getattr(intern!(py, "parameters"))?;
-    let parameters = parameters_any.call_method0(intern!(py, "items"))?;
+    let signature = get_signature(py, func, inspect)?;
+    let parameters_any = signature.getattr(keys.parameters)?;
+    let parameters = parameters_any.call_method0(keys.items)?;
 
     for item in parameters.try_iter()? {
         let pair = item?.cast_into::<PyTuple>()?;
@@ -251,13 +301,13 @@ fn build_injection_plan(
             continue;
         }
 
-        if let Some((_, target_id)) = sub_deps.iter().find(|(param_name, _)| param_name == &name) {
-            plan.push((name, InjectionType::Dependency(*target_id)));
+        if let Some((_, target_idx)) = sub_deps.iter().find(|(param_name, _)| param_name == &name) {
+            plan.push((name, InjectionType::Dependency(*target_idx)));
             continue;
         }
 
         let mut special = false;
-        if let Ok(annotation) = param.getattr("annotation") {
+        if let Ok(annotation) = param.getattr(keys.annotation) {
             if let Some(annotation_name) = annotation_display_name(py, &annotation) {
                 if annotation_name.contains("Request") {
                     plan.push((name.clone(), InjectionType::Request));
@@ -282,34 +332,36 @@ fn build_injection_plan(
 fn build_dependency_kwargs(
     py: Python<'_>,
     dep: &DependencyNode,
-    cache: &HashMap<u64, SharedPyObject>,
+    results_registry: &[Option<SharedPyObject>],
     request_input: &RequestInput<'_>,
     request: Option<&SharedPyObject>,
 ) -> Result<Py<PyDict>, DependencyExecutionError> {
     let final_kwargs = PyDict::new(py);
 
     for (arg_name, injection_type) in &dep.injection_plan {
+        let py_arg_name = pyo3::types::PyString::intern(py, arg_name);
+
         match injection_type {
-            InjectionType::Dependency(target_id) => {
-                if let Some(cached_val) = cache.get(target_id) {
-                    final_kwargs.set_item(arg_name, cached_val.as_ref().bind(py))?;
+            InjectionType::Dependency(target_idx) => {
+                if let Some(cached_val) = &results_registry[*target_idx] {
+                    final_kwargs.set_item(py_arg_name, cached_val.bind(py))?;
                 }
             }
             InjectionType::Parameter(parameter) => {
                 if let Some(value) = pydantic::resolve_parameter_value(py, parameter, request_input)
                     .map_err(DependencyExecutionError::Response)?
                 {
-                    final_kwargs.set_item(arg_name, value)?;
+                    final_kwargs.set_item(py_arg_name, value)?;
                 }
             }
             InjectionType::Request => {
                 if let Some(req) = request {
-                    final_kwargs.set_item(arg_name, req.as_ref().bind(py))?;
+                    final_kwargs.set_item(py_arg_name, req.bind(py))?;
                 }
             }
             InjectionType::SecurityScopes => {
                 let py_scopes = Py::new(py, PySecurityScopes::new(Some(dep.scopes.clone())))?;
-                final_kwargs.set_item(arg_name, py_scopes)?;
+                final_kwargs.set_item(py_arg_name, py_scopes)?;
             }
         }
     }
@@ -317,49 +369,35 @@ fn build_dependency_kwargs(
     Ok(final_kwargs.unbind())
 }
 
-/// Synchronous variant of `execute_dependencies` for the case where every
-/// dep in the plan is sync. Runs inside an existing `Python::attach`, so it
-/// avoids the per-dep attach/detach the async path pays.
 pub fn execute_dependencies_sync(
     py: Python<'_>,
     flat_plan: &[DependencyNode],
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
-) -> Result<HashMap<String, SharedPyObject>, DependencyExecutionError> {
-    let request = request.map(Arc::new);
-    let mut cache: HashMap<u64, SharedPyObject> = HashMap::with_capacity(flat_plan.len());
-    let mut final_results: HashMap<String, SharedPyObject> = HashMap::with_capacity(
+) -> Result<Vec<(String, SharedPyObject)>, DependencyExecutionError> {
+    let request = request;
+    let mut results_registry: Vec<Option<SharedPyObject>> = vec![None; flat_plan.len()];
+
+    let mut final_results = Vec::with_capacity(
         flat_plan
             .iter()
             .filter(|node| node.is_top_level && node.param_name.is_some())
             .count(),
     );
 
-    for dep in flat_plan {
-        if dep.use_cache {
-            if let Some(cached_val) = cache.get(&dep.func_id) {
-                if dep.is_top_level {
-                    if let Some(name) = &dep.param_name {
-                        final_results.insert(name.clone(), Arc::clone(cached_val));
-                    }
-                }
-                continue;
-            }
-        }
-
-        let py_kwargs = build_dependency_kwargs(py, dep, &cache, request_input, request.as_ref())?;
+    for (i, dep) in flat_plan.iter().enumerate() {
+        let py_kwargs =
+            build_dependency_kwargs(py, dep, &results_registry, request_input, request.as_ref())?;
         let bound_func = dep.func.bind(py);
         let bound_kwargs = py_kwargs.bind(py);
-        let result: SharedPyObject = Arc::new(bound_func.call((), Some(bound_kwargs))?.unbind());
+        let result: SharedPyObject = bound_func.call((), Some(bound_kwargs))?.unbind();
+
+        results_registry[i] = Some(result.clone_ref(py));
 
         if dep.is_top_level {
             if let Some(name) = &dep.param_name {
-                final_results.insert(name.clone(), Arc::clone(&result));
+                final_results.push((name.clone(), result));
             }
-        }
-
-        if dep.use_cache {
-            cache.insert(dep.func_id, result);
         }
     }
 
@@ -367,62 +405,67 @@ pub fn execute_dependencies_sync(
 }
 
 pub async fn execute_dependencies(
+    rt_handle: tokio::runtime::Handle,
     flat_plan: &[DependencyNode],
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
-) -> Result<HashMap<String, SharedPyObject>, DependencyExecutionError> {
-    let request = request.map(Arc::new);
-    let mut cache: HashMap<u64, SharedPyObject> = HashMap::with_capacity(flat_plan.len());
-    let mut final_results: HashMap<String, SharedPyObject> = HashMap::with_capacity(
+) -> Result<Vec<(String, SharedPyObject)>, DependencyExecutionError> {
+    let request = request;
+    let mut results_registry: Vec<Option<SharedPyObject>> = vec![None; flat_plan.len()];
+
+    let mut final_results = Vec::with_capacity(
         flat_plan
             .iter()
             .filter(|node| node.is_top_level && node.param_name.is_some())
             .count(),
     );
 
-    for dep in flat_plan {
-        if dep.use_cache {
-            if let Some(cached_val) = cache.get(&dep.func_id) {
-                if dep.is_top_level {
-                    if let Some(name) = &dep.param_name {
-                        final_results.insert(name.clone(), Arc::clone(cached_val));
-                    }
-                }
-                continue;
-            }
-        }
-
+    for (i, dep) in flat_plan.iter().enumerate() {
         let result: SharedPyObject = if dep.is_async {
             let future = Python::attach(|py| -> Result<_, DependencyExecutionError> {
-                let py_kwargs =
-                    build_dependency_kwargs(py, dep, &cache, request_input, request.as_ref())?;
+                let py_kwargs = build_dependency_kwargs(
+                    py,
+                    dep,
+                    &results_registry,
+                    request_input,
+                    request.as_ref(),
+                )?;
                 let bound_func = dep.func.bind(py);
                 let bound_kwargs = py_kwargs.bind(py);
                 let coroutine = bound_func.call((), Some(bound_kwargs))?;
                 pyo3_async_runtimes::tokio::into_future(coroutine)
                     .map_err(DependencyExecutionError::Python)
             })?;
-            Arc::new(future.await.map_err(DependencyExecutionError::Python)?)
+            future.await.map_err(DependencyExecutionError::Python)?
         } else {
-            Arc::new(Python::attach(
-                |py| -> Result<Py<PyAny>, DependencyExecutionError> {
-                    let py_kwargs =
-                        build_dependency_kwargs(py, dep, &cache, request_input, request.as_ref())?;
-                    let bound_func = dep.func.bind(py);
-                    let bound_kwargs = py_kwargs.bind(py);
-                    Ok(bound_func.call((), Some(bound_kwargs))?.unbind())
-                },
-            )?)
+            let py_kwargs = Python::attach(|py| -> Result<_, DependencyExecutionError> {
+                build_dependency_kwargs(py, dep, &results_registry, request_input, request.as_ref())
+            })?;
+
+            let py_func = dep.func.clone();
+
+            rt_handle
+                .spawn_blocking(move || {
+                    Python::attach(|py| -> Result<Py<PyAny>, DependencyExecutionError> {
+                        let bound_func = py_func.bind(py);
+                        let bound_kwargs = py_kwargs.bind(py);
+                        Ok(bound_func.call((), Some(bound_kwargs))?.unbind())
+                    })
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    Err(DependencyExecutionError::Python(Python::attach(|py| {
+                        pyo3::exceptions::PyRuntimeError::new_err("Spawn blocking failed")
+                    })))
+                })?
         };
+
+        results_registry[i] = Some(result.clone());
 
         if dep.is_top_level {
             if let Some(name) = &dep.param_name {
-                final_results.insert(name.clone(), Arc::clone(&result));
+                final_results.push((name.clone(), result));
             }
-        }
-
-        if dep.use_cache {
-            cache.insert(dep.func_id, result);
         }
     }
 

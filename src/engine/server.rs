@@ -25,7 +25,7 @@ use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 use crate::utils::openapi::build_openapi_spec;
 use crate::utils::utils::local_guard;
 use crate::{
-    ffi::py_handlers::{run_py_handler_no_args, run_py_handler_with_request},
+    ffi::py_handlers::run_py_handler,
     routing::router::{FrozenRouter, FrozenRouterBuilder},
 };
 use crate::{
@@ -64,7 +64,7 @@ pub fn serve(
         .try_init()
         .ok();
 
-    let host = host.unwrap_or_else(|| "127.0.0.1".to_string());
+    let host: String = host.unwrap_or_else(|| "127.0.0.1".to_string());
     let port = port.unwrap_or(8000);
     let rt_handle = PYTHON_RUNTIME.handle().clone();
     let app_state = AppState { rt_handle };
@@ -93,14 +93,16 @@ pub fn serve(
     drop(app_config);
 
     let server_thread = std::thread::spawn(move || {
-        let entered_lifespan = match run_startup_phase(app, lifespan, on_startup) {
+        let entered_lifespan =
+            Python::attach(|py| run_startup_phase(py, app, lifespan, on_startup));
+
+        let entered_lifespan = match entered_lifespan {
             Ok(entered) => entered,
             Err(err) => {
                 log_python_error("startup failed", err);
                 return;
             }
         };
-
         let addr = format!("{}:{}", host, port);
         let server_result = PYTHON_RUNTIME.block_on(async move {
             let listener = TcpListener::bind(&addr)
@@ -133,9 +135,11 @@ pub fn serve(
             error!("Server error: {}", err);
         }
 
-        if let Err(err) = run_shutdown_phase(entered_lifespan, on_shutdown) {
-            log_python_error("shutdown failed", err);
-        }
+        Python::attach(|py| {
+            if let Err(err) = run_shutdown_phase(py, entered_lifespan, on_shutdown) {
+                log_python_error("shutdown failed", err);
+            }
+        });
     });
 
     py.detach(move || server_thread.join())
@@ -145,129 +149,121 @@ pub fn serve(
 }
 
 fn run_startup_phase(
+    py: Python<'_>,
     app: Py<FastrAPI>,
     lifespan: Option<Py<PyAny>>,
     on_startup: Option<Py<PyAny>>,
 ) -> PyResult<Option<EnteredLifespan>> {
     if let Some(lifespan_handler) = lifespan {
-        return enter_lifespan(app, lifespan_handler).map(Some);
+        return enter_lifespan(py, app, lifespan_handler).map(Some); // Pass py here too
     }
 
     if let Some(startup_handlers) = on_startup {
-        run_lifecycle_handlers(startup_handlers)?;
+        run_lifecycle_handlers(py, startup_handlers)?;
     }
 
     Ok(None)
 }
 
 fn run_shutdown_phase(
+    py: Python<'_>, // <-- Add this
     entered_lifespan: Option<EnteredLifespan>,
     on_shutdown: Option<Py<PyAny>>,
 ) -> PyResult<()> {
     if let Some(entered) = entered_lifespan {
-        return exit_lifespan(entered);
+        return exit_lifespan(py, entered);
     }
 
     if let Some(shutdown_handlers) = on_shutdown {
-        run_lifecycle_handlers(shutdown_handlers)?;
+        run_lifecycle_handlers(py, shutdown_handlers)?;
     }
 
     Ok(())
 }
-
-fn run_lifecycle_handlers(handlers: Py<PyAny>) -> PyResult<()> {
-    for handler in extract_lifecycle_handlers(&handlers)? {
-        run_lifecycle_handler(handler)?;
+fn run_lifecycle_handlers(py: Python<'_>, handlers: Py<PyAny>) -> PyResult<()> {
+    for handler in extract_lifecycle_handlers(py, &handlers)? {
+        run_lifecycle_handler(py, handler)?;
     }
-
     Ok(())
 }
 
-fn extract_lifecycle_handlers(handlers: &Py<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
-    Python::attach(|py| {
-        let handlers_bound = handlers.bind(py);
-        let builtins = py.import("builtins")?;
+fn extract_lifecycle_handlers<'py>(
+    py: Python<'py>,
+    handlers: &Py<PyAny>,
+) -> PyResult<Vec<Py<PyAny>>> {
+    let handlers_bound = handlers.bind(py);
 
-        if builtins
-            .call_method1("callable", (handlers_bound,))?
-            .extract::<bool>()?
-        {
-            return Ok(vec![handlers.clone_ref(py)]);
-        }
+    if handlers_bound.is_callable() {
+        return Ok(vec![handlers.clone_ref(py)]);
+    }
 
-        let mut extracted = Vec::new();
-        for item in handlers_bound.try_iter()? {
-            let handler = item?.unbind();
-            if !builtins
-                .call_method1("callable", (handler.bind(py),))?
-                .extract::<bool>()?
-            {
+    handlers_bound
+        .try_iter()?
+        .map(|item| {
+            let handler = item?;
+            if !handler.is_callable() {
                 return Err(PyTypeError::new_err(
                     "Lifecycle handlers must be callables or iterables of callables",
                 ));
             }
-            extracted.push(handler);
-        }
-
-        Ok(extracted)
-    })
+            Ok(handler.into())
+        })
+        .collect::<PyResult<Vec<Py<PyAny>>>>()
 }
 
-fn run_lifecycle_handler(handler: Py<PyAny>) -> PyResult<()> {
-    let is_async = Python::attach(|py| -> PyResult<bool> {
-        py.import("inspect")?
-            .call_method1("iscoroutinefunction", (handler.bind(py),))?
-            .extract()
-    })?;
+fn run_lifecycle_handler(py: Python<'_>, handler: Py<PyAny>) -> PyResult<()> {
+    let handler_bound = handler.bind(py);
+
+    let is_async: bool = py
+        .import("inspect")?
+        .call_method1("iscoroutinefunction", (handler_bound,))?
+        .is_truthy()?;
 
     if is_async {
-        Python::attach(|py| -> PyResult<()> {
-            let coroutine = handler.bind(py).call0()?;
-            run_awaitable_in_new_loop(py, coroutine)
-        })?;
+        let coroutine = handler_bound.call0()?;
+        run_awaitable_in_new_loop(py, coroutine)?;
     } else {
-        Python::attach(|py| -> PyResult<()> {
-            handler.bind(py).call0()?;
-            Ok(())
-        })?;
+        handler_bound.call0()?;
     }
 
     Ok(())
 }
 
-fn enter_lifespan(app: Py<FastrAPI>, lifespan: Py<PyAny>) -> PyResult<EnteredLifespan> {
-    Python::attach(|py| -> PyResult<EnteredLifespan> {
-        let event_loop = create_event_loop(py)?;
-        let manager = lifespan.bind(py).call1((app.clone_ref(py),))?;
-        let awaitable = manager.call_method0("__aenter__")?;
+fn enter_lifespan(
+    py: Python<'_>,
+    app: Py<FastrAPI>,
+    lifespan: Py<PyAny>,
+) -> PyResult<EnteredLifespan> {
+    let event_loop = create_event_loop(py)?;
+    let manager = lifespan.bind(py).call1((app.clone_ref(py),))?;
+    let awaitable = manager.call_method0("__aenter__")?;
 
-        if let Err(err) = run_awaitable_in_loop(py, event_loop.bind(py), awaitable) {
-            shutdown_async_generators(event_loop.bind(py));
-            close_event_loop(py, event_loop.bind(py));
-            return Err(err);
-        }
+    if let Err(err) = run_awaitable_in_loop(py, event_loop.bind(py), awaitable) {
+        shutdown_async_generators(event_loop.bind(py));
+        close_event_loop(py, event_loop.bind(py));
+        return Err(err);
+    }
 
-        Ok(EnteredLifespan {
-            manager: manager.unbind(),
-            event_loop,
-        })
+    Ok(EnteredLifespan {
+        manager: manager.unbind(),
+        event_loop,
     })
 }
 
-fn exit_lifespan(entered_lifespan: EnteredLifespan) -> PyResult<()> {
-    Python::attach(|py| -> PyResult<()> {
-        let event_loop = entered_lifespan.event_loop.bind(py);
-        let awaitable = entered_lifespan
-            .manager
-            .bind(py)
-            .call_method1("__aexit__", (py.None(), py.None(), py.None()))?;
-        let result = run_awaitable_in_loop(py, event_loop, awaitable);
-        shutdown_async_generators(event_loop);
-        close_event_loop(py, event_loop);
-        result
-    })?;
+fn exit_lifespan(py: Python<'_>, entered_lifespan: EnteredLifespan) -> PyResult<()> {
+    let event_loop = entered_lifespan.event_loop.bind(py);
 
-    Ok(())
+    let awaitable = entered_lifespan
+        .manager
+        .bind(py)
+        .call_method1("__aexit__", (py.None(), py.None(), py.None()))?;
+
+    let result = run_awaitable_in_loop(py, event_loop, awaitable);
+
+    shutdown_async_generators(event_loop);
+    close_event_loop(py, event_loop);
+
+    result
 }
 
 fn create_event_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -609,10 +605,6 @@ async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> R
         RouteMatch::Params(handler, params) => (handler, Some(params)),
     };
 
-    if !handler.needs_kwargs {
-        return run_py_handler_no_args(state.rt_handle, handler).await;
-    }
-
     let path_base = path_str.as_ptr() as usize;
     let param_ranges: SmallVec<[PathParamRange; 4]> = if let Some(params) = params_iter {
         params
@@ -636,17 +628,19 @@ async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> R
     };
 
     let (request_parts, body) = req.into_parts();
-    let expects_body = !handler.body_param_names.is_empty() || !handler.param_validators.is_empty();
-    let payload = if !expects_body {
-        None
-    } else {
+    let has_body_requirements =
+        !handler.body_param_names.is_empty() || !handler.param_validators.is_empty();
+
+    let payload = if has_body_requirements {
         match extract_payload(body).await {
             Ok(p) => p,
             Err(resp) => return resp,
         }
+    } else {
+        None
     };
 
-    run_py_handler_with_request(
+    run_py_handler(
         state.rt_handle,
         handler,
         request_parts,

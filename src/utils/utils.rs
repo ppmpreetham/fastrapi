@@ -87,37 +87,42 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>, status: StatusCode
     if let Ok(dict) = obj.cast::<PyDict>() {
         return json_response_with_status(py, status, &py_dict_to_json(py, dict));
     }
+
     if let Ok(list) = obj.cast::<PyList>() {
         return json_response_with_status(py, status, &py_list_to_json(py, list));
     }
 
-    // bool BEFORE int — `True`/`False` are instances of int in Python.
     if let Ok(b) = obj.cast::<PyBool>() {
         return json_response_with_status(py, status, &Value::Bool(b.is_true()));
     }
+
     if let Ok(s) = obj.cast::<PyString>() {
-        return json_response_with_status(
-            py,
-            status,
-            &Value::String(s.to_str().unwrap_or_default().to_owned()),
-        );
+        if let Ok(slice) = s.to_str() {
+            return json_response_with_status(
+                py,
+                status,
+                &Value::String(std::borrow::Cow::Borrowed(slice).into_owned()),
+            );
+        }
     }
+
     if let Ok(i) = obj.cast::<PyInt>() {
         if let Ok(v) = i.extract::<i64>() {
             return json_response_with_status(py, status, &Value::Number(v.into()));
         }
     }
+
     if let Ok(f) = obj.cast::<PyFloat>() {
-        if let Ok(v) = f.extract::<f64>() {
-            if let Some(n) = serde_json::Number::from_f64(v) {
-                return json_response_with_status(py, status, &Value::Number(n));
-            }
-            return json_response_with_status(py, status, &Value::Null);
+        let v = f.value(); // Native PyFloat zero-overhead extractor macro
+        if let Some(n) = serde_json::Number::from_f64(v) {
+            return json_response_with_status(py, status, &Value::Number(n));
         }
+        return json_response_with_status(py, status, &Value::Null);
     }
+
+    // 7. General structural fallback serializer
     json_response_with_status(py, status, &py_any_to_json(py, obj))
 }
-
 #[inline]
 pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
     let mut map = Map::with_capacity(dict.len());

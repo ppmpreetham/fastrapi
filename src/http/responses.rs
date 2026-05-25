@@ -1,9 +1,11 @@
-use crate::utils::utils::{json_response, json_response_with_status, py_any_to_json, py_to_response};
+use crate::utils::utils::{
+    json_response, json_response_with_status, py_any_to_json, py_to_response,
+};
 use axum::{
     http::{header, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
 };
-use pyo3::prelude::*;
+use pyo3::{exceptions::PyAttributeError, prelude::*};
 use tracing::error;
 
 use pyo3::{pyclass, pymethods, Py, PyAny};
@@ -97,61 +99,92 @@ pub fn convert_response_by_type(
     py: Python,
     result: &Bound<PyAny>,
     handler: &crate::routing::types::RouteHandler,
-) -> Response {
-    let mut final_result = result.clone();
-
-    let is_explicit_response = final_result.is_instance_of::<PyJSONResponse>() ||
-                               final_result.is_instance_of::<PyPlainTextResponse>() ||
-                               final_result.is_instance_of::<PyHTMLResponse>() ||
-                               final_result.is_instance_of::<PyRedirectResponse>();
-
-    if !is_explicit_response && !final_result.is_none() {
-        if let Some(model) = &handler.response_model {
-            if let Ok(validated) = model.bind(py).call_method1("model_validate", (&final_result,)) {
-                if let Ok(dumped) = validated.call_method0("model_dump") {
-                    final_result = dumped;
-                }
-            }
-        }
-    }
-
-    if final_result.is_none() {
-        let status = handler.default_status.unwrap_or(StatusCode::NO_CONTENT);
-        return status.into_response();
-    }
-
-    if final_result.is_instance_of::<PyJSONResponse>() {
-        return convert_json_response(py, &final_result);
-    } else if final_result.is_instance_of::<PyPlainTextResponse>() {
-        return convert_text_response(py, &final_result);
-    } else if final_result.is_instance_of::<PyHTMLResponse>() {
-        return convert_html_response(py, &final_result);
-    } else if final_result.is_instance_of::<PyRedirectResponse>() {
-        return convert_redirect_response(py, &final_result);
+) -> PyResult<Response> {
+    if result.is_none() {
+        return Ok(handler
+            .default_status
+            .unwrap_or(StatusCode::NO_CONTENT)
+            .into_response());
     }
 
     let default_status = handler.default_status.unwrap_or(StatusCode::OK);
 
-    match handler.response_type {
-        ResponseType::Json => {
-            let json = py_any_to_json(py, &final_result);
-            crate::utils::utils::json_response_with_status(py, default_status, &json)
+    let mut final_result = result;
+
+    let mut dumped_storage: Option<Bound<PyAny>> = None;
+
+    if let Some(model) = &handler.response_model {
+        let is_explicit_response = final_result.is_instance_of::<PyJSONResponse>()
+            || final_result.is_instance_of::<PyPlainTextResponse>()
+            || final_result.is_instance_of::<PyHTMLResponse>()
+            || final_result.is_instance_of::<PyRedirectResponse>();
+
+        if !is_explicit_response {
+            let validated = model
+                .bind(py)
+                .call_method1("model_validate", (final_result,))?;
+
+            let dumped = match validated.getattr("model_dump") {
+                Ok(method) => method.call0()?,
+                Err(err) if err.is_instance_of::<PyAttributeError>(py) => validated,
+                Err(err) => return Err(err),
+            };
+
+            dumped_storage = Some(dumped);
+            final_result = dumped_storage.as_ref().unwrap();
         }
+    }
+    let response = match handler.response_type {
         ResponseType::PlainText => {
-            let text = final_result
-                .extract::<String>()
-                .unwrap_or_else(|_| final_result.to_string());
+            // Fast native UTF-8 extraction path
+            let body_bytes = if let Ok(s) = final_result.extract::<&str>() {
+                bytes::Bytes::copy_from_slice(s.as_bytes())
+            } else {
+                match final_result.str() {
+                    Ok(py_str) => match py_str.to_str() {
+                        Ok(s) => bytes::Bytes::copy_from_slice(s.as_bytes()),
+                        Err(_) => bytes::Bytes::new(),
+                    },
+                    Err(_) => bytes::Bytes::new(),
+                }
+            };
+
             (
                 default_status,
                 [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                text,
+                body_bytes,
             )
                 .into_response()
         }
-        ResponseType::Html => convert_html_response(py, &final_result),
-        ResponseType::Redirect => convert_redirect_response(py, &final_result),
-        ResponseType::Auto => py_to_response(py, &final_result, default_status),
-    }
+
+        ResponseType::Json => {
+            let json = py_any_to_json(py, final_result);
+
+            crate::utils::utils::json_response_with_status(py, default_status, &json)
+        }
+
+        ResponseType::Html => convert_html_response(py, final_result),
+
+        ResponseType::Redirect => convert_redirect_response(py, final_result),
+
+        ResponseType::Auto => {
+            // cannot determine response type AOT.
+
+            if final_result.is_instance_of::<PyJSONResponse>() {
+                convert_json_response(py, final_result)
+            } else if final_result.is_instance_of::<PyPlainTextResponse>() {
+                convert_text_response(py, final_result)
+            } else if final_result.is_instance_of::<PyHTMLResponse>() {
+                convert_html_response(py, final_result)
+            } else if final_result.is_instance_of::<PyRedirectResponse>() {
+                convert_redirect_response(py, final_result)
+            } else {
+                py_to_response(py, final_result, default_status)
+            }
+        }
+    };
+
+    Ok(response)
 }
 
 #[inline(always)]

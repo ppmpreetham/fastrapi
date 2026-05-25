@@ -72,11 +72,13 @@ impl PyAPIRouter {
                 "Cannot modify router after it has been frozen",
             ));
         }
-        
+
         let default_status = status_code
             .map(|c| {
                 axum::http::StatusCode::from_u16(c).map_err(|_| {
-                    pyo3::exceptions::PyValueError::new_err("status_code must be between 100 and 599")
+                    pyo3::exceptions::PyValueError::new_err(
+                        "status_code must be between 100 and 599",
+                    )
                 })
             })
             .transpose()?;
@@ -106,13 +108,13 @@ impl PyAPIRouter {
             let func: Py<PyAny> = args.get_item(0)?.unbind();
             let metadata =
                 crate::ffi::pydantic::parse_route_metadata(py, &func.bind(py), &path_for_closure);
-            
+
             let final_response_type = if let Some(cls) = &response_class_capture {
                 crate::ffi::pydantic::get_response_type_from_class(py, &cls.bind(py))
             } else {
                 metadata.response_type
             };
-            
+
             let needs_kwargs = !metadata.body_param_names.is_empty()
                 || !metadata.param_validators.is_empty()
                 || !metadata.dependencies.is_empty()
@@ -126,6 +128,32 @@ impl PyAPIRouter {
             } else {
                 None
             };
+
+            let deps_empty = metadata.dependencies.is_empty();
+            let execution_mode = match (
+                metadata.is_async,
+                deps_empty,
+                metadata.all_deps_sync,
+                metadata.dependency_needs_request,
+            ) {
+                (false, true, _, _) => crate::ffi::py_handlers::ExecutionMode::SyncNoDeps,
+                (false, false, _, false) => crate::ffi::py_handlers::ExecutionMode::SyncDepsNoReq,
+                (false, false, _, true) => crate::ffi::py_handlers::ExecutionMode::SyncDepsReq,
+                (true, true, _, _) => crate::ffi::py_handlers::ExecutionMode::AsyncNoDeps,
+                (true, false, true, false) => {
+                    crate::ffi::py_handlers::ExecutionMode::AsyncSyncDepsNoReq
+                }
+                (true, false, true, true) => {
+                    crate::ffi::py_handlers::ExecutionMode::AsyncSyncDepsReq
+                }
+                (true, false, false, false) => {
+                    crate::ffi::py_handlers::ExecutionMode::AsyncAsyncDepsNoReq
+                }
+                (true, false, false, true) => {
+                    crate::ffi::py_handlers::ExecutionMode::AsyncAsyncDepsReq
+                }
+            };
+
             let handler = Arc::new(crate::routing::types::RouteHandler {
                 func: func.clone_ref(py),
                 is_async: metadata.is_async,
@@ -142,6 +170,7 @@ impl PyAPIRouter {
                 default_status,
                 response_model: response_model_capture.clone(),
                 response_class: response_class_capture.clone(),
+                execution_mode,
             });
             let entry = RouteEntry {
                 method,
