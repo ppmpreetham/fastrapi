@@ -466,10 +466,10 @@ pub async fn execute_dependencies(
 
         results_registry[i] = Some(result.clone());
 
-        if dep.is_top_level {
-            if let Some(name) = &dep.param_name {
-                final_results.push((name.clone(), result));
-            }
+        if dep.is_top_level
+            && let Some(name) = &dep.param_name
+        {
+            final_results.push((name.clone(), result));
         }
     }
 

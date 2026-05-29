@@ -117,10 +117,10 @@ impl PyAPIRouter {
             let func: Py<PyAny> = args.get_item(0)?.unbind();
 
             let metadata =
-                crate::ffi::pydantic::parse_route_metadata(py, &func.bind(py), &path_for_closure);
+                crate::ffi::pydantic::parse_route_metadata(py, func.bind(py), &path_for_closure);
 
             let final_response_type = if let Some(cls) = &response_class_capture {
-                crate::ffi::pydantic::get_response_type_from_class(py, &cls.bind(py))
+                crate::ffi::pydantic::get_response_type_from_class(py, cls.bind(py))
             } else {
                 metadata.response_type
             };
@@ -637,7 +637,7 @@ impl PyAPIRouter {
             Vec::new()
         };
         self.sub_routers.lock().unwrap().push(SubRouterMount {
-            router: router,
+            router,
             prefix,
             tags: tag_vec,
         });
@@ -653,28 +653,24 @@ fn flatten_router(py: Python<'_>, root: &PyAPIRouter) -> (Vec<FlatRoute>, Vec<Fl
 
     while let Some((router, prefix, parent_tags)) = stack.pop() {
         router.mark_frozen();
-        let router_prefix = router.prefix.clone();
-        let full_prefix = join_path(&prefix, &router_prefix);
 
-        let mut current_tags = parent_tags.clone();
-        current_tags = router.tags.iter().fold(current_tags, |mut tags, tag| {
-            if !tags.contains(tag) {
-                tags.push(tag.clone());
+        let full_prefix = join_path(&prefix, &router.prefix);
+
+        let mut current_tags = parent_tags;
+        for tag in &router.tags {
+            if !current_tags.contains(tag) {
+                current_tags.push(tag.clone());
             }
-            tags
-        });
+        }
 
-        let route_entries = {
-            let guard = router.route_entries.lock().unwrap();
-            guard.clone()
-        };
+        let route_entries = router.route_entries.lock().unwrap().clone();
         routes.extend(route_entries.into_iter().map(|entry| {
             let mut tags = current_tags.clone();
-            entry.tags.iter().for_each(|tag| {
+            for tag in &entry.tags {
                 if !tags.contains(tag) {
                     tags.push(tag.clone());
                 }
-            });
+            }
 
             FlatRoute {
                 method: entry.method,
@@ -684,43 +680,59 @@ fn flatten_router(py: Python<'_>, root: &PyAPIRouter) -> (Vec<FlatRoute>, Vec<Fl
             }
         }));
 
-        let ws_entries = {
-            let guard = router.websocket_entries.lock().unwrap();
-            guard.clone()
-        };
+        let ws_entries = router.websocket_entries.lock().unwrap().clone();
         ws_routes.extend(ws_entries.into_iter().map(|ws| FlatWebSocket {
             path: join_path(&full_prefix, &ws.path),
             handler: ws.handler.clone_ref(py),
         }));
 
-        let subs = {
-            let guard = router.sub_routers.lock().unwrap();
-            guard.clone()
-        };
-        subs.into_iter().for_each(|sub| {
+        let subs = router.sub_routers.lock().unwrap().clone();
+        for sub in subs {
             let sub_router = sub.router.bind(py).borrow();
-            let mut sub_tags = current_tags.clone();
 
-            sub.tags.iter().for_each(|tag| {
+            let mut sub_tags = current_tags.clone();
+            for tag in &sub.tags {
                 if !sub_tags.contains(tag) {
                     sub_tags.push(tag.clone());
                 }
-            });
+            }
 
             stack.push((
                 sub_router.clone(),
                 join_path(&full_prefix, &sub.prefix),
                 sub_tags,
             ));
-        });
+        }
     }
+
     (routes, ws_routes)
 }
 
 fn join_path(a: &str, b: &str) -> String {
-    match (a.ends_with('/'), b.starts_with('/')) {
-        (true, true) => format!("{}{}", &a[..a.len() - 1], b),
-        (false, false) => format!("{}/{}", a, b),
-        _ => format!("{}{}", a, b),
+    let a_ends = a.ends_with('/');
+    let b_starts = b.starts_with('/');
+
+    let capacity = match (a_ends, b_starts) {
+        (true, true) => a.len() + b.len() - 1,
+        (false, false) => a.len() + b.len() + 1,
+        _ => a.len() + b.len(),
+    };
+
+    let mut path = String::with_capacity(capacity);
+    path.push_str(a);
+
+    match (a_ends, b_starts) {
+        (true, true) => {
+            path.pop();
+            path.push_str(b);
+        }
+        (false, false) => {
+            path.push('/');
+            path.push_str(b);
+        }
+        _ => {
+            path.push_str(b);
+        }
     }
+    path
 }

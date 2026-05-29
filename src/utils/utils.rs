@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use bytes::{BufMut, BytesMut};
@@ -96,20 +96,20 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>, status: StatusCode
         return json_response_with_status(py, status, &Value::Bool(b.is_true()));
     }
 
-    if let Ok(s) = obj.cast::<PyString>() {
-        if let Ok(slice) = s.to_str() {
-            return json_response_with_status(
-                py,
-                status,
-                &Value::String(std::borrow::Cow::Borrowed(slice).into_owned()),
-            );
-        }
+    if let Ok(s) = obj.cast::<PyString>()
+        && let Ok(slice) = s.to_str()
+    {
+        return json_response_with_status(
+            py,
+            status,
+            &Value::String(std::borrow::Cow::Borrowed(slice).into_owned()),
+        );
     }
 
-    if let Ok(i) = obj.cast::<PyInt>() {
-        if let Ok(v) = i.extract::<i64>() {
-            return json_response_with_status(py, status, &Value::Number(v.into()));
-        }
+    if let Ok(i) = obj.cast::<PyInt>()
+        && let Ok(v) = i.extract::<i64>()
+    {
+        return json_response_with_status(py, status, &Value::Number(v.into()));
     }
 
     if let Ok(f) = obj.cast::<PyFloat>() {
@@ -195,18 +195,18 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
             return Value::Number(v.into());
         }
         // bigints that don't fit in i64: fall back to string to preserve precision.
-        if let Ok(s) = value.str() {
-            if let Ok(s) = s.to_str() {
-                return Value::String(s.to_owned());
-            }
+        if let Ok(s) = value.str()
+            && let Ok(s) = s.to_str()
+        {
+            return Value::String(s.to_owned());
         }
     }
-    if let Ok(f) = value.cast::<PyFloat>() {
-        if let Ok(v) = f.extract::<f64>() {
-            return serde_json::Number::from_f64(v)
-                .map(Value::Number)
-                .unwrap_or(Value::Null);
-        }
+    if let Ok(f) = value.cast::<PyFloat>()
+        && let Ok(v) = f.extract::<f64>()
+    {
+        return serde_json::Number::from_f64(v)
+            .map(Value::Number)
+            .unwrap_or(Value::Null);
     }
 
     if let Ok(tuple) = value.cast::<PyTuple>() {
@@ -240,27 +240,28 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
     // `model_dump`; dataclasses expose `__dataclass_fields__`; Enum exposes
     // `value`; datetime/date/time/UUID/Decimal are matched by class name to
     // avoid importing each module on the hot path.
-    if let Ok(true) = value.hasattr("model_dump") {
-        if let Ok(dumped) = value.call_method0("model_dump") {
-            return py_any_to_json(py, &dumped);
-        }
+    if let Ok(true) = value.hasattr("model_dump")
+        && let Ok(dumped) = value.call_method0("model_dump")
+    {
+        return py_any_to_json(py, &dumped);
     }
-    if let Ok(true) = value.hasattr("__dataclass_fields__") {
-        if let Ok(asdict) = py
+
+    if let Ok(true) = value.hasattr("__dataclass_fields__")
+        && let Ok(asdict) = py
             .import("dataclasses")
             .and_then(|m| m.getattr("asdict"))
             .and_then(|f| f.call1((value,)))
-        {
-            return py_any_to_json(py, &asdict);
-        }
+    {
+        return py_any_to_json(py, &asdict);
     }
-    if let Ok(true) = value.hasattr("isoformat") {
-        if let Ok(s) = value.call_method0("isoformat") {
-            if let Ok(s) = s.cast_into::<PyString>() {
-                return Value::String(s.to_str().unwrap_or_default().to_owned());
-            }
-        }
+
+    if let Ok(true) = value.hasattr("isoformat")
+        && let Ok(s) = value.call_method0("isoformat")
+        && let Ok(s) = s.cast_into::<PyString>()
+    {
+        return Value::String(s.to_str().unwrap_or_default().to_owned());
     }
+
     if let Ok(class_name) = value
         .get_type()
         .name()
@@ -268,17 +269,17 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
     {
         match class_name.as_str() {
             "UUID" => {
-                if let Ok(s) = value.str() {
-                    if let Ok(s) = s.to_str() {
-                        return Value::String(s.to_owned());
-                    }
+                if let Ok(s) = value.str()
+                    && let Ok(s) = s.to_str()
+                {
+                    return Value::String(s.to_owned());
                 }
             }
             "Decimal" => {
-                if let Ok(s) = value.str() {
-                    if let Ok(s) = s.to_str() {
-                        return Value::String(s.to_owned());
-                    }
+                if let Ok(s) = value.str()
+                    && let Ok(s) = s.to_str()
+                {
+                    return Value::String(s.to_owned());
                 }
             }
             _ => {}
@@ -306,18 +307,17 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
                 })
             })
             .unwrap_or(false);
-        if is_enum {
-            if let Ok(inner) = value.getattr("value") {
-                return py_any_to_json(py, &inner);
-            }
+        if is_enum && let Ok(inner) = value.getattr("value") {
+            return py_any_to_json(py, &inner);
         }
     }
 
-    if let Ok(s) = value.str() {
-        if let Ok(s) = s.to_str() {
-            return Value::String(s.to_owned());
-        }
+    if let Ok(s) = value.str()
+        && let Ok(s) = s.to_str()
+    {
+        return Value::String(s.to_owned());
     }
+
     Value::Null
 }
 

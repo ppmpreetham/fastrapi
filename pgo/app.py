@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 app = FastrAPI(
     title="FastrAPI PGO Workload",
-    version="0.2.10",
+    version="0.2.11",
     description="Broad local workload used by maturin PGO training.",
     openapi_url="/api-docs/openapi.json",
 )
@@ -194,7 +194,7 @@ def config():
 
 @app.get("/version")
 def version():
-    return {"name": "fastrapi", "version": "0.2.10", "profile": "pgo"}
+    return {"name": "fastrapi", "version": "0.2.11", "profile": "pgo"}
 
 
 @app.get("/html")

@@ -12,7 +12,7 @@ pub static BASEMODEL_TYPE: OnceLock<Py<PyType>> = OnceLock::new();
 
 pub static PYTHON_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(num_cpus::get().max(4).min(16))
+        .worker_threads(num_cpus::get().clamp(4, 16))
         .thread_name("python-handler")
         .enable_all()
         .build()

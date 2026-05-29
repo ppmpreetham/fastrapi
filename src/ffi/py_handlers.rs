@@ -171,7 +171,7 @@ fn prepare_kwargs_and_payload<'py>(
         None => PyDict::new(py),
     };
 
-    pydantic::apply_request_data(py, handler, request_input, payload, &kwargs).map_err(|e| e)?;
+    pydantic::apply_request_data(py, handler, request_input, payload, &kwargs)?;
 
     Ok(kwargs)
 }
@@ -239,7 +239,7 @@ where
     rt_handle
         .spawn_blocking(move || {
             Python::attach(|py| match result {
-                Ok(res) => specialized_response_conversion(py, &res.bind(py), &handler),
+                Ok(res) => specialized_response_conversion(py, res.bind(py), &handler),
                 Err(err) => python_error_to_response(py, err),
             })
         })
@@ -504,7 +504,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
 
                 let py_func = handler_clone2.func.bind(py);
                 let coroutine = py_func
-                    .call((), Some(&kwargs))
+                    .call((), Some(kwargs))
                     .map_err(|err| python_error_to_response(py, err))?;
 
                 pyo3_async_runtimes::tokio::into_future(coroutine)

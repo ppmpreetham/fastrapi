@@ -296,7 +296,7 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 | FastAPI + Guvicorn (workers: 1)  | 21.08            | 19.67               | 937          | 38.47            | 93.42            |
 | FastAPI + Guvicorn (workers: 16) | 4.84             | 4.17                | 3882         | 10.22            | 81.20            |
 
-> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency , making it **~33× faster** than FastAPI + Guvicorn with 1 worker.
+> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency , making it **~6× faster** than FastAPI + Guvicorn.
 
 ## Comparison: FastAPI vs FastRAPI
 
@@ -314,7 +314,7 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 | Scaling to 10,000+ routes                   | Noticeable slowdown                                 | Stays fast thanks to hashmap lookup                      | ✅             |
 | JSON serialization flexibility              | Hard to swap (monkey-patch needed)                  | Trivial to plug orjson / sonic-rs / simdjson             | ✅             |
 | `response_model=None` + raw Response return | Fully supported                                     | serialization                                            | ❌ (for now)   |
-| `APIRouter` + `include_router()`            | Yes, mature ecosystem                               | Not yet implemented                                      | ❌ (for now)   |
+| `APIRouter` + `include_router()`            | Yes, mature ecosystem                               | Full support                                             | ✅   |
 | `app.mount()` / `StaticFiles`               | Yes                                                 | Not yet implemented                                      | ❌ (for now)   |
 
 ## Current Limitations

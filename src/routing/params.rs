@@ -111,10 +111,10 @@ fn external_name_for_param(
     source: &ParameterSource,
     param_obj: &Bound<'_, PyAny>,
 ) -> String {
-    if let Ok(alias) = param_obj.getattr("alias") {
-        if let Ok(Some(alias)) = alias.extract::<Option<String>>() {
-            return alias;
-        }
+    if let Ok(alias) = param_obj.getattr("alias")
+        && let Ok(Some(alias)) = alias.extract::<Option<String>>()
+    {
+        return alias;
     }
 
     if matches!(source, ParameterSource::Header)

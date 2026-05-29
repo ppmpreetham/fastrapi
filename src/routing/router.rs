@@ -1,4 +1,4 @@
-use crate::routing::types::{HttpMethod, RouteHandler, HTTP_METHOD_COUNT};
+use crate::routing::types::{HTTP_METHOD_COUNT, HttpMethod, RouteHandler};
 use ahash::AHashMap;
 use pyo3::{Py, PyAny};
 use std::{borrow::Cow, sync::Arc};

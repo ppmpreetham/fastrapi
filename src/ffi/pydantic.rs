@@ -7,12 +7,12 @@ use crate::routing::params;
 use crate::routing::types::{ParameterSource, ParsedParameter, RequestInput, RouteHandler};
 use crate::types::response::ResponseType;
 use crate::utils::utils::{json_to_py_object, py_to_response};
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple, PyType};
 use pyo3::{intern, prelude::*};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -207,20 +207,17 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
 
             if !parsed_param.is_pydantic_model {
                 if let Some(ann) = &parsed_param.annotation {
-                    parsed_param.scalar_kind = resolve_scalar_kind(py, &ann.bind(py));
+                    parsed_param.scalar_kind = resolve_scalar_kind(py, ann.bind(py));
                 }
             }
 
-            match parsed_param.source {
-                ParameterSource::Body => {
-                    body_param_names.push(parsed_param.name.clone());
-                    if parsed_param.is_pydantic_model {
-                        if let Some(ann) = &parsed_param.annotation {
-                            param_validators.push((parsed_param.name.clone(), ann.clone_ref(py)));
-                        }
-                    }
+            if parsed_param.source == ParameterSource::Body {
+                body_param_names.push(parsed_param.name.clone());
+                if parsed_param.is_pydantic_model
+                    && let Some(ann) = &parsed_param.annotation
+                {
+                    param_validators.push((parsed_param.name.clone(), ann.clone_ref(py)));
                 }
-                _ => {}
             }
 
             parsed_params.push(parsed_param);
@@ -310,64 +307,64 @@ fn validate_scalar_constraints(
     value: &Bound<'_, PyAny>,
 ) -> Result<(), Response> {
     if let Ok(number) = value.extract::<f64>() {
-        if let Some(gt) = param.constraints.gt {
-            if number <= gt {
-                return Err(validation_error_response(format!(
-                    "{} must be greater than {}",
-                    param.external_name, gt
-                )));
-            }
+        if let Some(gt) = param.constraints.gt
+            && number <= gt
+        {
+            return Err(validation_error_response(format!(
+                "{} must be greater than {}",
+                param.external_name, gt
+            )));
         }
-        if let Some(ge) = param.constraints.ge {
-            if number < ge {
-                return Err(validation_error_response(format!(
-                    "{} must be greater than or equal to {}",
-                    param.external_name, ge
-                )));
-            }
+        if let Some(ge) = param.constraints.ge
+            && number < ge
+        {
+            return Err(validation_error_response(format!(
+                "{} must be greater than or equal to {}",
+                param.external_name, ge
+            )));
         }
-        if let Some(lt) = param.constraints.lt {
-            if number >= lt {
-                return Err(validation_error_response(format!(
-                    "{} must be less than {}",
-                    param.external_name, lt
-                )));
-            }
+        if let Some(lt) = param.constraints.lt
+            && number >= lt
+        {
+            return Err(validation_error_response(format!(
+                "{} must be less than {}",
+                param.external_name, lt
+            )));
         }
-        if let Some(le) = param.constraints.le {
-            if number > le {
-                return Err(validation_error_response(format!(
-                    "{} must be less than or equal to {}",
-                    param.external_name, le
-                )));
-            }
+        if let Some(le) = param.constraints.le
+            && number > le
+        {
+            return Err(validation_error_response(format!(
+                "{} must be less than or equal to {}",
+                param.external_name, le
+            )));
         }
     }
 
     if let Ok(text) = value.extract::<String>() {
-        if let Some(min_length) = param.constraints.min_length {
-            if text.len() < min_length {
-                return Err(validation_error_response(format!(
-                    "{} is shorter than {}",
-                    param.external_name, min_length
-                )));
-            }
+        if let Some(min_length) = param.constraints.min_length
+            && text.len() < min_length
+        {
+            return Err(validation_error_response(format!(
+                "{} is shorter than {}",
+                param.external_name, min_length
+            )));
         }
-        if let Some(max_length) = param.constraints.max_length {
-            if text.len() > max_length {
-                return Err(validation_error_response(format!(
-                    "{} is longer than {}",
-                    param.external_name, max_length
-                )));
-            }
+        if let Some(max_length) = param.constraints.max_length
+            && text.len() > max_length
+        {
+            return Err(validation_error_response(format!(
+                "{} is longer than {}",
+                param.external_name, max_length
+            )));
         }
-        if let Some(pattern) = &param.constraints.pattern {
-            if !pattern.is_match(&text) {
-                return Err(validation_error_response(format!(
-                    "{} does not match expected pattern",
-                    param.external_name
-                )));
-            }
+        if let Some(pattern) = &param.constraints.pattern
+            && !pattern.is_match(&text)
+        {
+            return Err(validation_error_response(format!(
+                "{} does not match expected pattern",
+                param.external_name
+            )));
         }
     }
 
@@ -481,7 +478,7 @@ fn apply_body_and_validation(
                 .find(|(n, _)| n == &param.name)
                 .map(|(_, v)| v.bind(py))
                 .ok_or_else(|| validation_error_response("Body validator is not registered"))?;
-            let validated = validate_with_pydantic(py, &validator, payload)?;
+            let validated = validate_with_pydantic(py, validator, payload)?;
             kwargs.set_item(param.name_py.bind(py), validated).ok();
             return Ok(());
         }
@@ -509,7 +506,7 @@ fn apply_body_and_validation(
                     .find(|(n, _)| n == &param.name)
                     .map(|(_, v)| v.bind(py))
                     .ok_or_else(|| validation_error_response("Body validator is not registered"))?;
-                let validated = validate_with_pydantic(py, &validator, value)?;
+                let validated = validate_with_pydantic(py, validator, value)?;
                 kwargs.set_item(param.name_py.bind(py), validated).ok();
             } else {
                 kwargs
@@ -572,13 +569,13 @@ pub fn apply_request_data(
 }
 
 pub fn get_response_type_from_class(py: Python<'_>, cls: &Bound<'_, PyAny>) -> ResponseType {
-    if cls.is(&py.get_type::<PyJSONResponse>()) {
+    if cls.is(py.get_type::<PyJSONResponse>()) {
         ResponseType::Json
-    } else if cls.is(&py.get_type::<PyPlainTextResponse>()) {
+    } else if cls.is(py.get_type::<PyPlainTextResponse>()) {
         ResponseType::PlainText
-    } else if cls.is(&py.get_type::<PyHTMLResponse>()) {
+    } else if cls.is(py.get_type::<PyHTMLResponse>()) {
         ResponseType::Html
-    } else if cls.is(&py.get_type::<PyRedirectResponse>()) {
+    } else if cls.is(py.get_type::<PyRedirectResponse>()) {
         ResponseType::Redirect
     } else {
         ResponseType::Auto
@@ -594,13 +591,13 @@ pub fn get_response_type(py: Python<'_>, func: &Bound<'_, PyAny>) -> ResponseTyp
             return Ok(ResponseType::Json);
         };
 
-        if ann.is(&py.get_type::<PyJSONResponse>()) {
+        if ann.is(py.get_type::<PyJSONResponse>()) {
             return Ok(ResponseType::Json);
-        } else if ann.is(&py.get_type::<PyPlainTextResponse>()) {
+        } else if ann.is(py.get_type::<PyPlainTextResponse>()) {
             return Ok(ResponseType::PlainText);
-        } else if ann.is(&py.get_type::<PyHTMLResponse>()) {
+        } else if ann.is(py.get_type::<PyHTMLResponse>()) {
             return Ok(ResponseType::Html);
-        } else if ann.is(&py.get_type::<PyRedirectResponse>()) {
+        } else if ann.is(py.get_type::<PyRedirectResponse>()) {
             return Ok(ResponseType::Redirect);
         }
 

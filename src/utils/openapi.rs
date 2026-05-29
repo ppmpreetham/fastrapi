@@ -5,7 +5,7 @@ use crate::routing::types::{HttpMethod, ParameterConstraints, ParameterSource, R
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::debug;
@@ -113,21 +113,19 @@ impl Default for OpenApiSpec {
 
 pub fn extract_pydantic_schema(py: Python, model: &Bound<PyAny>) -> Option<JsonValue> {
     // Pydantic v2
-    if let Ok(schema_method) = model.getattr("model_json_schema") {
-        if let Ok(result) = schema_method.call0() {
-            if let Ok(dict) = result.cast::<PyDict>() {
-                return Some(py_dict_to_json(py, dict));
-            }
-        }
+    if let Ok(schema_method) = model.getattr("model_json_schema")
+        && let Ok(result) = schema_method.call0()
+        && let Ok(dict) = result.cast::<PyDict>()
+    {
+        return Some(py_dict_to_json(py, dict));
     }
 
     // Pydantic v1
-    if let Ok(schema_method) = model.getattr("schema") {
-        if let Ok(result) = schema_method.call0() {
-            if let Ok(dict) = result.cast::<PyDict>() {
-                return Some(py_dict_to_json(py, dict));
-            }
-        }
+    if let Ok(schema_method) = model.getattr("schema")
+        && let Ok(result) = schema_method.call0()
+        && let Ok(dict) = result.cast::<PyDict>()
+    {
+        return Some(py_dict_to_json(py, dict));
     }
 
     None
@@ -336,8 +334,7 @@ pub fn build_openapi_spec(
                     let path_slug = path
                         .trim_start_matches('/')
                         .replace('/', "__")
-                        .replace('{', "_")
-                        .replace('}', "_");
+                        .replace(['{', '}'], "_");
 
                     let wrapper_name = format!("Body_{}_{}_{}", func_name, path_slug, method);
 
