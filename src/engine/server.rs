@@ -1,12 +1,13 @@
 use super::types::FastrAPI;
 use axum::{
-    body::{to_bytes, Body},
+    Json, Router,
+    body::{Body, to_bytes},
     extract::{Extension, Request},
     http::StatusCode,
     middleware::{self as axum_middleware, Next},
     response::{Html, IntoResponse, Response},
     routing::*,
-    Json, Router,
+    serve::ListenerExt,
 };
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
@@ -14,10 +15,10 @@ use smallvec::SmallVec;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{error, info, Level};
+use tracing::{Level, error, info};
 
 // middleware Libraries
-use tower_http::compression::{predicate::SizeAbove, CompressionLayer};
+use tower_http::compression::{CompressionLayer, predicate::SizeAbove};
 use tower_sessions::cookie::Key;
 use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
@@ -34,9 +35,8 @@ use crate::{
 };
 use crate::{
     http::middleware::{
-        build_cors_layer, parse_cors_params, parse_gzip_params, parse_session_params,
-        parse_trusted_host_params, CORSMiddleware, GZipMiddleware, SessionMiddleware,
-        TrustedHostMiddleware,
+        CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware, build_cors_layer,
+        parse_cors_params, parse_gzip_params, parse_session_params, parse_trusted_host_params,
     },
     routing::router::RouteMatch,
 };
@@ -114,10 +114,12 @@ pub fn serve(
                 info!("📚 Swagger UI at http://{}{}", addr, docs);
             }
 
-            let server = axum::serve(
-                listener,
-                router.into_make_service_with_connect_info::<SocketAddr>(),
-            );
+            let listener = listener.tap_io(|stream| {
+                let _ = stream.set_nodelay(true);
+            });
+
+            let service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let server = axum::serve(listener, service);
 
             server
                 .with_graceful_shutdown(async {
