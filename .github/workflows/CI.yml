@@ -40,10 +40,9 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter --pgo
+          args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
-          before-script-linux: rustup component add llvm-tools
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -72,10 +71,9 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter --pgo
+          args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: musllinux_1_2
-          before-script-linux: rustup component add llvm-tools
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -101,9 +99,8 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter --pgo
+          args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          rust-components: llvm-tools
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -128,9 +125,8 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter --pgo
+          args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          rust-components: llvm-tools
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
