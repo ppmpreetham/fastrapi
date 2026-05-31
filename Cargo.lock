@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "fastrapi"
-version = "0.2.11"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "async-recursion",
@@ -388,7 +388,6 @@ dependencies = [
  "smallvec",
  "smartstring",
  "tokio",
- "tokio-tungstenite",
  "tower",
  "tower-http",
  "tower-sessions",

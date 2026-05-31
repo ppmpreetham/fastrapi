@@ -4,15 +4,13 @@ build-backend = "maturin"
 
 [project]
 name = "fastrapi"
-version = "0.2.11"
+version = "0.3.0"
 description = "A high-performance Python API framework powered by Rust"
 readme = "README.md"
 requires-python = ">=3.8"
-license = {file = "LICENSE"}
+license = { file = "LICENSE" }
 keywords = ["fastapi", "fastrapi", "api", "web", "framework", "fast", "rust"]
-authors = [
-  {name = "Preetham Pemmasani", email = "ppmpreetham1@gmail.com"}
-]
+authors = [{ name = "Preetham Pemmasani", email = "ppmpreetham1@gmail.com" }]
 
 classifiers = [
   "Programming Language :: Rust",
@@ -33,9 +31,7 @@ classifiers = [
   "Operating System :: OS Independent",
   "License :: OSI Approved :: MIT License",
 ]
-dependencies = [
-    "pydantic>=2.9.0",
-]
+dependencies = ["pydantic>=2.9.0"]
 
 # If you have optional dependencies, uncomment and adjust this section
 # [project.optional-dependencies]

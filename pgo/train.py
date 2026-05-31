@@ -14,7 +14,8 @@ from urllib.request import Request, urlopen
 HOST = "127.0.0.1"
 PORT = 8000
 BASE = f"http://{HOST}:{PORT}"
-DEFAULT_ITERATIONS = 3000
+DEFAULT_ITERATIONS = 200
+DEFAULT_MAX_SECONDS = 120
 PAYLOAD_DIR = Path(__file__).resolve().parent / "payloads"
 EXPECTED_ERROR_STATUSES = {400, 401, 403, 404, 405, 422}
 TRAINING_DEPENDENCIES = ["pydantic>=2.9.0"]
@@ -110,8 +111,6 @@ def run_static_routes():
     request("/config")
     request("/version")
     request("/html")
-    request("/text", headers={"Accept": "text/plain"})
-    request("/redirect", headers={"Accept": "text/html"})
     request("/heavy", headers={"Accept-Encoding": "gzip"})
     request("/docs", headers={"Accept": "text/html"})
     request("/api-docs/openapi.json")
@@ -213,10 +212,21 @@ def run_expected_errors():
     )
 
 
-def run_workload(iterations):
+def run_workload(iterations, max_seconds):
     payloads = load_payloads()
+    started = time.time()
+
+    print(
+        f"PGO workload starting: iterations={iterations}, "
+        f"max_seconds={max_seconds or 'disabled'}",
+        flush=True,
+    )
 
     for index in range(iterations):
+        if max_seconds and time.time() - started >= max_seconds:
+            print(f"PGO workload time budget reached after {index} iterations", flush=True)
+            break
+
         run_static_routes()
         run_read_routes(index)
         run_write_routes(payloads, index)
@@ -224,15 +234,21 @@ def run_workload(iterations):
         if index % 25 == 0:
             run_expected_errors()
 
+        completed = index + 1
+        if completed == 1 or completed % 25 == 0 or completed == iterations:
+            elapsed = time.time() - started
+            print(f"PGO workload progress: {completed}/{iterations} in {elapsed:.1f}s", flush=True)
+
 
 def main():
     ensure_training_dependencies()
     iterations = int(os.environ.get("PGO_ITERATIONS", DEFAULT_ITERATIONS))
+    max_seconds = int(os.environ.get("PGO_MAX_SECONDS", DEFAULT_MAX_SECONDS))
     proc = subprocess.Popen([sys.executable, "-m", "pgo.app"])
 
     try:
         wait_for_port(HOST, PORT)
-        run_workload(iterations)
+        run_workload(iterations, max_seconds)
     except URLError:
         proc.terminate()
         raise

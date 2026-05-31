@@ -1,6 +1,6 @@
 [package]
 name = "fastrapi"
-version = "0.2.11"
+version = "0.3.0"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -23,7 +23,6 @@ serde = "1.0.228"
 num_cpus = "1.17.0"
 smallvec = "1.15.1"
 smartstring = "1.0.1"
-tokio-tungstenite = "0.29.0"
 futures-util = "0.3.32"
 hyper = "1.8.1"
 hyper-util = { version = "0.1.20", features = ["tokio"] }

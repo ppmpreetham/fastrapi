@@ -6,10 +6,12 @@ from fastrapi import (
     FastrAPI,
     Header,
     HTTPException,
-    Path as PathParam,
     Query,
     Security,
     SecurityScopes,
+)
+from fastrapi import (
+    Path as PathParam,
 )
 from fastrapi.middleware import (
     CORSMiddleware,
@@ -17,13 +19,15 @@ from fastrapi.middleware import (
     SessionMiddleware,
     TrustedHostMiddleware,
 )
-from fastrapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastrapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+)
 from pydantic import BaseModel
-
 
 app = FastrAPI(
     title="FastrAPI PGO Workload",
-    version="0.2.11",
+    version="0.3.0",
     description="Broad local workload used by maturin PGO training.",
     openapi_url="/api-docs/openapi.json",
 )
@@ -194,7 +198,7 @@ def config():
 
 @app.get("/version")
 def version():
-    return {"name": "fastrapi", "version": "0.2.11", "profile": "pgo"}
+    return {"name": "fastrapi", "version": "0.3.0", "profile": "pgo"}
 
 
 @app.get("/html")
@@ -207,16 +211,6 @@ def html() -> HTMLResponse:
         </main>
         """
     )
-
-
-@app.get("/text")
-def text() -> PlainTextResponse:
-    return PlainTextResponse("plain text response for pgo")
-
-
-@app.get("/redirect")
-def redirect() -> RedirectResponse:
-    return RedirectResponse("/", status_code=307)
 
 
 @app.get("/heavy")
@@ -305,7 +299,9 @@ def admin_only(auth=Security(verify_scopes, scopes=["admin"])):
 
 
 @app.post("/admin/audit")
-def admin_audit(body: GenericJSON, auth=Security(verify_scopes, scopes=["admin", "audit"])):
+def admin_audit(
+    body: GenericJSON, auth=Security(verify_scopes, scopes=["admin", "audit"])
+):
     return {"accepted": True, "auth": auth, "event": body.data}
 
 
