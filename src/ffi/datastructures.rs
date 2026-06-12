@@ -12,6 +12,22 @@ pub struct PyUploadFile {
     cursor: usize,
 }
 
+impl PyUploadFile {
+    pub(crate) fn from_bytes(
+        filename: Option<String>,
+        content_type: Option<String>,
+        file_content: Vec<u8>,
+    ) -> Self {
+        Self {
+            filename,
+            content_type,
+            size: Some(file_content.len() as u64),
+            file_content,
+            cursor: 0,
+        }
+    }
+}
+
 #[pymethods]
 impl PyUploadFile {
     #[new]

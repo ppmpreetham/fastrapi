@@ -6,6 +6,15 @@ use crate::{
     router::PyAPIRouter,
 };
 
+#[derive(Clone)]
+pub struct StaticMount {
+    pub path: String,
+    pub directory: String,
+    pub html: bool,
+    pub follow_symlink: bool,
+    pub name: Option<String>,
+}
+
 #[pyclass(name = "FastrAPI")]
 pub struct FastrAPI {
     #[pyo3(get, set)]
@@ -80,6 +89,17 @@ pub struct FastrAPI {
     pub separate_input_output_schemas: bool,
     #[pyo3(get, set)]
     pub openapi_external_docs: Option<Py<PyAny>>,
+    #[pyo3(get, set)]
+    pub sync_to_threadpool: bool,
+    #[pyo3(get, set)]
+    pub max_body_size: Option<usize>,
+    #[pyo3(get, set)]
+    pub max_field_size: Option<usize>,
+    #[pyo3(get, set)]
+    pub max_file_size: Option<usize>,
+    #[pyo3(get, set)]
+    pub reject_unknown_multipart_fields: bool,
+    pub static_mounts: Vec<StaticMount>,
 
     // CORS for rust side of things
     pub cors_config: Option<CORSMiddleware>,

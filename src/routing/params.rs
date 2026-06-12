@@ -1,9 +1,13 @@
+use once_cell::sync::OnceCell;
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString};
 use std::sync::Arc;
 
 use super::types::{ParameterConstraints, ParameterSource, ParsedParameter};
 use crate::ffi::pydantic;
+
+static INSPECT_PARAMETER_EMPTY: OnceCell<Py<PyAny>> = OnceCell::new();
 
 // utils
 
@@ -34,11 +38,14 @@ pub fn extract_path_param_names(path: &str) -> Vec<String> {
 }
 
 pub fn is_inspect_empty(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
-    py.import("inspect")
-        .ok()
-        .and_then(|inspect| inspect.getattr("Parameter").ok())
-        .and_then(|parameter| parameter.getattr("empty").ok())
-        .map(|empty| value.is(&empty))
+    INSPECT_PARAMETER_EMPTY
+        .get_or_try_init(|| {
+            py.import(intern!(py, "inspect"))?
+                .getattr(intern!(py, "Parameter"))?
+                .getattr(intern!(py, "empty"))
+                .map(Bound::unbind)
+        })
+        .map(|empty| value.is(empty.bind(py)))
         .unwrap_or(false)
 }
 
@@ -88,6 +95,26 @@ fn source_from_param_class(type_name: &str) -> Option<ParameterSource> {
         "Cookie" => Some(ParameterSource::Cookie),
         _ => None,
     }
+}
+
+fn annotation_name(py: Python<'_>, annotation: &Py<PyAny>) -> Option<String> {
+    let annotation = annotation.bind(py);
+    annotation
+        .getattr("__name__")
+        .ok()
+        .and_then(|value| {
+            value
+                .cast::<PyString>()
+                .ok()
+                .and_then(|name| name.to_str().ok())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            annotation
+                .str()
+                .ok()
+                .map(|value| value.to_string_lossy().into_owned())
+        })
 }
 
 fn extract_param_default(param_obj: &Bound<'_, PyAny>) -> (Option<Py<PyAny>>, bool, bool) {
@@ -146,10 +173,17 @@ pub fn parse_parameter_spec(
         .as_ref()
         .map(|annotation| pydantic::is_pydantic_model(py, annotation.bind(py)))
         .unwrap_or(false);
+    let is_upload_file = annotation
+        .as_ref()
+        .and_then(|annotation| annotation_name(py, annotation))
+        .map(|name| name.contains("UploadFile"))
+        .unwrap_or(false);
 
     let default = param_obj.getattr("default")?;
     let mut source = if path_param_names.iter().any(|name| name == param_name) {
         ParameterSource::Path
+    } else if is_upload_file {
+        ParameterSource::Body
     } else if is_pydantic_model {
         ParameterSource::Body
     } else {

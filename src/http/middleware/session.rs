@@ -55,7 +55,7 @@ pub fn parse_session_params(kwargs: &Bound<'_, PyDict>) -> PyResult<SessionMiddl
         _ => {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "SessionMiddleware requires 'secret_key' argument",
-            ))
+            ));
         }
     };
 

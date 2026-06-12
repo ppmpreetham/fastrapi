@@ -1,13 +1,13 @@
 use super::utils::py_dict_to_json;
+use crate::FastrAPI;
 use crate::ffi::pydantic;
 use crate::router::PyAPIRouter;
-use crate::routing::types::{HttpMethod, ParameterConstraints, ParameterSource, RouteHandler};
+use crate::routing::types::{FlatRoute, ParameterConstraints, ParameterSource};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
-use std::sync::Arc;
 use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,6 +15,15 @@ pub struct OpenApiSpec {
     pub openapi: String,
     pub info: OpenApiInfo,
     pub paths: HashMap<String, PathItem>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub servers: Option<Vec<JsonValue>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<JsonValue>>,
+
+    #[serde(skip_serializing_if = "Option::is_none", rename = "externalDocs")]
+    pub external_docs: Option<JsonValue>,
     pub components: Option<Components>,
 }
 
@@ -22,8 +31,21 @@ pub struct OpenApiSpec {
 pub struct OpenApiInfo {
     pub title: String,
     pub version: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none", rename = "termsOfService")]
+    pub terms_of_service: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact: Option<JsonValue>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub license: Option<JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +69,8 @@ pub struct PathItem {
 pub struct Operation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,9 +125,16 @@ impl Default for OpenApiSpec {
             info: OpenApiInfo {
                 title: "FastrAPI".to_string(),
                 version: "0.1.0".to_string(),
+                summary: None,
                 description: Some("API built with FastrAPI".to_string()),
+                terms_of_service: None,
+                contact: None,
+                license: None,
             },
             paths: HashMap::new(),
+            servers: None,
+            tags: None,
+            external_docs: None,
             components: Some(Components {
                 schemas: HashMap::new(),
             }),
@@ -139,31 +170,52 @@ fn get_schema_name(model: &Bound<PyAny>) -> String {
         .unwrap_or_else(|| "UnknownSchema".to_string())
 }
 
-fn python_type_to_openapi_type(py: Python, type_hint: &Bound<PyAny>) -> JsonValue {
-    if let Ok(type_str) = type_hint.str() {
-        let type_name = type_str.to_string_lossy().to_string();
+fn python_type_to_openapi_type(py: Python<'_>, type_hint: &Bound<PyAny>) -> JsonValue {
+    if pydantic::is_pydantic_model(py, type_hint) {
+        let schema_name = get_schema_name(type_hint);
+        return json!({
+            "$ref": format!("#/components/schemas/{schema_name}")
+        });
+    }
 
-        if type_name.contains("str") {
-            return json!({"type": "string"});
-        } else if type_name.contains("int") {
-            return json!({"type": "integer"});
-        } else if type_name.contains("float") {
-            return json!({"type": "number"});
-        } else if type_name.contains("bool") {
-            return json!({"type": "boolean"});
-        } else if type_name.contains("List") || type_name.contains("list") {
-            return json!({"type": "array", "items": {"type": "string"}});
-        } else if type_name.contains("Dict") || type_name.contains("dict") {
-            return json!({"type": "object"});
+    if let Ok(name_attr) = type_hint.getattr("__name__")
+        && let Ok(py_str) = name_attr.cast::<PyString>()
+        && let Ok(name_str) = py_str.to_str()
+    {
+        match name_str {
+            "str" => return json!({ "type": "string" }),
+            "int" => return json!({ "type": "integer" }),
+            "float" => return json!({ "type": "number" }),
+            "bool" => return json!({ "type": "boolean" }),
+            "list" => {
+                return json!({
+                    "type": "array",
+                    "items": { "type": "string" }
+                });
+            }
+            "dict" => return json!({ "type": "object" }),
+            _ => {}
         }
     }
 
-    if pydantic::is_pydantic_model(py, type_hint) {
-        let schema_name = get_schema_name(type_hint);
-        return json!({"$ref": format!("#/components/schemas/{}", schema_name)});
+    if let Ok(type_repr) = type_hint.str() {
+        if let Ok(type_name) = type_repr.to_str() {
+            if type_name.contains("List") || type_name.contains("list") {
+                return json!({
+                    "type": "array",
+                    "items": { "type": "string" }
+                });
+            }
+
+            if type_name.contains("Dict") || type_name.contains("dict") {
+                return json!({
+                    "type": "object"
+                });
+            }
+        }
     }
 
-    json!({"type": "string"})
+    json!({ "type": "string" })
 }
 
 fn apply_parameter_constraints(
@@ -172,51 +224,111 @@ fn apply_parameter_constraints(
 ) -> JsonValue {
     if let Some(object) = schema.as_object_mut() {
         if let Some(gt) = constraints.gt {
-            object.insert("exclusiveMinimum".to_string(), json!(gt));
+            object.insert("exclusiveMinimum".into(), gt.into());
         }
         if let Some(ge) = constraints.ge {
-            object.insert("minimum".to_string(), json!(ge));
+            object.insert("minimum".into(), ge.into());
         }
         if let Some(lt) = constraints.lt {
-            object.insert("exclusiveMaximum".to_string(), json!(lt));
+            object.insert("exclusiveMaximum".into(), lt.into());
         }
         if let Some(le) = constraints.le {
-            object.insert("maximum".to_string(), json!(le));
+            object.insert("maximum".into(), le.into());
         }
         if let Some(min_length) = constraints.min_length {
-            object.insert("minLength".to_string(), json!(min_length));
+            object.insert("minLength".into(), min_length.into());
         }
         if let Some(max_length) = constraints.max_length {
-            object.insert("maxLength".to_string(), json!(max_length));
+            object.insert("maxLength".into(), max_length.into());
         }
+
         if let Some(pattern) = &constraints.pattern {
-            object.insert("pattern".to_string(), json!(pattern.as_str()));
+            object.insert("pattern".into(), pattern.as_str().into());
         }
     }
     schema
 }
 
-pub fn build_openapi_spec(
-    py: Python<'_>,
-    router: &PyAPIRouter,
-    title: &str,
-    version: &str,
-    description: &str,
-) -> serde_json::Value {
+pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
     let mut spec = OpenApiSpec::default();
-    spec.info.title = title.to_string();
-    spec.info.version = version.to_string();
-    spec.info.description = if description.is_empty() {
-        None
-    } else {
-        Some(description.to_string())
-    };
 
-    let collected = collect_routes(py, router);
+    spec.info.title = app.title.clone();
+    spec.info.version = app.version.clone();
+    spec.info.summary = app.summary.clone();
+
+    spec.info.description = (!app.description.is_empty()).then(|| app.description.clone());
+    spec.info.terms_of_service = app.terms_of_service.clone();
+
+    if let Some(contact) = &app.contact
+        && let Ok(dict) = contact.bind(py).cast::<PyDict>()
+    {
+        spec.info.contact = Some(py_dict_to_json(py, dict));
+    }
+
+    if let Some(license) = &app.license_info
+        && let Ok(dict) = license.bind(py).cast::<PyDict>()
+    {
+        spec.info.license = Some(py_dict_to_json(py, dict));
+    }
+
+    if let Some(servers) = &app.servers
+        && let Ok(list) = servers.extract::<Vec<Py<PyAny>>>(py)
+    {
+        spec.servers = Some(
+            list.into_iter()
+                .filter_map(|item| {
+                    item.bind(py)
+                        .cast::<PyDict>()
+                        .ok()
+                        .map(|d| py_dict_to_json(py, d))
+                })
+                .collect(),
+        );
+    }
+
+    if app.root_path_in_servers && !app.root_path.is_empty() {
+        spec.servers.get_or_insert_with(Vec::new).push(json!({
+            "url": app.root_path
+        }));
+    }
+
+    if let Some(tags) = &app.openapi_tags
+        && let Ok(list) = tags.extract::<Vec<Py<PyAny>>>(py)
+    {
+        spec.tags = Some(
+            list.into_iter()
+                .filter_map(|item| {
+                    item.bind(py)
+                        .cast::<PyDict>()
+                        .ok()
+                        .map(|d| py_dict_to_json(py, d))
+                })
+                .collect(),
+        );
+    }
+
+    if let Some(docs) = &app.openapi_external_docs
+        && let Ok(dict) = docs.bind(py).cast::<PyDict>()
+    {
+        spec.external_docs = Some(py_dict_to_json(py, dict));
+    }
+
+    let router = app.router.bind(py);
+    let router = router.borrow();
+
+    let collected = collect_routes(py, &router);
 
     let mut schemas: HashMap<String, JsonValue> = HashMap::new();
-    for (path, method, handler, tags) in collected {
-        let method = method.as_str().to_lowercase();
+    for route in collected {
+        if !route.include_in_schema {
+            continue;
+        }
+
+        let path = route.path.clone();
+        let method = route.method.as_str().to_lowercase();
+        let handler = route.handler.clone();
+        let tags = &route.tags;
+
         let description = handler
             .func
             .bind(py)
@@ -227,13 +339,14 @@ pub fn build_openapi_spec(
             .filter(|s| !s.is_empty());
 
         let mut operation = Operation {
-            summary: Some(format!("{} {}", method.to_uppercase(), path)),
-            description,
+            summary: route.summary.clone(),
+            description: route.description.clone().or(description),
             tags: if tags.is_empty() {
                 None
             } else {
                 Some(tags.clone())
             },
+            deprecated: route.deprecated,
             parameters: None,
             request_body: None,
             responses: HashMap::new(),
@@ -276,8 +389,8 @@ pub fn build_openapi_spec(
             let validator_count = handler.param_validators.len();
 
             if validator_count == 1 {
-                let (_param_name, validator) = &handler.param_validators[0];
-                let validator_bound = validator.bind(py);
+                let validator = &handler.param_validators[0];
+                let validator_bound = validator.model_class.bind(py);
 
                 if let Some(schema) = extract_pydantic_schema(py, validator_bound) {
                     let schema_name = get_schema_name(validator_bound);
@@ -303,22 +416,19 @@ pub fn build_openapi_spec(
                 let mut properties = serde_json::Map::new();
                 let mut required_fields = Vec::new();
 
-                handler
-                    .param_validators
-                    .iter()
-                    .for_each(|(param_name, validator)| {
-                        let validator_bound = validator.bind(py);
+                handler.param_validators.iter().for_each(|validator| {
+                    let validator_bound = validator.model_class.bind(py);
 
-                        if let Some(schema) = extract_pydantic_schema(py, validator_bound) {
-                            let schema_name = get_schema_name(validator_bound);
-                            schemas.insert(schema_name.clone(), schema);
-                            properties.insert(
-                                param_name.clone(),
-                                json!({ "$ref": format!("#/components/schemas/{}", schema_name) }),
-                            );
-                            required_fields.push(param_name.clone());
-                        }
-                    });
+                    if let Some(schema) = extract_pydantic_schema(py, validator_bound) {
+                        let schema_name = get_schema_name(validator_bound);
+                        schemas.insert(schema_name.clone(), schema);
+                        properties.insert(
+                            validator.name.clone(),
+                            json!({ "$ref": format!("#/components/schemas/{}", schema_name) }),
+                        );
+                        required_fields.push(validator.name.clone());
+                    }
+                });
 
                 if !properties.is_empty() {
                     let func_name = handler
@@ -434,13 +544,7 @@ pub fn build_openapi_spec(
     serde_json::to_value(spec).unwrap_or_else(|_| json!({}))
 }
 
-fn collect_routes(
-    py: Python<'_>,
-    router: &PyAPIRouter,
-) -> Vec<(String, HttpMethod, Arc<RouteHandler>, Vec<String>)> {
+fn collect_routes(py: Python<'_>, router: &PyAPIRouter) -> Vec<FlatRoute> {
     let flat = router.flatten(py);
-    flat.0
-        .iter()
-        .map(|r| (r.path.clone(), r.method, r.handler.clone(), r.tags.clone()))
-        .collect()
+    flat.0.clone()
 }

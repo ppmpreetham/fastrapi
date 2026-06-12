@@ -1,20 +1,33 @@
+use crate::ffi::datastructures::PyUploadFile;
 use crate::globals::BASEMODEL_TYPE;
 use crate::http::responses::{
     PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse,
 };
 use crate::routing::dependencies::{self, DependencyNode};
 use crate::routing::params;
-use crate::routing::types::{ParameterSource, ParsedParameter, RequestInput, RouteHandler};
+use crate::routing::types::{
+    BodyField, BodyPayload, ParameterSource, ParsedParameter, PydanticValidator, RequestInput,
+    RouteHandler, SerializationHint,
+};
 use crate::types::response::ResponseType;
 use crate::utils::utils::{json_to_py_object, py_to_response};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use once_cell::sync::OnceCell;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple, PyType};
 use pyo3::{intern, prelude::*};
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::collections::HashSet;
+
+static INSPECT_MODULE: OnceCell<Py<PyModule>> = OnceCell::new();
+
+fn get_inspect(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
+    INSPECT_MODULE
+        .get_or_try_init(|| py.import(intern!(py, "inspect")).map(Bound::unbind))
+        .map(|module| module.bind(py).clone())
+}
 
 #[derive(Debug, Clone, Default)]
 pub enum ScalarKind {
@@ -61,23 +74,14 @@ pub fn load_pydantic_model(py: Python<'_>, module: &str, class_name: &str) -> Py
     Ok(cls.into())
 }
 
-pub fn validate_with_pydantic<'py>(
+pub fn validate_python_with_pydantic<'py>(
     py: Python<'py>,
-    model_class: &Bound<'py, PyAny>,
+    validate_fn: &Bound<'py, PyAny>,
     json_payload: &Value,
 ) -> Result<Py<PyAny>, Response> {
     let py_data = json_to_py_object(py, json_payload);
 
-    let validated = if let Ok(validate_method) = model_class.getattr("model_validate") {
-        validate_method.call1((py_data,))
-    } else {
-        let data_bound = py_data.bind(py);
-        if let Ok(dict) = data_bound.cast::<PyDict>() {
-            model_class.call((), Some(dict))
-        } else {
-            model_class.call1((py_data,))
-        }
-    };
+    let validated = validate_fn.call1((py_data,));
 
     match validated {
         Ok(obj) => Ok(obj.into()),
@@ -86,6 +90,28 @@ pub fn validate_with_pydantic<'py>(
             Err((StatusCode::UNPROCESSABLE_ENTITY, "Validation failed").into_response())
         }
     }
+}
+
+pub fn validate_json_with_pydantic<'py>(
+    py: Python<'py>,
+    validator: &PydanticValidator,
+    raw_payload: &[u8],
+) -> Result<Py<PyAny>, Response> {
+    if let Some(validate_json) = &validator.validate_json {
+        let raw = pyo3::types::PyBytes::new(py, raw_payload);
+        return match validate_json.bind(py).call1((raw,)) {
+            Ok(obj) => Ok(obj.into()),
+            Err(e) => {
+                e.print(py);
+                Err((StatusCode::UNPROCESSABLE_ENTITY, "Validation failed").into_response())
+            }
+        };
+    }
+
+    let mut buf = raw_payload.to_vec();
+    let payload: Value = simd_json::serde::from_slice(&mut buf)
+        .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response())?;
+    validate_python_with_pydantic(py, validator.validate_python.bind(py), &payload)
 }
 
 fn initialize_basemodel(py: Python<'_>) -> Option<Py<PyType>> {
@@ -147,8 +173,9 @@ pub fn register_pydantic_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 pub struct ParsedRouteMetadata {
-    pub param_validators: Vec<(String, Py<PyAny>)>,
+    pub param_validators: Vec<PydanticValidator>,
     pub response_type: ResponseType,
+    pub serialization_hint: SerializationHint,
     pub body_param_names: Vec<Py<PyString>>,
     pub dependencies: Vec<DependencyNode>,
     pub dependency_needs_request: bool,
@@ -160,6 +187,7 @@ pub struct ParsedRouteMetadata {
 
 pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> ParsedRouteMetadata {
     let response_type = get_response_type(py, func);
+    let serialization_hint = get_serialization_hint(py, func);
 
     let is_async = func
         .getattr("__code__")
@@ -184,7 +212,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     let mut parsed_params = Vec::new();
 
     let _ = (|| -> PyResult<()> {
-        let inspect = py.import("inspect")?;
+        let inspect = get_inspect(py)?;
         let signature = inspect.call_method1("signature", (func,))?;
         let parameters = signature.getattr("parameters")?;
         let items = parameters.call_method0("items")?;
@@ -216,7 +244,21 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                 if parsed_param.is_pydantic_model
                     && let Some(ann) = &parsed_param.annotation
                 {
-                    param_validators.push((parsed_param.name.clone(), ann.clone_ref(py)));
+                    let ann_bound = ann.bind(py);
+                    let validate_json = ann_bound
+                        .getattr(intern!(py, "model_validate_json"))
+                        .ok()
+                        .map(Bound::unbind);
+                    let validate_python = ann_bound
+                        .getattr(intern!(py, "model_validate"))
+                        .map(Bound::unbind)
+                        .unwrap_or_else(|_| ann.clone_ref(py));
+                    param_validators.push(PydanticValidator {
+                        name: parsed_param.name.clone(),
+                        model_class: ann.clone_ref(py),
+                        validate_json,
+                        validate_python,
+                    });
                 }
             }
 
@@ -238,6 +280,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     ParsedRouteMetadata {
         param_validators,
         response_type,
+        serialization_hint,
         body_param_names,
         dependencies,
         dependency_needs_request,
@@ -428,33 +471,23 @@ pub fn resolve_parameter_value(
 fn apply_body_and_validation(
     py: Python,
     handler: &RouteHandler,
-    payload: Option<&serde_json::Value>,
+    payload: Option<&BodyPayload>,
     kwargs: &Bound<'_, PyDict>,
 ) -> Result<(), Response> {
-    let known_body_params: HashSet<&str> = handler
-        .body_param_names
-        .iter()
-        .filter_map(|s| s.bind(py).to_str().ok())
-        .chain(handler.param_validators.iter().map(|(n, _)| n.as_str()))
-        .collect();
-
-    let body_params: Vec<&ParsedParameter> = handler
-        .parsed_params
-        .iter()
-        .filter(|p| {
-            matches!(p.source, ParameterSource::Body) || known_body_params.contains(p.name.as_str())
-        })
-        .collect();
-
-    if body_params.is_empty() {
+    if handler.body_param_indices.is_empty() {
         return Ok(());
     }
 
     let Some(payload) = payload else {
-        if body_params.iter().any(|p| p.required) {
+        if handler
+            .body_param_indices
+            .iter()
+            .any(|&idx| handler.parsed_params[idx].required)
+        {
             return Err(validation_error_response("Request body is required"));
         }
-        body_params.into_iter().for_each(|param| {
+        handler.body_param_indices.iter().for_each(|&idx| {
+            let param = &handler.parsed_params[idx];
             if param.has_default {
                 let value = param
                     .default_value
@@ -468,32 +501,102 @@ fn apply_body_and_validation(
         return Ok(());
     };
 
-    if body_params.len() == 1 {
-        let param = body_params[0];
-
-        if param.is_pydantic_model {
+    if handler.body_param_indices.len() == 1 {
+        let param = &handler.parsed_params[handler.body_param_indices[0]];
+        if param.is_pydantic_model
+            && let BodyPayload::Json { raw, .. } = payload
+        {
             let validator = handler
                 .param_validators
                 .iter()
-                .find(|(n, _)| n == &param.name)
-                .map(|(_, v)| v.bind(py))
+                .find(|validator| validator.name == param.name)
                 .ok_or_else(|| validation_error_response("Body validator is not registered"))?;
-            let validated = validate_with_pydantic(py, validator, payload)?;
+            let validated = validate_json_with_pydantic(py, validator, raw)?;
             kwargs.set_item(param.name_py.bind(py), validated).ok();
             return Ok(());
         }
+    }
+
+    let parsed_storage;
+    let json_payload = match payload {
+        BodyPayload::Json { raw, value } => match value {
+            Some(payload) => payload,
+            None => {
+                let mut buf = raw.to_vec();
+                parsed_storage = simd_json::serde::from_slice(&mut buf).map_err(|_| {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response()
+                })?;
+                &parsed_storage
+            }
+        },
+        BodyPayload::Form(form) => {
+            for &idx in &handler.body_param_indices {
+                let param = &handler.parsed_params[idx];
+                let value = form
+                    .get(&param.external_name)
+                    .or_else(|| form.get(&param.name));
+
+                if let Some(value) = value {
+                    match value {
+                        BodyField::Text(raw) => {
+                            let value = convert_scalar_value(py, raw, param)?;
+                            validate_scalar_constraints(param, value.bind(py))?;
+                            kwargs.set_item(param.name_py.bind(py), value).ok();
+                        }
+                        BodyField::File(file) => {
+                            let upload = Py::new(
+                                py,
+                                PyUploadFile::from_bytes(
+                                    file.filename.clone(),
+                                    file.content_type.clone(),
+                                    file.content.clone(),
+                                ),
+                            )
+                            .map_err(|err| {
+                                err.print(py);
+                                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                            })?
+                            .into_any();
+                            kwargs.set_item(param.name_py.bind(py), upload).ok();
+                        }
+                    }
+                    continue;
+                }
+
+                if param.has_default {
+                    let default_value = param
+                        .default_value
+                        .as_ref()
+                        .map(|d| d.clone_ref(py))
+                        .unwrap_or_else(|| py.None());
+                    kwargs.set_item(param.name_py.bind(py), default_value).ok();
+                } else if param.required {
+                    return Err(validation_error_response(format!(
+                        "Missing field: {}",
+                        param.external_name
+                    )));
+                }
+            }
+
+            return Ok(());
+        }
+    };
+
+    if handler.body_param_indices.len() == 1 {
+        let param = &handler.parsed_params[handler.body_param_indices[0]];
 
         kwargs
-            .set_item(param.name_py.bind(py), json_to_py_object(py, payload))
+            .set_item(param.name_py.bind(py), json_to_py_object(py, json_payload))
             .ok();
         return Ok(());
     }
 
-    let obj = payload
+    let obj = json_payload
         .as_object()
         .ok_or_else(|| validation_error_response("Body must be an object"))?;
 
-    for param in body_params {
+    for &idx in &handler.body_param_indices {
+        let param = &handler.parsed_params[idx];
         let value = obj
             .get(&param.external_name)
             .or_else(|| obj.get(&param.name));
@@ -503,10 +606,10 @@ fn apply_body_and_validation(
                 let validator = handler
                     .param_validators
                     .iter()
-                    .find(|(n, _)| n == &param.name)
-                    .map(|(_, v)| v.bind(py))
+                    .find(|validator| validator.name == param.name)
                     .ok_or_else(|| validation_error_response("Body validator is not registered"))?;
-                let validated = validate_with_pydantic(py, validator, value)?;
+                let validated =
+                    validate_python_with_pydantic(py, validator.validate_python.bind(py), value)?;
                 kwargs.set_item(param.name_py.bind(py), validated).ok();
             } else {
                 kwargs
@@ -538,22 +641,23 @@ pub fn apply_request_data(
     py: Python,
     handler: &RouteHandler,
     request_input: &RequestInput<'_>,
-    payload: Option<&serde_json::Value>,
+    payload: Option<&BodyPayload>,
     kwargs: &Bound<'_, PyDict>,
 ) -> Result<(), Response> {
-    let body_set: HashSet<&str> = handler
-        .body_param_names
+    let query_param_count = handler
+        .parsed_params
         .iter()
-        .filter_map(|s| s.bind(py).to_str().ok())
-        .chain(handler.param_validators.iter().map(|(n, _)| n.as_str()))
-        .collect();
-
+        .filter(|p| matches!(p.source, ParameterSource::Query))
+        .count();
+    if query_param_count > 1 {
+        request_input.get_all_query_params(); // populate OnceCell once
+    }
     handler
         .parsed_params
         .iter()
         .try_for_each(|param| -> Result<(), axum::response::Response> {
             if matches!(param.source, ParameterSource::Body)
-                || body_set.contains(param.name.as_str())
+                || handler.body_param_name_set.contains(param.name.as_str())
             {
                 return Ok(());
             }
@@ -580,6 +684,42 @@ pub fn get_response_type_from_class(py: Python<'_>, cls: &Bound<'_, PyAny>) -> R
     } else {
         ResponseType::Auto
     }
+}
+
+pub fn get_serialization_hint(py: Python<'_>, func: &Bound<'_, PyAny>) -> SerializationHint {
+    let result: PyResult<SerializationHint> = (|| {
+        let annotations = func.getattr(intern!(py, "__annotations__"))?;
+        let dict = annotations.cast::<PyDict>()?;
+
+        let Some(ann) = dict.get_item(intern!(py, "return"))? else {
+            return Ok(SerializationHint::PlainDict);
+        };
+
+        if self::is_pydantic_model(py, &ann) {
+            return Ok(SerializationHint::PydanticModel);
+        }
+
+        let type_name_bound = if let Ok(name) = ann.getattr(intern!(py, "__name__")) {
+            name
+        } else {
+            ann.str()?.into_any()
+        };
+
+        let name_str = type_name_bound.cast::<PyString>()?.to_str()?;
+
+        Ok(match name_str {
+            "dict" | "list" | "set" => SerializationHint::PlainDict,
+            _ if ann
+                .hasattr(intern!(py, "__dataclass_fields__"))
+                .unwrap_or(false) =>
+            {
+                SerializationHint::Dataclass
+            }
+            _ => SerializationHint::Unknown,
+        })
+    })();
+
+    result.unwrap_or(SerializationHint::Unknown)
 }
 
 pub fn get_response_type(py: Python<'_>, func: &Bound<'_, PyAny>) -> ResponseType {
@@ -626,7 +766,11 @@ pub fn call_with_pydantic_validation<'py>(
     model_class: &Bound<'py, PyAny>,
     payload: &Value,
 ) -> Response {
-    match validate_with_pydantic(py, model_class, payload) {
+    let validate_fn = model_class
+        .getattr(intern!(py, "model_validate"))
+        .unwrap_or_else(|_| model_class.clone());
+
+    match validate_python_with_pydantic(py, &validate_fn, payload) {
         Ok(validated_obj) => match route_func.call1((validated_obj,)) {
             Ok(result) => py_to_response(py, &result, axum::http::StatusCode::OK),
             Err(err) => {

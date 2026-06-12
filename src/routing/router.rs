@@ -20,7 +20,7 @@ impl FrozenRouter {
     pub fn resolve<'a>(&'a self, method: HttpMethod, path: &'a str) -> Option<RouteMatch<'a>> {
         let idx = method as usize;
         let normalized = normalize_lookup(path);
-        if let Some(handler) = self.static_routes[idx].get(normalized.as_ref()) {
+        if let Some(handler) = self.static_routes[idx].get(normalized) {
             return Some(RouteMatch::Static(handler.clone()));
         }
         let matched = self.param_routes[idx].as_ref()?.at(path).ok()?;
@@ -29,7 +29,7 @@ impl FrozenRouter {
 
     pub fn resolve_ws(&self, path: &str) -> Option<Py<PyAny>> {
         let normalized = normalize_lookup(path);
-        self.websocket_routes.get(normalized.as_ref()).cloned()
+        self.websocket_routes.get(normalized).cloned()
     }
 }
 
@@ -95,39 +95,36 @@ impl Default for FrozenRouterBuilder {
     }
 }
 
-fn normalize_lookup(input: &str) -> Cow<'_, str> {
+fn normalize_lookup(input: &str) -> &str {
     let trimmed = input.trim();
-    let needs_leading = !trimmed.starts_with('/');
-    let needs_trailing_strip = trimmed.len() > 1 && trimmed.ends_with('/');
-
-    if !needs_leading && !needs_trailing_strip && trimmed.len() == input.len() {
-        return Cow::Borrowed(input);
+    if trimmed.len() > 1 {
+        trimmed.trim_end_matches('/')
+    } else {
+        trimmed
     }
-    if !needs_leading && !needs_trailing_strip {
-        return Cow::Borrowed(trimmed);
-    }
-
-    let mut path = String::with_capacity(trimmed.len() + 1);
-    if needs_leading {
-        path.push('/');
-    }
-    path.push_str(trimmed);
-    if path.len() > 1 && path.ends_with('/') {
-        path.pop();
-    }
-    Cow::Owned(path)
 }
 
 fn normalize_register(input: &str) -> (Cow<'_, str>, bool) {
-    let base = normalize_lookup(input);
-    let bytes = base.as_bytes();
+    let normalized = normalize_lookup(input);
+    let base = if normalized.starts_with('/') {
+        Cow::Borrowed(normalized)
+    } else {
+        let mut s = String::with_capacity(normalized.len() + 1);
+        s.push('/');
+        s.push_str(normalized);
+        Cow::Owned(s)
+    };
+
     let mut has_params = false;
     let mut in_param = false;
+    let bytes = base.as_bytes();
     let mut i = 0;
-    while i < bytes.len() {
+    let len = bytes.len();
+
+    while i < len {
         match bytes[i] {
             b'{' => {
-                if bytes.get(i + 1) == Some(&b'{') {
+                if i + 1 < len && bytes[i + 1] == b'{' {
                     i += 2;
                     continue;
                 }
@@ -137,9 +134,8 @@ fn normalize_register(input: &str) -> (Cow<'_, str>, bool) {
                 in_param = true;
                 has_params = true;
             }
-
             b'}' => {
-                if bytes.get(i + 1) == Some(&b'}') {
+                if i + 1 < len && bytes[i + 1] == b'}' {
                     i += 2;
                     continue;
                 }
@@ -152,8 +148,10 @@ fn normalize_register(input: &str) -> (Cow<'_, str>, bool) {
         }
         i += 1;
     }
+
     if in_param {
         return (base, false);
     }
+
     (base, has_params)
 }

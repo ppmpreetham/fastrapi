@@ -3,16 +3,22 @@ use once_cell::sync::Lazy;
 use papaya::HashMap as PapayaHashMap;
 use pyo3::prelude::*;
 use pyo3::types::PyType;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, atomic::AtomicUsize};
 
 pub static MIDDLEWARES: Lazy<PapayaHashMap<String, Arc<PyMiddleware>>> =
     Lazy::new(|| PapayaHashMap::with_capacity(16));
 
+pub static MIDDLEWARE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 pub static BASEMODEL_TYPE: OnceLock<Py<PyType>> = OnceLock::new();
 
 pub static PYTHON_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
     tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(num_cpus::get().clamp(4, 16))
+        .worker_threads(cpus.clamp(4, 16))
         .thread_name("python-handler")
         .enable_all()
         .build()

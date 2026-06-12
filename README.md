@@ -66,6 +66,10 @@ app = FastrAPI()
 def hello():
     return {"Hello": "World"}
 
+@app.get("/healthz", cache_resp=True)
+def healthz():
+    return {"ok": True}
+
 @app.post("/echo")
 def echo(data):
     return {"received": data}
@@ -280,6 +284,17 @@ k6 run benchmarks/stress.js
 ```
 
 If you benchmark a debug build, Rust-side overhead will be much higher and the numbers will be misleading.
+
+### Startup-Precomputed Routes
+
+Use `cache_resp=True` only for immutable responses. FastrAPI calls the handler during startup, stores the rendered response bytes and headers, and serves that route through a no-Python Axum path.
+
+```python
+@app.get("/", cache_resp=True)
+def hello():
+    return {"Hello": "World"}
+```
+
 
 ### 🖥️ Test Environment
 

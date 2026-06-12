@@ -1,17 +1,22 @@
+use crate::routing::types::SerializationHint;
 use axum::{
     body::Body,
-    http::{StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use bytes::{BufMut, BytesMut};
+use once_cell::sync::OnceCell;
 use pyo3::types::{
     PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet,
     PyTuple,
 };
-use pyo3::{prelude::*, types::PyString};
+use pyo3::{exceptions::PyValueError, intern, prelude::*, types::PyString};
 use serde_json::{Map, Value};
 use serde_pyobject::to_pyobject;
-use std::cell::RefCell;
+use std::{
+    cell::RefCell,
+    io::{self, Write},
+};
 
 thread_local! {
     /// Per-thread JSON response buffer. `serde_json::to_writer` writes here,
@@ -20,6 +25,75 @@ thread_local! {
     /// underlying allocation across requests so steady-state response building
     /// pays no buffer alloc.
     static RESPONSE_BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(1024));
+}
+
+static ENUM_TYPE: OnceCell<Py<PyAny>> = OnceCell::new();
+static DATACLASSES_ASDICT: OnceCell<Py<PyAny>> = OnceCell::new();
+
+#[inline]
+fn is_enum_instance(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    let Ok(enum_type) = ENUM_TYPE.get_or_try_init(|| {
+        py.import("enum")
+            .and_then(|module| module.getattr("Enum"))
+            .map(Bound::unbind)
+    }) else {
+        return false;
+    };
+
+    value.is_instance(enum_type.bind(py)).unwrap_or(false)
+}
+
+#[inline]
+fn dataclasses_asdict(py: Python<'_>) -> Option<Bound<'_, PyAny>> {
+    DATACLASSES_ASDICT
+        .get_or_try_init(|| {
+            py.import(intern!(py, "dataclasses"))?
+                .getattr(intern!(py, "asdict"))
+                .map(Bound::unbind)
+        })
+        .ok()
+        .map(|func| func.bind(py).clone())
+}
+
+#[inline]
+fn write_pydantic_model_json<W: Write>(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    writer: &mut W,
+) -> PyResult<bool> {
+    let Ok(json) = value.call_method0(intern!(py, "model_dump_json")) else {
+        return Ok(false);
+    };
+
+    if let Ok(s) = json.cast::<PyString>() {
+        writer
+            .write_all(s.to_str().unwrap_or_default().as_bytes())
+            .map_err(json_io_error)?;
+        return Ok(true);
+    }
+
+    if let Ok(bytes) = json.cast::<PyBytes>() {
+        writer.write_all(bytes.as_bytes()).map_err(json_io_error)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+#[inline]
+fn write_dataclass_json<W: Write>(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    writer: &mut W,
+) -> PyResult<bool> {
+    let Some(asdict) = dataclasses_asdict(py) else {
+        return Ok(false);
+    };
+    let Ok(asdict) = asdict.call1((value,)) else {
+        return Ok(false);
+    };
+    write_py_json(py, &asdict, writer)?;
+    Ok(true)
 }
 
 /// Serialize a `serde_json::Value` into an axum JSON response, reusing a
@@ -46,9 +120,273 @@ pub fn json_response_with_status(py: Python<'_>, status: StatusCode, value: &Val
 
     Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
+        .header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )
         .body(Body::from(bytes))
         .unwrap()
+}
+
+#[inline]
+fn json_io_error(err: io::Error) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
+#[inline]
+fn json_ser_error(err: serde_json::Error) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
+#[inline]
+fn write_json_string<W: Write>(writer: &mut W, value: &str) -> PyResult<()> {
+    serde_json::to_writer(writer, value).map_err(json_ser_error)
+}
+
+#[inline]
+fn write_json_bytes<W: Write>(writer: &mut W, bytes: &[u8]) -> PyResult<()> {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => write_json_string(writer, s),
+        Err(_) => {
+            writer.write_all(b"[").map_err(json_io_error)?;
+            for (idx, byte) in bytes.iter().enumerate() {
+                if idx > 0 {
+                    writer.write_all(b",").map_err(json_io_error)?;
+                }
+                write!(writer, "{byte}").map_err(json_io_error)?;
+            }
+            writer.write_all(b"]").map_err(json_io_error)
+        }
+    }
+}
+
+#[inline]
+fn write_json_array<'py, W, I>(py: Python<'py>, writer: &mut W, items: I) -> PyResult<()>
+where
+    W: Write,
+    I: IntoIterator<Item = Bound<'py, PyAny>>,
+{
+    writer.write_all(b"[").map_err(json_io_error)?;
+    let mut first = true;
+    for item in items {
+        if !first {
+            writer.write_all(b",").map_err(json_io_error)?;
+        }
+        first = false;
+        write_py_json(py, &item, writer)?;
+    }
+    writer.write_all(b"]").map_err(json_io_error)
+}
+
+#[inline]
+fn write_py_json<W: Write>(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    writer: &mut W,
+) -> PyResult<()> {
+    if value.is_none() {
+        return writer.write_all(b"null").map_err(json_io_error);
+    }
+
+    if let Ok(dict) = value.cast::<PyDict>() {
+        writer.write_all(b"{").map_err(json_io_error)?;
+        let mut first = true;
+        for (key, item) in dict.iter() {
+            if !first {
+                writer.write_all(b",").map_err(json_io_error)?;
+            }
+            first = false;
+            write_json_string(writer, &json_key_for(&key))?;
+            writer.write_all(b":").map_err(json_io_error)?;
+            write_py_json(py, &item, writer)?;
+        }
+        return writer.write_all(b"}").map_err(json_io_error);
+    }
+
+    if let Ok(list) = value.cast::<PyList>() {
+        return write_json_array(py, writer, list.iter());
+    }
+
+    if let Ok(tuple) = value.cast::<PyTuple>() {
+        return write_json_array(py, writer, tuple.iter());
+    }
+
+    if let Ok(set) = value.cast::<PySet>() {
+        return write_json_array(py, writer, set.iter());
+    }
+
+    if let Ok(fset) = value.cast::<PyFrozenSet>() {
+        return write_json_array(py, writer, fset.iter());
+    }
+
+    if let Ok(s) = value.cast::<PyString>() {
+        return write_json_string(writer, s.to_str().unwrap_or_default());
+    }
+
+    if let Ok(b) = value.cast::<PyBool>() {
+        return writer
+            .write_all(if b.is_true() { b"true" } else { b"false" })
+            .map_err(json_io_error);
+    }
+
+    if let Ok(i) = value.cast::<PyInt>() {
+        if let Ok(v) = i.extract::<i64>() {
+            write!(writer, "{v}").map_err(json_io_error)?;
+            return Ok(());
+        }
+
+        if let Ok(s) = value.str()
+            && let Ok(s) = s.to_str()
+        {
+            return write_json_string(writer, s);
+        }
+    }
+
+    if let Ok(f) = value.cast::<PyFloat>() {
+        if let Some(number) = serde_json::Number::from_f64(f.value()) {
+            write!(writer, "{number}").map_err(json_io_error)?;
+        } else {
+            writer.write_all(b"null").map_err(json_io_error)?;
+        }
+        return Ok(());
+    }
+
+    if let Ok(b) = value.cast::<PyBytes>() {
+        return write_json_bytes(writer, b.as_bytes());
+    }
+
+    if let Ok(b) = value.cast::<PyByteArray>() {
+        let snapshot = b.to_vec();
+        return write_json_bytes(writer, &snapshot);
+    }
+
+    if let Ok(true) = value.hasattr("model_dump_json")
+        && write_pydantic_model_json(py, value, writer)?
+    {
+        return Ok(());
+    }
+
+    if let Ok(true) = value.hasattr("model_dump")
+        && let Ok(dumped) = value.call_method0("model_dump")
+    {
+        return write_py_json(py, &dumped, writer);
+    }
+
+    if let Ok(true) = value.hasattr("__dataclass_fields__")
+        && let Some(asdict) = dataclasses_asdict(py)
+        && let Ok(asdict) = asdict.call1((value,))
+    {
+        return write_py_json(py, &asdict, writer);
+    }
+
+    if let Ok(true) = value.hasattr("isoformat")
+        && let Ok(s) = value.call_method0("isoformat")
+        && let Ok(s) = s.cast_into::<PyString>()
+    {
+        return write_json_string(writer, s.to_str().unwrap_or_default());
+    }
+
+    if let Ok(class_name) = value
+        .get_type()
+        .name()
+        .map(|n| n.to_str().unwrap_or_default().to_owned())
+    {
+        match class_name.as_str() {
+            "UUID" | "Decimal" => {
+                if let Ok(s) = value.str()
+                    && let Ok(s) = s.to_str()
+                {
+                    return write_json_string(writer, s);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if is_enum_instance(py, value)
+        && let Ok(inner) = value.getattr("value")
+    {
+        return write_py_json(py, &inner, writer);
+    }
+
+    if let Ok(s) = value.str()
+        && let Ok(s) = s.to_str()
+    {
+        return write_json_string(writer, s);
+    }
+
+    writer.write_all(b"null").map_err(json_io_error)
+}
+
+#[inline]
+pub fn py_json_response_with_status(
+    py: Python<'_>,
+    status: StatusCode,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Response> {
+    py_json_response_with_status_hint(py, status, value, SerializationHint::Unknown)
+}
+
+#[inline]
+pub fn py_json_response_with_status_hint(
+    py: Python<'_>,
+    status: StatusCode,
+    value: &Bound<'_, PyAny>,
+    hint: SerializationHint,
+) -> PyResult<Response> {
+    let bytes = RESPONSE_BUF.with(|cell| {
+        let mut buf = cell.take();
+        buf.clear();
+
+        let write_result = {
+            let mut writer = (&mut buf).writer();
+            match hint {
+                SerializationHint::PydanticModel => {
+                    if write_pydantic_model_json(py, value, &mut writer)? {
+                        Ok(())
+                    } else {
+                        write_py_json(py, value, &mut writer)
+                    }
+                }
+                SerializationHint::Dataclass => {
+                    if write_dataclass_json(py, value, &mut writer)? {
+                        Ok(())
+                    } else {
+                        write_py_json(py, value, &mut writer)
+                    }
+                }
+                SerializationHint::PlainDict | SerializationHint::Unknown => {
+                    write_py_json(py, value, &mut writer)
+                }
+            }
+        };
+
+        match write_result {
+            Ok(()) => {
+                let bytes = buf.split().freeze();
+                cell.replace(buf);
+                Ok(bytes)
+            }
+            Err(err) => {
+                cell.replace(buf);
+                Err(err)
+            }
+        }
+    })?;
+
+    Ok(Response::builder()
+        .status(status)
+        .header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )
+        .body(Body::from(bytes))
+        .unwrap())
+}
+
+#[inline]
+pub fn py_json_response(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Response> {
+    py_json_response_with_status(py, StatusCode::OK, value)
 }
 
 // for local reads (fast, non-Send for sync blocks like spawn_blocking)
@@ -84,44 +422,10 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>, status: StatusCode
         return final_status.into_response();
     }
 
-    if let Ok(dict) = obj.cast::<PyDict>() {
-        return json_response_with_status(py, status, &py_dict_to_json(py, dict));
-    }
-
-    if let Ok(list) = obj.cast::<PyList>() {
-        return json_response_with_status(py, status, &py_list_to_json(py, list));
-    }
-
-    if let Ok(b) = obj.cast::<PyBool>() {
-        return json_response_with_status(py, status, &Value::Bool(b.is_true()));
-    }
-
-    if let Ok(s) = obj.cast::<PyString>()
-        && let Ok(slice) = s.to_str()
-    {
-        return json_response_with_status(
-            py,
-            status,
-            &Value::String(std::borrow::Cow::Borrowed(slice).into_owned()),
-        );
-    }
-
-    if let Ok(i) = obj.cast::<PyInt>()
-        && let Ok(v) = i.extract::<i64>()
-    {
-        return json_response_with_status(py, status, &Value::Number(v.into()));
-    }
-
-    if let Ok(f) = obj.cast::<PyFloat>() {
-        let v = f.value(); // Native PyFloat zero-overhead extractor macro
-        if let Some(n) = serde_json::Number::from_f64(v) {
-            return json_response_with_status(py, status, &Value::Number(n));
-        }
-        return json_response_with_status(py, status, &Value::Null);
-    }
-
-    // 7. General structural fallback serializer
-    json_response_with_status(py, status, &py_any_to_json(py, obj))
+    py_json_response_with_status(py, status, obj).unwrap_or_else(|err| {
+        err.print(py);
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })
 }
 #[inline]
 pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
@@ -232,7 +536,7 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         return bytes_to_json(b.as_bytes());
     }
     if let Ok(b) = value.cast::<PyByteArray>() {
-        let snapshot: Vec<u8> = unsafe { b.as_bytes().to_vec() };
+        let snapshot = b.to_vec();
         return bytes_to_json(&snapshot);
     }
 
@@ -240,6 +544,14 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
     // `model_dump`; dataclasses expose `__dataclass_fields__`; Enum exposes
     // `value`; datetime/date/time/UUID/Decimal are matched by class name to
     // avoid importing each module on the hot path.
+    if let Ok(true) = value.hasattr("model_dump_json")
+        && let Ok(json) = value.call_method0(intern!(py, "model_dump_json"))
+        && let Ok(s) = json.cast::<PyString>()
+        && let Ok(parsed) = serde_json::from_str(s.to_str().unwrap_or_default())
+    {
+        return parsed;
+    }
+
     if let Ok(true) = value.hasattr("model_dump")
         && let Ok(dumped) = value.call_method0("model_dump")
     {
@@ -247,10 +559,8 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
     }
 
     if let Ok(true) = value.hasattr("__dataclass_fields__")
-        && let Ok(asdict) = py
-            .import("dataclasses")
-            .and_then(|m| m.getattr("asdict"))
-            .and_then(|f| f.call1((value,)))
+        && let Some(asdict) = dataclasses_asdict(py)
+        && let Ok(asdict) = asdict.call1((value,))
     {
         return py_any_to_json(py, &asdict);
     }
@@ -285,31 +595,10 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
             _ => {}
         }
     }
-    if let Ok(true) = value.hasattr("value") {
-        let is_enum = value
-            .get_type()
-            .getattr("__bases__")
-            .ok()
-            .and_then(|b| b.cast_into::<PyTuple>().ok())
-            .map(|t| {
-                t.iter().any(|base| {
-                    base.getattr("__name__")
-                        .ok()
-                        .and_then(|n| n.cast_into::<PyString>().ok())
-                        .and_then(|s| s.to_str().ok().map(|s| s.to_owned()))
-                        .map(|name| {
-                            matches!(
-                                name.as_str(),
-                                "Enum" | "IntEnum" | "StrEnum" | "Flag" | "IntFlag"
-                            )
-                        })
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-        if is_enum && let Ok(inner) = value.getattr("value") {
-            return py_any_to_json(py, &inner);
-        }
+    if is_enum_instance(py, value)
+        && let Ok(inner) = value.getattr("value")
+    {
+        return py_any_to_json(py, &inner);
     }
 
     if let Ok(s) = value.str()

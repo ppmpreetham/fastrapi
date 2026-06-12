@@ -1,23 +1,28 @@
 use crate::utils::utils::{json_to_py_object, py_any_to_json};
 use axum::{extract::Extension, response::IntoResponse};
 use bytes::Bytes;
-use fastwebsockets::{upgrade, FragmentCollector, Frame, OpCode};
+use fastwebsockets::{FragmentCollector, Frame, OpCode, upgrade};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use pyo3::prelude::*;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::error;
 
+use crate::ffi::py_handlers::schedule_python_coroutine;
+
 pub async fn ws_handler(
     ws: upgrade::IncomingUpgrade,
-    Extension(handler): Extension<Py<PyAny>>,
+    Extension(handler): Extension<Arc<Py<PyAny>>>,
     Extension(_rt_handle): Extension<tokio::runtime::Handle>,
+    Extension(async_loop): Extension<Arc<Py<PyAny>>>,
 ) -> impl IntoResponse {
     let (response, fut) = ws.upgrade().expect("WebSocket upgrade failed");
 
     tokio::task::spawn(async move {
-        if let Err(e) = handle_connection(fut, handler).await {
+        if let Err(e) = handle_connection(fut, handler, async_loop).await {
             error!("WebSocket error: {e}");
         }
     });
@@ -33,7 +38,8 @@ enum WSMessage {
 
 async fn handle_connection(
     fut: upgrade::UpgradeFut,
-    handler: Py<PyAny>,
+    handler: Arc<Py<PyAny>>,
+    async_loop: Arc<Py<PyAny>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ws_stream = fut.await?;
     let mut ws = FragmentCollector::new(ws_stream);
@@ -52,11 +58,11 @@ async fn handle_connection(
         )
     })?;
 
-    let python_handler_future = Python::attach(|py| {
-        let coroutine = handler.call1(py, (py_ws_obj.clone(),))?;
-        let bound = coroutine.bind(py);
-        pyo3_async_runtimes::tokio::into_future(bound.clone())
-    })?;
+    let python_handler_future: Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>> =
+        Python::attach(|py| {
+            let coroutine = handler.bind(py).call1((py_ws_obj.clone_ref(py),))?;
+            schedule_python_coroutine(py, &async_loop, coroutine)
+        })?;
 
     tokio::select! {
         result = python_handler_future => {
@@ -146,8 +152,8 @@ pub struct PyWebSocket {
 
 #[pymethods]
 impl PyWebSocket {
-    fn accept(&self) -> PyResult<()> {
-        Ok(())
+    fn accept<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(()) })
     }
 
     fn send_text<'py>(&self, py: Python<'py>, data: String) -> PyResult<Bound<'py, PyAny>> {

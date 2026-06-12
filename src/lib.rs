@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyList, PyModule};
 use pyo3_nest::{add_classes, submodule};
 
 pub mod engine;
@@ -18,10 +18,11 @@ pub use ffi::exceptions;
 pub use ffi::py_handlers;
 pub use ffi::pydantic;
 pub use ffi::router;
-pub use globals::{config, BASEMODEL_TYPE, MIDDLEWARES, PYTHON_RUNTIME};
+pub use globals::{BASEMODEL_TYPE, MIDDLEWARES, PYTHON_RUNTIME, config};
 pub use http::middleware;
 pub use http::request;
 pub use http::responses;
+pub use http::staticfiles;
 pub use http::status;
 pub use http::websocket;
 pub use routing::dependencies;
@@ -32,6 +33,10 @@ pub use app::FastrAPI;
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
 
+use crate::routing::security::{
+    APIKeyCookie, APIKeyHeader, APIKeyQuery, HTTPAuthorizationCredentials, HTTPBasic,
+    HTTPBasicCredentials, HTTPBearer, OAuth2PasswordBearer, PySecurityScopes,
+};
 use background::PyBackgroundTasks;
 use datastructures::PyUploadFile;
 use exceptions::{
@@ -44,17 +49,16 @@ use params::{
     Unset,
 };
 use router::PyAPIRouter;
-use security::PySecurityScopes;
+use staticfiles::PyStaticFiles;
 use websocket::PyWebSocket;
 
 #[pymodule(gil_used = false)]
 fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.setattr("__package__", "fastrapi")?;
-    m.setattr("__path__", py.eval(c"[]", None, None)?)?;
+    m.setattr("__path__", PyList::empty(py))?;
 
     m.add_class::<FastrAPI>()?;
-    m.add("FastrAPI", m.getattr("FastrAPI")?)?;
 
     submodule!(
         m,
@@ -133,11 +137,14 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("File", m.getattr("params")?.getattr("File")?)?;
     m.add("Security", m.getattr("params")?.getattr("Security")?)?;
     m.add(
+        "StaticFiles",
+        m.getattr("staticfiles")?.getattr("StaticFiles")?,
+    )?;
+    m.add(
         "UploadFile",
         m.getattr("datastructures")?.getattr("UploadFile")?,
     )?;
     m.add_class::<PyAPIRouter>()?;
-    m.add("APIRouter", m.getattr("APIRouter")?)?;
 
     Ok(())
 }

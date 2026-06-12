@@ -3,13 +3,23 @@ use super::security::PySecurityScopes;
 use super::types::{ParsedParameter, RequestInput};
 use crate::ffi::pydantic;
 use axum::response::Response;
+use once_cell::sync::OnceCell;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple};
 use smallvec::SmallVec;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 type SharedPyObject = Py<PyAny>;
+
+static INSPECT_MODULE: OnceCell<Py<PyModule>> = OnceCell::new();
+
+fn get_inspect(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
+    INSPECT_MODULE
+        .get_or_try_init(|| py.import(intern!(py, "inspect")).map(Bound::unbind))
+        .map(|module| module.bind(py).clone())
+}
 
 struct ParserKeys<'py> {
     parameters: &'py Bound<'py, PyString>,
@@ -52,7 +62,7 @@ pub struct DependencyNode {
     pub scopes: Vec<String>,
     pub use_cache: bool,
     pub is_top_level: bool,
-    pub injection_plan: Vec<(String, InjectionType)>,
+    pub injection_plan: Vec<(Py<PyString>, InjectionType)>,
     pub needs_request_object: bool,
 }
 
@@ -137,7 +147,7 @@ pub fn parse_dependencies(
     func: &Bound<PyAny>,
     path_param_names: &[String],
 ) -> PyResult<Vec<DependencyNode>> {
-    let inspect = py.import(intern!(py, "inspect"))?;
+    let inspect = get_inspect(py)?;
     let keys = ParserKeys::new(py);
     let mut flat_plan = Vec::new();
     let mut visited = HashMap::new();
@@ -259,6 +269,10 @@ fn extract_and_flatten(
 
     let (injection_plan, needs_request_object) =
         build_injection_plan(py, func, path_param_names, &sub_deps, inspect, keys)?;
+    let injection_plan = injection_plan
+        .into_iter()
+        .map(|(name, injection)| (PyString::intern(py, &name).unbind(), injection))
+        .collect();
     let is_async = is_async_callable(py, inspect, func);
 
     let node_index = flat_plan.len();
@@ -343,8 +357,7 @@ fn build_dependency_kwargs(
     let final_kwargs = PyDict::new(py);
 
     for (arg_name, injection_type) in &dep.injection_plan {
-        let py_arg_name = pyo3::types::PyString::intern(py, arg_name);
-
+        let py_arg_name = arg_name.bind(py);
         match injection_type {
             InjectionType::Dependency(target_idx) => {
                 if let Some(cached_val) = &results_registry[*target_idx] {
@@ -410,6 +423,7 @@ pub fn execute_dependencies_sync(
 
 pub async fn execute_dependencies(
     rt_handle: tokio::runtime::Handle,
+    async_loop: &Arc<Py<PyAny>>,
     flat_plan: &[DependencyNode],
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
@@ -436,9 +450,14 @@ pub async fn execute_dependencies(
                 )?;
                 let bound_func = dep.func.bind(py);
                 let bound_kwargs = py_kwargs.bind(py);
-                let coroutine = bound_func.call((), Some(bound_kwargs))?;
-                pyo3_async_runtimes::tokio::into_future(coroutine)
-                    .map_err(DependencyExecutionError::Python)
+                let coroutine = bound_func.call((), Some(bound_kwargs))?.unbind();
+                let locals = pyo3_async_runtimes::TaskLocals::new(async_loop.bind(py).clone());
+                Ok(pyo3_async_runtimes::tokio::scope(locals, async move {
+                    let py_future = Python::attach(|py| {
+                        pyo3_async_runtimes::tokio::into_future(coroutine.into_bound(py))
+                    })?;
+                    py_future.await
+                }))
             })?;
             future.await.map_err(DependencyExecutionError::Python)?
         } else {
@@ -458,7 +477,7 @@ pub async fn execute_dependencies(
                 })
                 .await
                 .unwrap_or_else(|_| {
-                    Err(DependencyExecutionError::Python(Python::attach(|py| {
+                    Err(DependencyExecutionError::Python(Python::attach(|_py| {
                         pyo3::exceptions::PyRuntimeError::new_err("Spawn blocking failed")
                     })))
                 })?

@@ -1,9 +1,11 @@
 use crate::routing::types::{
-    FlatRoute, FlatWebSocket, HttpMethod, RouteEntry, SubRouterMount, WebSocketEntry,
+    FlatRoute, FlatWebSocket, HttpMethod, ParameterSource, RouteEntry, SerializationHint,
+    SubRouterMount, WebSocketEntry,
 };
+use ahash::AHashSet;
 use hyper::StatusCode;
-use pyo3::prelude::{pyclass, pymethods, Bound, Py, PyAny, PyAnyMethods, PyResult, Python};
-use pyo3::types::{IntoPyDict, PyCFunction, PyDict, PyTuple};
+use pyo3::prelude::{Bound, Py, PyAny, PyAnyMethods, PyResult, Python, pyclass, pymethods};
+use pyo3::types::{PyCFunction, PyDict, PyTuple};
 use pyo3::types::{PyString, PyStringMethods};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -69,6 +71,7 @@ impl PyAPIRouter {
         description: Option<String>,
         deprecated: Option<bool>,
         include_in_schema: bool,
+        cache_response: bool,
     ) -> PyResult<Py<PyAny>> {
         if self.frozen.load(Ordering::Relaxed) {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -130,62 +133,58 @@ impl PyAPIRouter {
                 || !metadata.dependencies.is_empty()
                 || !metadata.parsed_params.is_empty();
 
-            let kwargs_template = if needs_kwargs {
-                let pairs = metadata
-                    .parsed_params
-                    .iter()
-                    .map(|p| (p.name_py.bind(py), py.None()));
+            let mut body_param_name_set: AHashSet<String> = AHashSet::with_capacity(
+                metadata.body_param_names.len() + metadata.param_validators.len(),
+            );
+            metadata
+                .parsed_params
+                .iter()
+                .filter(|p| matches!(p.source, ParameterSource::Body))
+                .for_each(|p| {
+                    body_param_name_set.insert(p.name.clone());
+                });
+            metadata.param_validators.iter().for_each(|validator| {
+                body_param_name_set.insert(validator.name.clone());
+            });
 
-                let d = pairs.into_py_dict(py)?;
-                Some(d.unbind())
-            } else {
-                None
-            };
+            let body_param_indices = metadata
+                .parsed_params
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, param)| {
+                    (matches!(param.source, ParameterSource::Body)
+                        || body_param_name_set.contains(param.name.as_str()))
+                    .then_some(idx)
+                })
+                .collect();
 
-            let deps_empty = metadata.dependencies.is_empty();
-
-            let execution_mode = match (
-                metadata.is_async,
-                deps_empty,
-                metadata.all_deps_sync,
-                metadata.dependency_needs_request,
-            ) {
-                (false, true, _, _) => crate::ffi::py_handlers::ExecutionMode::SyncNoDeps,
-                (false, false, _, false) => crate::ffi::py_handlers::ExecutionMode::SyncDepsNoReq,
-                (false, false, _, true) => crate::ffi::py_handlers::ExecutionMode::SyncDepsReq,
-                (true, true, _, _) => crate::ffi::py_handlers::ExecutionMode::AsyncNoDeps,
-                (true, false, true, false) => {
-                    crate::ffi::py_handlers::ExecutionMode::AsyncSyncDepsNoReq
-                }
-                (true, false, true, true) => {
-                    crate::ffi::py_handlers::ExecutionMode::AsyncSyncDepsReq
-                }
-                (true, false, false, false) => {
-                    crate::ffi::py_handlers::ExecutionMode::AsyncAsyncDepsNoReq
-                }
-                (true, false, false, true) => {
-                    crate::ffi::py_handlers::ExecutionMode::AsyncAsyncDepsReq
-                }
-            };
-
-            let handler = Arc::new(crate::routing::types::RouteHandler {
+            let mut handler = crate::routing::types::RouteHandler {
                 func: func.clone_ref(py),
                 is_async: metadata.is_async,
                 is_fast_path: metadata.is_fast_path,
                 dependency_needs_request: metadata.dependency_needs_request,
                 all_deps_sync: metadata.all_deps_sync,
                 needs_kwargs,
-                kwargs_template,
                 param_validators: metadata.param_validators,
                 response_type: final_response_type,
+                serialization_hint: if response_model_capture.is_some() {
+                    SerializationHint::PydanticModel
+                } else {
+                    metadata.serialization_hint
+                },
                 body_param_names: metadata.body_param_names,
+                body_param_name_set,
+                body_param_indices,
                 dependencies: metadata.dependencies,
                 parsed_params: metadata.parsed_params,
                 default_status,
                 response_model: response_model_capture.clone(),
                 response_class: response_class_capture.clone(),
-                execution_mode,
-            });
+                execution_mode: crate::ffi::py_handlers::ExecutionMode::SyncNoArgs,
+                cache_response,
+            };
+            crate::ffi::py_handlers::assign_execution_mode(&mut handler);
+            let handler = Arc::new(handler);
 
             let entry = RouteEntry {
                 method,
@@ -299,7 +298,7 @@ impl PyAPIRouter {
         })
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn get(
         &self,
@@ -327,6 +326,7 @@ impl PyAPIRouter {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.create_method_decorator(
             py,
@@ -340,10 +340,11 @@ impl PyAPIRouter {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn post(
         &self,
@@ -371,6 +372,7 @@ impl PyAPIRouter {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.create_method_decorator(
             py,
@@ -384,10 +386,11 @@ impl PyAPIRouter {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn put(
         &self,
@@ -415,6 +418,7 @@ impl PyAPIRouter {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.create_method_decorator(
             py,
@@ -428,10 +432,11 @@ impl PyAPIRouter {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn delete(
         &self,
@@ -459,6 +464,7 @@ impl PyAPIRouter {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.create_method_decorator(
             py,
@@ -472,10 +478,11 @@ impl PyAPIRouter {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn patch(
         &self,
@@ -503,6 +510,7 @@ impl PyAPIRouter {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.create_method_decorator(
             py,
@@ -516,10 +524,11 @@ impl PyAPIRouter {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn options(
         &self,
@@ -547,6 +556,7 @@ impl PyAPIRouter {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.create_method_decorator(
             py,
@@ -560,10 +570,11 @@ impl PyAPIRouter {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn head(
         &self,
@@ -591,6 +602,7 @@ impl PyAPIRouter {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.create_method_decorator(
             py,
@@ -604,6 +616,25 @@ impl PyAPIRouter {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
+        )
+    }
+
+    #[pyo3(signature = (path))]
+    fn const_get(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
+        self.create_method_decorator(
+            py,
+            HttpMethod::GET,
+            path,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            true,
         )
     }
 
@@ -677,6 +708,10 @@ fn flatten_router(py: Python<'_>, root: &PyAPIRouter) -> (Vec<FlatRoute>, Vec<Fl
                 path: join_path(&full_prefix, &entry.path),
                 handler: entry.handler,
                 tags,
+                summary: entry.summary.clone(),
+                description: entry.description.clone(),
+                deprecated: entry.deprecated,
+                include_in_schema: entry.include_in_schema,
             }
         }));
 

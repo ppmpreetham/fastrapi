@@ -20,7 +20,7 @@ macro_rules! set_field {
     };
 }
 
-use crate::utils::utils::py_to_response;
+use crate::http::responses::convert_auto_response;
 use axum::{
     extract::Request,
     http::StatusCode,
@@ -37,10 +37,10 @@ mod gzip;
 mod session;
 mod trustedhost;
 
-pub use cors::{build_cors_layer, parse_cors_params, CORSMiddleware};
-pub use gzip::{parse_gzip_params, GZipMiddleware};
-pub use session::{parse_session_params, SessionMiddleware};
-pub use trustedhost::{parse_trusted_host_params, TrustedHostMiddleware};
+pub use cors::{CORSMiddleware, build_cors_layer, parse_cors_params};
+pub use gzip::{GZipMiddleware, parse_gzip_params};
+pub use session::{SessionMiddleware, parse_session_params};
+pub use trustedhost::{TrustedHostMiddleware, parse_trusted_host_params};
 
 #[derive(Clone)]
 pub struct PyMiddleware {
@@ -60,8 +60,21 @@ struct PyRequestInfo {
     headers: Vec<(String, String)>,
 }
 
+enum MiddlewareDecision {
+    Continue,
+    Respond(Response),
+}
+
 pub async fn execute_py_middleware(
     middleware: Arc<PyMiddleware>,
+    request: Request,
+    next: Next,
+) -> Response {
+    execute_py_middlewares(Arc::new(vec![middleware]), request, next).await
+}
+
+pub async fn execute_py_middlewares(
+    middlewares: Arc<Vec<Arc<PyMiddleware>>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -76,8 +89,6 @@ pub async fn execute_py_middleware(
             .collect(),
     };
 
-    let middleware = middleware.clone();
-
     let result = tokio::task::spawn_blocking(move || {
         Python::attach(|py| {
             let py_dict = PyDict::new(py);
@@ -91,36 +102,35 @@ pub async fn execute_py_middleware(
             });
             py_dict.set_item("headers", headers_dict).ok();
 
-            let middleware_func = middleware.func.bind(py);
-            match middleware_func.as_borrowed().call1((py_dict,)) {
-                Ok(result) => {
-                    if !result.is_none() {
-                        return py_to_response(py, &result, axum::http::StatusCode::OK);
+            for middleware in middlewares.iter() {
+                let middleware_func = middleware.func.bind(py);
+                match middleware_func.as_borrowed().call1((&py_dict,)) {
+                    Ok(result) => {
+                        if !result.is_none() {
+                            return MiddlewareDecision::Respond(convert_auto_response(py, &result));
+                        }
                     }
-
-                    (StatusCode::NO_CONTENT, "CONTINUE").into_response()
-                }
-                Err(err) => {
-                    err.print(py);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Middleware Execution Error",
-                    )
-                        .into_response()
+                    Err(err) => {
+                        err.print(py);
+                        return MiddlewareDecision::Respond(
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "Middleware Execution Error",
+                            )
+                                .into_response(),
+                        );
+                    }
                 }
             }
+
+            MiddlewareDecision::Continue
         })
     })
     .await;
 
     match result {
-        Ok(response) => {
-            if response.status() == StatusCode::NO_CONTENT {
-                next.run(request).await
-            } else {
-                response
-            }
-        }
+        Ok(MiddlewareDecision::Continue) => next.run(request).await,
+        Ok(MiddlewareDecision::Respond(response)) => response,
         Err(err) => {
             error!("Tokio task error: {}", err);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()

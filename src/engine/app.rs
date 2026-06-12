@@ -2,15 +2,17 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyCFunction, PyDict, PyString, PyTuple};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tracing::info;
 
 use super::server;
-pub use super::types::FastrAPI;
-use crate::globals::MIDDLEWARES;
+pub use super::types::{FastrAPI, StaticMount};
+use crate::globals::{MIDDLEWARE_COUNTER, MIDDLEWARES};
 use crate::http::middleware::{
-    parse_cors_params, parse_gzip_params, parse_session_params, parse_trusted_host_params,
-    PyMiddleware,
+    PyMiddleware, parse_cors_params, parse_gzip_params, parse_session_params,
+    parse_trusted_host_params,
 };
+use crate::http::staticfiles::PyStaticFiles;
 use crate::router::PyAPIRouter;
 use crate::routing::types::HttpMethod;
 
@@ -55,6 +57,11 @@ impl FastrAPI {
         generate_unique_id_function=None,
         separate_input_output_schemas=true,
         openapi_external_docs=None,
+        sync_to_threadpool=false,
+        max_body_size=Some(16 * 1024 * 1024),
+        max_field_size=Some(1024 * 1024),
+        max_file_size=Some(16 * 1024 * 1024),
+        reject_unknown_multipart_fields=false,
     ))]
     fn new(
         py: Python<'_>,
@@ -94,6 +101,11 @@ impl FastrAPI {
         generate_unique_id_function: Option<Py<PyAny>>,
         separate_input_output_schemas: bool,
         openapi_external_docs: Option<Py<PyAny>>,
+        sync_to_threadpool: bool,
+        max_body_size: Option<usize>,
+        max_field_size: Option<usize>,
+        max_file_size: Option<usize>,
+        reject_unknown_multipart_fields: bool,
     ) -> PyResult<Self> {
         let default_response_class = default_response_class.unwrap_or_else(|| {
             py.import(intern!(py, "fastrapi"))
@@ -147,6 +159,12 @@ impl FastrAPI {
             generate_unique_id_function,
             separate_input_output_schemas,
             openapi_external_docs,
+            sync_to_threadpool,
+            max_body_size,
+            max_field_size,
+            max_file_size,
+            reject_unknown_multipart_fields,
+            static_mounts: Vec::new(),
             cors_config: None,
             trusted_host_config: None,
             gzip_config: None,
@@ -196,7 +214,7 @@ impl FastrAPI {
 
     // wish these methods could be abstracted away by macros, but PyO3 doesn't support dynamic method creation or macros in impl blocks, so here we are :(
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn get<'py>(
         &self,
@@ -224,6 +242,7 @@ impl FastrAPI {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.router.bind(py).borrow().create_method_decorator(
             py,
@@ -237,10 +256,11 @@ impl FastrAPI {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn post<'py>(
         &self,
@@ -268,6 +288,7 @@ impl FastrAPI {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.router.bind(py).borrow().create_method_decorator(
             py,
@@ -281,10 +302,11 @@ impl FastrAPI {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn put<'py>(
         &self,
@@ -312,6 +334,7 @@ impl FastrAPI {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.router.bind(py).borrow().create_method_decorator(
             py,
@@ -325,10 +348,11 @@ impl FastrAPI {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn delete<'py>(
         &self,
@@ -356,6 +380,7 @@ impl FastrAPI {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.router.bind(py).borrow().create_method_decorator(
             py,
@@ -369,10 +394,11 @@ impl FastrAPI {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn patch<'py>(
         &self,
@@ -400,6 +426,7 @@ impl FastrAPI {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.router.bind(py).borrow().create_method_decorator(
             py,
@@ -413,10 +440,11 @@ impl FastrAPI {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn options<'py>(
         &self,
@@ -444,6 +472,7 @@ impl FastrAPI {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.router.bind(py).borrow().create_method_decorator(
             py,
@@ -457,10 +486,11 @@ impl FastrAPI {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
         )
     }
 
-    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=true, response_model_exclude_unset=false, response_model_exclude_defaults=false, response_model_exclude_none=false, include_in_schema=true, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=false))]
     #[allow(unused_variables)]
     fn head<'py>(
         &self,
@@ -488,6 +518,7 @@ impl FastrAPI {
         callbacks: Option<Py<PyAny>>,
         openapi_extra: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        cache_resp: bool,
     ) -> PyResult<Py<PyAny>> {
         self.router.bind(py).borrow().create_method_decorator(
             py,
@@ -501,12 +532,62 @@ impl FastrAPI {
             description,
             deprecated,
             include_in_schema,
+            cache_resp,
+        )
+    }
+
+    #[pyo3(signature = (path))]
+    fn const_get(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
+        self.router.bind(py).borrow().create_method_decorator(
+            py,
+            HttpMethod::GET,
+            path,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            true,
         )
     }
 
     #[pyo3(signature = (path))]
     fn websocket(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
         self.router.bind(py).borrow().create_ws_decorator(py, path)
+    }
+
+    #[pyo3(signature = (path, app, *, name=None))]
+    fn mount(
+        &mut self,
+        py: Python<'_>,
+        path: String,
+        app: Py<PyAny>,
+        name: Option<String>,
+    ) -> PyResult<()> {
+        if !path.starts_with('/') {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Mount path must start with '/'",
+            ));
+        }
+
+        let static_files = app.bind(py).extract::<PyRef<'_, PyStaticFiles>>()?;
+        let normalized_path = if path.len() > 1 {
+            path.trim_end_matches('/').to_string()
+        } else {
+            path
+        };
+
+        self.static_mounts.push(StaticMount {
+            path: normalized_path,
+            directory: static_files.directory.clone(),
+            html: static_files.html,
+            follow_symlink: static_files.follow_symlink,
+            name,
+        });
+        Ok(())
     }
 
     // decorator for generic Python functions: @app.middleware("smtg")
@@ -517,7 +598,8 @@ impl FastrAPI {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.unbind(); // 0th item is the function being decorated
             let py_middleware = PyMiddleware::new(func.clone_ref(py));
-            let middleware_id = format!("{}_{}", middleware_type, MIDDLEWARES.len());
+            let id = MIDDLEWARE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let middleware_id = format!("{}_{}", middleware_type, id);
             MIDDLEWARES
                 .pin()
                 .insert(middleware_id.clone(), Arc::new(py_middleware));
@@ -533,8 +615,33 @@ impl FastrAPI {
         .map(|f| f.into())
     }
 
-    fn serve(slf: Py<Self>, py: Python, host: Option<String>, port: Option<u16>) -> PyResult<()> {
-        server::serve(py, host, port, slf)
+    #[pyo3(signature = (host=None, port=None, *, reload=false, reload_dirs=None, reload_ignore_dirs=None, reload_ignore_patterns=None, reload_ignore_paths=None, reload_tick=750, reload_ignore_worker_failure=false))]
+    fn serve(
+        slf: Py<Self>,
+        py: Python,
+        host: Option<String>,
+        port: Option<u16>,
+        reload: bool,
+        reload_dirs: Option<Vec<String>>,
+        reload_ignore_dirs: Option<Vec<String>>,
+        reload_ignore_patterns: Option<Vec<String>>,
+        reload_ignore_paths: Option<Vec<String>>,
+        reload_tick: u64,
+        reload_ignore_worker_failure: bool,
+    ) -> PyResult<()> {
+        if reload && std::env::var_os("FASTRAPI_RELOAD_CHILD").is_none() {
+            server::serve_with_reload(
+                py,
+                reload_dirs,
+                reload_ignore_dirs,
+                reload_ignore_patterns,
+                reload_ignore_paths,
+                reload_tick,
+                reload_ignore_worker_failure,
+            )
+        } else {
+            server::serve(py, host, port, slf)
+        }
     }
 
     #[pyo3(signature = (router, *, prefix="".to_string(), tags=None))]

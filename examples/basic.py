@@ -3,6 +3,7 @@ from fastrapi.responses import JSONResponse
 
 app = FastrAPI()
 
+# you could try @app.get("/", cache_resp=True) if it's static and won't change :)
 @app.get("/")
 def hello() -> JSONResponse:
     return {"Hello": "World"}

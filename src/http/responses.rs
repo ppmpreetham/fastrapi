@@ -1,16 +1,39 @@
 use crate::utils::utils::{
-    json_response, json_response_with_status, py_any_to_json, py_to_response,
+    py_json_response_with_status, py_json_response_with_status_hint, py_to_response,
 };
 use axum::{
-    http::{header, StatusCode},
+    http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
-use pyo3::{exceptions::PyAttributeError, prelude::*};
+use pyo3::prelude::*;
 use tracing::error;
 
-use pyo3::{pyclass, pymethods, Py, PyAny};
+use pyo3::{Py, PyAny, pyclass, pymethods};
 
 use crate::types::response::ResponseType;
+
+fn response_class_name(result: &Bound<'_, PyAny>) -> Option<String> {
+    result
+        .get_type()
+        .name()
+        .ok()
+        .and_then(|name| name.to_str().ok().map(str::to_owned))
+}
+
+fn response_class_is(class_name: Option<&str>, expected: &str) -> bool {
+    class_name
+        .map(|name| name == expected || name.rsplit('.').next() == Some(expected))
+        .unwrap_or(false)
+}
+
+fn response_status(result: &Bound<'_, PyAny>, default: StatusCode) -> StatusCode {
+    result
+        .getattr("status_code")
+        .ok()
+        .and_then(|status| status.extract::<u16>().ok())
+        .and_then(|status| StatusCode::from_u16(status).ok())
+        .unwrap_or(default)
+}
 
 // wrapper classes
 #[pyclass(name = "HTMLResponse", skip_from_py_object)]
@@ -111,27 +134,24 @@ pub fn convert_response_by_type(
 
     let mut final_result = result;
 
-    let mut dumped_storage: Option<Bound<PyAny>> = None;
+    let validated_storage;
 
     if let Some(model) = &handler.response_model {
+        let class_name = response_class_name(final_result);
         let is_explicit_response = final_result.is_instance_of::<PyJSONResponse>()
             || final_result.is_instance_of::<PyPlainTextResponse>()
             || final_result.is_instance_of::<PyHTMLResponse>()
-            || final_result.is_instance_of::<PyRedirectResponse>();
+            || final_result.is_instance_of::<PyRedirectResponse>()
+            || response_class_is(class_name.as_deref(), "JSONResponse")
+            || response_class_is(class_name.as_deref(), "PlainTextResponse")
+            || response_class_is(class_name.as_deref(), "HTMLResponse")
+            || response_class_is(class_name.as_deref(), "RedirectResponse");
 
         if !is_explicit_response {
-            let validated = model
+            validated_storage = model
                 .bind(py)
                 .call_method1("model_validate", (final_result,))?;
-
-            let dumped = match validated.getattr("model_dump") {
-                Ok(method) => method.call0()?,
-                Err(err) if err.is_instance_of::<PyAttributeError>(py) => validated,
-                Err(err) => return Err(err),
-            };
-
-            dumped_storage = Some(dumped);
-            final_result = dumped_storage.as_ref().unwrap();
+            final_result = &validated_storage;
         }
     }
     let response = match handler.response_type {
@@ -151,17 +171,21 @@ pub fn convert_response_by_type(
 
             (
                 default_status,
-                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                [(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                )],
                 body_bytes,
             )
                 .into_response()
         }
 
-        ResponseType::Json => {
-            let json = py_any_to_json(py, final_result);
-
-            crate::utils::utils::json_response_with_status(py, default_status, &json)
-        }
+        ResponseType::Json => py_json_response_with_status_hint(
+            py,
+            default_status,
+            final_result,
+            handler.serialization_hint,
+        )?,
 
         ResponseType::Html => convert_html_response(py, final_result),
 
@@ -170,13 +194,23 @@ pub fn convert_response_by_type(
         ResponseType::Auto => {
             // cannot determine response type AOT.
 
-            if final_result.is_instance_of::<PyJSONResponse>() {
+            let class_name = response_class_name(final_result);
+
+            if final_result.is_instance_of::<PyJSONResponse>()
+                || response_class_is(class_name.as_deref(), "JSONResponse")
+            {
                 convert_json_response(py, final_result)
-            } else if final_result.is_instance_of::<PyPlainTextResponse>() {
+            } else if final_result.is_instance_of::<PyPlainTextResponse>()
+                || response_class_is(class_name.as_deref(), "PlainTextResponse")
+            {
                 convert_text_response(py, final_result)
-            } else if final_result.is_instance_of::<PyHTMLResponse>() {
+            } else if final_result.is_instance_of::<PyHTMLResponse>()
+                || response_class_is(class_name.as_deref(), "HTMLResponse")
+            {
                 convert_html_response(py, final_result)
-            } else if final_result.is_instance_of::<PyRedirectResponse>() {
+            } else if final_result.is_instance_of::<PyRedirectResponse>()
+                || response_class_is(class_name.as_deref(), "RedirectResponse")
+            {
                 convert_redirect_response(py, final_result)
             } else {
                 py_to_response(py, final_result, default_status)
@@ -192,6 +226,14 @@ pub fn convert_html_response(_py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyHTMLResponse>>() {
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
         (status_code, Html(resp.content.clone())).into_response()
+    } else if response_class_is(response_class_name(result).as_deref(), "HTMLResponse") {
+        let status_code = response_status(result, StatusCode::OK);
+        let content = result
+            .getattr("content")
+            .ok()
+            .and_then(|content| content.extract::<String>().ok())
+            .unwrap_or_default();
+        (status_code, Html(content)).into_response()
     } else {
         error!("Expected HTMLResponse, but got another type.");
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -202,8 +244,24 @@ pub fn convert_html_response(_py: Python, result: &Bound<PyAny>) -> Response {
 pub fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyJSONResponse>>() {
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
-        let json = py_any_to_json(py, &resp.content.bind(py));
-        json_response_with_status(py, status_code, &json)
+        py_json_response_with_status(py, status_code, resp.content.bind(py)).unwrap_or_else(|err| {
+            err.print(py);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })
+    } else if response_class_is(response_class_name(result).as_deref(), "JSONResponse") {
+        let status_code = response_status(result, StatusCode::OK);
+        match result.getattr("content") {
+            Ok(content) => {
+                py_json_response_with_status(py, status_code, &content).unwrap_or_else(|err| {
+                    err.print(py);
+                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                })
+            }
+            Err(err) => {
+                err.print(py);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
     } else {
         error!("Expected JSONResponse, but got another type.");
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -216,8 +274,27 @@ pub fn convert_text_response(_py: Python, result: &Bound<PyAny>) -> Response {
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
         (
             status_code,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            )],
             resp.content.clone(),
+        )
+            .into_response()
+    } else if response_class_is(response_class_name(result).as_deref(), "PlainTextResponse") {
+        let status_code = response_status(result, StatusCode::OK);
+        let content = result
+            .getattr("content")
+            .ok()
+            .and_then(|content| content.extract::<String>().ok())
+            .unwrap_or_default();
+        (
+            status_code,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            )],
+            content,
         )
             .into_response()
     } else {
@@ -228,11 +305,30 @@ pub fn convert_text_response(_py: Python, result: &Bound<PyAny>) -> Response {
 
 #[inline(always)]
 pub fn convert_redirect_response(_py: Python, result: &Bound<PyAny>) -> Response {
-    if let Ok(resp) = result.extract::<PyRef<'_, PyRedirectResponse>>() {
-        if resp.status_code == 301 {
-            Redirect::permanent(&resp.url).into_response()
+    let redirect = if let Ok(resp) = result.extract::<PyRef<'_, PyRedirectResponse>>() {
+        Some((resp.url.clone(), resp.status_code))
+    } else if response_class_is(response_class_name(result).as_deref(), "RedirectResponse") {
+        result
+            .getattr("url")
+            .ok()
+            .and_then(|url| url.extract::<String>().ok())
+            .map(|url| {
+                let status = result
+                    .getattr("status_code")
+                    .ok()
+                    .and_then(|status| status.extract::<u16>().ok())
+                    .unwrap_or(307);
+                (url, status)
+            })
+    } else {
+        None
+    };
+
+    if let Some((url, status_code)) = redirect {
+        if status_code == 301 {
+            Redirect::permanent(&url).into_response()
         } else {
-            Redirect::temporary(&resp.url).into_response()
+            Redirect::temporary(&url).into_response()
         }
     } else {
         error!("Expected RedirectResponse, but got another type.");
@@ -245,6 +341,31 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
     if result.is_none() {
         return StatusCode::NO_CONTENT.into_response();
     }
-    let json = py_any_to_json(py, result);
-    json_response(py, &json)
+
+    let class_name = response_class_name(result);
+    if result.is_instance_of::<PyJSONResponse>()
+        || response_class_is(class_name.as_deref(), "JSONResponse")
+    {
+        return convert_json_response(py, result);
+    }
+    if result.is_instance_of::<PyPlainTextResponse>()
+        || response_class_is(class_name.as_deref(), "PlainTextResponse")
+    {
+        return convert_text_response(py, result);
+    }
+    if result.is_instance_of::<PyHTMLResponse>()
+        || response_class_is(class_name.as_deref(), "HTMLResponse")
+    {
+        return convert_html_response(py, result);
+    }
+    if result.is_instance_of::<PyRedirectResponse>()
+        || response_class_is(class_name.as_deref(), "RedirectResponse")
+    {
+        return convert_redirect_response(py, result);
+    }
+
+    crate::utils::utils::py_json_response(py, result).unwrap_or_else(|err| {
+        err.print(py);
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })
 }
