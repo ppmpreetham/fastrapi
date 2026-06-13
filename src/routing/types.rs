@@ -72,6 +72,7 @@ pub struct ParsedParameter {
     pub param_object: Option<Py<PyAny>>,
     pub is_pydantic_model: bool,
     pub scalar_kind: crate::ffi::pydantic::ScalarKind,
+    pub validator_index: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -109,6 +110,7 @@ pub struct PydanticValidator {
     pub model_class: Py<PyAny>,
     pub validate_json: Option<Py<PyAny>>,
     pub validate_python: Py<PyAny>,
+    pub core_validator: Option<Py<PyAny>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -97,7 +97,22 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     submodule!(m, "request", add_classes!(PyRequest, PyHTTPConnection));
     submodule!(m, "datastructures", add_classes!(PyUploadFile));
     submodule!(m, "background", add_classes!(PyBackgroundTasks));
-    submodule!(m, "security", add_classes!(PySecurityScopes));
+    submodule!(
+        m,
+        "security",
+        add_classes!(
+            PySecurityScopes,
+            APIKeyHeader,
+            APIKeyQuery,
+            APIKeyCookie,
+            HTTPAuthorizationCredentials,
+            HTTPBearer,
+            OAuth2PasswordBearer,
+            HTTPBasicCredentials,
+            HTTPBasic
+        )
+    );
+    submodule!(m, "staticfiles", add_classes!(PyStaticFiles));
     submodule!(
         m,
         "middleware",
@@ -118,6 +133,24 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "SecurityScopes",
         m.getattr("security")?.getattr("SecurityScopes")?,
+    )?;
+    m.add(
+        "OAuth2PasswordBearer",
+        m.getattr("security")?.getattr("OAuth2PasswordBearer")?,
+    )?;
+    m.add("HTTPBearer", m.getattr("security")?.getattr("HTTPBearer")?)?;
+    m.add("HTTPBasic", m.getattr("security")?.getattr("HTTPBasic")?)?;
+    m.add(
+        "APIKeyHeader",
+        m.getattr("security")?.getattr("APIKeyHeader")?,
+    )?;
+    m.add(
+        "APIKeyQuery",
+        m.getattr("security")?.getattr("APIKeyQuery")?,
+    )?;
+    m.add(
+        "APIKeyCookie",
+        m.getattr("security")?.getattr("APIKeyCookie")?,
     )?;
     m.add("Depends", m.getattr("params")?.getattr("Depends")?)?;
     m.add("Query", m.getattr("params")?.getattr("Query")?)?;

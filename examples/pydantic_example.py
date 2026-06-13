@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from fastrapi import FastrAPI
 
-api = FastrAPI(openapi_url="/api-docs/openapi.json")
+api = FastrAPI()
 
 class User(BaseModel):
     name: str

@@ -344,7 +344,7 @@ Some advanced features are still in development like:
 - [ ] Better error handling (currently shows Rust errors)
 - [ ] Rate limiter (even FastAPI doesn't have it)
 - [x] Websockets
-- [ ] Form/Multipart support
+- [x] Form/Multipart support
 - [ ] File uploads (`UploadFile` + multipart parsing)
 - [x] Generated OpenAPI JSON + Swagger docs (`/api-docs/openapi.json`, `/docs`)
 - [ ] Sub-APIs / Includes
@@ -353,7 +353,7 @@ Some advanced features are still in development like:
 - [x] Dependency injection
 - [x] Route parameter parsing (`Path`, `Query`, body models, `Depends`, `Security`)
 - [ ] GraphQL support
-- [ ] APIRouter + include_router(prefix=..., tags=..., dependencies=...)
+- [x] APIRouter + include_router(prefix=..., tags=..., dependencies=...)
 - [ ] Respect response_model=None (allow raw Response / RedirectResponse returns)
 - [ ] app.mount() for static files & sub-apps
 - [ ] @app.exception_handler() + app.add_exception_handler()

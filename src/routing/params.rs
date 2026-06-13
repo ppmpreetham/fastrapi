@@ -241,6 +241,7 @@ pub fn parse_parameter_spec(
         param_object,
         is_pydantic_model,
         scalar_kind: pydantic::ScalarKind::Other,
+        validator_index: None,
     })
 }
 

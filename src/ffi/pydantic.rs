@@ -15,7 +15,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use once_cell::sync::OnceCell;
-use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple, PyType};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyModule, PyString, PyTuple, PyType};
 use pyo3::{intern, prelude::*};
 use serde_json::{Value, json};
 use std::borrow::Cow;
@@ -97,6 +97,20 @@ pub fn validate_json_with_pydantic<'py>(
     validator: &PydanticValidator,
     raw_payload: &[u8],
 ) -> Result<Py<PyAny>, Response> {
+    if let Some(core_engine) = &validator.core_validator {
+        let raw_bytes = PyBytes::new(py, raw_payload);
+        return match core_engine
+            .bind(py)
+            .call_method1(intern!(py, "validate_json"), (raw_bytes,))
+        {
+            Ok(obj) => Ok(obj.into()),
+            Err(e) => {
+                e.print(py);
+                Err((StatusCode::UNPROCESSABLE_ENTITY, "Validation failed").into_response())
+            }
+        };
+    }
+
     if let Some(validate_json) = &validator.validate_json {
         let raw = pyo3::types::PyBytes::new(py, raw_payload);
         return match validate_json.bind(py).call1((raw,)) {
@@ -244,7 +258,14 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                 if parsed_param.is_pydantic_model
                     && let Some(ann) = &parsed_param.annotation
                 {
+                    let validator_idx = param_validators.len();
+                    parsed_param.validator_index = Some(validator_idx);
+
                     let ann_bound = ann.bind(py);
+                    let core_validator = ann_bound
+                        .getattr(intern!(py, "__pydantic_validator__"))
+                        .ok()
+                        .map(|v| v.unbind());
                     let validate_json = ann_bound
                         .getattr(intern!(py, "model_validate_json"))
                         .ok()
@@ -258,6 +279,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                         model_class: ann.clone_ref(py),
                         validate_json,
                         validate_python,
+                        core_validator,
                     });
                 }
             }
@@ -506,11 +528,11 @@ fn apply_body_and_validation(
         if param.is_pydantic_model
             && let BodyPayload::Json { raw, .. } = payload
         {
-            let validator = handler
-                .param_validators
-                .iter()
-                .find(|validator| validator.name == param.name)
+            let idx = param
+                .validator_index
                 .ok_or_else(|| validation_error_response("Body validator is not registered"))?;
+
+            let validator = &handler.param_validators[idx];
             let validated = validate_json_with_pydantic(py, validator, raw)?;
             kwargs.set_item(param.name_py.bind(py), validated).ok();
             return Ok(());
@@ -603,11 +625,11 @@ fn apply_body_and_validation(
 
         if let Some(value) = value {
             if param.is_pydantic_model {
-                let validator = handler
-                    .param_validators
-                    .iter()
-                    .find(|validator| validator.name == param.name)
+                let idx = param
+                    .validator_index
                     .ok_or_else(|| validation_error_response("Body validator is not registered"))?;
+
+                let validator = &handler.param_validators[idx];
                 let validated =
                     validate_python_with_pydantic(py, validator.validate_python.bind(py), value)?;
                 kwargs.set_item(param.name_py.bind(py), validated).ok();
