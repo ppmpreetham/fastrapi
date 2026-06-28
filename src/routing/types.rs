@@ -111,6 +111,7 @@ pub struct PydanticValidator {
     pub validate_json: Option<Py<PyAny>>,
     pub validate_python: Py<PyAny>,
     pub core_validator: Option<Py<PyAny>>,
+    pub validate_json_method: Option<Py<PyAny>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

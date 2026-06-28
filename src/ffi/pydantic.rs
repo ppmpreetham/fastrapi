@@ -15,7 +15,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use once_cell::sync::OnceCell;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyModule, PyString, PyTuple, PyType};
+use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple, PyType};
 use pyo3::{intern, prelude::*};
 use serde_json::{Value, json};
 use std::borrow::Cow;
