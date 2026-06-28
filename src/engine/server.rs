@@ -1313,13 +1313,12 @@ async fn serve_static_file(mount: Arc<StaticMount>, request_path: String) -> Res
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    if !mount.follow_symlink {
-        if let Ok(link_metadata) = tokio::fs::symlink_metadata(&file_path).await
+    if !mount.follow_symlink
+        && let Ok(link_metadata) = tokio::fs::symlink_metadata(&file_path).await
             && link_metadata.file_type().is_symlink()
         {
             return StatusCode::FORBIDDEN.into_response();
         }
-    }
 
     let bytes = match tokio::fs::read(&file_path).await {
         Ok(bytes) => bytes,

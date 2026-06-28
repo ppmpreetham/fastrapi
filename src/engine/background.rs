@@ -51,15 +51,14 @@ impl PyBackgroundTasks {
                     };
                     match func.into_bound(py).call1(&args_tuple) {
                         Ok(result) => {
-                            if result.hasattr("__await__").unwrap_or(false) {
-                                if let Err(e) = py
+                            if result.hasattr("__await__").unwrap_or(false)
+                                && let Err(e) = py
                                     .import("asyncio")
                                     .and_then(|asyncio| asyncio.call_method1("run", (result,)))
                                 {
                                     error!("Async background task error: {}", e);
                                     e.print(py);
                                 }
-                            }
                         }
                         Err(e) => {
                             error!("Background task error: {}", e);

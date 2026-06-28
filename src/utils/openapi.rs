@@ -198,8 +198,8 @@ fn python_type_to_openapi_type(py: Python<'_>, type_hint: &Bound<PyAny>) -> Json
         }
     }
 
-    if let Ok(type_repr) = type_hint.str() {
-        if let Ok(type_name) = type_repr.to_str() {
+    if let Ok(type_repr) = type_hint.str()
+        && let Ok(type_name) = type_repr.to_str() {
             if type_name.contains("List") || type_name.contains("list") {
                 return json!({
                     "type": "array",
@@ -213,7 +213,6 @@ fn python_type_to_openapi_type(py: Python<'_>, type_hint: &Bound<PyAny>) -> Json
                 });
             }
         }
-    }
 
     json!({ "type": "string" })
 }

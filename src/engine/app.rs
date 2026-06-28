@@ -183,7 +183,7 @@ impl FastrAPI {
         let class_name_obj = middleware_class.bind(py).getattr(intern!(py, "__name__"))?;
         let class_name = class_name_obj.cast::<PyString>()?.to_str()?.to_owned();
 
-        let opts = &kwargs.map(|d| d.clone()).unwrap_or_else(|| PyDict::new(py));
+        let opts = &kwargs.cloned().unwrap_or_else(|| PyDict::new(py));
         match class_name.as_str() {
             "CORSMiddleware" => {
                 self.cors_config = Some(parse_cors_params(opts)?);

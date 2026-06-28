@@ -93,20 +93,16 @@ fn is_async_callable(
     inspect: &Bound<'_, PyModule>,
     func: &Bound<'_, PyAny>,
 ) -> bool {
-    if let Ok(is_coroutine) = inspect.call_method1(intern!(py, "iscoroutinefunction"), (func,)) {
-        if is_coroutine.is_truthy().unwrap_or(false) {
+    if let Ok(is_coroutine) = inspect.call_method1(intern!(py, "iscoroutinefunction"), (func,))
+        && is_coroutine.is_truthy().unwrap_or(false) {
             return true;
         }
-    }
-    if let Ok(call_method) = func.getattr(intern!(py, "__call__")) {
-        if let Ok(is_coroutine) =
+    if let Ok(call_method) = func.getattr(intern!(py, "__call__"))
+        && let Ok(is_coroutine) =
             inspect.call_method1(intern!(py, "iscoroutinefunction"), (call_method,))
-        {
-            if is_coroutine.is_truthy().unwrap_or(false) {
+            && is_coroutine.is_truthy().unwrap_or(false) {
                 return true;
             }
-        }
-    }
     false
 }
 
@@ -132,11 +128,10 @@ fn annotation_display_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Opt
 fn extract_string_list(value: &Bound<'_, PyAny>) -> Option<Vec<String>> {
     let mut values = Vec::new();
     value.try_iter().ok()?.for_each(|item_res| {
-        if let Ok(item) = item_res {
-            if let Ok(s) = item.extract::<String>() {
+        if let Ok(item) = item_res
+            && let Ok(s) = item.extract::<String>() {
                 values.push(s);
             }
-        }
     });
 
     Some(values)
@@ -185,11 +180,10 @@ fn extract_and_flatten(
 ) -> PyResult<usize> {
     let func_id = func.as_ptr() as u64;
 
-    if use_cache {
-        if let Some(&idx) = visited.get(&func_id) {
+    if use_cache
+        && let Some(&idx) = visited.get(&func_id) {
             return Ok(idx);
         }
-    }
 
     let signature = get_signature(py, func, inspect)?;
     let parameters = signature.getattr(keys.parameters)?;
@@ -325,8 +319,8 @@ fn build_injection_plan(
         }
 
         let mut special = false;
-        if let Ok(annotation) = param.getattr(keys.annotation) {
-            if let Some(annotation_name) = annotation_display_name(py, &annotation) {
+        if let Ok(annotation) = param.getattr(keys.annotation)
+            && let Some(annotation_name) = annotation_display_name(py, &annotation) {
                 if annotation_name.contains("Request") {
                     plan.push((name.clone(), InjectionType::Request));
                     needs_request_object = true;
@@ -336,7 +330,6 @@ fn build_injection_plan(
                     special = true;
                 }
             }
-        }
 
         if !special {
             let parsed_param = params::parse_parameter_spec(py, &name, &param, path_param_names)?;
@@ -411,11 +404,10 @@ pub fn execute_dependencies_sync(
 
         results_registry[i] = Some(result.clone_ref(py));
 
-        if dep.is_top_level {
-            if let Some(name) = &dep.param_name {
+        if dep.is_top_level
+            && let Some(name) = &dep.param_name {
                 final_results.push((name.clone(), result));
             }
-        }
     }
 
     Ok(final_results)

@@ -77,7 +77,7 @@ impl PyRequestValidationError {
         let body_py = body.map(|b| b.into()).unwrap_or_else(|| py.None());
         (
             Self { body: body_py },
-            PyValidationException::new(errors.into()),
+            PyValidationException::new(errors),
         )
     }
 

@@ -178,11 +178,10 @@ fn test_model(
 
 pub fn register_pydantic_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(test_model, m)?)?;
-    if BASEMODEL_TYPE.get().is_none() {
-        if let Some(base_model_type) = initialize_basemodel(m.py()) {
+    if BASEMODEL_TYPE.get().is_none()
+        && let Some(base_model_type) = initialize_basemodel(m.py()) {
             let _ = BASEMODEL_TYPE.set(base_model_type);
         }
-    }
     Ok(())
 }
 
@@ -247,11 +246,10 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
             let mut parsed_param =
                 params::parse_parameter_spec(py, &param_name, &param_obj, &path_param_names)?;
 
-            if !parsed_param.is_pydantic_model {
-                if let Some(ann) = &parsed_param.annotation {
+            if !parsed_param.is_pydantic_model
+                && let Some(ann) = &parsed_param.annotation {
                     parsed_param.scalar_kind = resolve_scalar_kind(py, ann.bind(py));
                 }
-            }
 
             if parsed_param.source == ParameterSource::Body {
                 body_param_names.push(parsed_param.name.clone());
@@ -364,11 +362,10 @@ fn convert_scalar_value(
         ScalarKind::Str => Ok(raw.into_pyobject(py).unwrap().into_any().unbind()),
 
         ScalarKind::Other => {
-            if let Some(ann) = param.annotation.as_ref().map(|a| a.bind(py)) {
-                if let Ok(v) = ann.call1((raw,)) {
+            if let Some(ann) = param.annotation.as_ref().map(|a| a.bind(py))
+                && let Ok(v) = ann.call1((raw,)) {
                     return Ok(v.unbind());
                 }
-            }
             Ok(raw.into_pyobject(py).unwrap().into_any().unbind())
         }
     }
@@ -568,7 +565,7 @@ fn apply_body_and_validation(
                 if let Some(value) = value {
                     match value {
                         BodyField::Text(raw) => {
-                            let value = convert_scalar_value(py, &raw, param)?;
+                            let value = convert_scalar_value(py, raw, param)?;
                             validate_scalar_constraints(param, value.bind(py))?;
                             kwargs.set_item(param.name_py.bind(py), value).ok();
                         }

@@ -33,5 +33,5 @@ pub struct Config {
 
 pub fn config() -> &'static Config {
     static CONFIG: std::sync::LazyLock<Config> = std::sync::LazyLock::new(Config::default);
-    &*CONFIG
+    &CONFIG
 }
