@@ -97,12 +97,12 @@ pub fn validate_json_with_pydantic<'py>(
     validator: &PydanticValidator,
     raw_payload: &[u8],
 ) -> Result<Py<PyAny>, Response> {
-    if let Some(core_engine) = &validator.core_validator {
-        let raw_bytes = PyBytes::new(py, raw_payload);
-        return match core_engine
-            .bind(py)
-            .call_method1(intern!(py, "validate_json"), (raw_bytes,))
-        {
+    if let Some(validate_json_method) = &validator.validate_json_method {
+        let raw_str = std::str::from_utf8(raw_payload).map_err(|_| {
+            (StatusCode::UNPROCESSABLE_ENTITY, "Invalid UTF-8 payload").into_response()
+        })?;
+
+        return match validate_json_method.bind(py).call1((raw_str,)) {
             Ok(obj) => Ok(obj.into()),
             Err(e) => {
                 e.print(py);
@@ -274,12 +274,19 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                         .getattr(intern!(py, "model_validate"))
                         .map(Bound::unbind)
                         .unwrap_or_else(|_| ann.clone_ref(py));
+                    let validate_json_method = core_validator.as_ref().and_then(|core| {
+                        core.bind(py)
+                            .getattr(intern!(py, "validate_json"))
+                            .ok()
+                            .map(Bound::unbind)
+                    });
                     param_validators.push(PydanticValidator {
                         name: parsed_param.name.clone(),
                         model_class: ann.clone_ref(py),
                         validate_json,
                         validate_python,
                         core_validator,
+                        validate_json_method,
                     });
                 }
             }
@@ -561,7 +568,7 @@ fn apply_body_and_validation(
                 if let Some(value) = value {
                     match value {
                         BodyField::Text(raw) => {
-                            let value = convert_scalar_value(py, raw, param)?;
+                            let value = convert_scalar_value(py, &raw, param)?;
                             validate_scalar_constraints(param, value.bind(py))?;
                             kwargs.set_item(param.name_py.bind(py), value).ok();
                         }

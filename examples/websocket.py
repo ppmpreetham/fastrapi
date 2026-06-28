@@ -1,5 +1,5 @@
 from fastrapi import FastrAPI
-from fastrapi.websocket import websocket
+from fastrapi import websocket
 
 app = FastrAPI()
 

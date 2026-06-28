@@ -1466,14 +1466,14 @@ fn sync_no_request_method_router(
 }
 
 async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> Response {
-    let method = match req.method().as_str().as_bytes() {
-        b"GET" => HttpMethod::GET,
-        b"POST" => HttpMethod::POST,
-        b"PUT" => HttpMethod::PUT,
-        b"DELETE" => HttpMethod::DELETE,
-        b"PATCH" => HttpMethod::PATCH,
-        b"OPTIONS" => HttpMethod::OPTIONS,
-        b"HEAD" => HttpMethod::HEAD,
+    let method = match req.method().as_str() {
+        "GET" => HttpMethod::GET,
+        "POST" => HttpMethod::POST,
+        "PUT" => HttpMethod::PUT,
+        "DELETE" => HttpMethod::DELETE,
+        "PATCH" => HttpMethod::PATCH,
+        "OPTIONS" => HttpMethod::OPTIONS,
+        "HEAD" => HttpMethod::HEAD,
         _ => return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response(),
     };
 
