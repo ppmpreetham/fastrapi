@@ -94,15 +94,17 @@ fn is_async_callable(
     func: &Bound<'_, PyAny>,
 ) -> bool {
     if let Ok(is_coroutine) = inspect.call_method1(intern!(py, "iscoroutinefunction"), (func,))
-        && is_coroutine.is_truthy().unwrap_or(false) {
-            return true;
-        }
+        && is_coroutine.is_truthy().unwrap_or(false)
+    {
+        return true;
+    }
     if let Ok(call_method) = func.getattr(intern!(py, "__call__"))
         && let Ok(is_coroutine) =
             inspect.call_method1(intern!(py, "iscoroutinefunction"), (call_method,))
-            && is_coroutine.is_truthy().unwrap_or(false) {
-                return true;
-            }
+        && is_coroutine.is_truthy().unwrap_or(false)
+    {
+        return true;
+    }
     false
 }
 
@@ -129,9 +131,10 @@ fn extract_string_list(value: &Bound<'_, PyAny>) -> Option<Vec<String>> {
     let mut values = Vec::new();
     value.try_iter().ok()?.for_each(|item_res| {
         if let Ok(item) = item_res
-            && let Ok(s) = item.extract::<String>() {
-                values.push(s);
-            }
+            && let Ok(s) = item.extract::<String>()
+        {
+            values.push(s);
+        }
     });
 
     Some(values)
@@ -180,10 +183,9 @@ fn extract_and_flatten(
 ) -> PyResult<usize> {
     let func_id = func.as_ptr() as u64;
 
-    if use_cache
-        && let Some(&idx) = visited.get(&func_id) {
-            return Ok(idx);
-        }
+    if use_cache && let Some(&idx) = visited.get(&func_id) {
+        return Ok(idx);
+    }
 
     let signature = get_signature(py, func, inspect)?;
     let parameters = signature.getattr(keys.parameters)?;
@@ -320,16 +322,17 @@ fn build_injection_plan(
 
         let mut special = false;
         if let Ok(annotation) = param.getattr(keys.annotation)
-            && let Some(annotation_name) = annotation_display_name(py, &annotation) {
-                if annotation_name.contains("Request") {
-                    plan.push((name.clone(), InjectionType::Request));
-                    needs_request_object = true;
-                    special = true;
-                } else if annotation_name.contains("SecurityScopes") {
-                    plan.push((name.clone(), InjectionType::SecurityScopes));
-                    special = true;
-                }
+            && let Some(annotation_name) = annotation_display_name(py, &annotation)
+        {
+            if annotation_name.contains("Request") {
+                plan.push((name.clone(), InjectionType::Request));
+                needs_request_object = true;
+                special = true;
+            } else if annotation_name.contains("SecurityScopes") {
+                plan.push((name.clone(), InjectionType::SecurityScopes));
+                special = true;
             }
+        }
 
         if !special {
             let parsed_param = params::parse_parameter_spec(py, &name, &param, path_param_names)?;
@@ -405,9 +408,10 @@ pub fn execute_dependencies_sync(
         results_registry[i] = Some(result.clone_ref(py));
 
         if dep.is_top_level
-            && let Some(name) = &dep.param_name {
-                final_results.push((name.clone(), result));
-            }
+            && let Some(name) = &dep.param_name
+        {
+            final_results.push((name.clone(), result));
+        }
     }
 
     Ok(final_results)
@@ -442,14 +446,11 @@ pub async fn execute_dependencies(
                 )?;
                 let bound_func = dep.func.bind(py);
                 let bound_kwargs = py_kwargs.bind(py);
-                let coroutine = bound_func.call((), Some(bound_kwargs))?.unbind();
-                let locals = pyo3_async_runtimes::TaskLocals::new(async_loop.bind(py).clone());
-                Ok(pyo3_async_runtimes::tokio::scope(locals, async move {
-                    let py_future = Python::attach(|py| {
-                        pyo3_async_runtimes::tokio::into_future(coroutine.into_bound(py))
-                    })?;
-                    py_future.await
-                }))
+                let coroutine = bound_func.call((), Some(bound_kwargs))?;
+                let locals = rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
+                Ok(rsloop::rust_async::into_future_with_locals(
+                    &locals, coroutine,
+                )?)
             })?;
             future.await.map_err(DependencyExecutionError::Python)?
         } else {

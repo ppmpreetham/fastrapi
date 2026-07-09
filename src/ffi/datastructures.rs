@@ -59,7 +59,7 @@ impl PyUploadFile {
         let data = self.file_content[start..end].to_vec();
         self.cursor = end;
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        rsloop::rust_async::future_into_py(py, async move {
             Python::attach(|py| Ok(PyBytes::new(py, &data).unbind()))
         })
     }
@@ -68,15 +68,15 @@ impl PyUploadFile {
         self.file_content.extend_from_slice(&data);
         self.size = Some(self.file_content.len() as u64);
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(()) })
+        rsloop::rust_async::future_into_py(py, async move { Ok(()) })
     }
 
     fn seek<'py>(&mut self, py: Python<'py>, offset: i64) -> PyResult<Bound<'py, PyAny>> {
         self.cursor = offset as usize;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(()) })
+        rsloop::rust_async::future_into_py(py, async move { Ok(()) })
     }
 
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(()) })
+        rsloop::rust_async::future_into_py(py, async move { Ok(()) })
     }
 }

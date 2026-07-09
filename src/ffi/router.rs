@@ -98,9 +98,10 @@ impl PyAPIRouter {
                 iter.flatten().for_each(|item| {
                     if let Ok(py_str) = item.cast::<PyString>()
                         && let Ok(tag_slice) = py_str.to_str()
-                            && !merged_tags.iter().any(|t| t == tag_slice) {
-                                merged_tags.push(tag_slice.to_string());
-                            }
+                        && !merged_tags.iter().any(|t| t == tag_slice)
+                    {
+                        merged_tags.push(tag_slice.to_string());
+                    }
                 });
             }
         }

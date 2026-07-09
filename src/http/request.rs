@@ -142,7 +142,8 @@ impl PyRequest {
             None
         });
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let locals = rsloop::rust_async::get_current_locals(py)?;
+        rsloop::rust_async::future_into_py_with_locals(py, locals.clone(), async move {
             let body: Arc<[u8]> = body_cell
                 .get_or_try_init(|| async {
                     let mut full_body = if let Some(len) = content_length {
@@ -154,7 +155,7 @@ impl PyRequest {
                         let message = {
                             let fut = Python::attach(|py| {
                                 let awaitable = receive.bind(py).call0()?;
-                                pyo3_async_runtimes::tokio::into_future(awaitable)
+                                rsloop::rust_async::into_future_with_locals(&locals, awaitable)
                             })?;
 
                             fut.await?
@@ -191,9 +192,9 @@ impl PyRequest {
 
     fn json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let body_awaitable = self.body(py)?;
-        let body_fut = pyo3_async_runtimes::tokio::into_future(body_awaitable)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let locals = rsloop::rust_async::get_current_locals(py)?;
+        let body_fut = rsloop::rust_async::into_future_with_locals(&locals, body_awaitable)?;
+        rsloop::rust_async::future_into_py_with_locals(py, locals.clone(), async move {
             let body_bytes: Py<PyAny> = body_fut.await?;
 
             Python::attach(|py| {

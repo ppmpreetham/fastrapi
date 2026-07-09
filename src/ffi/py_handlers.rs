@@ -8,14 +8,12 @@ use axum::{
     http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
 };
-use once_cell::sync::OnceCell;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 use smallvec::SmallVec;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
-use tokio::sync::oneshot;
+use std::sync::Arc;
 use tracing::error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,26 +236,6 @@ pub(crate) fn render_no_request_json_response(py: Python<'_>, handler: &RouteHan
     .unwrap_or_else(|err| python_error_to_response(py, err))
 }
 
-#[pyclass]
-struct PyFutureDoneCallback {
-    sender: Mutex<Option<oneshot::Sender<PyResult<Py<PyAny>>>>>,
-}
-
-static RUN_COROUTINE_THREADSAFE: OnceCell<Py<PyAny>> = OnceCell::new();
-
-#[pymethods]
-impl PyFutureDoneCallback {
-    fn __call__(&self, py: Python<'_>, future: &Bound<'_, PyAny>) -> PyResult<()> {
-        let result = future
-            .call_method0(intern!(py, "result"))
-            .map(Bound::unbind);
-        if let Some(sender) = self.sender.lock().ok().and_then(|mut guard| guard.take()) {
-            let _ = sender.send(result);
-        }
-        Ok(())
-    }
-}
-
 #[inline(always)]
 async fn await_python_future<F>(
     handler: Arc<RouteHandler>,
@@ -284,30 +262,10 @@ pub(crate) fn schedule_python_coroutine(
     async_loop: &Arc<Py<PyAny>>,
     coroutine: Bound<'_, PyAny>,
 ) -> PyResult<std::pin::Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>>> {
-    let run_coroutine_threadsafe = RUN_COROUTINE_THREADSAFE.get_or_try_init(|| {
-        py.import(intern!(py, "asyncio"))?
-            .getattr(intern!(py, "run_coroutine_threadsafe"))
-            .map(Bound::unbind)
-    })?;
-    let (sender, receiver) = oneshot::channel();
-    let callback = Py::new(
-        py,
-        PyFutureDoneCallback {
-            sender: Mutex::new(Some(sender)),
-        },
-    )?;
-    let future = run_coroutine_threadsafe
-        .bind(py)
-        .call1((coroutine, async_loop.bind(py)))?;
-    future.call_method1(intern!(py, "add_done_callback"), (callback,))?;
-
-    Ok(Box::pin(async move {
-        receiver.await.map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("Python coroutine result channel closed")
-        })?
-    }))
+    let locals = rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
+    let future = rsloop::rust_async::into_future_with_locals(&locals, coroutine)?;
+    Ok(Box::pin(future))
 }
-
 #[inline(always)]
 fn into_asyncio_future(
     py: Python<'_>,

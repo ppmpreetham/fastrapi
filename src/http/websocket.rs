@@ -153,14 +153,14 @@ pub struct PyWebSocket {
 #[pymethods]
 impl PyWebSocket {
     fn accept<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(()) })
+        rsloop::rust_async::future_into_py(py, async move { Ok(()) })
     }
 
     fn send_text<'py>(&self, py: Python<'py>, data: String) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.tx.clone();
         let bytes = Bytes::from(data);
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        rsloop::rust_async::future_into_py(py, async move {
             tx.send(WSMessage::Text(bytes))
                 .await
                 .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("WebSocket closed"))?;
@@ -172,7 +172,7 @@ impl PyWebSocket {
         let tx = self.tx.clone();
         let bytes = Bytes::from(data);
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        rsloop::rust_async::future_into_py(py, async move {
             tx.send(WSMessage::Binary(bytes))
                 .await
                 .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("WebSocket closed"))?;
@@ -192,7 +192,7 @@ impl PyWebSocket {
     fn receive_text<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let rx = self.rx.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        rsloop::rust_async::future_into_py(py, async move {
             let mut rx_guard = rx.lock().await;
             match rx_guard.recv().await {
                 Some(WSMessage::Text(bytes)) => String::from_utf8(bytes.to_vec())
@@ -210,7 +210,7 @@ impl PyWebSocket {
     fn receive_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let rx = self.rx.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        rsloop::rust_async::future_into_py(py, async move {
             let mut rx_guard = rx.lock().await;
             match rx_guard.recv().await {
                 Some(WSMessage::Binary(data)) => Ok(data.to_vec()),
@@ -227,7 +227,7 @@ impl PyWebSocket {
     fn receive_json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let rx = self.rx.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        rsloop::rust_async::future_into_py(py, async move {
             let mut rx_guard = rx.lock().await;
             match rx_guard.recv().await {
                 Some(WSMessage::Text(bytes)) => {
@@ -253,7 +253,7 @@ impl PyWebSocket {
     fn close<'py>(&self, py: Python<'py>, _code: Option<u16>) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.tx.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        rsloop::rust_async::future_into_py(py, async move {
             tx.send(WSMessage::Close).await.map_err(|_| {
                 pyo3::exceptions::PyRuntimeError::new_err("WebSocket already closed")
             })?;

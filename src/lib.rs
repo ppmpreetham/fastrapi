@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyModule};
+use pyo3::types::{PyDict, PyList, PyModule};
 use pyo3_nest::{add_classes, submodule};
 
 pub mod engine;
@@ -52,6 +52,18 @@ use router::PyAPIRouter;
 use staticfiles::PyStaticFiles;
 use websocket::PyWebSocket;
 
+fn register_rsloop_asyncio_alias(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = m.py();
+    let rsloop_module = py.import("rsloop")?;
+    m.add("asyncio", &rsloop_module)?;
+
+    let sys_modules = py
+        .import("sys")?
+        .getattr("modules")?
+        .cast_into::<PyDict>()?;
+    sys_modules.set_item("fastrapi.asyncio", rsloop_module)?;
+    Ok(())
+}
 #[pymodule(gil_used = false)]
 fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -129,6 +141,7 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     status::create_status_submodule(m)?;
     pydantic::register_pydantic_integration(m)?;
+    register_rsloop_asyncio_alias(m)?;
 
     m.add(
         "SecurityScopes",

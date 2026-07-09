@@ -55,10 +55,10 @@ impl PyBackgroundTasks {
                                 && let Err(e) = py
                                     .import("asyncio")
                                     .and_then(|asyncio| asyncio.call_method1("run", (result,)))
-                                {
-                                    error!("Async background task error: {}", e);
-                                    e.print(py);
-                                }
+                            {
+                                error!("Async background task error: {}", e);
+                                e.print(py);
+                            }
                         }
                         Err(e) => {
                             error!("Background task error: {}", e);

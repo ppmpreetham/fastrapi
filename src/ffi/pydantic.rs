@@ -179,9 +179,10 @@ fn test_model(
 pub fn register_pydantic_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(test_model, m)?)?;
     if BASEMODEL_TYPE.get().is_none()
-        && let Some(base_model_type) = initialize_basemodel(m.py()) {
-            let _ = BASEMODEL_TYPE.set(base_model_type);
-        }
+        && let Some(base_model_type) = initialize_basemodel(m.py())
+    {
+        let _ = BASEMODEL_TYPE.set(base_model_type);
+    }
     Ok(())
 }
 
@@ -247,9 +248,10 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                 params::parse_parameter_spec(py, &param_name, &param_obj, &path_param_names)?;
 
             if !parsed_param.is_pydantic_model
-                && let Some(ann) = &parsed_param.annotation {
-                    parsed_param.scalar_kind = resolve_scalar_kind(py, ann.bind(py));
-                }
+                && let Some(ann) = &parsed_param.annotation
+            {
+                parsed_param.scalar_kind = resolve_scalar_kind(py, ann.bind(py));
+            }
 
             if parsed_param.source == ParameterSource::Body {
                 body_param_names.push(parsed_param.name.clone());
@@ -363,9 +365,10 @@ fn convert_scalar_value(
 
         ScalarKind::Other => {
             if let Some(ann) = param.annotation.as_ref().map(|a| a.bind(py))
-                && let Ok(v) = ann.call1((raw,)) {
-                    return Ok(v.unbind());
-                }
+                && let Ok(v) = ann.call1((raw,))
+            {
+                return Ok(v.unbind());
+            }
             Ok(raw.into_pyobject(py).unwrap().into_any().unbind())
         }
     }

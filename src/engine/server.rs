@@ -405,19 +405,20 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 }
 
 fn start_background_asyncio_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let asyncio = py.import("asyncio")?;
-    let event_loop = asyncio.call_method0("new_event_loop")?.unbind();
+    let loop_module = py.import("rsloop").or_else(|_| py.import("asyncio"))?;
+    let event_loop = loop_module.call_method0("new_event_loop")?.unbind();
     let loop_for_thread = event_loop.clone_ref(py);
 
     std::thread::spawn(move || {
         Python::attach(|py| {
+            let _ = py.import("rsloop");
             let Ok(asyncio) = py.import("asyncio") else {
                 return;
             };
             let event_loop = loop_for_thread.bind(py);
             let _ = asyncio.call_method1("set_event_loop", (event_loop,));
             if let Err(err) = event_loop.call_method0("run_forever") {
-                log_python_error("asyncio loop stopped with error", err);
+                log_python_error("python async loop stopped with error", err);
             }
             let _ = event_loop.call_method0("close");
         });
@@ -425,7 +426,6 @@ fn start_background_asyncio_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
 
     Ok(event_loop)
 }
-
 fn stop_background_asyncio_loop(py: Python<'_>, event_loop: &Arc<Py<PyAny>>) {
     let event_loop = event_loop.bind(py);
     if let Ok(stop) = event_loop.getattr("stop") {
@@ -551,12 +551,12 @@ fn exit_lifespan(py: Python<'_>, entered_lifespan: EnteredLifespan) -> PyResult<
 }
 
 fn create_event_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let asyncio = py.import("asyncio")?;
-    let event_loop = asyncio.call_method0("new_event_loop")?;
-    asyncio.call_method1("set_event_loop", (&event_loop,))?;
+    let loop_module = py.import("rsloop").or_else(|_| py.import("asyncio"))?;
+    let event_loop = loop_module.call_method0("new_event_loop")?;
+    py.import("asyncio")?
+        .call_method1("set_event_loop", (&event_loop,))?;
     Ok(event_loop.unbind())
 }
-
 fn run_awaitable_in_new_loop(py: Python<'_>, awaitable: Bound<'_, PyAny>) -> PyResult<()> {
     let event_loop = create_event_loop(py)?;
     let result = run_awaitable_in_loop(py, event_loop.bind(py), awaitable);
@@ -1123,7 +1123,7 @@ fn build_router(
 
     // L1: Sessions
     if let Some(config) = session_config {
-        info!("🍪 Layer: Sessions");
+        info!("???? Layer: Sessions");
         let key = Key::from(config.secret_key.as_bytes());
         let store = MemoryStore::default();
 
@@ -1146,7 +1146,7 @@ fn build_router(
 
     // L2: GZip
     if let Some(config) = gzip_config {
-        info!("🗜️  Layer: GZip (min: {} bytes)", config.minimum_size);
+        info!("???????  Layer: GZip (min: {} bytes)", config.minimum_size);
         let predicate = SizeAbove::new(config.minimum_size as u16);
         app = app.layer(CompressionLayer::new().compress_when(predicate));
     }
@@ -1173,7 +1173,7 @@ fn build_router(
 
     // L4: Trusted Host
     if let Some(config) = Option::<CORSMiddleware>::None {
-        info!("🛡️  Layer: CORS");
+        info!("???????  Layer: CORS");
         match build_cors_layer(&config) {
             Ok(layer) => app = app.layer(layer),
             Err(e) => eprintln!("Error building CORS layer: {:?}", e),
@@ -1182,7 +1182,7 @@ fn build_router(
 
     // L5: Trusted Host
     if let Some(config) = trusted_host_config {
-        info!("🔒 Layer: TrustedHost");
+        info!("???? Layer: TrustedHost");
         let allow_all = config.allowed_hosts.iter().any(|host| host == "*");
 
         if !allow_all {
@@ -1315,10 +1315,10 @@ async fn serve_static_file(mount: Arc<StaticMount>, request_path: String) -> Res
 
     if !mount.follow_symlink
         && let Ok(link_metadata) = tokio::fs::symlink_metadata(&file_path).await
-            && link_metadata.file_type().is_symlink()
-        {
-            return StatusCode::FORBIDDEN.into_response();
-        }
+        && link_metadata.file_type().is_symlink()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
 
     let bytes = match tokio::fs::read(&file_path).await {
         Ok(bytes) => bytes,

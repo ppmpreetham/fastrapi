@@ -75,10 +75,7 @@ impl PyRequestValidationError {
         body: Option<Bound<'_, PyAny>>,
     ) -> (Self, PyValidationException) {
         let body_py = body.map(|b| b.into()).unwrap_or_else(|| py.None());
-        (
-            Self { body: body_py },
-            PyValidationException::new(errors),
-        )
+        (Self { body: body_py }, PyValidationException::new(errors))
     }
 
     #[pyo3(signature = (*_args, **_kwargs))]
