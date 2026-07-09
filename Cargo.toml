@@ -42,6 +42,7 @@ uuid = { version = "1.23.3", features = ["v4"] }
 async-stream = "0.3.6"
 rsloop = { git = "https://github.com/RustedBytes/rsloop" }
 sonic-rs = "0.5.8"
+metrics-exporter-prometheus = "0.18.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pprof2 = { version = "0.13", features = ["flamegraph"] }
