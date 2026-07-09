@@ -1,8 +1,8 @@
-use std::sync::OnceLock;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use super::types::{ParameterConstraints, ParameterSource, ParsedParameter};
 use crate::ffi::pydantic;
@@ -15,20 +15,23 @@ static INSPECT_PARAMETER_EMPTY: OnceLock<Py<PyAny>> = OnceLock::new();
 pub fn extract_path_param_names(path: &str) -> Vec<String> {
     static PATH_PARAM_REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let regex = PATH_PARAM_REGEX.get_or_init(|| regex::Regex::new(r"\{([^}]+)\}").unwrap());
-    
-    regex.captures_iter(path)
+
+    regex
+        .captures_iter(path)
         .map(|caps| caps[1].to_string())
         .collect()
 }
 
 pub fn is_inspect_empty(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
-    let empty = INSPECT_PARAMETER_EMPTY
-        .get_or_init(|| {
-            py.import(intern!(py, "inspect")).unwrap()
-                .getattr(intern!(py, "Parameter")).unwrap()
-                .getattr(intern!(py, "empty")).unwrap()
-                .unbind()
-        });
+    let empty = INSPECT_PARAMETER_EMPTY.get_or_init(|| {
+        py.import(intern!(py, "inspect"))
+            .unwrap()
+            .getattr(intern!(py, "Parameter"))
+            .unwrap()
+            .getattr(intern!(py, "empty"))
+            .unwrap()
+            .unbind()
+    });
     value.is(empty.bind(py))
 }
 
@@ -165,9 +168,7 @@ pub fn parse_parameter_spec(
     let default = param_obj.getattr("default")?;
     let mut source = if path_param_names.iter().any(|name| name == param_name) {
         ParameterSource::Path
-    } else if is_upload_file {
-        ParameterSource::Body
-    } else if is_pydantic_model {
+    } else if is_upload_file || is_pydantic_model {
         ParameterSource::Body
     } else {
         ParameterSource::Query
@@ -292,13 +293,10 @@ impl PySecurity {
         dependency: Option<Py<PyAny>>,
         scopes: Option<Vec<String>>,
         use_cache: bool,
-    ) -> (Self, PyDepends) {
-        (
-            Self {
-                scopes: scopes.unwrap_or_default(),
-            },
-            PyDepends::new(dependency, use_cache),
-        )
+    ) -> pyo3::PyClassInitializer<Self> {
+        pyo3::PyClassInitializer::from(PyDepends::new(dependency, use_cache)).add_subclass(Self {
+            scopes: scopes.unwrap_or_default(),
+        })
     }
 }
 

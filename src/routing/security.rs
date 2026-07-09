@@ -33,7 +33,11 @@ impl PySecurityScopes {
     }
 }
 
-#[pyclass(name = "HTTPAuthorizationCredentials", module = "fastrapi.security")]
+#[pyclass(
+    name = "HTTPAuthorizationCredentials",
+    module = "fastrapi.security",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct HTTPAuthorizationCredentials {
     #[pyo3(get)]
@@ -53,7 +57,11 @@ impl HTTPAuthorizationCredentials {
     }
 }
 
-#[pyclass(name = "HTTPBasicCredentials", module = "fastrapi.security")]
+#[pyclass(
+    name = "HTTPBasicCredentials",
+    module = "fastrapi.security",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct HTTPBasicCredentials {
     #[pyo3(get)]
@@ -70,7 +78,11 @@ impl HTTPBasicCredentials {
     }
 }
 
-#[pyclass(name = "OAuth2PasswordBearer", module = "fastrapi.security")]
+#[pyclass(
+    name = "OAuth2PasswordBearer",
+    module = "fastrapi.security",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct OAuth2PasswordBearer {
     #[pyo3(get)]
@@ -106,7 +118,7 @@ impl OAuth2PasswordBearer {
     }
 }
 
-#[pyclass(name = "HTTPBearer", module = "fastrapi.security")]
+#[pyclass(name = "HTTPBearer", module = "fastrapi.security", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct HTTPBearer {
     #[pyo3(get)]
@@ -138,7 +150,7 @@ impl HTTPBearer {
     }
 }
 
-#[pyclass(name = "HTTPBasic", module = "fastrapi.security")]
+#[pyclass(name = "HTTPBasic", module = "fastrapi.security", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct HTTPBasic {
     #[pyo3(get)]
@@ -162,7 +174,7 @@ impl HTTPBasic {
     }
 }
 
-#[pyclass(name = "APIKeyHeader", module = "fastrapi.security")]
+#[pyclass(name = "APIKeyHeader", module = "fastrapi.security", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct APIKeyHeader {
     #[pyo3(get)]
@@ -194,7 +206,7 @@ impl APIKeyHeader {
     }
 }
 
-#[pyclass(name = "APIKeyQuery", module = "fastrapi.security")]
+#[pyclass(name = "APIKeyQuery", module = "fastrapi.security", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct APIKeyQuery {
     #[pyo3(get)]
@@ -226,7 +238,7 @@ impl APIKeyQuery {
     }
 }
 
-#[pyclass(name = "APIKeyCookie", module = "fastrapi.security")]
+#[pyclass(name = "APIKeyCookie", module = "fastrapi.security", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct APIKeyCookie {
     #[pyo3(get)]

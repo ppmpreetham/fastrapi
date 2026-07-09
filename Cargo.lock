@@ -935,7 +935,6 @@ dependencies = [
  "cookie",
  "dashmap",
  "fastwebsockets",
- "futures",
  "futures-util",
  "hyper",
  "hyper-util",
@@ -946,7 +945,6 @@ dependencies = [
  "percent-encoding",
  "pprof2",
  "pyo3",
- "pyo3-async-runtimes",
  "pyo3-nest",
  "regex",
  "rsloop",
@@ -1064,7 +1062,6 @@ checksum = "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d"
 dependencies = [
  "futures-channel",
  "futures-core",
- "futures-executor",
  "futures-io",
  "futures-sink",
  "futures-task",
@@ -1086,17 +1083,6 @@ name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
-
-[[package]]
-name = "futures-executor"
-version = "0.3.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
-dependencies = [
- "futures-core",
- "futures-task",
- "futures-util",
-]
 
 [[package]]
 name = "futures-io"
@@ -1994,7 +1980,6 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "pyo3",
- "tokio",
 ]
 
 [[package]]

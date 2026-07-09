@@ -1,5 +1,6 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
+use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyUserWarning};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
@@ -73,9 +74,10 @@ impl PyRequestValidationError {
         py: Python<'_>,
         errors: Bound<'_, PyAny>,
         body: Option<Bound<'_, PyAny>>,
-    ) -> (Self, PyValidationException) {
+    ) -> PyClassInitializer<Self> {
         let body_py = body.map(|b| b.into()).unwrap_or_else(|| py.None());
-        (Self { body: body_py }, PyValidationException::new(errors))
+        PyClassInitializer::from(PyValidationException::new(errors))
+            .add_subclass(Self { body: body_py })
     }
 
     #[pyo3(signature = (*_args, **_kwargs))]
@@ -96,9 +98,10 @@ impl PyResponseValidationError {
         py: Python<'_>,
         errors: Bound<'_, PyAny>,
         body: Option<Bound<'_, PyAny>>,
-    ) -> (Self, PyValidationException) {
+    ) -> PyClassInitializer<Self> {
         let body_py = body.map(|b| b.into()).unwrap_or_else(|| py.None());
-        (Self { body: body_py }, PyValidationException::new(errors))
+        PyClassInitializer::from(PyValidationException::new(errors))
+            .add_subclass(Self { body: body_py })
     }
 
     #[pyo3(signature = (*_args, **_kwargs))]

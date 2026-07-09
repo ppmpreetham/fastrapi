@@ -132,7 +132,10 @@ impl PyStreamingResponse {
     #[new]
     #[pyo3(signature = (content, status_code=200))]
     fn new(content: Py<PyAny>, status_code: u16) -> Self {
-        Self { content, status_code }
+        Self {
+            content,
+            status_code,
+        }
     }
 }
 
@@ -363,20 +366,28 @@ pub fn convert_redirect_response(_py: Python, result: &Bound<PyAny>) -> Response
 
 #[inline(always)]
 pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response {
-    let (content, status_code) = if let Ok(resp) = result.extract::<PyRef<'_, PyStreamingResponse>>() {
-        (resp.content.clone_ref(py), StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK))
-    } else if response_class_is(response_class_name(result).as_deref(), "StreamingResponse") {
-        let status_code = response_status(result, StatusCode::OK);
-        let content = result.getattr("content").ok().map(|c| c.unbind()).unwrap_or_else(|| py.None());
-        (content, status_code)
-    } else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
+    let (content, status_code) =
+        if let Ok(resp) = result.extract::<PyRef<'_, PyStreamingResponse>>() {
+            (
+                resp.content.clone_ref(py),
+                StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK),
+            )
+        } else if response_class_is(response_class_name(result).as_deref(), "StreamingResponse") {
+            let status_code = response_status(result, StatusCode::OK);
+            let content = result
+                .getattr("content")
+                .ok()
+                .map(|c| c.unbind())
+                .unwrap_or_else(|| py.None());
+            (content, status_code)
+        } else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
 
     let locals = rsloop::rust_async::get_current_locals(py).unwrap();
-    
+
     let stream = async_stream::stream! {
-        let (mut is_async, mut is_sync) = Python::attach(|py| {
+        let (is_async, is_sync) = Python::attach(|py| {
             let b = content.bind(py);
             (b.hasattr("__anext__").unwrap_or(false), b.hasattr("__next__").unwrap_or(false))
         });
