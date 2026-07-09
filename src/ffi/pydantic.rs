@@ -14,19 +14,20 @@ use crate::utils::utils::{json_to_py_object, py_to_response};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use once_cell::sync::OnceCell;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple, PyType};
 use pyo3::{intern, prelude::*};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait, Value, json};
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
-static INSPECT_MODULE: OnceCell<Py<PyModule>> = OnceCell::new();
+static INSPECT_MODULE: OnceLock<Py<PyModule>> = OnceLock::new();
 
 fn get_inspect(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
-    INSPECT_MODULE
-        .get_or_try_init(|| py.import(intern!(py, "inspect")).map(Bound::unbind))
-        .map(|module| module.bind(py).clone())
+    Ok(INSPECT_MODULE
+        .get_or_init(|| py.import(intern!(py, "inspect")).unwrap().unbind())
+        .bind(py)
+        .clone())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -122,8 +123,7 @@ pub fn validate_json_with_pydantic<'py>(
         };
     }
 
-    let mut buf = raw_payload.to_vec();
-    let payload: Value = simd_json::serde::from_slice(&mut buf)
+    let payload: Value = sonic_rs::from_slice(raw_payload)
         .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response())?;
     validate_python_with_pydantic(py, validator.validate_python.bind(py), &payload)
 }
@@ -551,8 +551,7 @@ fn apply_body_and_validation(
         BodyPayload::Json { raw, value } => match value {
             Some(payload) => payload,
             None => {
-                let mut buf = raw.to_vec();
-                parsed_storage = simd_json::serde::from_slice(&mut buf).map_err(|_| {
+                parsed_storage = sonic_rs::from_slice(raw).map_err(|_| {
                     (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response()
                 })?;
                 &parsed_storage
@@ -679,7 +678,7 @@ pub fn apply_request_data(
         .filter(|p| matches!(p.source, ParameterSource::Query))
         .count();
     if query_param_count > 1 {
-        request_input.get_all_query_params(); // populate OnceCell once
+        request_input.get_all_query_params(); // populate OnceLock once
     }
     handler
         .parsed_params

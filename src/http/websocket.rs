@@ -235,7 +235,7 @@ impl PyWebSocket {
                         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
                     Python::attach(|py| {
-                        let json: serde_json::Value = serde_json::from_str(&text)
+                        let json: sonic_rs::Value = sonic_rs::from_str(&text)
                             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
                         Ok(json_to_py_object(py, &json))
                     })

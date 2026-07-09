@@ -6,7 +6,7 @@ use crate::routing::types::{FlatRoute, ParameterConstraints, ParameterSource};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value as JsonValue, json};
+use sonic_rs::{Value as JsonValue, json, JsonValueMutTrait};
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -224,26 +224,26 @@ fn apply_parameter_constraints(
 ) -> JsonValue {
     if let Some(object) = schema.as_object_mut() {
         if let Some(gt) = constraints.gt {
-            object.insert("exclusiveMinimum".into(), gt.into());
+            object.insert("exclusiveMinimum", json!(gt));
         }
         if let Some(ge) = constraints.ge {
-            object.insert("minimum".into(), ge.into());
+            object.insert("minimum", json!(ge));
         }
         if let Some(lt) = constraints.lt {
-            object.insert("exclusiveMaximum".into(), lt.into());
+            object.insert("exclusiveMaximum", json!(lt));
         }
         if let Some(le) = constraints.le {
-            object.insert("maximum".into(), le.into());
+            object.insert("maximum", json!(le));
         }
         if let Some(min_length) = constraints.min_length {
-            object.insert("minLength".into(), min_length.into());
+            object.insert("minLength", json!(min_length));
         }
         if let Some(max_length) = constraints.max_length {
-            object.insert("maxLength".into(), max_length.into());
+            object.insert("maxLength", json!(max_length));
         }
 
         if let Some(pattern) = &constraints.pattern {
-            object.insert("pattern".into(), pattern.as_str().into());
+            object.insert("pattern", json!(pattern.as_str()));
         }
     }
     schema
@@ -413,7 +413,7 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
                     });
                 }
             } else if validator_count > 1 {
-                let mut properties = serde_json::Map::new();
+                let mut properties = sonic_rs::Object::new();
                 let mut required_fields = Vec::new();
 
                 handler.param_validators.iter().for_each(|validator| {
@@ -423,7 +423,7 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
                         let schema_name = get_schema_name(validator_bound);
                         schemas.insert(schema_name.clone(), schema);
                         properties.insert(
-                            validator.name.clone(),
+                            &validator.name,
                             json!({ "$ref": format!("#/components/schemas/{}", schema_name) }),
                         );
                         required_fields.push(validator.name.clone());
@@ -541,7 +541,7 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
         components.schemas = schemas;
     }
     debug!("Built OpenAPI spec with {} paths", spec.paths.len());
-    serde_json::to_value(spec).unwrap_or_else(|_| json!({}))
+    sonic_rs::to_value(&spec).unwrap_or_else(|_| json!({}))
 }
 
 fn collect_routes(py: Python<'_>, router: &PyAPIRouter) -> Vec<FlatRoute> {

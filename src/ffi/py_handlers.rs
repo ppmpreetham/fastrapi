@@ -14,6 +14,7 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tracing::error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +89,7 @@ fn build_request_input_from_parts<'a>(
     param_ranges: &'a [PathParamRange],
 ) -> RequestInput<'a> {
     let path_str = parts.uri.path();
-    let path_params = once_cell::sync::OnceCell::new();
+    let path_params = OnceLock::new();
 
     if !param_ranges.is_empty() {
         let path_params_vec: SmallVec<[(String, &'a str); 8]> = param_ranges
@@ -104,8 +105,8 @@ fn build_request_input_from_parts<'a>(
         query_string: parts.uri.query().unwrap_or(""),
         headers: &parts.headers,
         path_params,
-        query_params: once_cell::sync::OnceCell::new(),
-        cookies: once_cell::sync::OnceCell::new(),
+        query_params: OnceLock::new(),
+        cookies: OnceLock::new(),
     }
 }
 

@@ -3,7 +3,7 @@ use super::security::PySecurityScopes;
 use super::types::{ParsedParameter, RequestInput};
 use crate::ffi::pydantic;
 use axum::response::Response;
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple};
@@ -13,12 +13,13 @@ use std::sync::Arc;
 
 type SharedPyObject = Py<PyAny>;
 
-static INSPECT_MODULE: OnceCell<Py<PyModule>> = OnceCell::new();
+static INSPECT_MODULE: OnceLock<Py<PyModule>> = OnceLock::new();
 
 fn get_inspect(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
-    INSPECT_MODULE
-        .get_or_try_init(|| py.import(intern!(py, "inspect")).map(Bound::unbind))
-        .map(|module| module.bind(py).clone())
+    Ok(INSPECT_MODULE
+        .get_or_init(|| py.import(intern!(py, "inspect")).unwrap().unbind())
+        .bind(py)
+        .clone())
 }
 
 struct ParserKeys<'py> {

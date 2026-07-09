@@ -2,7 +2,7 @@ use crate::router::PyAPIRouter;
 use crate::routing::dependencies::DependencyNode;
 use crate::types::response::ResponseType;
 use ahash::{AHashMap, AHashSet};
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 use pyo3::types::PyString;
 use pyo3::{Py, PyAny};
 use smallvec::SmallVec;
@@ -99,7 +99,7 @@ pub enum BodyField {
 pub enum BodyPayload {
     Json {
         raw: bytes::Bytes,
-        value: Option<serde_json::Value>,
+        value: Option<sonic_rs::Value>,
     },
     Form(AHashMap<String, BodyField>),
 }
@@ -160,10 +160,10 @@ pub struct RequestInput<'a> {
     pub path: &'a str,
     pub query_string: &'a str,
 
-    pub path_params: OnceCell<SmallVec<[(String, &'a str); 8]>>,
-    pub query_params: OnceCell<SmallVec<[(Cow<'a, str>, Cow<'a, str>); 8]>>,
+    pub path_params: OnceLock<SmallVec<[(String, &'a str); 8]>>,
+    pub query_params: OnceLock<SmallVec<[(Cow<'a, str>, Cow<'a, str>); 8]>>,
     pub headers: &'a axum::http::HeaderMap,
-    pub cookies: OnceCell<SmallVec<[(&'a str, &'a str); 8]>>,
+    pub cookies: OnceLock<SmallVec<[(&'a str, &'a str); 8]>>,
 }
 
 #[inline(always)]

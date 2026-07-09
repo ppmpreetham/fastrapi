@@ -635,8 +635,7 @@ async fn extract_payload(
         }));
     }
 
-    let mut buf = body.to_vec();
-    let value = simd_json::serde::from_slice(&mut buf)
+    let value = sonic_rs::from_slice(&body)
         .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response())?;
     Ok(Some(BodyPayload::Json {
         raw: body,

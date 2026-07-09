@@ -3,7 +3,7 @@ use axum::response::{IntoResponse, Json, Response};
 use pyo3::exceptions::{PyException, PyRuntimeError, PyUserWarning};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
-use serde_json::json;
+use sonic_rs::json;
 
 // Base Errors
 

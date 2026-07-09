@@ -1,6 +1,6 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyTuple};
+use pyo3::types::{PyAny, PyBytes, PyDict};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -33,7 +33,7 @@ impl PyAppInfo {
     fn new(scope: Py<PyAny>) -> Self {
         Self { scope }
     }
-    
+
     #[getter]
     fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
@@ -115,7 +115,7 @@ impl PyRequest {
                     return Ok(Bound::new(py, client_info)?.into());
                 }
                 Ok(client.into())
-            },
+            }
             Err(_) => Ok(py.None()),
         }
     }

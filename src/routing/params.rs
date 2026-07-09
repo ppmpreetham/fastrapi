@@ -1,4 +1,4 @@
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString};
@@ -7,46 +7,29 @@ use std::sync::Arc;
 use super::types::{ParameterConstraints, ParameterSource, ParsedParameter};
 use crate::ffi::pydantic;
 
-static INSPECT_PARAMETER_EMPTY: OnceCell<Py<PyAny>> = OnceCell::new();
+static INSPECT_PARAMETER_EMPTY: OnceLock<Py<PyAny>> = OnceLock::new();
 
 // utils
 
 /// from route patterns like "/users/{user_id}"
 pub fn extract_path_param_names(path: &str) -> Vec<String> {
-    let mut params = Vec::new();
-    let mut in_param = false;
-    let mut current_param = String::new();
-    path.chars().for_each(|c| match c {
-        '{' => {
-            in_param = true;
-            current_param.clear();
-        }
-        '}' => {
-            if in_param && !current_param.is_empty() {
-                params.push(current_param.clone());
-            }
-            in_param = false;
-        }
-        _ => {
-            if in_param {
-                current_param.push(c);
-            }
-        }
-    });
-
-    params
+    static PATH_PARAM_REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let regex = PATH_PARAM_REGEX.get_or_init(|| regex::Regex::new(r"\{([^}]+)\}").unwrap());
+    
+    regex.captures_iter(path)
+        .map(|caps| caps[1].to_string())
+        .collect()
 }
 
 pub fn is_inspect_empty(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
-    INSPECT_PARAMETER_EMPTY
-        .get_or_try_init(|| {
-            py.import(intern!(py, "inspect"))?
-                .getattr(intern!(py, "Parameter"))?
-                .getattr(intern!(py, "empty"))
-                .map(Bound::unbind)
-        })
-        .map(|empty| value.is(empty.bind(py)))
-        .unwrap_or(false)
+    let empty = INSPECT_PARAMETER_EMPTY
+        .get_or_init(|| {
+            py.import(intern!(py, "inspect")).unwrap()
+                .getattr(intern!(py, "Parameter")).unwrap()
+                .getattr(intern!(py, "empty")).unwrap()
+                .unbind()
+        });
+    value.is(empty.bind(py))
 }
 
 fn is_ellipsis(value: &Bound<'_, PyAny>) -> bool {
