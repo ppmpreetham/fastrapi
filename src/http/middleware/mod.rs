@@ -30,7 +30,7 @@ use axum::{
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::error;
 
 mod cors;
 mod gzip;
@@ -137,29 +137,4 @@ pub async fn execute_py_middlewares(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
-}
-
-pub async fn logging_middleware(request: Request, next: Next) -> Response {
-    let method = request.method().clone();
-    let uri = request.uri().clone();
-    let start = std::time::Instant::now();
-    let response = next.run(request).await;
-
-    debug!(
-        "-> {} {} | {} | {:?}",
-        method,
-        uri,
-        response.status(),
-        start.elapsed()
-    );
-
-    response
-}
-
-pub async fn header_middleware(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert("X-Powered-By", "FastrAPI".parse().unwrap());
-    response
 }

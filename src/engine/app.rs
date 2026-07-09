@@ -62,6 +62,11 @@ impl FastrAPI {
         max_field_size=Some(1024 * 1024),
         max_file_size=Some(16 * 1024 * 1024),
         reject_unknown_multipart_fields=false,
+        trace_requests=false,
+        catch_panics=false,
+        request_timeout=None,
+        request_id_header=None,
+        powered_by_header=None,
     ))]
     fn new(
         py: Python<'_>,
@@ -106,6 +111,11 @@ impl FastrAPI {
         max_field_size: Option<usize>,
         max_file_size: Option<usize>,
         reject_unknown_multipart_fields: bool,
+        trace_requests: bool,
+        catch_panics: bool,
+        request_timeout: Option<u64>,
+        request_id_header: Option<String>,
+        powered_by_header: Option<String>,
     ) -> PyResult<Self> {
         let default_response_class = default_response_class.unwrap_or_else(|| {
             py.import(intern!(py, "fastrapi"))
@@ -164,6 +174,11 @@ impl FastrAPI {
             max_field_size,
             max_file_size,
             reject_unknown_multipart_fields,
+            trace_requests,
+            catch_panics,
+            request_timeout,
+            request_id_header,
+            powered_by_header,
             static_mounts: Vec::new(),
             cors_config: None,
             trusted_host_config: None,

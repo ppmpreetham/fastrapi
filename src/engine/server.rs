@@ -3,25 +3,33 @@ use ahash::{AHashMap, AHashSet};
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{Path as AxumPath, Request},
-    http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE},
+    extract::Request,
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
     middleware::{self as axum_middleware, Next},
     response::{Html, IntoResponse, Response},
     routing::{MethodRouter, *},
     serve::ListenerExt,
 };
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use smallvec::SmallVec;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::Duration;
 use tokio::net::TcpListener;
+use tower::{ServiceExt, service_fn};
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::normalize_path::NormalizePathLayer;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::timeout::TimeoutLayer;
+use tower_http::trace::TraceLayer;
 use tracing::{Level, error, info};
 
 // middleware Libraries
@@ -256,34 +264,53 @@ fn run_reload_supervisor(
     argv: &[String],
     config: ReloadConfig,
 ) -> Result<(), String> {
-    let mut snapshot = snapshot_python_files(&config).map_err(|err| err.to_string())?;
+    let ignore_globs = build_reload_ignore_globs(&config)?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = RecommendedWatcher::new(
+        move |event| {
+            let _ = tx.send(event);
+        },
+        NotifyConfig::default(),
+    )
+    .map_err(|err| err.to_string())?;
+
+    for dir in &config.watch_dirs {
+        watcher
+            .watch(dir, RecursiveMode::Recursive)
+            .map_err(|err| err.to_string())?;
+    }
+
     let mut child = spawn_reload_child(executable, argv).map_err(|err| err.to_string())?;
+    let debounce = Duration::from_millis(config.tick_ms);
 
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(config.tick_ms));
-
         if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
             if config.ignore_worker_failure {
                 eprintln!("FastrAPI reload: child exited with status {status}; restarting");
                 child = spawn_reload_child(executable, argv).map_err(|err| err.to_string())?;
-                snapshot = snapshot_python_files(&config).map_err(|err| err.to_string())?;
                 continue;
             }
             return Err(format!("reload child exited with status {status}"));
         }
 
-        let next_snapshot = snapshot_python_files(&config).map_err(|err| err.to_string())?;
-        if next_snapshot == snapshot {
-            continue;
+        match rx.recv_timeout(debounce) {
+            Ok(Ok(event)) => {
+                if !reload_event_matches(&event, &config, &ignore_globs) {
+                    continue;
+                }
+                println!("FastrAPI reload: Python file change detected; restarting server");
+                stop_child(&mut child);
+                child = spawn_reload_child(executable, argv).map_err(|err| err.to_string())?;
+                while rx.try_recv().is_ok() {}
+            }
+            Ok(Err(err)) => return Err(err.to_string()),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("reload watcher stopped".to_string());
+            }
         }
-
-        println!("FastrAPI reload: Python file change detected; restarting server");
-        stop_child(&mut child);
-        child = spawn_reload_child(executable, argv).map_err(|err| err.to_string())?;
-        snapshot = next_snapshot;
     }
 }
-
 fn spawn_reload_child(executable: &str, argv: &[String]) -> std::io::Result<Child> {
     let mut command = Command::new(executable);
     command
@@ -303,69 +330,35 @@ fn stop_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn snapshot_python_files(config: &ReloadConfig) -> std::io::Result<HashMap<PathBuf, FileStamp>> {
-    let mut snapshot = HashMap::new();
-    for dir in &config.watch_dirs {
-        collect_python_files(dir, config, &mut snapshot)?;
-    }
-    Ok(snapshot)
-}
-
-type FileStamp = (Option<SystemTime>, u64);
-
-fn collect_python_files(
-    path: &Path,
+fn reload_event_matches(
+    event: &notify::Event,
     config: &ReloadConfig,
-    snapshot: &mut HashMap<PathBuf, FileStamp>,
-) -> std::io::Result<()> {
-    if is_reload_ignored(path, config) {
-        return Ok(());
-    }
-
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(_) => return Ok(()),
-    };
-
-    if metadata.is_file() {
-        if path.extension().and_then(|ext| ext.to_str()) == Some("py") {
-            snapshot.insert(
-                path.to_path_buf(),
-                (metadata.modified().ok(), metadata.len()),
-            );
-        }
-        return Ok(());
-    }
-
-    if !metadata.is_dir() {
-        return Ok(());
-    }
-
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return Ok(());
-    };
-    if matches!(name, ".git" | ".venv" | "__pycache__" | "target")
-        || config.ignore_dirs.iter().any(|ignored| {
-            ignored
-                .file_name()
-                .and_then(|ignored_name| ignored_name.to_str())
-                .map(|ignored_name| ignored_name == name)
-                .unwrap_or(false)
-                || path.ends_with(ignored)
-        })
-    {
-        return Ok(());
-    }
-
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        collect_python_files(&entry.path(), config, snapshot)?;
-    }
-
-    Ok(())
+    ignore_globs: &Option<GlobSet>,
+) -> bool {
+    event.paths.iter().any(|path| {
+        path.extension().and_then(|ext| ext.to_str()) == Some("py")
+            && !is_reload_ignored(path, config, ignore_globs)
+    })
 }
 
-fn is_reload_ignored(path: &Path, config: &ReloadConfig) -> bool {
+fn is_reload_ignored(path: &Path, config: &ReloadConfig, ignore_globs: &Option<GlobSet>) -> bool {
+    if path.ancestors().any(is_default_reload_ignored_dir) {
+        return true;
+    }
+
+    if path.ancestors().any(|ancestor| {
+        config.ignore_dirs.iter().any(|ignored| {
+            ancestor == ignored
+                || ancestor.ends_with(ignored)
+                || ignored
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| ancestor.file_name().and_then(|n| n.to_str()) == Some(name))
+        })
+    }) {
+        return true;
+    }
+
     if config
         .ignore_paths
         .iter()
@@ -374,37 +367,42 @@ fn is_reload_ignored(path: &Path, config: &ReloadConfig) -> bool {
         return true;
     }
 
-    let path_text = path.to_string_lossy();
-    config
+    ignore_globs
+        .as_ref()
+        .is_some_and(|globs| globs.is_match(path))
+}
+
+fn is_default_reload_ignored_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, ".git" | ".venv" | "__pycache__" | "target"))
+}
+
+fn build_reload_ignore_globs(config: &ReloadConfig) -> Result<Option<GlobSet>, String> {
+    if config.ignore_patterns.is_empty() {
+        return Ok(None);
+    }
+
+    let mut builder = GlobSetBuilder::new();
+    for pattern in config
         .ignore_patterns
         .iter()
-        .any(|pattern| wildcard_match(pattern, &path_text))
-}
-
-fn wildcard_match(pattern: &str, text: &str) -> bool {
-    if pattern.is_empty() {
-        return false;
-    }
-    if !pattern.contains('*') {
-        return text.contains(pattern);
-    }
-
-    let mut remainder = text;
-    let mut first = true;
-    for part in pattern.split('*').filter(|part| !part.is_empty()) {
-        let Some(index) = remainder.find(part) else {
-            return false;
+        .filter(|pattern| !pattern.is_empty())
+    {
+        let pattern = if pattern.contains(['*', '?', '[', ']']) {
+            pattern.clone()
+        } else {
+            format!("**/*{pattern}*")
         };
-        if first && !pattern.starts_with('*') && index != 0 {
-            return false;
-        }
-        remainder = &remainder[index + part.len()..];
-        first = false;
+        let glob = GlobBuilder::new(&pattern)
+            .literal_separator(false)
+            .build()
+            .map_err(|err| err.to_string())?;
+        builder.add(glob);
     }
 
-    pattern.ends_with('*') || remainder.is_empty()
+    builder.build().map(Some).map_err(|err| err.to_string())
 }
-
 fn start_background_asyncio_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let loop_module = py.import("rsloop").or_else(|_| py.import("asyncio"))?;
     let event_loop = loop_module.call_method0("new_event_loop")?.unbind();
@@ -652,30 +650,20 @@ fn parse_urlencoded_form(
         .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid form body").into_response())?;
     let mut form = ahash::AHashMap::new();
 
-    raw.split('&')
-        .filter(|pair| !pair.is_empty())
-        .try_for_each(|pair| -> Result<(), Response> {
-            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            let value = decode_form_component(value);
+    form_urlencoded::parse(raw.as_bytes()).try_for_each(
+        |(key, value)| -> Result<(), Response> {
             if let Some(limit) = max_field_size
                 && value.len() > limit
             {
                 return Err((StatusCode::PAYLOAD_TOO_LARGE, "Form field too large").into_response());
             }
-            form.insert(decode_form_component(key), BodyField::Text(value));
+            form.insert(key.into_owned(), BodyField::Text(value.into_owned()));
             Ok(())
-        })?;
+        },
+    )?;
 
     Ok(form)
 }
-
-fn decode_form_component(value: &str) -> String {
-    let replaced = value.replace('+', " ");
-    percent_encoding::percent_decode_str(&replaced)
-        .decode_utf8_lossy()
-        .into_owned()
-}
-
 async fn parse_multipart_form(
     body: bytes::Bytes,
     content_type: &str,
@@ -1226,7 +1214,55 @@ fn build_router(
         }
     }
 
+    if app_config.trace_requests {
+        app = app.layer(TraceLayer::new_for_http());
+    }
+
+    if let Some(header_name) = app_config
+        .request_id_header
+        .as_deref()
+        .and_then(parse_header_name)
+    {
+        app = app
+            .layer(SetRequestIdLayer::new(header_name.clone(), MakeRequestUuid))
+            .layer(PropagateRequestIdLayer::new(header_name));
+    }
+
+    if let Some(value) = app_config
+        .powered_by_header
+        .as_deref()
+        .and_then(parse_header_value)
+    {
+        app = app.layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("x-powered-by"),
+            value,
+        ));
+    }
+
+    if let Some(seconds) = app_config.request_timeout {
+        app = app.layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(seconds),
+        ));
+    }
+
+    if app_config.catch_panics {
+        app = app.layer(CatchPanicLayer::new());
+    }
+
+    if app_config.redirect_slashes {
+        app = app.layer(NormalizePathLayer::trim_trailing_slash());
+    }
+
     app
+}
+
+fn parse_header_name(value: &str) -> Option<HeaderName> {
+    HeaderName::from_bytes(value.as_bytes()).ok()
+}
+
+fn parse_header_value(value: &str) -> Option<HeaderValue> {
+    HeaderValue::from_str(value).ok()
 }
 
 fn cached_method_router(method: HttpMethod, cached: Arc<CachedResponse>) -> MethodRouter {
@@ -1253,137 +1289,76 @@ fn cached_method_router(method: HttpMethod, cached: Arc<CachedResponse>) -> Meth
 
 fn add_static_mount(app: Router, mount: StaticMount) -> Router {
     let mount_path = if mount.path == "/" {
-        String::new()
+        "/".to_string()
     } else {
         mount.path.trim_end_matches('/').to_string()
     };
-    let root_route = if mount_path.is_empty() {
-        "/".to_string()
-    } else {
-        mount_path.clone()
-    };
-    let wildcard_route = if mount_path.is_empty() {
-        "/{*path}".to_string()
-    } else {
-        format!("{mount_path}/{{*path}}")
-    };
 
-    let mount = Arc::new(mount);
-    let root_mount = mount.clone();
-    let wildcard_mount = mount;
+    let serve_dir = ServeDir::new(&mount.directory).append_index_html_on_directories(mount.html);
+    if mount.follow_symlink {
+        return app.nest_service(&mount_path, serve_dir);
+    }
 
-    app.route(
-        &root_route,
-        get(move || {
-            let mount = root_mount.clone();
-            async move { serve_static_file(mount, String::new()).await }
-        }),
-    )
-    .route(
-        &wildcard_route,
-        get(move |AxumPath(path): AxumPath<String>| {
-            let mount = wildcard_mount.clone();
-            async move { serve_static_file(mount, path).await }
-        }),
-    )
-}
+    let directory = Arc::new(PathBuf::from(mount.directory));
+    let html = mount.html;
+    let service = service_fn(move |req: Request| {
+        let directory = directory.clone();
+        let serve_dir = serve_dir.clone();
+        async move {
+            if static_request_hits_symlink(&directory, req.uri().path(), html).await {
+                return Ok::<_, std::convert::Infallible>(StatusCode::FORBIDDEN.into_response());
+            }
 
-async fn serve_static_file(mount: Arc<StaticMount>, request_path: String) -> Response {
-    let Some(mut file_path) = resolve_static_path(&mount, &request_path) else {
-        return StatusCode::FORBIDDEN.into_response();
-    };
-
-    let mut metadata = match tokio::fs::metadata(&file_path).await {
-        Ok(metadata) => metadata,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
-    };
-
-    if metadata.is_dir() {
-        if !mount.html {
-            return StatusCode::NOT_FOUND.into_response();
+            serve_dir
+                .oneshot(req)
+                .await
+                .map(IntoResponse::into_response)
         }
-        file_path.push("index.html");
-        metadata = match tokio::fs::metadata(&file_path).await {
-            Ok(metadata) => metadata,
-            Err(_) => return StatusCode::NOT_FOUND.into_response(),
-        };
-    }
+    });
 
-    if !metadata.is_file() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
-    if !mount.follow_symlink
-        && let Ok(link_metadata) = tokio::fs::symlink_metadata(&file_path).await
-        && link_metadata.file_type().is_symlink()
-    {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-
-    let bytes = match tokio::fs::read(&file_path).await {
-        Ok(bytes) => bytes,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
-    };
-
-    let content_type = static_content_type(&file_path);
-    let mut response = Body::from(bytes).into_response();
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-    response
+    app.nest_service(&mount_path, service)
 }
 
-fn resolve_static_path(mount: &StaticMount, request_path: &str) -> Option<PathBuf> {
-    let decoded = percent_encoding::percent_decode_str(request_path)
-        .decode_utf8()
-        .ok()?;
-    let mut file_path = PathBuf::from(&mount.directory);
+async fn static_request_hits_symlink(directory: &Path, request_path: &str, html: bool) -> bool {
+    let decoded = match percent_encoding::percent_decode_str(request_path).decode_utf8() {
+        Ok(decoded) => decoded,
+        Err(_) => return false,
+    };
+    if tokio::fs::symlink_metadata(directory)
+        .await
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return true;
+    }
 
-    for component in Path::new(decoded.as_ref()).components() {
+    let mut file_path = directory.to_path_buf();
+
+    for component in Path::new(decoded.trim_start_matches('/')).components() {
         match component {
             Component::Normal(part) => file_path.push(part),
             Component::CurDir => {}
-            Component::Prefix(_) | Component::RootDir | Component::ParentDir => return None,
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => return false,
+        }
+
+        if tokio::fs::symlink_metadata(&file_path)
+            .await
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return true;
         }
     }
 
-    Some(file_path)
-}
-
-fn static_content_type(path: &Path) -> &'static str {
-    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-
-    if ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm") {
-        "text/html; charset=utf-8"
-    } else if ext.eq_ignore_ascii_case("css") {
-        "text/css; charset=utf-8"
-    } else if ext.eq_ignore_ascii_case("js") || ext.eq_ignore_ascii_case("mjs") {
-        "text/javascript; charset=utf-8"
-    } else if ext.eq_ignore_ascii_case("json") {
-        "application/json"
-    } else if ext.eq_ignore_ascii_case("png") {
-        "image/png"
-    } else if ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg") {
-        "image/jpeg"
-    } else if ext.eq_ignore_ascii_case("gif") {
-        "image/gif"
-    } else if ext.eq_ignore_ascii_case("svg") {
-        "image/svg+xml"
-    } else if ext.eq_ignore_ascii_case("webp") {
-        "image/webp"
-    } else if ext.eq_ignore_ascii_case("ico") {
-        "image/x-icon"
-    } else if ext.eq_ignore_ascii_case("txt") {
-        "text/plain; charset=utf-8"
-    } else if ext.eq_ignore_ascii_case("wasm") {
-        "application/wasm"
-    } else if ext.eq_ignore_ascii_case("pdf") {
-        "application/pdf"
-    } else {
-        "application/octet-stream"
+    if html
+        && let Ok(metadata) = tokio::fs::metadata(&file_path).await
+        && metadata.is_dir()
+    {
+        file_path.push("index.html");
     }
-}
 
+    tokio::fs::symlink_metadata(&file_path)
+        .await
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+}
 fn no_request_method_router(
     method: HttpMethod,
     handler: Arc<crate::routing::types::RouteHandler>,

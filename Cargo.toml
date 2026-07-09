@@ -22,10 +22,13 @@ futures-util = "0.3.32"
 hyper = "1.10.1"
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 # TODO: if using python package, make these features optional
-tower-http = { version = "0.6.8", features = ["cors", "trace", "set-header", "compression-gzip", "fs"] }
+tower-http = { version = "0.6.8", features = ["cors", "trace", "set-header", "compression-gzip", "fs", "normalize-path", "catch-panic", "timeout", "request-id"] }
 tower-sessions = { version = "0.15.0", features = ["signed"] } # for sessions
 tower = "0.5.3"
 cookie = { version = "0.18.1", features = ["private", "signed"] }
+form_urlencoded = "1.2.2"
+globset = "0.4"
+notify = "8"
 papaya = { version = "0.2.3" }
 parking_lot = "0.12.5"
 fastwebsockets = { version = "0.10.0", features = ["upgrade", "with_axum"] }

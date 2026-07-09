@@ -99,6 +99,16 @@ pub struct FastrAPI {
     pub max_file_size: Option<usize>,
     #[pyo3(get, set)]
     pub reject_unknown_multipart_fields: bool,
+    #[pyo3(get, set)]
+    pub trace_requests: bool,
+    #[pyo3(get, set)]
+    pub catch_panics: bool,
+    #[pyo3(get, set)]
+    pub request_timeout: Option<u64>,
+    #[pyo3(get, set)]
+    pub request_id_header: Option<String>,
+    #[pyo3(get, set)]
+    pub powered_by_header: Option<String>,
     pub static_mounts: Vec<StaticMount>,
 
     // CORS for rust side of things

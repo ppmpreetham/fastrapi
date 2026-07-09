@@ -2,12 +2,13 @@ use crate::router::PyAPIRouter;
 use crate::routing::dependencies::DependencyNode;
 use crate::types::response::ResponseType;
 use ahash::{AHashMap, AHashSet};
-use std::sync::OnceLock;
+use cookie::Cookie;
 use pyo3::types::PyString;
 use pyo3::{Py, PyAny};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(usize)]
@@ -254,14 +255,10 @@ impl<'a> RequestInput<'a> {
                 .iter()
                 .filter_map(|header_value| header_value.to_str().ok())
                 .for_each(|raw_cookie| {
-                    raw_cookie
-                        .split(';')
-                        .map(|c| c.trim())
-                        .filter(|c| !c.is_empty())
-                        .for_each(|cookie| {
-                            let (name, value) = cookie.split_once('=').unwrap_or((cookie, ""));
-                            result.push((name.trim(), value.trim()));
-                        });
+                    Cookie::split_parse(raw_cookie)
+                        .filter_map(Result::ok)
+                        .filter_map(|cookie| Some((cookie.name_raw()?, cookie.value_raw()?)))
+                        .for_each(|cookie| result.push(cookie));
                 });
 
             result
