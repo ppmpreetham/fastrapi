@@ -669,13 +669,21 @@ impl FastrAPI {
         self.include_router(py, router, prefix, tags)
     }
 
-    fn exception_handler(&self, py: Python, exc_class_or_status_code: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    fn exception_handler(
+        &self,
+        py: Python,
+        exc_class_or_status_code: Py<PyAny>,
+    ) -> PyResult<Py<PyAny>> {
         let exception_handlers = self.exception_handlers.clone();
-        let decorator = move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
+        let decorator = move |args: &Bound<'_, PyTuple>,
+                              _kwargs: Option<&Bound<'_, PyDict>>|
+              -> PyResult<Py<PyAny>> {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.unbind();
             if let Some(handlers) = &exception_handlers {
-                handlers.bind(py).set_item(exc_class_or_status_code.clone_ref(py), func.clone_ref(py))?;
+                handlers
+                    .bind(py)
+                    .set_item(exc_class_or_status_code.clone_ref(py), func.clone_ref(py))?;
             }
             Ok(func)
         };

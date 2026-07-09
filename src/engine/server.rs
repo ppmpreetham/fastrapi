@@ -21,6 +21,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::net::TcpListener;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::{Level, error, info};
 
 // middleware Libraries
@@ -1557,4 +1558,21 @@ async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> R
         payload,
     )
     .await
+}
+
+// TODO: combine this to the router
+// app.frontend("/", directory="dist", fallback="404.html", check_dir=False)
+fn frontend(directory: &str, fallback: Option<&str>, check_dir: Option<bool>) -> Router {
+    if check_dir == Some(true) && !Path::new(directory).exists() {
+        panic!("Directory '{}' does not exist.", directory);
+    }
+    let serve_dir = ServeDir::new(directory);
+    match fallback {
+        Some(fallback_file) => {
+            let fallback_path = Path::new(directory).join(fallback_file);
+            let service = serve_dir.not_found_service(ServeFile::new(fallback_path));
+            Router::new().fallback_service(service)
+        }
+        None => Router::new().fallback_service(serve_dir),
+    }
 }
