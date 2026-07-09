@@ -1,8 +1,50 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyTuple};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+
+#[pyclass(name = "ClientInfo", module = "fastrapi.request", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyClientInfo {
+    #[pyo3(get)]
+    pub host: String,
+    #[pyo3(get)]
+    pub port: u16,
+}
+
+#[pymethods]
+impl PyClientInfo {
+    #[new]
+    fn new(host: String, port: u16) -> Self {
+        Self { host, port }
+    }
+}
+
+#[pyclass(name = "AppInfo", module = "fastrapi.request", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyAppInfo {
+    pub scope: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyAppInfo {
+    #[new]
+    fn new(scope: Py<PyAny>) -> Self {
+        Self { scope }
+    }
+    
+    #[getter]
+    fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let scope = self.scope.bind(py);
+        if !scope.contains("state")? {
+            let types = py.import("types")?;
+            let namespace = types.call_method0("SimpleNamespace")?;
+            scope.set_item("state", namespace)?;
+        }
+        Ok(scope.get_item("state")?.into())
+    }
+}
 
 #[pyclass(name = "Request", module = "fastrapi.request", skip_from_py_object)]
 #[derive(Clone)]
@@ -59,10 +101,21 @@ impl PyRequest {
     }
 
     #[getter]
+    fn app(&self, py: Python<'_>) -> PyResult<PyAppInfo> {
+        Ok(PyAppInfo::new(self.scope.clone_ref(py)))
+    }
+
+    #[getter]
     fn client(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
         match scope.get_item("client") {
-            Ok(client) => Ok(client.into()),
+            Ok(client) => {
+                if let Ok((host, port)) = client.extract::<(String, u16)>() {
+                    let client_info = PyClientInfo { host, port };
+                    return Ok(Bound::new(py, client_info)?.into());
+                }
+                Ok(client.into())
+            },
             Err(_) => Ok(py.None()),
         }
     }

@@ -330,6 +330,9 @@ def hello():
 | JSON serialization flexibility              | Hard to swap (monkey-patch needed)                  | Trivial to plug orjson / sonic-rs / simdjson             | ✅             |
 | `response_model=None` + raw Response return | Fully supported                                     | serialization                                            | ❌ (for now)   |
 | `APIRouter` + `include_router()`            | Yes, mature ecosystem                               | Full support                                             | ✅   |
+| `StreamingResponse` / SSE                   | Yes, chunked streaming                              | Full support (async & sync generators)                   | ✅   |
+| Global State (`request.app.state`)          | Yes                                                 | Full support                                             | ✅   |
+| Exception Handlers (`@app.exception_handler`)| Yes, global error catching                          | Full support (plus Axum `.fallback()` alias)             | ✅   |
 | `app.mount()` / `StaticFiles`               | Yes                                                 | Not yet implemented                                      | ❌ (for now)   |
 
 ## Current Limitations
@@ -347,7 +350,7 @@ Some advanced features are still in development like:
 - [x] Form/Multipart support
 - [ ] File uploads (`UploadFile` + multipart parsing)
 - [x] Generated OpenAPI JSON + Swagger docs (`/api-docs/openapi.json`, `/docs`)
-- [ ] Sub-APIs / Includes
+- [x] Sub-APIs / Includes
 - [x] Security Utilities (OAuth2, JWT, etc.)
 - [x] Rust integration
 - [x] Dependency injection
@@ -356,10 +359,10 @@ Some advanced features are still in development like:
 - [x] APIRouter + include_router(prefix=..., tags=..., dependencies=...)
 - [ ] Respect response_model=None (allow raw Response / RedirectResponse returns)
 - [ ] app.mount() for static files & sub-apps
-- [ ] @app.exception_handler() + app.add_exception_handler()
+- [x] @app.exception_handler() + app.fallback()
 - [ ] Proper Python-friendly error pages (no Rust tracebacks in production)
 - [ ] app.openapi() method (customizable spec)
-- [ ] app.state (mutable app-wide state)
+- [x] app.state (mutable app-wide state)
 - [ ] app.openapi_tags= ordering in Swagger UI
 - [ ] callbacks= and webhooks= in OpenAPI
 - [ ] app.servers=, root_path, openapi_external_docs

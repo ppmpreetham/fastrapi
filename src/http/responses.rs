@@ -2,6 +2,7 @@ use crate::utils::utils::{
     py_json_response_with_status, py_json_response_with_status_hint, py_to_response,
 };
 use axum::{
+    body::Body,
     http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
@@ -117,6 +118,24 @@ impl PyRedirectResponse {
     }
 }
 
+#[pyclass(name = "StreamingResponse", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyStreamingResponse {
+    #[pyo3(get)]
+    pub content: Py<PyAny>,
+    #[pyo3(get)]
+    pub status_code: u16,
+}
+
+#[pymethods]
+impl PyStreamingResponse {
+    #[new]
+    #[pyo3(signature = (content, status_code=200))]
+    fn new(content: Py<PyAny>, status_code: u16) -> Self {
+        Self { content, status_code }
+    }
+}
+
 #[inline(always)]
 pub fn convert_response_by_type(
     py: Python,
@@ -142,10 +161,12 @@ pub fn convert_response_by_type(
             || final_result.is_instance_of::<PyPlainTextResponse>()
             || final_result.is_instance_of::<PyHTMLResponse>()
             || final_result.is_instance_of::<PyRedirectResponse>()
+            || final_result.is_instance_of::<PyStreamingResponse>()
             || response_class_is(class_name.as_deref(), "JSONResponse")
             || response_class_is(class_name.as_deref(), "PlainTextResponse")
             || response_class_is(class_name.as_deref(), "HTMLResponse")
-            || response_class_is(class_name.as_deref(), "RedirectResponse");
+            || response_class_is(class_name.as_deref(), "RedirectResponse")
+            || response_class_is(class_name.as_deref(), "StreamingResponse");
 
         if !is_explicit_response {
             validated_storage = model
@@ -212,6 +233,10 @@ pub fn convert_response_by_type(
                 || response_class_is(class_name.as_deref(), "RedirectResponse")
             {
                 convert_redirect_response(py, final_result)
+            } else if final_result.is_instance_of::<PyStreamingResponse>()
+                || response_class_is(class_name.as_deref(), "StreamingResponse")
+            {
+                convert_streaming_response(py, final_result)
             } else {
                 py_to_response(py, final_result, default_status)
             }
@@ -337,6 +362,80 @@ pub fn convert_redirect_response(_py: Python, result: &Bound<PyAny>) -> Response
 }
 
 #[inline(always)]
+pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response {
+    let (content, status_code) = if let Ok(resp) = result.extract::<PyRef<'_, PyStreamingResponse>>() {
+        (resp.content.clone_ref(py), StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK))
+    } else if response_class_is(response_class_name(result).as_deref(), "StreamingResponse") {
+        let status_code = response_status(result, StatusCode::OK);
+        let content = result.getattr("content").ok().map(|c| c.unbind()).unwrap_or_else(|| py.None());
+        (content, status_code)
+    } else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    let locals = rsloop::rust_async::get_current_locals(py).unwrap();
+    
+    let stream = async_stream::stream! {
+        let (mut is_async, mut is_sync) = Python::attach(|py| {
+            let b = content.bind(py);
+            (b.hasattr("__anext__").unwrap_or(false), b.hasattr("__next__").unwrap_or(false))
+        });
+
+        if is_async {
+            loop {
+                let awaitable = Python::attach(|py| content.bind(py).call_method0("__anext__").map(|a| a.unbind()));
+                let awaitable = match awaitable {
+                    Ok(a) => a,
+                    Err(e) => {
+                        Python::attach(|py| if !e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py) { error!("StreamingResponse async error: {:?}", e); });
+                        break;
+                    }
+                };
+                let fut = match Python::attach(|py| rsloop::rust_async::into_future_with_locals(&locals, awaitable.bind(py).clone())) {
+                    Ok(f) => f,
+                    Err(_) => break,
+                };
+                match fut.await {
+                    Ok(val) => {
+                        let bytes = Python::attach(|py| {
+                            let bound = val.bind(py);
+                            if let Ok(s) = bound.extract::<String>() { Ok(bytes::Bytes::from(s)) }
+                            else if let Ok(b) = bound.extract::<&[u8]>() { Ok(bytes::Bytes::from(b.to_vec())) }
+                            else { Err(()) }
+                        });
+                        if let Ok(b) = bytes { yield Ok::<_, std::convert::Infallible>(b); }
+                    }
+                    Err(e) => {
+                        Python::attach(|py| if !e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py) { error!("StreamingResponse async error: {:?}", e); });
+                        break;
+                    }
+                }
+            }
+        } else if is_sync {
+            loop {
+                let val = Python::attach(|py| content.bind(py).call_method0("__next__").map(|a| a.unbind()));
+                match val {
+                    Ok(val) => {
+                        let bytes = Python::attach(|py| {
+                            let bound = val.bind(py);
+                            if let Ok(s) = bound.extract::<String>() { Ok(bytes::Bytes::from(s)) }
+                            else if let Ok(b) = bound.extract::<&[u8]>() { Ok(bytes::Bytes::from(b.to_vec())) }
+                            else { Err(()) }
+                        });
+                        if let Ok(b) = bytes { yield Ok::<_, std::convert::Infallible>(b); }
+                    }
+                    Err(e) => {
+                        Python::attach(|py| if !e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) { error!("StreamingResponse sync error: {:?}", e); });
+                        break;
+                    }
+                }
+            }
+        }
+    };
+    (status_code, Body::from_stream(stream)).into_response()
+}
+
+#[inline(always)]
 pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
     if result.is_none() {
         return StatusCode::NO_CONTENT.into_response();
@@ -362,6 +461,11 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
         || response_class_is(class_name.as_deref(), "RedirectResponse")
     {
         return convert_redirect_response(py, result);
+    }
+    if result.is_instance_of::<PyStreamingResponse>()
+        || response_class_is(class_name.as_deref(), "StreamingResponse")
+    {
+        return convert_streaming_response(py, result);
     }
 
     crate::utils::utils::py_json_response(py, result).unwrap_or_else(|err| {

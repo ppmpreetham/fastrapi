@@ -140,7 +140,7 @@ impl FastrAPI {
             swagger_ui_oauth2_redirect_url,
             swagger_ui_init_oauth,
             middleware,
-            exception_handlers,
+            exception_handlers: exception_handlers.or_else(|| Some(PyDict::new(py).into())),
             on_startup,
             on_shutdown,
             lifespan,
@@ -656,5 +656,36 @@ impl FastrAPI {
             .bind(py)
             .borrow()
             .include_router(py, router, prefix, tags)
+    }
+
+    #[pyo3(signature = (prefix, router, *, tags=None))]
+    fn nest(
+        &self,
+        py: Python<'_>,
+        prefix: String,
+        router: Py<PyAPIRouter>,
+        tags: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        self.include_router(py, router, prefix, tags)
+    }
+
+    fn exception_handler(&self, py: Python, exc_class_or_status_code: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let exception_handlers = self.exception_handlers.clone();
+        let decorator = move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
+            let py = args.py();
+            let func: Py<PyAny> = args.get_item(0)?.unbind();
+            if let Some(handlers) = &exception_handlers {
+                handlers.bind(py).set_item(exc_class_or_status_code.clone_ref(py), func.clone_ref(py))?;
+            }
+            Ok(func)
+        };
+        PyCFunction::new_closure(py, Some(c"exception_handler"), None, decorator).map(|f| f.into())
+    }
+
+    fn fallback(&self, py: Python, handler: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        if let Some(handlers) = &self.exception_handlers {
+            handlers.bind(py).set_item(404, handler.clone_ref(py))?;
+        }
+        Ok(handler)
     }
 }

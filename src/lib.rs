@@ -31,7 +31,7 @@ pub use routing::security;
 
 pub use app::FastrAPI;
 pub use request::{PyHTTPConnection, PyRequest};
-pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse};
+pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse, PyStreamingResponse};
 
 use crate::routing::security::{
     APIKeyCookie, APIKeyHeader, APIKeyQuery, HTTPAuthorizationCredentials, HTTPBasic,
@@ -79,7 +79,8 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
             PyJSONResponse,
             PyHTMLResponse,
             PyPlainTextResponse,
-            PyRedirectResponse
+            PyRedirectResponse,
+            PyStreamingResponse
         )
     );
 

@@ -674,6 +674,17 @@ impl PyAPIRouter {
 
         Ok(())
     }
+
+    #[pyo3(signature = (prefix, router, *, tags=None))]
+    pub fn nest(
+        &self,
+        py: Python<'_>,
+        prefix: String,
+        router: Py<PyAPIRouter>,
+        tags: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        self.include_router(py, router, prefix, tags)
+    }
 }
 
 fn flatten_router(py: Python<'_>, root: &PyAPIRouter) -> (Vec<FlatRoute>, Vec<FlatWebSocket>) {
