@@ -34,6 +34,7 @@ use tracing::{debug, error};
 
 mod cors;
 mod gzip;
+mod rate_limit;
 mod session;
 mod trustedhost;
 
