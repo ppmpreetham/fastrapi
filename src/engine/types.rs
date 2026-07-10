@@ -59,6 +59,10 @@ pub struct FastrAPI {
     #[pyo3(get, set)]
     pub redoc_url: Option<String>,
     #[pyo3(get, set)]
+    pub scalar_url: Option<String>,
+    #[pyo3(get, set)]
+    pub elements_url: Option<String>,
+    #[pyo3(get, set)]
     pub swagger_ui_oauth2_redirect_url: Option<String>,
     #[pyo3(get, set)]
     pub swagger_ui_init_oauth: Option<Py<PyAny>>,

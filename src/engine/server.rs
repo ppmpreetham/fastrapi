@@ -1116,6 +1116,24 @@ fn build_router(
             get(|| async { Html(include_str!("../../static/swagger-ui.html")) }),
         );
     }
+    if let Some(redoc) = &app_config.redoc_url {
+        app = app.route(
+            redoc,
+            get(|| async { Html(include_str!("../../static/redoc.html")) }),
+        );
+    }
+    if let Some(scalar) = &app_config.scalar_url {
+        app = app.route(
+            scalar,
+            get(|| async { Html(include_str!("../../static/scalar.html")) }),
+        );
+    }
+    if let Some(elements) = &app_config.elements_url {
+        app = app.route(
+            elements,
+            get(|| async { Html(include_str!("../../static/elements.html")) }),
+        );
+    }
 
     if let Some(config) = &app_config.prometheus_config {
         let handle = prometheus_handle();
