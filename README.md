@@ -7,13 +7,13 @@ FastrAPI is a high-performance web framework that supercharges your Python APIs 
 
 ## Key Features
 
-- **Lightning Speed**: Powered by Rust and Axum, FastrAPI delivers up to **6x faster** performance than FastAPI, making your APIs scream.
-- **Python-First**: Write clean, familiar Python code, no Rust knowledge needed. FastrAPI handles the heavy lifting behind the scenes.
-- **Ironclad Type Safety**: Inherits Rust's robust type system for rock-solid reliability, catching errors before they hit production.
+- **High Speed**: Powered by Rust and Axum, FastrAPI delivers up to **6x faster** performance than FastAPI, making your APIs scream.
+- **Python First**: Write same Python code, 0 Rust knowledge needed. FastrAPI handles the heavy lifting behind the scenes.
 - **Pydantic Powered**: Seamless integration with Pydantic for effortless request and response validation, keeping your data in check.
 - **Async Native**: Built on Tokio's async runtime, FastrAPI maximizes concurrency for handling thousands of requests with ease.
 - **Ultra Lightweight**: Minimal runtime overhead with maximum throughput.
-- **Drop-in Replacement**: Drop-in compatibility with FastAPI's beloved decorator syntax, so you can switch without rewriting your codebase.
+- **Drop in Replacement**: Drop in compatibility with the same FastAPI's beloved decorator syntax, so you can switch without rewriting your codebase.
+- **Middleware Support**: `tower-http` support for CORS, GZip, Session, and TrustedHost middleware.
 
 ---
 
@@ -25,15 +25,15 @@ Yes. Powered by Rust and Axum, FastrAPI outperforms FastAPI by up to 6x in real-
 
 #### Do I need to know Rust?
 
-Nope. FastrAPI lets you write 100% Python code while leveraging Rust's performance under the hood.
+Nope. FastrAPI lets you write 100% Python code while still leveraging Rust's performance under the hood.
 
 #### Can it handle complex APIs?
 
-Absolutely. With full Pydantic integration and async support, FastrAPI scales effortlessly for small projects and enterprise-grade APIs alike.
+Absolutely, FastrAPI scales effortlessly for small projects and massive enterprise grade APIs alike.
 
 #### Will it keep up with FastAPI updates?
 
-Yes. FastrAPI mirrors FastAPI's decorator-based syntax, ensuring compatibility and instant access to familiar workflows.
+Yes. FastrAPI mirrors FastAPI's syntax, ensuring compatibility and instant access to workflows.
 
 ## Installation
 
@@ -269,6 +269,16 @@ app.serve("127.0.0.1", 8080)
 
 </details>
 
+### Startup-Precomputed Routes
+
+Use `cache_resp=True` only for immutable responses. FastrAPI calls the handler during startup, stores the rendered response bytes and headers, and serves that route through a no-Python Axum path.
+
+```python
+@app.get("/", cache_resp=True)
+def hello():
+    return {"Hello": "World"}
+```
+
 ## Performance
 
 Benchmarks using [k6](https://k6.io/) show it outperforms FastAPI + Guvicorn across multiple worker configurations.
@@ -284,16 +294,6 @@ k6 run benchmarks/stress.js
 ```
 
 If you benchmark a debug build, Rust-side overhead will be much higher and the numbers will be misleading.
-
-### Startup-Precomputed Routes
-
-Use `cache_resp=True` only for immutable responses. FastrAPI calls the handler during startup, stores the rendered response bytes and headers, and serves that route through a no-Python Axum path.
-
-```python
-@app.get("/", cache_resp=True)
-def hello():
-    return {"Hello": "World"}
-```
 
 
 ### 🖥️ Test Environment
@@ -311,31 +311,31 @@ def hello():
 | FastAPI + Guvicorn (workers: 1)  | 21.08            | 19.67               | 937          | 38.47            | 93.42            |
 | FastAPI + Guvicorn (workers: 16) | 4.84             | 4.17                | 3882         | 10.22            | 81.20            |
 
-> **TLDR;** FASTRAPI handles thousands of requests per second with ultra-low latency , making it **~6× faster** than FastAPI + Guvicorn.
+> **TLDR;** FASTRAPI can handle thousands of requests per second with ultra-low latency , making it **~6× faster** than FastAPI + Guvicorn.
 
 ## Comparison: FastAPI vs FastRAPI
 
 | Area                                        | FastAPI                                             | FastRAPI                                                 | FastRAPI wins? |
 | ------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------- | -------------- |
-| Dependency resolution                       | Runtime `inspect` + reflection every request        | One-time parsing at decorator, pre-built injection plan | 🟢             |
-| fast path for trivial endpoints             | No special case: full kwargs/dependency work always | mini compiler to skip deps, validation, kwargs, middlewares at startup      | 🟢             |
+| Dependency resolution                       | Runtime `inspect` + reflection every request        | One time parsing at startup, pre-built injection plan later | 🟢             |
+| fast path for trivial endpoints             | No cases and full `kwargs`/`dependency` work always at runtime | mini compiler to skip deps, validation, kwargs, middlewares if required at startup      | 🟢             |
 | Route lookup speed                          | Starlette regex router (slows with many routes)     | `papaya` concurrent hashmap + radix trie lookup                | 🟢             |
-| Middleware usability (Python)               | `@app.middleware` often buggy / limited             | Clean, working decorator + real execution                | 🟢             |
-| Background tasks reliability                | Fire-and-forget, errors usually swallowed           | Proper `JoinHandle` + error logging                      | 🟢             |
-| WebSocket implementation                    | Starlette (solid but heavy)                         | Custom with bounded channels + clean async pump          | 🟢             |
+| Middleware usability (Python)               | `@app.middleware` often buggy / limited             | working decorator + `tower-http` api                | 🟢             |
+| Background tasks reliability                | Fire 'n forget, errors usually swallowed           | proper `JoinHandle` + error logging                      | 🟢             |
+| WebSocket implementation                    | Starlette (solid but heavy)                         | custom with bounded channels + clean async pump          | 🟢             |
 | Startup-time error detection                | Almost everything deferred to runtime               | Full signature + dependency analysis at decorator time   | 🟢             |
-| Concurrency & resource safety               | asyncio + threadpool                                | Native Tokio + Rust memory & thread safety               | 🔴 (slow due to context switches)             |
 | Deployment footprint                        | Heavy (uvicorn + many deps)                         | tiny Rust binary                | 🟢             |
 | Scaling to 10,000+ routes                   | Noticeable slowdown                                 | Stays fast thanks to hashmap lookup                      | 🟢             |
 | JSON serialization speed                    | slow                  | fast thanks to `sonic-rs`             | 🟢             |
-| `response_model=None` + raw Response return | Fully supported                                     | serialization                                            | 🔴 (for now)   |
+| Prometheus metrics endpoint                     | No                                                  | Yes                                                      | 🟢             |
+| Exception Handlers (`@app.exception_handler`)| Yes, global error catching                          | Full support (plus Axum `.fallback()` alias)             | 🟡   |
 | `APIRouter` + `include_router()`            | Yes, mature ecosystem                               | Full support                                             | 🟡   |
 | `StreamingResponse` / SSE                   | Yes, chunked streaming                              | Full support (async & sync generators)                   | 🟡   |
-| Global State (`request.app.state`)          | Yes                                                 | Full support                                             | 🟡   |
-| Exception Handlers (`@app.exception_handler`)| Yes, global error catching                          | Full support (plus Axum `.fallback()` alias)             | 🟢   |
-| `app.mount()` / `StaticFiles`               | Yes                                                 | Not yet implemented                                      | 🔴 (for now)   |
-| Prometheus metrics endpoint                     | No                                                  | Yes                                                      | 🟢             |
 | Frontend serving support (React, Vue, Svelte, etc.) | Yes                                                  | Yes                                                      | 🟡             |
+| Global State (`request.app.state`)          | Yes                                                 | Full support                                             | 🟡   |
+| `response_model=None` + raw Response return | Fully supported                                     | serialization                                            | 🔴 (for now)   |
+| Concurrency & resource safety               | asyncio + threadpool                                | Native Tokio + Rust memory & thread safety               | 🔴 (slow due to context switches)             |
+| `app.mount()` / `StaticFiles`               | Yes                                                 | Not yet implemented                                      | 🔴 (for now)   |
 <!-- frontend, prometheus, rate limiting -->
 
 ## Current Limitations
