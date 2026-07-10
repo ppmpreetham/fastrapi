@@ -324,14 +324,14 @@ def hello():
 | Background tasks reliability                | Fire-and-forget, errors usually swallowed           | Proper `JoinHandle` + error logging                      | 🟢             |
 | WebSocket implementation                    | Starlette (solid but heavy)                         | Custom with bounded channels + clean async pump          | 🟢             |
 | Startup-time error detection                | Almost everything deferred to runtime               | Full signature + dependency analysis at decorator time   | 🟢             |
-| Concurrency & resource safety               | asyncio + threadpool                                | Native Tokio + Rust memory & thread safety               | 🟢             |
-| Deployment footprint                        | Heavy (uvicorn + many deps)                         | Tiny Rust binary + optional Python runtime               | 🟢             |
+| Concurrency & resource safety               | asyncio + threadpool                                | Native Tokio + Rust memory & thread safety               | 🔴 (slow due to context switches)             |
+| Deployment footprint                        | Heavy (uvicorn + many deps)                         | tiny Rust binary                | 🟢             |
 | Scaling to 10,000+ routes                   | Noticeable slowdown                                 | Stays fast thanks to hashmap lookup                      | 🟢             |
-| JSON serialization flexibility              | Hard to swap (monkey-patch needed)                  | Trivial to plug orjson / sonic-rs / simdjson             | 🟢             |
+| JSON serialization speed                    | slow                  | fast thanks to `sonic-rs`             | 🟢             |
 | `response_model=None` + raw Response return | Fully supported                                     | serialization                                            | 🔴 (for now)   |
-| `APIRouter` + `include_router()`            | Yes, mature ecosystem                               | Full support                                             | 🟢   |
-| `StreamingResponse` / SSE                   | Yes, chunked streaming                              | Full support (async & sync generators)                   | 🟢   |
-| Global State (`request.app.state`)          | Yes                                                 | Full support                                             | 🟢   |
+| `APIRouter` + `include_router()`            | Yes, mature ecosystem                               | Full support                                             | 🟡   |
+| `StreamingResponse` / SSE                   | Yes, chunked streaming                              | Full support (async & sync generators)                   | 🟡   |
+| Global State (`request.app.state`)          | Yes                                                 | Full support                                             | 🟡   |
 | Exception Handlers (`@app.exception_handler`)| Yes, global error catching                          | Full support (plus Axum `.fallback()` alias)             | 🟢   |
 | `app.mount()` / `StaticFiles`               | Yes                                                 | Not yet implemented                                      | 🔴 (for now)   |
 | Prometheus metrics endpoint                     | No                                                  | Yes                                                      | 🟢             |
