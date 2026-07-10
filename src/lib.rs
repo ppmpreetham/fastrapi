@@ -31,7 +31,9 @@ pub use routing::security;
 
 pub use app::FastrAPI;
 pub use request::{PyHTTPConnection, PyRequest};
-pub use responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse, PyStreamingResponse};
+pub use responses::{
+    PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse, PyStreamingResponse,
+};
 
 use crate::routing::security::{
     APIKeyCookie, APIKeyHeader, APIKeyQuery, HTTPAuthorizationCredentials, HTTPBasic,
@@ -49,6 +51,7 @@ use params::{
     Unset,
 };
 use router::PyAPIRouter;
+use routing::prometheus::PyInstrumentator;
 use staticfiles::PyStaticFiles;
 use websocket::PyWebSocket;
 
@@ -138,6 +141,11 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     );
 
     submodule!(m, "middleware.cors", add_classes!(CORSMiddleware));
+    submodule!(m, "prometheus", add_classes!(PyInstrumentator));
+    m.add(
+        "Instrumentator",
+        m.getattr("prometheus")?.getattr("Instrumentator")?,
+    )?;
     submodule!(m, "websocket", add_classes!(PyWebSocket));
 
     status::create_status_submodule(m)?;

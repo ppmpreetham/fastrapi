@@ -6,7 +6,7 @@ use crate::routing::types::{FlatRoute, ParameterConstraints, ParameterSource};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use serde::{Deserialize, Serialize};
-use sonic_rs::{Value as JsonValue, json, JsonValueMutTrait};
+use sonic_rs::{JsonValueMutTrait, Value as JsonValue, json};
 use std::collections::HashMap;
 use tracing::debug;
 

@@ -298,6 +298,7 @@ pub struct RouteHandler {
     pub response_class: Option<Py<PyAny>>,
     pub execution_mode: crate::ffi::py_handlers::ExecutionMode,
     pub cache_response: bool,
+    pub rate_limit_per_second: Option<u32>,
     // pub security_requirements: Vec<RouteSecurityRequirement>,
 }
 

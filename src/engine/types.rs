@@ -15,6 +15,19 @@ pub struct StaticMount {
     pub name: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct FrontendMount {
+    pub path: String,
+    pub directory: String,
+    pub fallback: Option<String>,
+    pub check_dir: bool,
+}
+
+#[derive(Clone)]
+pub struct PrometheusConfig {
+    pub metrics_path: String,
+}
+
 #[pyclass(name = "FastrAPI")]
 pub struct FastrAPI {
     #[pyo3(get, set)]
@@ -110,6 +123,8 @@ pub struct FastrAPI {
     #[pyo3(get, set)]
     pub powered_by_header: Option<String>,
     pub static_mounts: Vec<StaticMount>,
+    pub frontend_mounts: Vec<FrontendMount>,
+    pub prometheus_config: Option<PrometheusConfig>,
 
     // CORS for rust side of things
     pub cors_config: Option<CORSMiddleware>,

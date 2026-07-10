@@ -1,9 +1,9 @@
-use super::types::{FastrAPI, StaticMount};
+use super::types::{FastrAPI, FrontendMount, StaticMount};
 use ahash::{AHashMap, AHashSet};
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::Request,
+    extract::{ConnectInfo, Request},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
     middleware::{self as axum_middleware, Next},
     response::{Html, IntoResponse, Response},
@@ -17,10 +17,11 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tower::{ServiceExt, service_fn};
 use tower_http::catch_panic::CatchPanicLayer;
@@ -33,11 +34,14 @@ use tower_http::trace::TraceLayer;
 use tracing::{Level, error, info};
 
 // middleware Libraries
+use dashmap::DashMap;
+use parking_lot::Mutex;
 use tower_http::compression::{CompressionLayer, predicate::SizeAbove};
 use tower_sessions::cookie::Key;
 use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
 // internal Imports
+use crate::routing::prometheus::prometheus_handle;
 use crate::utils::openapi::build_openapi_spec;
 use crate::utils::utils::local_guard;
 use crate::{
@@ -77,6 +81,19 @@ pub struct AppState {
     pub reject_unknown_multipart_fields: bool,
     pub root_path: String,
 }
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct RateLimitKey {
+    handler: usize,
+    ip: Option<IpAddr>,
+}
+
+struct RateLimitWindow {
+    start: Instant,
+    count: u32,
+}
+
+static RATE_LIMITS: OnceLock<DashMap<RateLimitKey, Mutex<RateLimitWindow>>> = OnceLock::new();
 
 struct EnteredLifespan {
     manager: Py<PyAny>,
@@ -990,6 +1007,7 @@ fn build_router(
     });
 
     let frozen_router = Arc::new(frozen_router_builder.build());
+    let frontend_mounts = Arc::new(app_config.frontend_mounts.clone());
 
     let mut cached_routes: AHashMap<String, MethodRouter> = AHashMap::new();
     flat.0
@@ -1099,10 +1117,30 @@ fn build_router(
         );
     }
 
+    if let Some(config) = &app_config.prometheus_config {
+        let handle = prometheus_handle();
+        app = app.route(
+            &config.metrics_path,
+            get(move || {
+                let handle = handle.clone();
+                async move { handle.render() }
+            }),
+        );
+    }
+
     app = app.fallback({
         let router = frozen_router.clone();
         let state = app_state.clone();
-        axum::routing::any(move |req: Request| async move { dispatch(router, state, req).await })
+        let frontend_mounts = frontend_mounts.clone();
+        axum::routing::any(move |req: Request| async move {
+            if request_matches_router(&router, &state, &req) {
+                return dispatch(router, state, req).await;
+            }
+
+            serve_frontend_mounts(frontend_mounts, req)
+                .await
+                .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+        })
     });
 
     // =========================== //
@@ -1137,6 +1175,10 @@ fn build_router(
         info!("???????  Layer: GZip (min: {} bytes)", config.minimum_size);
         let predicate = SizeAbove::new(config.minimum_size as u16);
         app = app.layer(CompressionLayer::new().compress_when(predicate));
+    }
+
+    if app_config.prometheus_config.is_some() {
+        app = app.layer(axum_middleware::from_fn(record_prometheus_metrics));
     }
 
     // L3: Python Middleware
@@ -1439,6 +1481,218 @@ fn sync_no_request_method_router(
     }
 }
 
+fn is_rate_limited(req: &Request, handler: usize, limit: u32) -> bool {
+    if limit == 0 {
+        return true;
+    }
+
+    let ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+    let key = RateLimitKey { handler, ip };
+    let limits = RATE_LIMITS.get_or_init(DashMap::new);
+    let bucket = limits.entry(key).or_insert_with(|| {
+        Mutex::new(RateLimitWindow {
+            start: Instant::now(),
+            count: 0,
+        })
+    });
+    let mut window = bucket.lock();
+    let now = Instant::now();
+
+    if now.duration_since(window.start) >= Duration::from_secs(1) {
+        window.start = now;
+        window.count = 0;
+    }
+
+    if window.count >= limit {
+        return true;
+    }
+
+    window.count += 1;
+    false
+}
+fn request_matches_router(router: &FrozenRouter, state: &AppState, req: &Request) -> bool {
+    let Some(method) = request_method(req) else {
+        return true;
+    };
+    let Some(path) = dispatch_path(state, req.uri().path()) else {
+        return false;
+    };
+    router.resolve(method, path).is_some()
+}
+
+fn request_method(req: &Request) -> Option<HttpMethod> {
+    match req.method().as_str() {
+        "GET" => Some(HttpMethod::GET),
+        "POST" => Some(HttpMethod::POST),
+        "PUT" => Some(HttpMethod::PUT),
+        "DELETE" => Some(HttpMethod::DELETE),
+        "PATCH" => Some(HttpMethod::PATCH),
+        "OPTIONS" => Some(HttpMethod::OPTIONS),
+        "HEAD" => Some(HttpMethod::HEAD),
+        _ => None,
+    }
+}
+
+fn dispatch_path<'a>(state: &AppState, original_path: &'a str) -> Option<&'a str> {
+    let root = state.root_path.trim_end_matches('/');
+    if root.is_empty() {
+        Some(original_path)
+    } else if original_path == root {
+        Some("/")
+    } else if let Some(stripped) = original_path.strip_prefix(root) {
+        stripped.starts_with('/').then_some(stripped)
+    } else {
+        None
+    }
+}
+
+async fn serve_frontend_mounts(mounts: Arc<Vec<FrontendMount>>, req: Request) -> Option<Response> {
+    if !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) {
+        return None;
+    }
+
+    let (mount, relative_path) = frontend_match(&mounts, req.uri().path())?;
+    let file_path = frontend_safe_path(&mount.directory, &relative_path)?;
+    if tokio::fs::metadata(&file_path)
+        .await
+        .is_ok_and(|metadata| metadata.is_file())
+    {
+        return serve_frontend_file(req, file_path, StatusCode::OK).await;
+    }
+
+    let fallback = mount.fallback.as_deref()?;
+    let navigation = frontend_navigation_request(&req, &relative_path);
+    let (fallback_path, status) = frontend_fallback_path(mount, fallback, navigation).await?;
+    serve_frontend_file(req, fallback_path, status).await
+}
+
+fn frontend_match<'a>(
+    mounts: &'a [FrontendMount],
+    request_path: &str,
+) -> Option<(&'a FrontendMount, String)> {
+    mounts
+        .iter()
+        .filter_map(|mount| {
+            if mount.path == "/" {
+                return Some((mount, request_path.trim_start_matches('/').to_string()));
+            }
+            if request_path == mount.path {
+                return Some((mount, String::new()));
+            }
+            request_path
+                .strip_prefix(&format!("{}/", mount.path))
+                .map(|relative| (mount, relative.to_string()))
+        })
+        .max_by_key(|(mount, _)| mount.path.len())
+}
+
+fn frontend_safe_path(directory: &str, request_path: &str) -> Option<PathBuf> {
+    let decoded = percent_encoding::percent_decode_str(request_path)
+        .decode_utf8()
+        .ok()?;
+    let mut file_path = PathBuf::from(directory);
+
+    for component in Path::new(decoded.trim_start_matches('/')).components() {
+        match component {
+            Component::Normal(part) => file_path.push(part),
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => return None,
+        }
+    }
+
+    if request_path.is_empty() || request_path.ends_with('/') {
+        file_path.push("index.html");
+    }
+
+    Some(file_path)
+}
+
+fn frontend_navigation_request(req: &Request, relative_path: &str) -> bool {
+    relative_path
+        .rsplit('/')
+        .next()
+        .is_none_or(|last| !last.contains('.'))
+        && req
+            .headers()
+            .get(axum::http::header::ACCEPT)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|accept| accept.contains("text/html") || accept.contains("*/*"))
+}
+
+async fn frontend_fallback_path(
+    mount: &FrontendMount,
+    fallback: &str,
+    navigation: bool,
+) -> Option<(PathBuf, StatusCode)> {
+    let directory = Path::new(&mount.directory);
+    let candidates: SmallVec<[(PathBuf, StatusCode); 2]> = if fallback == "auto" {
+        smallvec::smallvec![
+            (directory.join("404.html"), StatusCode::NOT_FOUND),
+            (directory.join("index.html"), StatusCode::OK),
+        ]
+    } else if fallback == "404.html" {
+        smallvec::smallvec![(directory.join(fallback), StatusCode::NOT_FOUND)]
+    } else if navigation {
+        smallvec::smallvec![(directory.join(fallback), StatusCode::OK)]
+    } else {
+        return None;
+    };
+
+    for (path, status) in candidates {
+        if status == StatusCode::OK && !navigation {
+            continue;
+        }
+        if tokio::fs::metadata(&path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file())
+        {
+            return Some((path, status));
+        }
+    }
+
+    None
+}
+
+async fn serve_frontend_file(req: Request, path: PathBuf, status: StatusCode) -> Option<Response> {
+    let mut response = ServeFile::new(path)
+        .oneshot(req)
+        .await
+        .ok()
+        .map(IntoResponse::into_response)?;
+    *response.status_mut() = status;
+    Some(response)
+}
+async fn record_prometheus_metrics(req: Request, next: Next) -> Response {
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
+    let start = Instant::now();
+    let response = next.run(req).await;
+    let status = response.status().as_u16().to_string();
+    let elapsed = start.elapsed().as_secs_f64();
+
+    metrics::counter!(
+        "fastrapi_requests_total",
+        "method" => method.clone(),
+        "path" => path.clone(),
+        "status" => status.clone(),
+    )
+    .increment(1);
+    metrics::histogram!(
+        "fastrapi_request_duration_seconds",
+        "method" => method,
+        "path" => path,
+        "status" => status,
+    )
+    .record(elapsed);
+
+    response
+}
 async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> Response {
     let method = match req.method().as_str() {
         "GET" => HttpMethod::GET,
@@ -1476,6 +1730,12 @@ async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> R
         RouteMatch::Static(handler) => (handler, None),
         RouteMatch::Params(handler, params) => (handler, Some(params)),
     };
+
+    if let Some(limit) = handler.rate_limit_per_second
+        && is_rate_limited(&req, Arc::as_ptr(&handler) as usize, limit)
+    {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
 
     if matches!(
         handler.execution_mode,
@@ -1533,21 +1793,4 @@ async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> R
         payload,
     )
     .await
-}
-
-// TODO: combine this to the router
-// app.frontend("/", directory="dist", fallback="404.html", check_dir=False)
-fn frontend(directory: &str, fallback: Option<&str>, check_dir: Option<bool>) -> Router {
-    if check_dir == Some(true) && !Path::new(directory).exists() {
-        panic!("Directory '{}' does not exist.", directory);
-    }
-    let serve_dir = ServeDir::new(directory);
-    match fallback {
-        Some(fallback_file) => {
-            let fallback_path = Path::new(directory).join(fallback_file);
-            let service = serve_dir.not_found_service(ServeFile::new(fallback_path));
-            Router::new().fallback_service(service)
-        }
-        None => Router::new().fallback_service(serve_dir),
-    }
 }

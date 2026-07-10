@@ -125,11 +125,13 @@ fn json_ser_error(err: sonic_rs::Error) -> PyErr {
 // ponytail: helper wrapping sonic_rs::to_string for write paths
 #[inline]
 fn write_json_via_sonic<W: Write>(writer: &mut W, value: &str) -> PyResult<()> {
-    writer.write_all(
-        sonic_rs::to_string(&value)
-            .map_err(json_ser_error)?
-            .as_bytes(),
-    ).map_err(json_io_error)
+    writer
+        .write_all(
+            sonic_rs::to_string(&value)
+                .map_err(json_ser_error)?
+                .as_bytes(),
+        )
+        .map_err(json_io_error)
 }
 
 #[inline]
@@ -400,9 +402,15 @@ pub fn json_to_py_object(py: Python<'_>, value: &Value) -> Py<PyAny> {
     let json_str = sonic_rs::to_string(value).unwrap_or_else(|_| "null".to_owned());
     static JSON_LOADS: OnceLock<Py<PyAny>> = OnceLock::new();
     let loads = JSON_LOADS.get_or_init(|| {
-        py.import("json").unwrap().getattr("loads").unwrap().unbind()
+        py.import("json")
+            .unwrap()
+            .getattr("loads")
+            .unwrap()
+            .unbind()
     });
-    loads.bind(py).call1((&json_str,))
+    loads
+        .bind(py)
+        .call1((&json_str,))
         .map(|obj| obj.unbind())
         .unwrap_or_else(|_| py.None())
 }

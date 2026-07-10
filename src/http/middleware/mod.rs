@@ -40,6 +40,7 @@ mod trustedhost;
 
 pub use cors::{CORSMiddleware, build_cors_layer, parse_cors_params};
 pub use gzip::{GZipMiddleware, parse_gzip_params};
+pub use rate_limit::rate_limit;
 pub use session::{SessionMiddleware, parse_session_params};
 pub use trustedhost::{TrustedHostMiddleware, parse_trusted_host_params};
 

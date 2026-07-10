@@ -3,13 +3,13 @@ use super::security::PySecurityScopes;
 use super::types::{ParsedParameter, RequestInput};
 use crate::ffi::pydantic;
 use axum::response::Response;
-use std::sync::OnceLock;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 type SharedPyObject = Py<PyAny>;
 
