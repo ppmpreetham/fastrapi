@@ -42,8 +42,8 @@ use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
 // internal Imports
 use crate::routing::prometheus::prometheus_handle;
-use crate::utils::openapi::build_openapi_spec;
 use crate::utils::local_guard;
+use crate::utils::openapi::build_openapi_spec;
 use crate::{
     ffi::py_handlers::{
         ExecutionMode, render_no_request_json_response, render_no_request_response, run_py_handler,
@@ -146,7 +146,9 @@ pub fn serve(
         .as_ref()
         .map(|handler| handler.clone_ref(py));
     let app = app.clone_ref(py);
-
+    let redoc_url = app_config.redoc_url.clone();
+    let scalar_url = app_config.scalar_url.clone();
+    let elements_url = app_config.elements_url.clone();
     let router = build_router(py, app_state.clone(), docs_url, openapi_url, &app_config);
     drop(app_config);
 
@@ -170,6 +172,15 @@ pub fn serve(
             info!("🚀 FastrAPI running at http://{}", addr);
             if let Some(docs) = &docs_url_for_log {
                 info!("📚 Swagger UI at http://{}{}", addr, docs);
+            }
+            if let Some(redoc_docs) = &redoc_url {
+                info!("📚 ReDoc UI at http://{}{}", addr, redoc_docs);
+            }
+            if let Some(scalar_docs) = &scalar_url {
+                info!("📚 Scalar UI at http://{}{}", addr, scalar_docs);
+            }
+            if let Some(elements_docs) = &elements_url {
+                info!("📚 Elements UI at http://{}{}", addr, elements_docs);
             }
 
             let listener = listener.tap_io(|stream| {

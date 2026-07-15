@@ -49,6 +49,12 @@ uv install fastrapi
 pip install fastrapi
 ```
 
+### Build from Source
+
+```bash
+maturin build --release --pgo --generate-stubs
+```
+
 ### Switch from FastAPI
 
 ```diff
@@ -295,7 +301,6 @@ k6 run benchmarks/stress.js
 
 If you benchmark a debug build, Rust-side overhead will be much higher and the numbers will be misleading.
 
-
 ### 🖥️ Test Environment
 
 - **Kernel:** 6.16.8-arch3-1
@@ -315,27 +320,28 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 
 ## Comparison: FastAPI vs FastRAPI
 
-| Area                                        | FastAPI                                             | FastRAPI                                                 | FastRAPI wins? |
-| ------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------- | -------------- |
-| Dependency resolution                       | Runtime `inspect` + reflection every request        | One time parsing at startup, pre-built injection plan later | 🟢             |
-| fast path for trivial endpoints             | No cases and full `kwargs`/`dependency` work always at runtime | mini compiler to skip deps, validation, kwargs, middlewares if required at startup      | 🟢             |
-| Route lookup speed                          | Starlette regex router (slows with many routes)     | `papaya` concurrent hashmap + radix trie lookup                | 🟢             |
-| Middleware usability (Python)               | `@app.middleware` often buggy / limited             | working decorator + `tower-http` api                | 🟢             |
-| Background tasks reliability                | Fire 'n forget, errors usually swallowed           | proper `JoinHandle` + error logging                      | 🟢             |
-| WebSocket implementation                    | Starlette (solid but heavy)                         | custom with bounded channels + clean async pump          | 🟢             |
-| Startup-time error detection                | Almost everything deferred to runtime               | Full signature + dependency analysis at decorator time   | 🟢             |
-| Deployment footprint                        | Heavy (uvicorn + many deps)                         | tiny Rust binary                | 🟢             |
-| Scaling to 10,000+ routes                   | Noticeable slowdown                                 | Stays fast thanks to hashmap lookup                      | 🟢             |
-| JSON serialization speed                    | slow                  | fast thanks to `sonic-rs`             | 🟢             |
-| Prometheus metrics endpoint                     | No                                                  | Yes                                                      | 🟢             |
-| Exception Handlers (`@app.exception_handler`)| Yes, global error catching                          | Full support (plus Axum `.fallback()` alias)             | 🟡   |
-| `APIRouter` + `include_router()`            | Yes, mature ecosystem                               | Full support                                             | 🟡   |
-| `StreamingResponse` / SSE                   | Yes, chunked streaming                              | Full support (async & sync generators)                   | 🟡   |
-| Frontend serving support (React, Vue, Svelte, etc.) | Yes                                                  | Yes                                                      | 🟡             |
-| Global State (`request.app.state`)          | Yes                                                 | Full support                                             | 🟡   |
-| `response_model=None` + raw Response return | Fully supported                                     | serialization                                            | 🔴 (for now)   |
-| Concurrency & resource safety               | asyncio + threadpool                                | Native Tokio + Rust memory & thread safety               | 🔴 (slow due to context switches)             |
-| `app.mount()` / `StaticFiles`               | Yes                                                 | Not yet implemented                                      | 🔴 (for now)   |
+| Area                                                | FastAPI                                                        | FastRAPI                                                                           | FastRAPI wins?                    |
+| --------------------------------------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------- |
+| Dependency resolution                               | Runtime `inspect` + reflection every request                   | One time parsing at startup, pre-built injection plan later                        | 🟢                                |
+| fast path for trivial endpoints                     | No cases and full `kwargs`/`dependency` work always at runtime | mini compiler to skip deps, validation, kwargs, middlewares if required at startup | 🟢                                |
+| Route lookup speed                                  | Starlette regex router (slows with many routes)                | `papaya` concurrent hashmap + radix trie lookup                                    | 🟢                                |
+| Middleware usability (Python)                       | `@app.middleware` often buggy / limited                        | working decorator + `tower-http` api                                               | 🟢                                |
+| Background tasks reliability                        | Fire 'n forget, errors usually swallowed                       | proper `JoinHandle` + error logging                                                | 🟢                                |
+| WebSocket implementation                            | Starlette (solid but heavy)                                    | custom with bounded channels + clean async pump                                    | 🟢                                |
+| Startup-time error detection                        | Almost everything deferred to runtime                          | Full signature + dependency analysis at decorator time                             | 🟢                                |
+| Deployment footprint                                | Heavy (uvicorn + many deps)                                    | tiny Rust binary                                                                   | 🟢                                |
+| Scaling to 10,000+ routes                           | Noticeable slowdown                                            | Stays fast thanks to hashmap lookup                                                | 🟢                                |
+| JSON serialization speed                            | slow                                                           | fast thanks to `sonic-rs`                                                          | 🟢                                |
+| Prometheus metrics endpoint                         | No                                                             | Yes                                                                                | 🟢                                |
+| Exception Handlers (`@app.exception_handler`)       | Yes, global error catching                                     | Full support (plus Axum `.fallback()` alias)                                       | 🟡                                |
+| `APIRouter` + `include_router()`                    | Yes, mature ecosystem                                          | Full support                                                                       | 🟡                                |
+| `StreamingResponse` / SSE                           | Yes, chunked streaming                                         | Full support (async & sync generators)                                             | 🟡                                |
+| Frontend serving support (React, Vue, Svelte, etc.) | Yes                                                            | Yes                                                                                | 🟡                                |
+| Global State (`request.app.state`)                  | Yes                                                            | Full support                                                                       | 🟡                                |
+| `response_model=None` + raw Response return         | Fully supported                                                | serialization                                                                      | 🔴 (for now)                      |
+| Concurrency & resource safety                       | asyncio + threadpool                                           | Native Tokio + Rust memory & thread safety                                         | 🔴 (slow due to context switches) |
+| `app.mount()` / `StaticFiles`                       | Yes                                                            | Not yet implemented                                                                | 🔴 (for now)                      |
+
 <!-- frontend, prometheus, rate limiting -->
 
 ## Current Limitations

@@ -1,7 +1,7 @@
 from fastrapi import FastrAPI
 from fastrapi.responses import JSONResponse
 
-app = FastrAPI()
+app = FastrAPI(redoc_url="/api-docs")
 
 # you could try @app.get("/", cache_resp=True) if it's static and won't change :)
 @app.get("/")

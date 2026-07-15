@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "fastrapi"
-version = "0.3.1"
+version = "0.3.2"
 description = "A high-performance Python API framework powered by Rust"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -31,7 +31,10 @@ classifiers = [
   "Operating System :: OS Independent",
   "License :: OSI Approved :: MIT License",
 ]
-dependencies = ["pydantic>=2.9.0"]
+dependencies = [
+    "pydantic>=2.9.0",
+    "rsloop>=0.1.15",
+]
 
 # If you have optional dependencies, uncomment and adjust this section
 # [project.optional-dependencies]

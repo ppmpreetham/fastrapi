@@ -1,5 +1,5 @@
 // here lies all the decoraters signatures for get, put, patch, post, delete, options, head
-// again, wish these could be abstracted away by impls, but sadly pyo3 doesn't support it, atleast for now
+// once upon a time, here lied all the methods for the above, but they were later abstracted away by heros called macros
 
 use super::PyAPIRouter;
 use pyo3::prelude::Python;
