@@ -1,7 +1,7 @@
 use super::utils::py_dict_to_json;
 use crate::FastrAPI;
 use crate::ffi::pydantic;
-use crate::router::PyAPIRouter;
+use crate::decorators::PyAPIRouter;
 use crate::routing::types::{FlatRoute, ParameterConstraints, ParameterSource};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};

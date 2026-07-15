@@ -1,4 +1,4 @@
-use crate::router::PyAPIRouter;
+use crate::decorators::PyAPIRouter;
 use crate::routing::dependencies::DependencyNode;
 use crate::types::response::ResponseType;
 use ahash::{AHashMap, AHashSet};

@@ -14,10 +14,10 @@ pub use engine::app;
 pub use engine::background;
 pub use engine::server;
 pub use ffi::datastructures;
+pub use ffi::decorators;
 pub use ffi::exceptions;
 pub use ffi::py_handlers;
 pub use ffi::pydantic;
-pub use ffi::router;
 pub use globals::{BASEMODEL_TYPE, MIDDLEWARES, PYTHON_RUNTIME, config};
 pub use http::middleware;
 pub use http::request;
@@ -41,6 +41,7 @@ use crate::routing::security::{
 };
 use background::PyBackgroundTasks;
 use datastructures::PyUploadFile;
+use decorators::PyAPIRouter;
 use exceptions::{
     PyFastrAPIDeprecationWarning, PyFastrAPIError, PyHTTPException, PyRequestValidationError,
     PyResponseValidationError, PyValidationException, PyWebSocketException,
@@ -50,7 +51,6 @@ use params::{
     PyBody, PyCookie, PyDepends, PyFile, PyForm, PyHeader, PyPath, PyQuery, PySecurity, Undefined,
     Unset,
 };
-use router::PyAPIRouter;
 use routing::prometheus::PyInstrumentator;
 use staticfiles::PyStaticFiles;
 use websocket::PyWebSocket;
