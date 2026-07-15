@@ -49,7 +49,7 @@ impl<'py> ParserKeys<'py> {
 #[derive(Clone, Debug)]
 pub enum InjectionType {
     Dependency(usize),
-    Parameter(ParsedParameter),
+    Parameter(Box<ParsedParameter>),
     Request,
     SecurityScopes,
 }
@@ -69,7 +69,7 @@ pub struct DependencyNode {
 
 pub enum DependencyExecutionError {
     Python(PyErr),
-    Response(Response),
+    Response(Box<Response>),
 }
 
 impl From<PyErr> for DependencyExecutionError {
@@ -337,7 +337,7 @@ fn build_injection_plan(
 
         if !special {
             let parsed_param = params::parse_parameter_spec(py, &name, &param, path_param_names)?;
-            plan.push((name, InjectionType::Parameter(parsed_param)));
+            plan.push((name, InjectionType::Parameter(Box::new(parsed_param))));
         }
     }
 
@@ -363,7 +363,7 @@ fn build_dependency_kwargs(
             }
             InjectionType::Parameter(parameter) => {
                 if let Some(value) = pydantic::resolve_parameter_value(py, parameter, request_input)
-                    .map_err(DependencyExecutionError::Response)?
+                    .map_err(|e| DependencyExecutionError::Response(Box::new(e)))?
                 {
                     final_kwargs.set_item(py_arg_name, value)?;
                 }

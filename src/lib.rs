@@ -9,6 +9,7 @@ pub mod http;
 pub mod routing;
 pub mod types;
 pub mod utils;
+pub mod macros;
 
 pub use engine::app;
 pub use engine::background;

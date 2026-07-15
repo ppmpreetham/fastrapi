@@ -144,25 +144,19 @@ pub struct CompiledSecurityScheme {
 #[derive(Clone, Debug)]
 pub struct RouteSecurityRequirement {
     pub scheme: Arc<CompiledSecurityScheme>,
-    pub scopes: Arc<[String]>, // Zero-allocation cloning for specific route
+    pub scopes: Arc<[String]>,
 }
 
-#[derive(Clone, Debug)]
-pub enum InjectionType {
-    Dependency(usize),
-    Parameter(ParsedParameter),
-    Request,
-    SecurityScopes(usize), // Maps to RouteHandler.security_requirements index
-    SecurityScheme(usize), // Maps to RouteHandler.security_requirements index
-}
+pub type PathParams<'a> = OnceLock<SmallVec<[(String, &'a str); 8]>>;
+pub type QueryParams<'a> = OnceLock<SmallVec<[(Cow<'a, str>, Cow<'a, str>); 8]>>;
 
 pub struct RequestInput<'a> {
     pub method: &'a str,
     pub path: &'a str,
     pub query_string: &'a str,
 
-    pub path_params: OnceLock<SmallVec<[(String, &'a str); 8]>>,
-    pub query_params: OnceLock<SmallVec<[(Cow<'a, str>, Cow<'a, str>); 8]>>,
+    pub path_params: PathParams<'a>,
+    pub query_params: QueryParams<'a>,
     pub headers: &'a axum::http::HeaderMap,
     pub cookies: OnceLock<SmallVec<[(&'a str, &'a str); 8]>>,
 }

@@ -1,5 +1,3 @@
-#[path = "../engine/types.rs"]
-pub mod fastrapi;
+pub use crate::engine::types as fastrapi;
 pub mod response;
-#[path = "../routing/types.rs"]
-pub mod route;
+pub use crate::routing::types as route;

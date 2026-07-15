@@ -183,7 +183,7 @@ fn resolve_sync_deps<'py>(
         request_object,
     )
     .map_err(|e| match e {
-        DependencyExecutionError::Response(r) => r,
+        DependencyExecutionError::Response(r) => *r,
         DependencyExecutionError::Python(err) => python_error_to_response(py, err),
     })?;
 
@@ -228,7 +228,7 @@ pub(crate) fn render_no_request_json_response(py: Python<'_>, handler: &RouteHan
             .into_response();
     }
 
-    crate::utils::utils::py_json_response_with_status_hint(
+    crate::utils::py_json_response_with_status_hint(
         py,
         handler.default_status.unwrap_or(StatusCode::OK),
         &result,
@@ -564,7 +564,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
     .await
     {
         Ok(results) => results,
-        Err(DependencyExecutionError::Response(r)) => return r,
+        Err(DependencyExecutionError::Response(r)) => return *r,
         Err(DependencyExecutionError::Python(err)) => {
             return rt_handle
                 .spawn_blocking(move || Python::attach(|py| python_error_to_response(py, err)))

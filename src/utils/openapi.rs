@@ -1,4 +1,4 @@
-use super::utils::py_dict_to_json;
+use crate::utils::py_dict_to_json;
 use crate::FastrAPI;
 use crate::ffi::pydantic;
 use crate::decorators::PyAPIRouter;

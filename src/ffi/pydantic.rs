@@ -10,7 +10,7 @@ use crate::routing::types::{
     RouteHandler, SerializationHint,
 };
 use crate::types::response::ResponseType;
-use crate::utils::utils::{json_to_py_object, py_to_response};
+use crate::utils::{json_to_py_object, py_to_response};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

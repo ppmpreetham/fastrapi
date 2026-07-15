@@ -1,4 +1,4 @@
-use crate::utils::utils::{
+use crate::utils::{
     py_json_response_with_status, py_json_response_with_status_hint, py_to_response,
 };
 use axum::{
@@ -479,7 +479,7 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
         return convert_streaming_response(py, result);
     }
 
-    crate::utils::utils::py_json_response(py, result).unwrap_or_else(|err| {
+    crate::utils::py_json_response(py, result).unwrap_or_else(|err| {
         err.print(py);
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })

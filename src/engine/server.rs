@@ -43,7 +43,7 @@ use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 // internal Imports
 use crate::routing::prometheus::prometheus_handle;
 use crate::utils::openapi::build_openapi_spec;
-use crate::utils::utils::local_guard;
+use crate::utils::local_guard;
 use crate::{
     ffi::py_handlers::{
         ExecutionMode, render_no_request_json_response, render_no_request_response, run_py_handler,
