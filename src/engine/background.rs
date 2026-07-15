@@ -13,7 +13,7 @@ pub struct PyBackgroundTasks {
 #[pymethods]
 impl PyBackgroundTasks {
     #[new]
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             tasks: Arc::new(Mutex::new(Vec::new())),
         }
@@ -30,8 +30,7 @@ impl PyBackgroundTasks {
 }
 
 impl PyBackgroundTasks {
-    // this is called AFTER response is sent
-    pub async fn execute_all(&self) -> Vec<JoinHandle<()>> {
+    pub fn execute_all(&self) -> Vec<JoinHandle<()>> {
         let tasks = {
             let locked = self.tasks.lock().expect("Background tasks lock poisoned");
             locked.clone()

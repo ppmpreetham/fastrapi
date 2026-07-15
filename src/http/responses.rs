@@ -158,19 +158,19 @@ pub fn convert_response_by_type(
 
     let validated_storage;
 
-    if let Some(model) = &handler.response_model {
-        let class_name = response_class_name(final_result);
-        let is_explicit_response = final_result.is_instance_of::<PyJSONResponse>()
-            || final_result.is_instance_of::<PyPlainTextResponse>()
-            || final_result.is_instance_of::<PyHTMLResponse>()
-            || final_result.is_instance_of::<PyRedirectResponse>()
-            || final_result.is_instance_of::<PyStreamingResponse>()
-            || response_class_is(class_name.as_deref(), "JSONResponse")
-            || response_class_is(class_name.as_deref(), "PlainTextResponse")
-            || response_class_is(class_name.as_deref(), "HTMLResponse")
-            || response_class_is(class_name.as_deref(), "RedirectResponse")
-            || response_class_is(class_name.as_deref(), "StreamingResponse");
+    let class_name = response_class_name(final_result);
+    let is_explicit_response = final_result.is_instance_of::<PyJSONResponse>()
+        || final_result.is_instance_of::<PyPlainTextResponse>()
+        || final_result.is_instance_of::<PyHTMLResponse>()
+        || final_result.is_instance_of::<PyRedirectResponse>()
+        || final_result.is_instance_of::<PyStreamingResponse>()
+        || response_class_is(class_name.as_deref(), "JSONResponse")
+        || response_class_is(class_name.as_deref(), "PlainTextResponse")
+        || response_class_is(class_name.as_deref(), "HTMLResponse")
+        || response_class_is(class_name.as_deref(), "RedirectResponse")
+        || response_class_is(class_name.as_deref(), "StreamingResponse");
 
+    if let Some(model) = &handler.response_model {
         if !is_explicit_response {
             validated_storage = model
                 .bind(py)
@@ -178,6 +178,31 @@ pub fn convert_response_by_type(
             final_result = &validated_storage;
         }
     }
+
+    if is_explicit_response {
+        if final_result.is_instance_of::<PyJSONResponse>()
+            || response_class_is(class_name.as_deref(), "JSONResponse")
+        {
+            return Ok(convert_json_response(py, final_result));
+        } else if final_result.is_instance_of::<PyPlainTextResponse>()
+            || response_class_is(class_name.as_deref(), "PlainTextResponse")
+        {
+            return Ok(convert_text_response(py, final_result));
+        } else if final_result.is_instance_of::<PyHTMLResponse>()
+            || response_class_is(class_name.as_deref(), "HTMLResponse")
+        {
+            return Ok(convert_html_response(py, final_result));
+        } else if final_result.is_instance_of::<PyRedirectResponse>()
+            || response_class_is(class_name.as_deref(), "RedirectResponse")
+        {
+            return Ok(convert_redirect_response(py, final_result));
+        } else if final_result.is_instance_of::<PyStreamingResponse>()
+            || response_class_is(class_name.as_deref(), "StreamingResponse")
+        {
+            return Ok(convert_streaming_response(py, final_result));
+        }
+    }
+
     let response = match handler.response_type {
         ResponseType::PlainText => {
             // Fast native UTF-8 extraction path

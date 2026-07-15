@@ -1,14 +1,32 @@
-use crate::utils::py_dict_to_json;
 use crate::FastrAPI;
-use crate::ffi::pydantic;
 use crate::decorators::PyAPIRouter;
+use crate::ffi::pydantic;
 use crate::routing::types::{FlatRoute, ParameterConstraints, ParameterSource};
+use crate::utils::py_dict_to_json;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use serde::{Deserialize, Serialize};
-use sonic_rs::{JsonValueMutTrait, Value as JsonValue, json};
+use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value as JsonValue, json};
 use std::collections::HashMap;
 use tracing::debug;
+
+pub fn deep_merge_json(target: &mut JsonValue, source: JsonValue) {
+    if source.is_object() && target.is_object() {
+        let source_obj = source.as_object().unwrap();
+        let target_obj = target.as_object_mut().unwrap();
+
+        for (k, v) in source_obj.iter() {
+            if target_obj.contains_key(&k) {
+                let target_val = target_obj.get_mut(&k).unwrap();
+                deep_merge_json(target_val, v.clone());
+            } else {
+                target_obj.insert(k, v.clone());
+            }
+        }
+    } else {
+        *target = source;
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenApiSpec {
@@ -21,6 +39,9 @@ pub struct OpenApiSpec {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<JsonValue>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhooks: Option<HashMap<String, PathItem>>,
 
     #[serde(skip_serializing_if = "Option::is_none", rename = "externalDocs")]
     pub external_docs: Option<JsonValue>,
@@ -51,15 +72,15 @@ pub struct OpenApiInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PathItem {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub get: Option<Operation>,
+    pub get: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub post: Option<Operation>,
+    pub post: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub put: Option<Operation>,
+    pub put: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub delete: Option<Operation>,
+    pub delete: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub patch: Option<Operation>,
+    pub patch: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Vec<Parameter>>,
 }
@@ -77,9 +98,13 @@ pub struct Operation {
     pub tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Vec<Parameter>>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "operationId")]
+    pub operation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_body: Option<RequestBody>,
     pub responses: HashMap<String, Response>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callbacks: Option<HashMap<String, JsonValue>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +159,7 @@ impl Default for OpenApiSpec {
             paths: HashMap::new(),
             servers: None,
             tags: None,
+            webhooks: None,
             external_docs: None,
             components: Some(Components {
                 schemas: HashMap::new(),
@@ -315,10 +341,42 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
 
     let router = app.router.bind(py);
     let router = router.borrow();
-
     let collected = collect_routes(py, &router);
 
+    let app_responses = if let Some(resp) = &app.responses
+        && let Ok(dict) = resp.bind(py).cast::<PyDict>()
+    {
+        Some(py_dict_to_json(py, dict))
+    } else {
+        None
+    };
+
     let mut schemas: HashMap<String, JsonValue> = HashMap::new();
+    spec.paths = build_paths_from_routes(py, collected, &mut schemas, app_responses.as_ref());
+
+    if let Some(wh) = &app.webhooks
+        && let Ok(router) = wh.bind(py).cast::<crate::decorators::PyAPIRouter>()
+    {
+        let wh_collected = collect_routes(py, &router.borrow());
+        let wh_paths = build_paths_from_routes(py, wh_collected, &mut schemas, None);
+        spec.webhooks = Some(wh_paths);
+    }
+
+    if let Some(components) = &mut spec.components {
+        components.schemas = schemas;
+    }
+    debug!("Built OpenAPI spec with {} paths", spec.paths.len());
+    sonic_rs::to_value(&spec).unwrap_or_else(|_| json!({}))
+}
+
+pub fn build_paths_from_routes(
+    py: Python<'_>,
+    collected: Vec<FlatRoute>,
+    schemas: &mut HashMap<String, JsonValue>,
+    app_responses: Option<&JsonValue>,
+) -> HashMap<String, PathItem> {
+    let mut paths: HashMap<String, PathItem> = HashMap::new();
+
     for route in collected {
         if !route.include_in_schema {
             continue;
@@ -341,6 +399,7 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
         let mut operation = Operation {
             summary: route.summary.clone(),
             description: route.description.clone().or(description),
+            operation_id: route.operation_id.clone(),
             tags: if tags.is_empty() {
                 None
             } else {
@@ -350,6 +409,7 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
             parameters: None,
             request_body: None,
             responses: HashMap::new(),
+            callbacks: None,
         };
 
         let mut parameters = Vec::new();
@@ -360,7 +420,7 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
                 ParameterSource::Query => "query",
                 ParameterSource::Header => "header",
                 ParameterSource::Cookie => "cookie",
-                ParameterSource::Body => return,
+                ParameterSource::Body | ParameterSource::BackgroundTasks => return,
             };
 
             let schema = param
@@ -475,11 +535,15 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
                 }
             }
         }
+        let response_desc = route
+            .response_description
+            .clone()
+            .unwrap_or_else(|| "Successful Response".to_string());
         // Default 200 response
         operation.responses.insert(
             "200".to_string(),
             Response {
-                description: "Successful Response".to_string(),
+                description: response_desc,
                 content: Some({
                     let mut content = HashMap::new();
                     content.insert(
@@ -518,7 +582,7 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
             );
         }
 
-        let path_item = spec.paths.entry(path).or_insert_with(|| PathItem {
+        let path_item = paths.entry(path).or_insert_with(|| PathItem {
             get: None,
             post: None,
             put: None,
@@ -527,21 +591,105 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
             parameters: None,
         });
 
+        let mut operation_val = sonic_rs::to_value(&operation).unwrap_or_else(|_| json!({}));
+
+        if let Some(extra) = &route.openapi_extra {
+            deep_merge_json(&mut operation_val, extra.clone());
+        }
+
+        // Global app.responses merge
+        if let Some(app_resps) = app_responses {
+            if let Some(op_obj) = operation_val.as_object_mut() {
+                if let Some(op_resp) = op_obj.get_mut(&"responses") {
+                    deep_merge_json(op_resp, app_resps.clone());
+                }
+            }
+        }
+
+        // Route responses override app.responses
+        if let Some(responses) = &route.responses {
+            if let Some(op_obj) = operation_val.as_object_mut() {
+                if let Some(op_resp) = op_obj.get_mut(&"responses") {
+                    deep_merge_json(op_resp, responses.clone());
+                }
+            }
+        }
+
+        // Callbacks handling
+        if let Some(callbacks_val) = &route.callbacks {
+            if let Some(op_obj) = operation_val.as_object_mut() {
+                if let Some(op_cb) = op_obj.get_mut(&"callbacks") {
+                    deep_merge_json(op_cb, callbacks_val.clone());
+                } else {
+                    op_obj.insert("callbacks", callbacks_val.clone());
+                }
+            }
+        }
+
         match method.as_str() {
-            "get" => path_item.get = Some(operation),
-            "post" => path_item.post = Some(operation),
-            "put" => path_item.put = Some(operation),
-            "delete" => path_item.delete = Some(operation),
-            "patch" => path_item.patch = Some(operation),
+            "get" => path_item.get = Some(operation_val),
+            "post" => path_item.post = Some(operation_val),
+            "put" => path_item.put = Some(operation_val),
+            "delete" => path_item.delete = Some(operation_val),
+            "patch" => path_item.patch = Some(operation_val),
             _ => {}
         }
     }
+    paths
+}
 
-    if let Some(components) = &mut spec.components {
-        components.schemas = schemas;
+pub fn parse_callbacks_to_json(
+    py: Python<'_>,
+    callbacks_bound: &Bound<'_, PyAny>,
+) -> Option<JsonValue> {
+    let mut callbacks_map = sonic_rs::Object::new();
+    let mut dummy_schemas = HashMap::new();
+
+    if let Ok(list) = callbacks_bound.try_iter() {
+        for item in list.flatten() {
+            if let Ok(router_ref) = item.cast::<crate::decorators::PyAPIRouter>() {
+                let router = router_ref.borrow();
+                let collected = collect_routes(py, &router);
+                let paths = build_paths_from_routes(py, collected, &mut dummy_schemas, None);
+
+                for (path, path_item) in paths {
+                    callbacks_map.insert(
+                        &path,
+                        sonic_rs::to_value(&path_item).unwrap_or_else(|_| json!({})),
+                    );
+                }
+            }
+        }
+    } else if let Ok(dict) = callbacks_bound.cast::<PyDict>() {
+        for (k, v) in dict {
+            if let Ok(k_str) = k.extract::<String>() {
+                if let Ok(list) = v.try_iter() {
+                    let mut inner_map = sonic_rs::Object::new();
+                    for item in list.flatten() {
+                        if let Ok(router_ref) = item.cast::<crate::decorators::PyAPIRouter>() {
+                            let router = router_ref.borrow();
+                            let collected = collect_routes(py, &router);
+                            let paths =
+                                build_paths_from_routes(py, collected, &mut dummy_schemas, None);
+                            for (path, path_item) in paths {
+                                inner_map.insert(
+                                    &path,
+                                    sonic_rs::to_value(&path_item).unwrap_or_else(|_| json!({})),
+                                );
+                            }
+                        }
+                    }
+                    callbacks_map.insert(&k_str, json!(inner_map));
+                }
+            }
+        }
     }
-    debug!("Built OpenAPI spec with {} paths", spec.paths.len());
-    sonic_rs::to_value(&spec).unwrap_or_else(|_| json!({}))
+
+    if callbacks_map.is_empty() {
+        None
+    } else {
+        Some(json!(callbacks_map))
+    }
 }
 
 fn collect_routes(py: Python<'_>, router: &PyAPIRouter) -> Vec<FlatRoute> {

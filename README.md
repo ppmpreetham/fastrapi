@@ -333,6 +333,7 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 | Scaling to 10,000+ routes                           | Noticeable slowdown                                            | Stays fast thanks to hashmap lookup                                                | 🟢                                |
 | JSON serialization speed                            | slow                                                           | fast thanks to `sonic-rs`                                                          | 🟢                                |
 | Prometheus metrics endpoint                         | No                                                             | Yes                                                                                | 🟢                                |
+| `app.mount()` / `StaticFiles`                       | Yes                                                            | Full support                                                                       | 🟢                                |
 | Exception Handlers (`@app.exception_handler`)       | Yes, global error catching                                     | Full support (plus Axum `.fallback()` alias)                                       | 🟡                                |
 | `APIRouter` + `include_router()`                    | Yes, mature ecosystem                                          | Full support                                                                       | 🟡                                |
 | `StreamingResponse` / SSE                           | Yes, chunked streaming                                         | Full support (async & sync generators)                                             | 🟡                                |
@@ -340,7 +341,6 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 | Global State (`request.app.state`)                  | Yes                                                            | Full support                                                                       | 🟡                                |
 | `response_model=None` + raw Response return         | Fully supported                                                | serialization                                                                      | 🔴 (for now)                      |
 | Concurrency & resource safety                       | asyncio + threadpool                                           | Native Tokio + Rust memory & thread safety                                         | 🔴 (slow due to context switches) |
-| `app.mount()` / `StaticFiles`                       | Yes                                                            | Not yet implemented                                                                | 🔴 (for now)                      |
 
 <!-- frontend, prometheus, rate limiting -->
 
@@ -363,16 +363,17 @@ Some advanced features are still in development like:
 - [x] @app.exception_handler() + app.fallback()
 - [x] app.state (mutable app-wide state)
 - [x] Metrics / Prometheus endpoint
+- [x] File uploads (`UploadFile` + multipart parsing)
+- [x] Background tasks
+- [x] `app.mount()` for static files & sub-apps
+- [x] `app.openapi()` method (customizable spec)
+- [x] Respect response_model=None (allow raw Response / RedirectResponse returns)
 - [ ] Logging middlewares
 - [ ] Async Middleware support
 - [ ] Full middleware ordering control
 - [ ] Better error handling (currently shows Rust errors)
 - [ ] Proper Python-friendly error pages (no Rust tracebacks in production)
-- [ ] File uploads (`UploadFile` + multipart parsing)
 - [ ] GraphQL support
-- [ ] Respect response_model=None (allow raw Response / RedirectResponse returns)
-- [ ] `app.mount()` for static files & sub-apps
-- [ ] `app.openapi()` method (customizable spec)
 - [ ] `app.openapi_tags=` ordering in Swagger UI
 - [ ] `callbacks=` and `webhooks=` in OpenAPI
 - [ ] `app.servers=`, `root_path`, `openapi_external_docs`

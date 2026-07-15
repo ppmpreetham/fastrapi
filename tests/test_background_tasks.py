@@ -14,5 +14,12 @@ def test_background_task(client, app, caplog):
         return {"status": "accepted"}
 
     response = client.post("/task")
-    assert response.status_code == 202  # or 200 depending on your impl
-    assert background_called is True  # runs after response
+    assert response.status_code == 200
+    
+    import time
+    for _ in range(10):
+        if background_called:
+            break
+        time.sleep(0.1)
+        
+    assert background_called is True

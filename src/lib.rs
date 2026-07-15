@@ -6,10 +6,10 @@ pub mod engine;
 pub mod ffi;
 mod globals;
 pub mod http;
+pub mod macros;
 pub mod routing;
 pub mod types;
 pub mod utils;
-pub mod macros;
 
 pub use engine::app;
 pub use engine::background;

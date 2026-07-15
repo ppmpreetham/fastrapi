@@ -165,8 +165,16 @@ pub fn parse_parameter_spec(
         .map(|name| name.contains("UploadFile"))
         .unwrap_or(false);
 
+    let is_background_tasks = annotation
+        .as_ref()
+        .and_then(|annotation| annotation_name(py, annotation))
+        .map(|name| name.contains("BackgroundTasks"))
+        .unwrap_or(false);
+
     let default = param_obj.getattr("default")?;
-    let mut source = if path_param_names.iter().any(|name| name == param_name) {
+    let mut source = if is_background_tasks {
+        ParameterSource::BackgroundTasks
+    } else if path_param_names.iter().any(|name| name == param_name) {
         ParameterSource::Path
     } else if is_upload_file || is_pydantic_model {
         ParameterSource::Body

@@ -45,6 +45,7 @@ pub enum ParameterSource {
     Body,
     Header,
     Cookie,
+    BackgroundTasks,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -290,6 +291,12 @@ pub struct RouteHandler {
     pub default_status: Option<axum::http::StatusCode>,
     pub response_model: Option<Py<PyAny>>,
     pub response_class: Option<Py<PyAny>>,
+    pub responses: Option<sonic_rs::Value>,
+    pub callbacks: Option<sonic_rs::Value>,
+    pub openapi_extra: Option<sonic_rs::Value>,
+    pub response_description: Option<String>,
+    pub operation_id: Option<String>,
+    pub bypass_serialization: bool,
     pub execution_mode: crate::ffi::py_handlers::ExecutionMode,
     pub cache_response: bool,
     pub rate_limit_per_second: Option<u32>,
@@ -304,6 +311,11 @@ pub struct RouteEntry {
     pub tags: Vec<String>,
     pub summary: Option<String>,
     pub description: Option<String>,
+    pub response_description: Option<String>,
+    pub operation_id: Option<String>,
+    pub openapi_extra: Option<sonic_rs::Value>,
+    pub responses: Option<sonic_rs::Value>,
+    pub callbacks: Option<sonic_rs::Value>,
     pub deprecated: Option<bool>,
     pub include_in_schema: bool,
 }
@@ -319,6 +331,12 @@ pub struct SubRouterMount {
     pub router: Py<PyAPIRouter>,
     pub prefix: String,
     pub tags: Vec<String>,
+    pub dependencies: Option<Py<PyAny>>,
+    pub responses: Option<Py<PyAny>>,
+    pub deprecated: Option<bool>,
+    pub include_in_schema: bool,
+    pub default_response_class: Option<Py<PyAny>>,
+    pub generate_unique_id_function: Option<Py<PyAny>>,
 }
 
 #[derive(Clone)]
@@ -330,6 +348,11 @@ pub struct FlatRoute {
 
     pub summary: Option<String>,
     pub description: Option<String>,
+    pub response_description: Option<String>,
+    pub operation_id: Option<String>,
+    pub openapi_extra: Option<sonic_rs::Value>,
+    pub responses: Option<sonic_rs::Value>,
+    pub callbacks: Option<sonic_rs::Value>,
     pub deprecated: Option<bool>,
     pub include_in_schema: bool,
 }

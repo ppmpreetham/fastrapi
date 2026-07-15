@@ -103,21 +103,7 @@ impl PyAPIRouter {
 
     #[pyo3(signature = (path))]
     fn const_get(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
-        self.create_method_decorator(
-            py,
-            HttpMethod::GET,
-            path,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            true,
-            true,
-            None,
-        )
+        self.create_method_decorator_kw(py, HttpMethod::GET, path, None)
     }
 
     #[pyo3(signature = (path))]
@@ -125,13 +111,19 @@ impl PyAPIRouter {
         self.create_ws_decorator(py, path)
     }
 
-    #[pyo3(signature = (router, *, prefix="".to_string(), tags=None))]
+    #[pyo3(signature = (router, *, prefix="".to_string(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
     pub fn include_router(
         &self,
         py: Python<'_>,
         router: Py<PyAPIRouter>,
         prefix: String,
         tags: Option<Py<PyAny>>,
+        dependencies: Option<Py<PyAny>>,
+        responses: Option<Py<PyAny>>,
+        deprecated: Option<bool>,
+        include_in_schema: bool,
+        default_response_class: Option<Py<PyAny>>,
+        generate_unique_id_function: Option<Py<PyAny>>,
     ) -> PyResult<()> {
         if self.frozen.load(Ordering::Relaxed) {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -153,19 +145,42 @@ impl PyAPIRouter {
             router,
             prefix,
             tags: tag_vec,
+            dependencies,
+            responses,
+            deprecated,
+            include_in_schema,
+            default_response_class,
+            generate_unique_id_function,
         });
 
         Ok(())
     }
 
-    #[pyo3(signature = (prefix, router, *, tags=None))]
+    #[pyo3(signature = (prefix, router, *, tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
     pub fn nest(
         &self,
         py: Python<'_>,
         prefix: String,
         router: Py<PyAPIRouter>,
         tags: Option<Py<PyAny>>,
+        dependencies: Option<Py<PyAny>>,
+        responses: Option<Py<PyAny>>,
+        deprecated: Option<bool>,
+        include_in_schema: bool,
+        default_response_class: Option<Py<PyAny>>,
+        generate_unique_id_function: Option<Py<PyAny>>,
     ) -> PyResult<()> {
-        self.include_router(py, router, prefix, tags)
+        self.include_router(
+            py,
+            router,
+            prefix,
+            tags,
+            dependencies,
+            responses,
+            deprecated,
+            include_in_schema,
+            default_response_class,
+            generate_unique_id_function,
+        )
     }
 }

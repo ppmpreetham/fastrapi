@@ -237,24 +237,12 @@ impl FastrAPI {
         Ok(())
     }
 
-
     #[pyo3(signature = (path))]
     fn const_get(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
-        self.router.bind(py).borrow().create_method_decorator(
-            py,
-            HttpMethod::GET,
-            path,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            true,
-            true,
-            None,
-        )
+        self.router
+            .bind(py)
+            .borrow()
+            .create_method_decorator_kw(py, HttpMethod::GET, path, None)
     }
 
     #[pyo3(signature = (path))]
@@ -379,29 +367,70 @@ impl FastrAPI {
         }
     }
 
-    #[pyo3(signature = (router, *, prefix="".to_string(), tags=None))]
+    #[pyo3(signature = (router, *, prefix="".to_string(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
     fn include_router(
         &self,
         py: Python<'_>,
         router: Py<PyAPIRouter>,
         prefix: String,
         tags: Option<Py<PyAny>>,
+        dependencies: Option<Py<PyAny>>,
+        responses: Option<Py<PyAny>>,
+        deprecated: Option<bool>,
+        include_in_schema: bool,
+        default_response_class: Option<Py<PyAny>>,
+        generate_unique_id_function: Option<Py<PyAny>>,
     ) -> PyResult<()> {
-        self.router
-            .bind(py)
-            .borrow()
-            .include_router(py, router, prefix, tags)
+        self.router.bind(py).borrow().include_router(
+            py,
+            router,
+            prefix,
+            tags,
+            dependencies,
+            responses,
+            deprecated,
+            include_in_schema,
+            default_response_class,
+            generate_unique_id_function,
+        )
     }
 
-    #[pyo3(signature = (prefix, router, *, tags=None))]
+    #[pyo3(signature = (prefix, router, *, tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
     fn nest(
         &self,
         py: Python<'_>,
         prefix: String,
         router: Py<PyAPIRouter>,
         tags: Option<Py<PyAny>>,
+        dependencies: Option<Py<PyAny>>,
+        responses: Option<Py<PyAny>>,
+        deprecated: Option<bool>,
+        include_in_schema: bool,
+        default_response_class: Option<Py<PyAny>>,
+        generate_unique_id_function: Option<Py<PyAny>>,
     ) -> PyResult<()> {
-        self.include_router(py, router, prefix, tags)
+        self.include_router(
+            py,
+            router,
+            prefix,
+            tags,
+            dependencies,
+            responses,
+            deprecated,
+            include_in_schema,
+            default_response_class,
+            generate_unique_id_function,
+        )
+    }
+
+    #[pyo3(signature = ())]
+    fn openapi(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let spec = crate::utils::openapi::build_openapi_spec(py, self);
+        let json_str = sonic_rs::to_string(&spec).unwrap_or_else(|_| "{}".to_string());
+        let json_module = py.import(pyo3::intern!(py, "json"))?;
+        json_module
+            .call_method1(pyo3::intern!(py, "loads"), (json_str,))
+            .map(|d| d.unbind())
     }
 
     fn exception_handler(
@@ -435,7 +464,10 @@ impl FastrAPI {
 
 impl FastrAPI {
     #[inline]
-    fn _router<'py>(&self, py: Python<'py>) -> pyo3::PyRef<'py, crate::ffi::decorators::PyAPIRouter> {
+    fn _router<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> pyo3::PyRef<'py, crate::ffi::decorators::PyAPIRouter> {
         self.router.bind(py).borrow()
     }
 }

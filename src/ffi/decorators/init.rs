@@ -12,22 +12,80 @@ use std::sync::atomic::Ordering;
 use super::PyAPIRouter;
 
 impl PyAPIRouter {
-    pub fn create_method_decorator(
+    pub fn create_method_decorator_kw(
         &self,
         py: Python<'_>,
         method: HttpMethod,
         path: String,
-        status_code: Option<u16>,
-        response_model: Option<Py<PyAny>>,
-        response_class: Option<Py<PyAny>>,
-        tags: Option<Py<PyAny>>,
-        summary: Option<String>,
-        description: Option<String>,
-        deprecated: Option<bool>,
-        include_in_schema: bool,
-        cache_response: bool,
-        rate_limit_per_second: Option<u32>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        let extract_opt = |key: &str| -> Option<Py<PyAny>> {
+            kwargs
+                .and_then(|kw| kw.get_item(key).ok())
+                .map(|x| x.unbind())
+        };
+
+        let status_code: Option<u16> = kwargs
+            .and_then(|kw| kw.get_item("status_code").ok())
+            .and_then(|x| x.extract().ok());
+
+        let mut bypass_serialization = false;
+        let response_model = if let Some(kw) = kwargs {
+            if let Ok(rm) = kw.get_item("response_model") {
+                if rm.is_none() {
+                    bypass_serialization = true;
+                }
+                Some(rm.unbind())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let response_class = extract_opt("response_class");
+        let tags = extract_opt("tags");
+        let summary: Option<String> = kwargs
+            .and_then(|kw| kw.get_item("summary").ok())
+            .and_then(|x| x.extract().ok());
+        let description: Option<String> = kwargs
+            .and_then(|kw| kw.get_item("description").ok())
+            .and_then(|x| x.extract().ok());
+        let deprecated: Option<bool> = kwargs
+            .and_then(|kw| kw.get_item("deprecated").ok())
+            .and_then(|x| x.extract().ok());
+        let include_in_schema: bool = kwargs
+            .and_then(|kw| kw.get_item("include_in_schema").ok())
+            .and_then(|x| x.extract().ok())
+            .unwrap_or(true);
+        let cache_response: bool = kwargs
+            .and_then(|kw| kw.get_item("cache_resp").ok())
+            .and_then(|x| x.extract().ok())
+            .unwrap_or(false);
+        let rate_limit_per_second: Option<u32> = kwargs
+            .and_then(|kw| kw.get_item("rate_limit").ok())
+            .and_then(|x| x.extract().ok());
+
+        let response_description: Option<String> = kwargs
+            .and_then(|kw| kw.get_item("response_description").ok())
+            .and_then(|x| x.extract().ok());
+
+        let operation_id: Option<String> = kwargs
+            .and_then(|kw| kw.get_item("operation_id").ok())
+            .and_then(|x| x.extract().ok());
+
+        let responses = kwargs
+            .and_then(|kw| kw.get_item("responses").ok())
+            .map(|d| crate::utils::py_any_to_json(py, &d));
+
+        let openapi_extra = kwargs
+            .and_then(|kw| kw.get_item("openapi_extra").ok())
+            .map(|d| crate::utils::py_any_to_json(py, &d));
+
+        let callbacks = kwargs
+            .and_then(|kw| kw.get_item("callbacks").ok())
+            .and_then(|x| crate::utils::openapi::parse_callbacks_to_json(py, &x));
+
         if self.frozen.load(Ordering::Relaxed) {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Cannot modify router after it has been frozen",
@@ -121,7 +179,9 @@ impl PyAPIRouter {
                 needs_kwargs,
                 param_validators: metadata.param_validators,
                 response_type: final_response_type,
-                serialization_hint: if response_model_capture.is_some() {
+                serialization_hint: if bypass_serialization {
+                    SerializationHint::Unknown
+                } else if response_model_capture.is_some() {
                     SerializationHint::PydanticModel
                 } else {
                     metadata.serialization_hint
@@ -134,6 +194,12 @@ impl PyAPIRouter {
                 default_status,
                 response_model: response_model_capture.clone(),
                 response_class: response_class_capture.clone(),
+                responses: responses.clone(),
+                callbacks: None,
+                openapi_extra: openapi_extra.clone(),
+                response_description: response_description.clone(),
+                operation_id: operation_id.clone(),
+                bypass_serialization,
                 execution_mode: crate::ffi::py_handlers::ExecutionMode::SyncNoArgs,
                 cache_response,
                 rate_limit_per_second,
@@ -148,6 +214,11 @@ impl PyAPIRouter {
                 tags: merged_tags.clone(),
                 summary: summary.clone(),
                 description: description.clone(),
+                response_description: response_description.clone(),
+                operation_id: operation_id.clone(),
+                responses: responses.clone(),
+                openapi_extra: openapi_extra.clone(),
+                callbacks: callbacks.clone(),
                 deprecated,
                 include_in_schema,
             };

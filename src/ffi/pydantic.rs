@@ -75,7 +75,32 @@ pub fn load_pydantic_model(py: Python<'_>, module: &str, class_name: &str) -> Py
     Ok(cls.into())
 }
 
-pub fn validate_python_with_pydantic<'py>(
+pub fn pydantic_error_to_response(py: Python<'_>, err: &pyo3::PyErr) -> axum::response::Response {
+    use crate::utils::py_json_response_with_status;
+    use axum::response::IntoResponse;
+    use pyo3::types::PyDict;
+
+    let value = err.value(py);
+    if let Ok(errors) = value.call_method0(pyo3::intern!(py, "errors")) {
+        let dict = PyDict::new(py);
+        if dict.set_item(pyo3::intern!(py, "detail"), errors).is_ok() {
+            if let Ok(resp) = py_json_response_with_status(
+                py,
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                dict.as_any(),
+            ) {
+                return resp;
+            }
+        }
+    }
+    (
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        "Validation failed",
+    )
+        .into_response()
+}
+
+fn validate_python_with_pydantic<'py>(
     py: Python<'py>,
     validate_fn: &Bound<'py, PyAny>,
     json_payload: &Value,
@@ -86,10 +111,7 @@ pub fn validate_python_with_pydantic<'py>(
 
     match validated {
         Ok(obj) => Ok(obj.into()),
-        Err(e) => {
-            e.print(py);
-            Err((StatusCode::UNPROCESSABLE_ENTITY, "Validation failed").into_response())
-        }
+        Err(e) => Err(pydantic_error_to_response(py, &e)),
     }
 }
 
@@ -105,10 +127,7 @@ pub fn validate_json_with_pydantic<'py>(
 
         return match validate_json_method.bind(py).call1((raw_str,)) {
             Ok(obj) => Ok(obj.into()),
-            Err(e) => {
-                e.print(py);
-                Err((StatusCode::UNPROCESSABLE_ENTITY, "Validation failed").into_response())
-            }
+            Err(e) => Err(pydantic_error_to_response(py, &e)),
         };
     }
 
@@ -116,10 +135,7 @@ pub fn validate_json_with_pydantic<'py>(
         let raw = pyo3::types::PyBytes::new(py, raw_payload);
         return match validate_json.bind(py).call1((raw,)) {
             Ok(obj) => Ok(obj.into()),
-            Err(e) => {
-                e.print(py);
-                Err((StatusCode::UNPROCESSABLE_ENTITY, "Validation failed").into_response())
-            }
+            Err(e) => Err(pydantic_error_to_response(py, &e)),
         };
     }
 
@@ -463,7 +479,7 @@ fn raw_value_for_parameter<'a>(
             .get_cookie(&param.external_name)
             .or_else(|| request_input.get_cookie(&param.name))
             .map(Cow::Borrowed),
-        ParameterSource::Body => None,
+        ParameterSource::Body | ParameterSource::BackgroundTasks => None,
     }
 }
 
@@ -671,7 +687,7 @@ pub fn apply_request_data(
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
     kwargs: &Bound<'_, PyDict>,
-) -> Result<(), Response> {
+) -> Result<Option<Py<crate::engine::background::PyBackgroundTasks>>, Response> {
     let query_param_count = handler
         .parsed_params
         .iter()
@@ -680,6 +696,9 @@ pub fn apply_request_data(
     if query_param_count > 1 {
         request_input.get_all_query_params(); // populate OnceLock once
     }
+
+    let mut bg_tasks_instance: Option<Py<crate::engine::background::PyBackgroundTasks>> = None;
+
     handler
         .parsed_params
         .iter()
@@ -690,6 +709,25 @@ pub fn apply_request_data(
                 return Ok(());
             }
 
+            if matches!(param.source, ParameterSource::BackgroundTasks) {
+                let instance = if let Some(bg) = &bg_tasks_instance {
+                    bg.clone()
+                } else {
+                    let bg = Py::new(py, crate::engine::background::PyBackgroundTasks::new())
+                        .map_err(|_| {
+                            (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                "Failed to initialize BackgroundTasks",
+                            )
+                                .into_response()
+                        })?;
+                    bg_tasks_instance = Some(bg.clone());
+                    bg
+                };
+                let _ = kwargs.set_item(param.name_py.bind(py), instance);
+                return Ok(());
+            }
+
             if let Some(value) = resolve_parameter_value(py, param, request_input)? {
                 let _ = kwargs.set_item(param.name_py.bind(py), value);
             }
@@ -697,7 +735,8 @@ pub fn apply_request_data(
             Ok(())
         })?;
 
-    apply_body_and_validation(py, handler, payload, kwargs)
+    apply_body_and_validation(py, handler, payload, kwargs)?;
+    Ok(bg_tasks_instance)
 }
 
 pub fn get_response_type_from_class(py: Python<'_>, cls: &Bound<'_, PyAny>) -> ResponseType {

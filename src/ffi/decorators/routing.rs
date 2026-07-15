@@ -62,6 +62,11 @@ pub fn flatten_router(py: Python<'_>, root: &PyAPIRouter) -> (Vec<FlatRoute>, Ve
                 tags,
                 summary: entry.summary.clone(),
                 description: entry.description.clone(),
+                response_description: entry.response_description.clone(),
+                operation_id: entry.operation_id.clone(),
+                responses: entry.responses.clone(),
+                openapi_extra: entry.openapi_extra.clone(),
+                callbacks: entry.callbacks.clone(),
                 deprecated: entry.deprecated,
                 include_in_schema: entry.include_in_schema,
             }
