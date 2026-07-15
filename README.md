@@ -364,19 +364,19 @@ Some advanced features are still in development like:
 - [x] app.state (mutable app-wide state)
 - [x] Metrics / Prometheus endpoint
 - [x] File uploads (`UploadFile` + multipart parsing)
-- [x] Background tasks
+- [x] Background tasks (reliable spawning with rt_handle, only on success)
 - [x] `app.mount()` for static files & sub-apps
 - [x] `app.openapi()` method (customizable spec)
 - [x] Respect response_model=None (allow raw Response / RedirectResponse returns)
+- [x] `app.openapi_tags=` ordering in Swagger UI
+- [x] `app.servers=`, `root_path`, `openapi_external_docs`
 - [ ] Logging middlewares
 - [ ] Async Middleware support
 - [ ] Full middleware ordering control
 - [ ] Better error handling (currently shows Rust errors)
 - [ ] Proper Python-friendly error pages (no Rust tracebacks in production)
 - [ ] GraphQL support
-- [ ] `app.openapi_tags=` ordering in Swagger UI
 - [ ] `callbacks=` and `webhooks=` in OpenAPI
-- [ ] `app.servers=`, `root_path`, `openapi_external_docs`
 - [ ] `app.swagger_ui_parameters=` customization
 - [ ] `separate_input_output_schemas` in OpenAPI generation
 - [ ] Hot reloading / watchfiles integration
