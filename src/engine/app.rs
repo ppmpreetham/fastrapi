@@ -1,19 +1,21 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyCFunction, PyDict, PyString, PyTuple};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tracing::info;
 
 use super::server;
 pub use super::types::{FastrAPI, FrontendMount, StaticMount};
+use crate::decorators::PyAPIRouter;
 use crate::globals::{MIDDLEWARE_COUNTER, MIDDLEWARES};
 use crate::http::middleware::{
     PyMiddleware, parse_cors_params, parse_gzip_params, parse_session_params,
     parse_trusted_host_params,
 };
 use crate::http::staticfiles::PyStaticFiles;
-use crate::router::PyAPIRouter;
 use crate::routing::types::HttpMethod;
 
 #[pymethods]
@@ -631,36 +633,35 @@ impl FastrAPI {
     #[pyo3(signature = (path, *, directory, fallback=Some("auto".to_string()), check_dir=true))]
     fn frontend(
         &mut self,
-        path: String,
+        mut path: String,
         directory: String,
         fallback: Option<String>,
         check_dir: bool,
     ) -> PyResult<()> {
         if !path.starts_with('/') {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Frontend path must start with '/'",
-            ));
+            return Err(PyValueError::new_err("Frontend path must start with '/'"));
         }
-        if check_dir && !std::path::Path::new(&directory).is_dir() {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+
+        if check_dir && !Path::new(&directory).is_dir() {
+            return Err(PyValueError::new_err(format!(
                 "Directory '{directory}' does not exist"
             )));
         }
 
-        let normalized_path = if path.len() > 1 {
-            path.trim_end_matches('/').to_string()
-        } else {
-            path
-        };
+        if path.len() > 1 && path.ends_with('/') {
+            path.truncate(path.trim_end_matches('/').len());
+        }
 
         self.frontend_mounts.push(FrontendMount {
-            path: normalized_path,
+            path,
             directory,
             fallback,
             check_dir,
         });
+
         Ok(())
     }
+
     // decorator for generic Python functions: @app.middleware("smtg")
     fn middleware(&self, py: Python, middleware_type: String) -> PyResult<Py<PyAny>> {
         let decorator = move |args: &Bound<'_, PyTuple>,
