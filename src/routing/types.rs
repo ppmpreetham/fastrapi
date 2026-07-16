@@ -339,26 +339,3 @@ pub struct SubRouterMount {
     pub generate_unique_id_function: Option<Py<PyAny>>,
 }
 
-#[derive(Clone)]
-pub struct FlatRoute {
-    pub method: HttpMethod,
-    pub path: String,
-    pub handler: Arc<RouteHandler>,
-    pub tags: Vec<String>,
-
-    pub summary: Option<String>,
-    pub description: Option<String>,
-    pub response_description: Option<String>,
-    pub operation_id: Option<String>,
-    pub openapi_extra: Option<sonic_rs::Value>,
-    pub responses: Option<sonic_rs::Value>,
-    pub callbacks: Option<sonic_rs::Value>,
-    pub deprecated: Option<bool>,
-    pub include_in_schema: bool,
-}
-
-#[derive(Clone)]
-pub struct FlatWebSocket {
-    pub path: String,
-    pub handler: Py<PyAny>,
-}

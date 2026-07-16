@@ -3,7 +3,7 @@ mod requests;
 mod routing;
 
 use crate::routing::types::{
-    FlatRoute, FlatWebSocket, HttpMethod, RouteEntry, SubRouterMount, WebSocketEntry,
+    HttpMethod, RouteEntry, SubRouterMount, WebSocketEntry,
 };
 
 use pyo3::prelude::{Py, PyAny, PyAnyMethods, PyResult, Python, pyclass, pymethods};
@@ -34,7 +34,7 @@ pub struct PyAPIRouter {
     pub websocket_entries: Arc<Mutex<Vec<WebSocketEntry>>>,
     pub sub_routers: Arc<Mutex<Vec<SubRouterMount>>>,
     pub frozen: Arc<AtomicBool>,
-    pub cached_flat: Arc<Mutex<Option<Arc<(Vec<FlatRoute>, Vec<FlatWebSocket>)>>>>,
+    pub cached_flat: Arc<Mutex<Option<Arc<(Vec<RouteEntry>, Vec<WebSocketEntry>)>>>>,
 }
 
 impl PyAPIRouter {

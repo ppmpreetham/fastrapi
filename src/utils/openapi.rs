@@ -1,7 +1,7 @@
 use crate::FastrAPI;
 use crate::decorators::PyAPIRouter;
 use crate::ffi::pydantic;
-use crate::routing::types::{FlatRoute, ParameterConstraints, ParameterSource};
+use crate::routing::types::{ParameterConstraints, ParameterSource, RouteEntry};
 use crate::utils::py_dict_to_json;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
@@ -371,7 +371,7 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
 
 pub fn build_paths_from_routes(
     py: Python<'_>,
-    collected: Vec<FlatRoute>,
+    collected: Vec<RouteEntry>,
     schemas: &mut HashMap<String, JsonValue>,
     app_responses: Option<&JsonValue>,
 ) -> HashMap<String, PathItem> {
@@ -692,7 +692,7 @@ pub fn parse_callbacks_to_json(
     }
 }
 
-fn collect_routes(py: Python<'_>, router: &PyAPIRouter) -> Vec<FlatRoute> {
+fn collect_routes(py: Python<'_>, router: &PyAPIRouter) -> Vec<RouteEntry> {
     let flat = router.flatten(py);
     flat.0.clone()
 }

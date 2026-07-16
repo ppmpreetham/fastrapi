@@ -1,5 +1,5 @@
 use super::PyAPIRouter;
-use crate::routing::types::{FlatRoute, FlatWebSocket};
+use crate::routing::types::{RouteEntry, WebSocketEntry};
 use pyo3::prelude::Python;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -17,7 +17,7 @@ impl PyAPIRouter {
         self.mark_frozen();
     }
 
-    pub fn flatten(&self, py: Python<'_>) -> Arc<(Vec<FlatRoute>, Vec<FlatWebSocket>)> {
+    pub fn flatten(&self, py: Python<'_>) -> Arc<(Vec<RouteEntry>, Vec<WebSocketEntry>)> {
         if self.frozen.load(Ordering::Acquire) {
             if let Some(cached) = self.cached_flat.lock().unwrap().as_ref() {
                 return cached.clone();
@@ -29,7 +29,7 @@ impl PyAPIRouter {
     }
 }
 
-pub fn flatten_router(py: Python<'_>, root: &PyAPIRouter) -> (Vec<FlatRoute>, Vec<FlatWebSocket>) {
+pub fn flatten_router(py: Python<'_>, root: &PyAPIRouter) -> (Vec<RouteEntry>, Vec<WebSocketEntry>) {
     let mut routes = Vec::new();
     let mut ws_routes = Vec::new();
     let mut stack = vec![(root.clone(), String::new(), Vec::<String>::new())];
@@ -55,7 +55,7 @@ pub fn flatten_router(py: Python<'_>, root: &PyAPIRouter) -> (Vec<FlatRoute>, Ve
                 }
             }
 
-            FlatRoute {
+            RouteEntry {
                 method: entry.method,
                 path: join_path(&full_prefix, &entry.path),
                 handler: entry.handler,
@@ -73,7 +73,7 @@ pub fn flatten_router(py: Python<'_>, root: &PyAPIRouter) -> (Vec<FlatRoute>, Ve
         }));
 
         let ws_entries = router.websocket_entries.lock().unwrap().clone();
-        ws_routes.extend(ws_entries.into_iter().map(|ws| FlatWebSocket {
+        ws_routes.extend(ws_entries.into_iter().map(|ws| WebSocketEntry {
             path: join_path(&full_prefix, &ws.path),
             handler: ws.handler.clone_ref(py),
         }));
