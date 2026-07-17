@@ -1122,9 +1122,23 @@ fn build_router(
         }),
     );
     if let Some(docs) = docs_url {
+        let mut swagger_html = include_str!("../../static/swagger-ui.html").to_string();
+        if let Some(params) = &app_config.swagger_ui_parameters {
+            let json_val = crate::utils::py_any_to_json(py, &params.bind(py));
+            if let Ok(json_str) = sonic_rs::to_string(&json_val) {
+                swagger_html = swagger_html.replace("/* SWAGGER_UI_PARAMS */ {}", &json_str);
+            }
+        }
+        let swagger_html = Arc::new(swagger_html);
         app = app.route(
             &docs,
-            get(|| async { Html(include_str!("../../static/swagger-ui.html")) }),
+            get({
+                let html = swagger_html.clone();
+                move || {
+                    let html = html.clone();
+                    async move { Html(html.as_ref().clone()) }
+                }
+            }),
         );
     }
     if let Some(redoc) = &app_config.redoc_url {
@@ -1171,10 +1185,6 @@ fn build_router(
                 .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
         })
     });
-
-    // =========================== //
-    // ==== LAYER APPLICATION ==== //
-    // =========================== //
 
     // L1: Sessions
     if let Some(config) = session_config {

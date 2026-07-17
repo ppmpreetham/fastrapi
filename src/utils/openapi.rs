@@ -168,13 +168,16 @@ impl Default for OpenApiSpec {
     }
 }
 
-pub fn extract_pydantic_schema(py: Python, model: &Bound<PyAny>) -> Option<JsonValue> {
+pub fn extract_pydantic_schema(py: Python, model: &Bound<PyAny>, mode: &str) -> Option<JsonValue> {
     // Pydantic v2
-    if let Ok(schema_method) = model.getattr("model_json_schema")
-        && let Ok(result) = schema_method.call0()
-        && let Ok(dict) = result.cast::<PyDict>()
-    {
-        return Some(py_dict_to_json(py, dict));
+    if let Ok(schema_method) = model.getattr("model_json_schema") {
+        let kwargs = pyo3::types::PyDict::new(py);
+        let _ = kwargs.set_item("mode", mode);
+        if let Ok(result) = schema_method.call((), Some(&kwargs))
+            && let Ok(dict) = result.cast::<PyDict>()
+        {
+            return Some(py_dict_to_json(py, dict));
+        }
     }
 
     // Pydantic v1
@@ -352,13 +355,25 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
     };
 
     let mut schemas: HashMap<String, JsonValue> = HashMap::new();
-    spec.paths = build_paths_from_routes(py, collected, &mut schemas, app_responses.as_ref());
+    spec.paths = build_paths_from_routes(
+        py,
+        collected,
+        &mut schemas,
+        app_responses.as_ref(),
+        app.separate_input_output_schemas,
+    );
 
     if let Some(wh) = &app.webhooks
         && let Ok(router) = wh.bind(py).cast::<crate::decorators::PyAPIRouter>()
     {
         let wh_collected = collect_routes(py, &router.borrow());
-        let wh_paths = build_paths_from_routes(py, wh_collected, &mut schemas, None);
+        let wh_paths = build_paths_from_routes(
+            py,
+            wh_collected,
+            &mut schemas,
+            None,
+            app.separate_input_output_schemas,
+        );
         spec.webhooks = Some(wh_paths);
     }
 
@@ -374,6 +389,7 @@ pub fn build_paths_from_routes(
     collected: Vec<RouteEntry>,
     schemas: &mut HashMap<String, JsonValue>,
     app_responses: Option<&JsonValue>,
+    separate_input_output_schemas: bool,
 ) -> HashMap<String, PathItem> {
     let mut paths: HashMap<String, PathItem> = HashMap::new();
 
@@ -452,7 +468,8 @@ pub fn build_paths_from_routes(
                 let validator = &handler.param_validators[0];
                 let validator_bound = validator.model_class.bind(py);
 
-                if let Some(schema) = extract_pydantic_schema(py, validator_bound) {
+                let mode = "validation";
+                if let Some(schema) = extract_pydantic_schema(py, validator_bound, mode) {
                     let schema_name = get_schema_name(validator_bound);
                     schemas.insert(schema_name.clone(), schema.clone());
 
@@ -479,7 +496,8 @@ pub fn build_paths_from_routes(
                 handler.param_validators.iter().for_each(|validator| {
                     let validator_bound = validator.model_class.bind(py);
 
-                    if let Some(schema) = extract_pydantic_schema(py, validator_bound) {
+                    let mode = "validation";
+                    if let Some(schema) = extract_pydantic_schema(py, validator_bound, mode) {
                         let schema_name = get_schema_name(validator_bound);
                         schemas.insert(schema_name.clone(), schema);
                         properties.insert(
@@ -539,6 +557,23 @@ pub fn build_paths_from_routes(
             .response_description
             .clone()
             .unwrap_or_else(|| "Successful Response".to_string());
+
+        let mut response_schema = json!({"type": "object"});
+        if let Some(rm) = &handler.response_model {
+            let rm_bound = rm.bind(py);
+            let mode = if separate_input_output_schemas {
+                "serialization"
+            } else {
+                "validation"
+            };
+            if let Some(schema) = extract_pydantic_schema(py, rm_bound, mode) {
+                let schema_name = get_schema_name(rm_bound);
+                schemas.insert(schema_name.clone(), schema);
+                response_schema =
+                    json!({ "$ref": format!("#/components/schemas/{}", schema_name) });
+            }
+        }
+
         // Default 200 response
         operation.responses.insert(
             "200".to_string(),
@@ -549,7 +584,7 @@ pub fn build_paths_from_routes(
                     content.insert(
                         "application/json".to_string(),
                         MediaType {
-                            schema: json!({"type": "object"}),
+                            schema: response_schema,
                         },
                     );
                     content
@@ -650,7 +685,7 @@ pub fn parse_callbacks_to_json(
             if let Ok(router_ref) = item.cast::<crate::decorators::PyAPIRouter>() {
                 let router = router_ref.borrow();
                 let collected = collect_routes(py, &router);
-                let paths = build_paths_from_routes(py, collected, &mut dummy_schemas, None);
+                let paths = build_paths_from_routes(py, collected, &mut dummy_schemas, None, false);
 
                 for (path, path_item) in paths {
                     callbacks_map.insert(
@@ -669,8 +704,13 @@ pub fn parse_callbacks_to_json(
                         if let Ok(router_ref) = item.cast::<crate::decorators::PyAPIRouter>() {
                             let router = router_ref.borrow();
                             let collected = collect_routes(py, &router);
-                            let paths =
-                                build_paths_from_routes(py, collected, &mut dummy_schemas, None);
+                            let paths = build_paths_from_routes(
+                                py,
+                                collected,
+                                &mut dummy_schemas,
+                                None,
+                                false,
+                            );
                             for (path, path_item) in paths {
                                 inner_map.insert(
                                     &path,

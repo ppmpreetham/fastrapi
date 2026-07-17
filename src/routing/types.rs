@@ -217,29 +217,10 @@ impl<'a> RequestInput<'a> {
     }
 
     pub fn get_query_param(&self, key: &str) -> Option<Cow<'a, str>> {
-        if let Some(query_params) = self.query_params.get() {
-            return query_params
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.clone());
-        }
-
-        if self.query_string.is_empty() {
-            return None;
-        }
-
-        for pair in self.query_string.split('&') {
-            if pair.is_empty() {
-                continue;
-            }
-
-            let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
-            if raw_key == key || decode_query_component(raw_key).as_ref() == key {
-                return Some(decode_query_component(raw_value));
-            }
-        }
-
-        None
+        self.get_all_query_params()
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
     }
 
     pub fn get_all_cookies(&self) -> &SmallVec<[(&'a str, &'a str); 8]> {
@@ -291,11 +272,6 @@ pub struct RouteHandler {
     pub default_status: Option<axum::http::StatusCode>,
     pub response_model: Option<Py<PyAny>>,
     pub response_class: Option<Py<PyAny>>,
-    pub responses: Option<sonic_rs::Value>,
-    pub callbacks: Option<sonic_rs::Value>,
-    pub openapi_extra: Option<sonic_rs::Value>,
-    pub response_description: Option<String>,
-    pub operation_id: Option<String>,
     pub bypass_serialization: bool,
     pub execution_mode: crate::ffi::py_handlers::ExecutionMode,
     pub cache_response: bool,
@@ -338,4 +314,3 @@ pub struct SubRouterMount {
     pub default_response_class: Option<Py<PyAny>>,
     pub generate_unique_id_function: Option<Py<PyAny>>,
 }
-
