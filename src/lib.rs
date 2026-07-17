@@ -1,3 +1,6 @@
+#![allow(clippy::result_large_err)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::too_many_arguments)]
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule};
 use pyo3_nest::{add_classes, submodule};

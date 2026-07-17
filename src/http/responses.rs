@@ -3,10 +3,10 @@
 };
 use axum::{
     body::Body,
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderName, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
-use pyo3::prelude::*;
+use pyo3::{prelude::*, types::PyDict};
 use tracing::error;
 
 use pyo3::{Py, PyAny, pyclass, pymethods};
@@ -288,31 +288,30 @@ impl PyStreamingResponse {
 pub fn apply_response_metadata(
     py: Python<'_>,
     mut res: Response,
-    headers: Option<&Py<pyo3::types::PyDict>>,
+    headers: Option<&Py<PyDict>>,
     media_type: Option<&String>,
 ) -> Response {
-    if let Some(headers) = headers {
-        if let Ok(dict) = headers.bind(py).cast::<pyo3::types::PyDict>() {
-            for (k, v) in dict.iter() {
-                if let Ok(ks) = k.extract::<String>() {
-                    if let Ok(vs) = v.extract::<String>() {
-                        if let (Ok(hname), Ok(hval)) = (
-                            axum::http::header::HeaderName::try_from(ks),
-                            axum::http::header::HeaderValue::try_from(vs),
-                        ) {
-                            res.headers_mut().insert(hname, hval);
-                        }
-                    }
-                }
-            }
-        }
+    if let Some(headers) = headers
+        && let Ok(dict) = headers.bind(py).cast::<PyDict>()
+    {
+        let headers_iter = dict.iter().filter_map(|(k, v)| {
+            let ks = k.extract::<String>().ok()?;
+            let vs = v.extract::<String>().ok()?;
+            let hname = HeaderName::try_from(ks).ok()?;
+            let hval = HeaderValue::try_from(vs).ok()?;
+            Some((hname, hval))
+        });
+
+        res.headers_mut().extend(headers_iter);
     }
-    if let Some(media_type) = media_type {
-        if let Ok(hval) = axum::http::header::HeaderValue::try_from(media_type.as_str()) {
-            res.headers_mut()
-                .insert(axum::http::header::CONTENT_TYPE, hval);
-        }
+
+    if let Some(media_type) = media_type
+        && let Ok(hval) = HeaderValue::try_from(media_type.as_str())
+    {
+        res.headers_mut()
+            .insert(axum::http::header::CONTENT_TYPE, hval);
     }
+
     res
 }
 
@@ -349,13 +348,13 @@ pub fn convert_response_by_type(
         || response_class_is(class_name.as_deref(), "RedirectResponse")
         || response_class_is(class_name.as_deref(), "StreamingResponse");
 
-    if let Some(model) = &handler.response_model {
-        if !is_explicit_response {
-            validated_storage = model
-                .bind(py)
-                .call_method1("model_validate", (final_result,))?;
-            final_result = &validated_storage;
-        }
+    if let Some(model) = &handler.response_model
+        && !is_explicit_response
+    {
+        validated_storage = model
+            .bind(py)
+            .call_method1("model_validate", (final_result,))?;
+        final_result = &validated_storage;
     }
 
     if is_explicit_response {

@@ -30,15 +30,13 @@ impl PyAPIRouter {
             .and_then(|x| x.extract().ok());
 
         let mut bypass_serialization = false;
-        let response_model = if let Some(kw) = kwargs {
-            if let Ok(rm) = kw.get_item("response_model") {
-                if rm.is_none() {
-                    bypass_serialization = true;
-                }
-                Some(rm.unbind())
-            } else {
-                None
+        let response_model = if let Some(kw) = kwargs
+            && let Ok(rm) = kw.get_item("response_model")
+        {
+            if rm.is_none() {
+                bypass_serialization = true;
             }
+            Some(rm.unbind())
         } else {
             None
         };

@@ -579,11 +579,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
                         None
                     };
 
-                    if let Err(r) =
-                        resolve_sync_deps(py, &handler_clone, &request_input, req_obj, &kwargs)
-                    {
-                        return Err(r);
-                    }
+                    resolve_sync_deps(py, &handler_clone, &request_input, req_obj, &kwargs)?;
 
                     let coroutine = handler_clone
                         .func

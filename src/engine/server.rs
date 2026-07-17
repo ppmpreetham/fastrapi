@@ -41,7 +41,6 @@ use tower_sessions::cookie::Key;
 use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
 // internal Imports
-use crate::routing::prometheus::prometheus_handle;
 use crate::utils::local_guard;
 use crate::utils::openapi::build_openapi_spec;
 use crate::{
@@ -60,8 +59,9 @@ use crate::{
 };
 use crate::{
     http::middleware::{
-        CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware, TrustedHostMiddleware, build_cors_layer,
-        parse_cors_params, parse_gzip_params, parse_session_params, parse_https_redirect_params, parse_trusted_host_params,
+        CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
+        TrustedHostMiddleware, build_cors_layer, parse_cors_params, parse_gzip_params,
+        parse_https_redirect_params, parse_session_params, parse_trusted_host_params,
     },
     routing::router::RouteMatch,
 };
@@ -69,6 +69,7 @@ use crate::{
     http::websocket::ws_handler,
     routing::types::{BodyField, BodyPayload, PathParamRange, UploadedFile},
 };
+use crate::{routing::prometheus::prometheus_handle, utils::py_any_to_json};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -885,7 +886,9 @@ fn apply_declared_middleware(
     match class_name.as_str() {
         "CORSMiddleware" => *cors_config = Some(parse_cors_params(kwargs)?),
         "TrustedHostMiddleware" => *trusted_host_config = Some(parse_trusted_host_params(kwargs)?),
-        "HTTPSRedirectMiddleware" => *https_redirect_config = Some(parse_https_redirect_params(kwargs)?),
+        "HTTPSRedirectMiddleware" => {
+            *https_redirect_config = Some(parse_https_redirect_params(kwargs)?)
+        }
         "GZipMiddleware" => *gzip_config = Some(parse_gzip_params(kwargs)?),
         "SessionMiddleware" => *session_config = Some(parse_session_params(kwargs)?),
         _ => {}
@@ -1134,7 +1137,7 @@ fn build_router(
     if let Some(docs) = docs_url {
         let mut swagger_html = include_str!("../../static/swagger-ui.html").to_string();
         if let Some(params) = &app_config.swagger_ui_parameters {
-            let json_val = crate::utils::py_any_to_json(py, &params.bind(py));
+            let json_val = py_any_to_json(py, params.bind(py));
             if let Ok(json_str) = sonic_rs::to_string(&json_val) {
                 swagger_html = swagger_html.replace("/* SWAGGER_UI_PARAMS */ {}", &json_str);
             }
@@ -1259,7 +1262,6 @@ fn build_router(
         }
     }
 
-
     // L5: HTTPS Redirect
     if let Some(_config) = https_redirect_config {
         info!("🔗 Layer: HTTPSRedirect");
@@ -1273,10 +1275,10 @@ fn build_router(
                     if scheme == &axum::http::uri::Scheme::HTTPS {
                         is_https = true;
                     }
-                } else if let Some(forwarded_proto) = headers.get("X-Forwarded-Proto") {
-                    if forwarded_proto == "https" {
-                        is_https = true;
-                    }
+                } else if let Some(forwarded_proto) = headers.get("X-Forwarded-Proto")
+                    && forwarded_proto == "https"
+                {
+                    is_https = true;
                 }
 
                 if !is_https {

@@ -81,18 +81,18 @@ pub fn pydantic_error_to_response(py: Python<'_>, err: &pyo3::PyErr) -> axum::re
     use pyo3::types::PyDict;
 
     let value = err.value(py);
-    if let Ok(errors) = value.call_method0(pyo3::intern!(py, "errors")) {
-        let dict = PyDict::new(py);
-        if dict.set_item(pyo3::intern!(py, "detail"), errors).is_ok() {
-            if let Ok(resp) = py_json_response_with_status(
-                py,
-                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                dict.as_any(),
-            ) {
-                return resp;
-            }
-        }
+    if let Ok(errors) = value.call_method0(pyo3::intern!(py, "errors"))
+        && let dict = PyDict::new(py)
+        && dict.set_item(pyo3::intern!(py, "detail"), errors).is_ok()
+        && let Ok(resp) = py_json_response_with_status(
+            py,
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            dict.as_any(),
+        )
+    {
+        return resp;
     }
+
     (
         axum::http::StatusCode::UNPROCESSABLE_ENTITY,
         "Validation failed",

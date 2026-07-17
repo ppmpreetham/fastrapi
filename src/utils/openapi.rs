@@ -643,31 +643,29 @@ pub fn build_paths_from_routes(
         }
 
         // Global app.responses merge
-        if let Some(app_resps) = app_responses {
-            if let Some(op_obj) = operation_val.as_object_mut() {
-                if let Some(op_resp) = op_obj.get_mut(&"responses") {
-                    deep_merge_json(op_resp, app_resps.clone());
-                }
-            }
+        if let Some(app_resps) = app_responses
+            && let Some(op_obj) = operation_val.as_object_mut()
+            && let Some(op_resp) = op_obj.get_mut(&"responses")
+        {
+            deep_merge_json(op_resp, app_resps.clone());
         }
 
         // Route responses override app.responses
-        if let Some(responses) = &route.responses {
-            if let Some(op_obj) = operation_val.as_object_mut() {
-                if let Some(op_resp) = op_obj.get_mut(&"responses") {
-                    deep_merge_json(op_resp, responses.clone());
-                }
-            }
+        if let Some(responses) = &route.responses
+            && let Some(op_obj) = operation_val.as_object_mut()
+            && let Some(op_resp) = op_obj.get_mut(&"responses")
+        {
+            deep_merge_json(op_resp, responses.clone());
         }
 
         // Callbacks handling
-        if let Some(callbacks_val) = &route.callbacks {
-            if let Some(op_obj) = operation_val.as_object_mut() {
-                if let Some(op_cb) = op_obj.get_mut(&"callbacks") {
-                    deep_merge_json(op_cb, callbacks_val.clone());
-                } else {
-                    op_obj.insert("callbacks", callbacks_val.clone());
-                }
+        if let Some(callbacks_val) = &route.callbacks
+            && let Some(op_obj) = operation_val.as_object_mut()
+        {
+            if let Some(op_cb) = op_obj.get_mut(&"callbacks") {
+                deep_merge_json(op_cb, callbacks_val.clone());
+            } else {
+                op_obj.insert("callbacks", callbacks_val.clone());
             }
         }
 
@@ -695,43 +693,42 @@ pub fn parse_callbacks_to_json(
             if let Ok(router_ref) = item.cast::<crate::decorators::PyAPIRouter>() {
                 let router = router_ref.borrow();
                 let collected = collect_routes(py, &router);
-                let paths = build_paths_from_routes(py, collected, &mut dummy_schemas, None, false, None);
+                let paths =
+                    build_paths_from_routes(py, collected, &mut dummy_schemas, None, false, None);
 
                 for (path, path_item) in paths {
-                    callbacks_map.insert(
-                        &path,
-                        sonic_rs::to_value(&path_item).unwrap_or_else(|_| json!({})),
-                    );
+                    let value = sonic_rs::to_value(&path_item).unwrap_or_else(|_| json!({}));
+                    callbacks_map.insert(&path, value);
                 }
             }
         }
     } else if let Ok(dict) = callbacks_bound.cast::<PyDict>() {
-        for (k, v) in dict {
-            if let Ok(k_str) = k.extract::<String>() {
-                if let Ok(list) = v.try_iter() {
-                    let mut inner_map = sonic_rs::Object::new();
-                    for item in list.flatten() {
-                        if let Ok(router_ref) = item.cast::<crate::decorators::PyAPIRouter>() {
-                            let router = router_ref.borrow();
-                            let collected = collect_routes(py, &router);
-                            let paths = build_paths_from_routes(
-                                py,
-                                collected,
-                                &mut dummy_schemas,
-                                None,
-                                false,
-                                None,
-                            );
-                            for (path, path_item) in paths {
-                                inner_map.insert(
-                                    &path,
-                                    sonic_rs::to_value(&path_item).unwrap_or_else(|_| json!({})),
-                                );
-                            }
+        for (k, v) in dict.iter() {
+            if let Ok(k_str) = k.extract::<String>()
+                && let Ok(list) = v.try_iter()
+            {
+                let mut inner_map = sonic_rs::Object::new();
+                for item in list.flatten() {
+                    if let Ok(router_ref) = item.cast::<crate::decorators::PyAPIRouter>() {
+                        let router = router_ref.borrow();
+                        let collected = collect_routes(py, &router);
+                        let paths = build_paths_from_routes(
+                            py,
+                            collected,
+                            &mut dummy_schemas,
+                            None,
+                            false,
+                            None,
+                        );
+
+                        for (path, path_item) in paths {
+                            let value =
+                                sonic_rs::to_value(&path_item).unwrap_or_else(|_| json!({}));
+                            inner_map.insert(&path, value);
                         }
                     }
-                    callbacks_map.insert(&k_str, json!(inner_map));
                 }
+                callbacks_map.insert(&k_str, json!(inner_map));
             }
         }
     }
