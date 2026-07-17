@@ -14,9 +14,9 @@ pub mod routing;
 pub mod types;
 pub mod utils;
 
+pub use engine::server;
 pub use engine::app;
 pub use engine::background;
-pub use engine::server;
 pub use ffi::datastructures;
 pub use ffi::decorators;
 pub use ffi::exceptions;
