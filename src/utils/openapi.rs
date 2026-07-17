@@ -399,7 +399,7 @@ pub fn build_paths_from_routes(
         }
 
         let path = route.path.clone();
-        let method = route.method.as_str().to_lowercase();
+        let method = route.method.as_ref().to_lowercase();
         let handler = route.handler.clone();
         let tags = &route.tags;
 

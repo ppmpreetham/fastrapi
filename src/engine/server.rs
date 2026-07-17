@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     body::{Body, to_bytes},
     extract::{ConnectInfo, Request},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     middleware::{self as axum_middleware, Next},
     response::{Html, IntoResponse, Response},
     routing::{MethodRouter, *},
@@ -1553,26 +1553,15 @@ fn is_rate_limited(req: &Request, handler: usize, limit: u32) -> bool {
     false
 }
 fn request_matches_router(router: &FrozenRouter, state: &AppState, req: &Request) -> bool {
-    let Some(method) = request_method(req) else {
+    let Ok(method) = HttpMethod::try_from(req.method()) else {
         return true;
     };
+
     let Some(path) = dispatch_path(state, req.uri().path()) else {
         return false;
     };
-    router.resolve(method, path).is_some()
-}
 
-fn request_method(req: &Request) -> Option<HttpMethod> {
-    match req.method().as_str() {
-        "GET" => Some(HttpMethod::GET),
-        "POST" => Some(HttpMethod::POST),
-        "PUT" => Some(HttpMethod::PUT),
-        "DELETE" => Some(HttpMethod::DELETE),
-        "PATCH" => Some(HttpMethod::PATCH),
-        "OPTIONS" => Some(HttpMethod::OPTIONS),
-        "HEAD" => Some(HttpMethod::HEAD),
-        _ => None,
-    }
+    router.resolve(method, path).is_some()
 }
 
 fn dispatch_path<'a>(state: &AppState, original_path: &'a str) -> Option<&'a str> {

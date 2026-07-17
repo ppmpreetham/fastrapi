@@ -2,6 +2,7 @@ use crate::decorators::PyAPIRouter;
 use crate::routing::dependencies::DependencyNode;
 use crate::types::response::ResponseType;
 use ahash::{AHashMap, AHashSet};
+use axum::http::Method;
 use cookie::Cookie;
 use pyo3::types::PyString;
 use pyo3::{Py, PyAny};
@@ -9,9 +10,12 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use strum::{AsRefStr, Display, EnumCount, EnumIter, EnumString};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(usize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, AsRefStr, Display, EnumString, EnumCount, EnumIter,
+)]
+#[repr(u8)]
 pub enum HttpMethod {
     GET = 0,
     POST = 1,
@@ -22,21 +26,15 @@ pub enum HttpMethod {
     HEAD = 6,
 }
 
-impl HttpMethod {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            HttpMethod::GET => "GET",
-            HttpMethod::POST => "POST",
-            HttpMethod::PUT => "PUT",
-            HttpMethod::DELETE => "DELETE",
-            HttpMethod::PATCH => "PATCH",
-            HttpMethod::OPTIONS => "OPTIONS",
-            HttpMethod::HEAD => "HEAD",
-        }
+impl TryFrom<&Method> for HttpMethod {
+    type Error = strum::ParseError;
+
+    fn try_from(method: &Method) -> Result<Self, Self::Error> {
+        std::str::FromStr::from_str(method.as_str())
     }
 }
 
-pub const HTTP_METHOD_COUNT: usize = 7;
+pub const HTTP_METHOD_COUNT: usize = HttpMethod::COUNT;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParameterSource {

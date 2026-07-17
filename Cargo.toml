@@ -49,6 +49,7 @@ metrics-exporter-prometheus = "0.18.3"
 metrics = "0.24.6"
 axum-governor = "2.0.3"
 arc-swap = "1.9.2"
+strum = { version = "0.28.0", features = ["derive"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pprof2 = { version = "0.13", features = ["flamegraph"] }
