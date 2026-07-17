@@ -1,6 +1,8 @@
 use axum::http::{HeaderName, HeaderValue, Method};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::collections::HashSet;
 use std::str::FromStr;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
@@ -58,7 +60,54 @@ impl CORSMiddleware {
     }
 }
 
-// small parser for app.add_middleware(CORSMiddleware, **kwargs)
+fn parse_and_validate_vec<T, E, F>(
+    values: &[String],
+    parser: F,
+    kind: &str,
+    err_example: &str,
+    normalize_case: bool,
+) -> PyResult<(Vec<T>, bool)>
+where
+    F: Fn(&str) -> Result<T, E>,
+{
+    let mut parsed_items = Vec::with_capacity(values.len());
+    let mut seen_strings = HashSet::with_capacity(values.len());
+    let mut has_wildcard = false;
+
+    for v in values {
+        if v.as_str() == "*" {
+            has_wildcard = true;
+            continue;
+        }
+
+        let normalized = if normalize_case {
+            v.to_ascii_uppercase()
+        } else {
+            v.clone()
+        };
+
+        if !seen_strings.insert(normalized.clone()) {
+            continue;
+        }
+
+        let parsed = parser(normalized.as_str()).map_err(|_| {
+            PyValueError::new_err(format!(
+                "Invalid CORS {kind}:\n{v}\n\nExpected a valid {kind} format like:\n{err_example}"
+            ))
+        })?;
+
+        parsed_items.push(parsed);
+    }
+
+    if has_wildcard && !parsed_items.is_empty() {
+        return Err(PyValueError::new_err(format!(
+            "CORS configuration error: Wildcard '*' cannot be mixed with explicit values in {kind} list."
+        )));
+    }
+
+    Ok((parsed_items, has_wildcard))
+}
+
 pub fn parse_cors_params(kwargs: &Bound<'_, PyDict>) -> PyResult<CORSMiddleware> {
     let mut config = CORSMiddleware::default();
     set_field!(kwargs, config, "allow_origins", allow_origins: Vec<String>);
@@ -70,40 +119,54 @@ pub fn parse_cors_params(kwargs: &Bound<'_, PyDict>) -> PyResult<CORSMiddleware>
     Ok(config)
 }
 
-// building of actual Axum Layer happens here
 pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
     let mut layer = CorsLayer::new();
 
-    if config.allow_origins.contains(&"*".to_string()) {
+    let (origins, has_wildcard_origin) = parse_and_validate_vec(
+        &config.allow_origins,
+        HeaderValue::from_str,
+        "origin",
+        "https://example.com",
+        false,
+    )?;
+
+    if config.allow_credentials && has_wildcard_origin {
+        return Err(PyValueError::new_err(
+            "CORS configuration error: allow_credentials=True cannot be used with allow_origins=['*'].",
+        ));
+    }
+
+    if has_wildcard_origin {
         layer = layer.allow_origin(AllowOrigin::any());
-    } else {
-        let origins: Vec<HeaderValue> = config
-            .allow_origins
-            .iter()
-            .filter_map(|o| HeaderValue::from_str(o).ok())
-            .collect();
+    } else if !config.allow_origins.is_empty() {
         layer = layer.allow_origin(origins);
     }
 
-    if config.allow_methods.contains(&"*".to_string()) {
+    let (methods, has_wildcard_method) = parse_and_validate_vec(
+        &config.allow_methods,
+        Method::from_str,
+        "HTTP method",
+        "GET",
+        true,
+    )?;
+
+    if has_wildcard_method {
         layer = layer.allow_methods(AllowMethods::any());
     } else {
-        let methods: Vec<Method> = config
-            .allow_methods
-            .iter()
-            .filter_map(|m| Method::from_str(m).ok())
-            .collect();
         layer = layer.allow_methods(methods);
     }
 
-    if config.allow_headers.contains(&"*".to_string()) {
+    let (headers, has_wildcard_header) = parse_and_validate_vec(
+        &config.allow_headers,
+        HeaderName::from_str,
+        "HTTP header name",
+        "Content-Type",
+        false,
+    )?;
+
+    if has_wildcard_header {
         layer = layer.allow_headers(AllowHeaders::any());
-    } else {
-        let headers: Vec<HeaderName> = config
-            .allow_headers
-            .iter()
-            .filter_map(|h| HeaderName::from_str(h).ok())
-            .collect();
+    } else if !config.allow_headers.is_empty() {
         layer = layer.allow_headers(headers);
     }
 
@@ -112,12 +175,14 @@ pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
     }
 
     if !config.expose_headers.is_empty() {
-        let headers: Vec<HeaderName> = config
-            .expose_headers
-            .iter()
-            .filter_map(|h| HeaderName::from_str(h).ok())
-            .collect();
-        layer = layer.expose_headers(headers);
+        let (expose_headers, _) = parse_and_validate_vec(
+            &config.expose_headers,
+            HeaderName::from_str,
+            "exposed header name",
+            "X-Custom-Header",
+            false,
+        )?;
+        layer = layer.expose_headers(expose_headers);
     }
 
     layer = layer.max_age(std::time::Duration::from_secs(config.max_age));
