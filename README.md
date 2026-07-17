@@ -348,37 +348,41 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 
 Some advanced features are still in development like:
 
-- [x] Built-in middleware setup (`add_middleware` for CORS, GZip, Session, TrustedHost)
-- [x] Lifespan Events (`lifespan=`, `on_startup`, `on_shutdown`)
-- [x] Rate limiter (better to do from ngnix)
-- [x] Websockets
-- [x] Form/Multipart support
-- [x] Generated OpenAPI JSON + Swagger docs (`/api-docs/openapi.json`, `/docs`)
-- [x] Sub-APIs / Includes
-- [x] Security Utilities (OAuth2, JWT, etc.)
-- [x] Rust integration
-- [x] Dependency injection
-- [x] Route parameter parsing (`Path`, `Query`, body models, `Depends`, `Security`)
-- [x] APIRouter + include_router(prefix=..., tags=..., dependencies=...)
-- [x] @app.exception_handler() + app.fallback()
-- [x] app.state (mutable app-wide state)
-- [x] Metrics / Prometheus endpoint
-- [x] File uploads (`UploadFile` + multipart parsing)
-- [x] Background tasks (reliable spawning with rt_handle, only on success)
-- [x] `app.mount()` for static files & sub-apps
-- [x] `app.openapi()` method (customizable spec)
-- [x] Respect response_model=None (allow raw Response / RedirectResponse returns)
-- [x] `app.openapi_tags=` ordering in Swagger UI
-- [x] `app.servers=`, `root_path`, `openapi_external_docs`
+- [ ] Support `yield`-based dependencies (setup/teardown, e.g. `def get_db(): yield db; db.close()`)
+- [ ] Support `Annotated[Type, Depends(...)]` / `Annotated[str, Query(...)]` style DI
+- [ ] Execute app-level `dependencies=[...]` on every route
+- [ ] Execute router-level `dependencies=[...]` from `include_router`/`nest`/`APIRouter(dependencies=...)`
+- [ ] Add `app.dependency_overrides` for testing
+- [ ] Dispatch custom `@app.exception_handler(X)` handlers instead of only special-casing `PyHTTPException`
+- [ ] Make `app.state` persistent across requests (not rebuilt per-request scope)
+- [ ] Fix injected `Request` objects to have working `receive`/`send` so `.body()`/`.json()` work
+- [ ] Add `request.url`, `request.base_url`, `url_for()`
+- [ ] Expose `request.session` accessor for SessionMiddleware
+- [ ] Return structured validation errors (`[{"loc": [...], "msg": ..., "type": ...}]`) for path/query/header/cookie params, not just Pydantic body errors
+- [ ] Support repeated query-key list params (`?tags=a&tags=b` → `List[str]`)
+- [ ] Support repeated form-key list params
+- [ ] Improve scalar coercion for `List[int]`, `Union`/`Optional`, and other complex annotations
+- [ ] Implement `response_model_include`
+- [ ] Implement `response_model_exclude`
+- [ ] Implement `response_model_by_alias`
+- [ ] Implement `response_model_exclude_unset`
+- [ ] Implement `response_model_exclude_defaults`
+- [ ] Implement `response_model_exclude_none`
+- [ ] Add `FileResponse`
+- [ ] Add `ORJSONResponse` / `UJSONResponse`
+- [ ] Add Jinja2Templates equivalent
+- [ ] Add `headers`, `media_type`, `background` params to response wrapper classes
+- [ ] Support mounting sub-applications (not just `PyStaticFiles`) via `app.mount()`
+- [ ] Add `HTTPSRedirectMiddleware`
+- [ ] Support arbitrary Starlette-style ASGI middleware classes
+- [ ] Support custom `route_class`
+- [ ] Actually use `generate_unique_id_function` to generate operation IDs
 - [ ] Logging middlewares
 - [ ] Async Middleware support
 - [ ] Full middleware ordering control
 - [ ] Better error handling (currently shows Rust errors)
 - [ ] Proper Python-friendly error pages (no Rust tracebacks in production)
 - [ ] GraphQL support
-- [ ] `callbacks=` and `webhooks=` in OpenAPI
-- [ ] `app.swagger_ui_parameters=` customization
-- [ ] `separate_input_output_schemas` in OpenAPI generation
 - [ ] Hot reloading / watchfiles integration
 - [ ] Built-in TestClient (`starlette.testclient` style)
 - [ ] Advanced dependency scopes (request vs function)
