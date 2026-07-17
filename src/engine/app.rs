@@ -12,8 +12,8 @@ pub use super::types::{FastrAPI, FrontendMount, StaticMount};
 use crate::decorators::PyAPIRouter;
 use crate::globals::{MIDDLEWARE_COUNTER, MIDDLEWARES};
 use crate::http::middleware::{
-    PyMiddleware, parse_cors_params, parse_gzip_params, parse_session_params,
-    parse_trusted_host_params,
+    PyMiddleware, parse_cors_params, parse_gzip_params, parse_https_redirect_params,
+    parse_session_params, parse_trusted_host_params,
 };
 use crate::http::staticfiles::PyStaticFiles;
 use crate::routing::types::HttpMethod;
@@ -192,6 +192,7 @@ impl FastrAPI {
             prometheus_config: None,
             cors_config: None,
             trusted_host_config: None,
+            https_redirect_config: None,
             gzip_config: None,
             session_config: None,
             router: base_router,
@@ -218,6 +219,10 @@ impl FastrAPI {
                 self.trusted_host_config = Some(parse_trusted_host_params(opts)?);
                 info!("Enabled TrustedHostMiddleware");
             }
+            "HTTPSRedirectMiddleware" => {
+                self.https_redirect_config = Some(parse_https_redirect_params(opts)?);
+                info!("Enabled HTTPSRedirectMiddleware");
+            }
             "GZipMiddleware" => {
                 self.gzip_config = Some(parse_gzip_params(opts)?);
                 info!("Enabled GZipMiddleware");
@@ -228,7 +233,7 @@ impl FastrAPI {
             }
             _ => {
                 let msg = format!(
-                    "Middleware '{}' is not supported. Only CORSMiddleware, TrustedHostMiddleware, GZipMiddleware, and SessionMiddleware are allowed via add_middleware.",
+                    "Middleware '{}' is not supported. Only CORSMiddleware, TrustedHostMiddleware, HTTPSRedirectMiddleware, GZipMiddleware, and SessionMiddleware are allowed via add_middleware.",
                     class_name
                 );
                 return Err(pyo3::exceptions::PyValueError::new_err(msg));

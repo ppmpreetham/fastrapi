@@ -140,6 +140,39 @@ impl PyRequest {
     }
 
     #[getter]
+    fn url(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let datastructures = py.import("starlette.datastructures")?;
+        let url_class = datastructures.getattr("URL")?;
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("scope", &self.scope)?;
+        let url = url_class.call((), Some(&kwargs))?;
+        Ok(url.into())
+    }
+
+    #[getter]
+    fn base_url(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let datastructures = py.import("starlette.datastructures")?;
+        let url_class = datastructures.getattr("URL")?;
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("scope", &self.scope)?;
+        let url = url_class.call((), Some(&kwargs))?;
+        
+        let scope = self.scope.bind(py);
+        let root_path: String = match scope.get_item("root_path") {
+            Ok(val) => val.extract().unwrap_or_else(|_| "".to_string()),
+            Err(_) => "".to_string(),
+        };
+        
+        let kwargs2 = pyo3::types::PyDict::new(py);
+        kwargs2.set_item("scheme", url.getattr("scheme")?)?;
+        kwargs2.set_item("netloc", url.getattr("netloc")?)?;
+        kwargs2.set_item("path", root_path)?;
+        
+        let base_url = url_class.call((), Some(&kwargs2))?;
+        Ok(base_url.into())
+    }
+
+    #[getter]
     fn path_params(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
         match scope.get_item("path_params") {

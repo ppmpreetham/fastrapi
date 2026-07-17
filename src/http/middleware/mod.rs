@@ -32,14 +32,16 @@ use pyo3::types::{PyAny, PyDict};
 use std::sync::Arc;
 use tracing::error;
 
-mod cors;
-mod gzip;
+pub mod cors;
+pub mod gzip;
+pub mod httpsredirect;
 mod rate_limit;
 mod session;
 mod trustedhost;
 
 pub use cors::{CORSMiddleware, build_cors_layer, parse_cors_params};
 pub use gzip::{GZipMiddleware, parse_gzip_params};
+pub use httpsredirect::{HTTPSRedirectMiddleware, parse_https_redirect_params};
 pub use rate_limit::rate_limit;
 pub use session::{SessionMiddleware, parse_session_params};
 pub use trustedhost::{TrustedHostMiddleware, parse_trusted_host_params};

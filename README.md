@@ -348,6 +348,10 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 
 Some advanced features are still in development like:
 
+- [x] Add `ORJSONResponse` / `UJSONResponse`
+- [x] Add `headers`, `media_type`, `background` params to response wrapper classes
+- [x] Add `HTTPSRedirectMiddleware`
+- [x] Actually use `generate_unique_id_function` to generate operation IDs
 - [ ] Support `yield`-based dependencies (setup/teardown, e.g. `def get_db(): yield db; db.close()`)
 - [ ] Support `Annotated[Type, Depends(...)]` / `Annotated[str, Query(...)]` style DI
 - [ ] Execute app-level `dependencies=[...]` on every route
@@ -356,7 +360,7 @@ Some advanced features are still in development like:
 - [ ] Dispatch custom `@app.exception_handler(X)` handlers instead of only special-casing `PyHTTPException`
 - [ ] Make `app.state` persistent across requests (not rebuilt per-request scope)
 - [ ] Fix injected `Request` objects to have working `receive`/`send` so `.body()`/`.json()` work
-- [ ] Add `request.url`, `request.base_url`, `url_for()`
+- [ ] Add `url_for()`
 - [ ] Expose `request.session` accessor for SessionMiddleware
 - [ ] Return structured validation errors (`[{"loc": [...], "msg": ..., "type": ...}]`) for path/query/header/cookie params, not just Pydantic body errors
 - [ ] Support repeated query-key list params (`?tags=a&tags=b` → `List[str]`)
@@ -369,14 +373,10 @@ Some advanced features are still in development like:
 - [ ] Implement `response_model_exclude_defaults`
 - [ ] Implement `response_model_exclude_none`
 - [ ] Add `FileResponse`
-- [ ] Add `ORJSONResponse` / `UJSONResponse`
 - [ ] Add Jinja2Templates equivalent
-- [ ] Add `headers`, `media_type`, `background` params to response wrapper classes
 - [ ] Support mounting sub-applications (not just `PyStaticFiles`) via `app.mount()`
-- [ ] Add `HTTPSRedirectMiddleware`
 - [ ] Support arbitrary Starlette-style ASGI middleware classes
 - [ ] Support custom `route_class`
-- [ ] Actually use `generate_unique_id_function` to generate operation IDs
 - [ ] Logging middlewares
 - [ ] Async Middleware support
 - [ ] Full middleware ordering control

@@ -1,4 +1,4 @@
-use crate::utils::{
+﻿use crate::utils::{
     py_json_response_with_status, py_json_response_with_status_hint, py_to_response,
 };
 use axum::{
@@ -44,16 +44,31 @@ pub struct PyHTMLResponse {
     pub content: String,
     #[pyo3(get)]
     pub status_code: u16,
+    #[pyo3(get)]
+    pub headers: Option<Py<pyo3::types::PyDict>>,
+    #[pyo3(get)]
+    pub media_type: Option<String>,
+    #[pyo3(get)]
+    pub background: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 impl PyHTMLResponse {
     #[new]
-    #[pyo3(signature = (content, status_code=200))]
-    fn new(content: String, status_code: u16) -> Self {
+    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None))]
+    fn new(
+        content: String,
+        status_code: u16,
+        headers: Option<Py<pyo3::types::PyDict>>,
+        media_type: Option<String>,
+        background: Option<Py<PyAny>>,
+    ) -> Self {
         Self {
             content,
             status_code,
+            headers,
+            media_type,
+            background,
         }
     }
 }
@@ -65,16 +80,103 @@ pub struct PyJSONResponse {
     pub content: Py<PyAny>,
     #[pyo3(get)]
     pub status_code: u16,
+    #[pyo3(get)]
+    pub headers: Option<Py<pyo3::types::PyDict>>,
+    #[pyo3(get)]
+    pub media_type: Option<String>,
+    #[pyo3(get)]
+    pub background: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 impl PyJSONResponse {
     #[new]
-    #[pyo3(signature = (content, status_code=200))]
-    fn new(content: Py<PyAny>, status_code: u16) -> Self {
+    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None))]
+    fn new(
+        content: Py<PyAny>,
+        status_code: u16,
+        headers: Option<Py<pyo3::types::PyDict>>,
+        media_type: Option<String>,
+        background: Option<Py<PyAny>>,
+    ) -> Self {
         Self {
             content,
             status_code,
+            headers,
+            media_type,
+            background,
+        }
+    }
+}
+
+#[pyclass(name = "ORJSONResponse", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyORJSONResponse {
+    #[pyo3(get)]
+    pub content: Py<PyAny>,
+    #[pyo3(get)]
+    pub status_code: u16,
+    #[pyo3(get)]
+    pub headers: Option<Py<pyo3::types::PyDict>>,
+    #[pyo3(get)]
+    pub media_type: Option<String>,
+    #[pyo3(get)]
+    pub background: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PyORJSONResponse {
+    #[new]
+    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None))]
+    fn new(
+        content: Py<PyAny>,
+        status_code: u16,
+        headers: Option<Py<pyo3::types::PyDict>>,
+        media_type: Option<String>,
+        background: Option<Py<PyAny>>,
+    ) -> Self {
+        Self {
+            content,
+            status_code,
+            headers,
+            media_type,
+            background,
+        }
+    }
+}
+
+#[pyclass(name = "UJSONResponse", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyUJSONResponse {
+    #[pyo3(get)]
+    pub content: Py<PyAny>,
+    #[pyo3(get)]
+    pub status_code: u16,
+    #[pyo3(get)]
+    pub headers: Option<Py<pyo3::types::PyDict>>,
+    #[pyo3(get)]
+    pub media_type: Option<String>,
+    #[pyo3(get)]
+    pub background: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PyUJSONResponse {
+    #[new]
+    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None))]
+    fn new(
+        content: Py<PyAny>,
+        status_code: u16,
+        headers: Option<Py<pyo3::types::PyDict>>,
+        media_type: Option<String>,
+        background: Option<Py<PyAny>>,
+    ) -> Self {
+        Self {
+            content,
+            status_code,
+            headers,
+            media_type,
+            background,
         }
     }
 }
@@ -86,16 +188,31 @@ pub struct PyPlainTextResponse {
     pub content: String,
     #[pyo3(get)]
     pub status_code: u16,
+    #[pyo3(get)]
+    pub headers: Option<Py<pyo3::types::PyDict>>,
+    #[pyo3(get)]
+    pub media_type: Option<String>,
+    #[pyo3(get)]
+    pub background: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 impl PyPlainTextResponse {
     #[new]
-    #[pyo3(signature = (content, status_code=200))]
-    fn new(content: String, status_code: u16) -> Self {
+    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None))]
+    fn new(
+        content: String,
+        status_code: u16,
+        headers: Option<Py<pyo3::types::PyDict>>,
+        media_type: Option<String>,
+        background: Option<Py<PyAny>>,
+    ) -> Self {
         Self {
             content,
             status_code,
+            headers,
+            media_type,
+            background,
         }
     }
 }
@@ -107,14 +224,28 @@ pub struct PyRedirectResponse {
     pub url: String,
     #[pyo3(get)]
     pub status_code: u16,
+    #[pyo3(get)]
+    pub headers: Option<Py<pyo3::types::PyDict>>,
+    #[pyo3(get)]
+    pub background: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 impl PyRedirectResponse {
     #[new]
-    #[pyo3(signature = (url, status_code=307))]
-    fn new(url: String, status_code: u16) -> Self {
-        Self { url, status_code }
+    #[pyo3(signature = (url, status_code=307, headers=None, background=None))]
+    fn new(
+        url: String,
+        status_code: u16,
+        headers: Option<Py<pyo3::types::PyDict>>,
+        background: Option<Py<PyAny>>,
+    ) -> Self {
+        Self {
+            url,
+            status_code,
+            headers,
+            background,
+        }
     }
 }
 
@@ -125,18 +256,64 @@ pub struct PyStreamingResponse {
     pub content: Py<PyAny>,
     #[pyo3(get)]
     pub status_code: u16,
+    #[pyo3(get)]
+    pub headers: Option<Py<pyo3::types::PyDict>>,
+    #[pyo3(get)]
+    pub media_type: Option<String>,
+    #[pyo3(get)]
+    pub background: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 impl PyStreamingResponse {
     #[new]
-    #[pyo3(signature = (content, status_code=200))]
-    fn new(content: Py<PyAny>, status_code: u16) -> Self {
+    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None))]
+    fn new(
+        content: Py<PyAny>,
+        status_code: u16,
+        headers: Option<Py<pyo3::types::PyDict>>,
+        media_type: Option<String>,
+        background: Option<Py<PyAny>>,
+    ) -> Self {
         Self {
             content,
             status_code,
+            headers,
+            media_type,
+            background,
         }
     }
+}
+
+pub fn apply_response_metadata(
+    py: Python<'_>,
+    mut res: Response,
+    headers: Option<&Py<pyo3::types::PyDict>>,
+    media_type: Option<&String>,
+) -> Response {
+    if let Some(headers) = headers {
+        if let Ok(dict) = headers.bind(py).cast::<pyo3::types::PyDict>() {
+            for (k, v) in dict.iter() {
+                if let Ok(ks) = k.extract::<String>() {
+                    if let Ok(vs) = v.extract::<String>() {
+                        if let (Ok(hname), Ok(hval)) = (
+                            axum::http::header::HeaderName::try_from(ks),
+                            axum::http::header::HeaderValue::try_from(vs),
+                        ) {
+                            res.headers_mut().insert(hname, hval);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(media_type) = media_type {
+        if let Ok(hval) = axum::http::header::HeaderValue::try_from(media_type.as_str()) {
+            res.headers_mut()
+                .insert(axum::http::header::CONTENT_TYPE, hval);
+        }
+    }
+    res
 }
 
 #[inline(always)]
@@ -165,6 +342,8 @@ pub fn convert_response_by_type(
         || final_result.is_instance_of::<PyRedirectResponse>()
         || final_result.is_instance_of::<PyStreamingResponse>()
         || response_class_is(class_name.as_deref(), "JSONResponse")
+        || response_class_is(class_name.as_deref(), "ORJSONResponse")
+        || response_class_is(class_name.as_deref(), "UJSONResponse")
         || response_class_is(class_name.as_deref(), "PlainTextResponse")
         || response_class_is(class_name.as_deref(), "HTMLResponse")
         || response_class_is(class_name.as_deref(), "RedirectResponse")
@@ -182,6 +361,8 @@ pub fn convert_response_by_type(
     if is_explicit_response {
         if final_result.is_instance_of::<PyJSONResponse>()
             || response_class_is(class_name.as_deref(), "JSONResponse")
+            || response_class_is(class_name.as_deref(), "ORJSONResponse")
+            || response_class_is(class_name.as_deref(), "UJSONResponse")
         {
             return Ok(convert_json_response(py, final_result));
         } else if final_result.is_instance_of::<PyPlainTextResponse>()
@@ -247,6 +428,8 @@ pub fn convert_response_by_type(
 
             if final_result.is_instance_of::<PyJSONResponse>()
                 || response_class_is(class_name.as_deref(), "JSONResponse")
+                || response_class_is(class_name.as_deref(), "ORJSONResponse")
+                || response_class_is(class_name.as_deref(), "UJSONResponse")
             {
                 convert_json_response(py, final_result)
             } else if final_result.is_instance_of::<PyPlainTextResponse>()
@@ -278,7 +461,8 @@ pub fn convert_response_by_type(
 pub fn convert_html_response(_py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyHTMLResponse>>() {
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
-        (status_code, Html(resp.content.clone())).into_response()
+        let res = (status_code, Html(resp.content.clone())).into_response();
+        apply_response_metadata(_py, res, resp.headers.as_ref(), resp.media_type.as_ref())
     } else if response_class_is(response_class_name(result).as_deref(), "HTMLResponse") {
         let status_code = response_status(result, StatusCode::OK);
         let content = result
@@ -297,11 +481,32 @@ pub fn convert_html_response(_py: Python, result: &Bound<PyAny>) -> Response {
 pub fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyJSONResponse>>() {
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
-        py_json_response_with_status(py, status_code, resp.content.bind(py)).unwrap_or_else(|err| {
-            err.print(py);
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        })
-    } else if response_class_is(response_class_name(result).as_deref(), "JSONResponse") {
+        let res = py_json_response_with_status(py, status_code, resp.content.bind(py))
+            .unwrap_or_else(|err| {
+                err.print(py);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            });
+        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_ref())
+    } else if let Ok(resp) = result.extract::<PyRef<'_, PyORJSONResponse>>() {
+        let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
+        let res = py_json_response_with_status(py, status_code, resp.content.bind(py))
+            .unwrap_or_else(|err| {
+                err.print(py);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            });
+        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_ref())
+    } else if let Ok(resp) = result.extract::<PyRef<'_, PyUJSONResponse>>() {
+        let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
+        let res = py_json_response_with_status(py, status_code, resp.content.bind(py))
+            .unwrap_or_else(|err| {
+                err.print(py);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            });
+        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_ref())
+    } else if response_class_is(response_class_name(result).as_deref(), "JSONResponse")
+        || response_class_is(response_class_name(result).as_deref(), "ORJSONResponse")
+        || response_class_is(response_class_name(result).as_deref(), "UJSONResponse")
+    {
         let status_code = response_status(result, StatusCode::OK);
         match result.getattr("content") {
             Ok(content) => {
@@ -325,7 +530,7 @@ pub fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
 pub fn convert_text_response(_py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp) = result.extract::<PyRef<'_, PyPlainTextResponse>>() {
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
-        (
+        let res = (
             status_code,
             [(
                 header::CONTENT_TYPE,
@@ -333,7 +538,8 @@ pub fn convert_text_response(_py: Python, result: &Bound<PyAny>) -> Response {
             )],
             resp.content.clone(),
         )
-            .into_response()
+            .into_response();
+        apply_response_metadata(_py, res, resp.headers.as_ref(), resp.media_type.as_ref())
     } else if response_class_is(response_class_name(result).as_deref(), "PlainTextResponse") {
         let status_code = response_status(result, StatusCode::OK);
         let content = result
@@ -358,27 +564,25 @@ pub fn convert_text_response(_py: Python, result: &Bound<PyAny>) -> Response {
 
 #[inline(always)]
 pub fn convert_redirect_response(_py: Python, result: &Bound<PyAny>) -> Response {
-    let redirect = if let Ok(resp) = result.extract::<PyRef<'_, PyRedirectResponse>>() {
-        Some((resp.url.clone(), resp.status_code))
+    if let Ok(resp) = result.extract::<PyRef<'_, PyRedirectResponse>>() {
+        let res = if resp.status_code == 301 {
+            Redirect::permanent(&resp.url).into_response()
+        } else {
+            Redirect::temporary(&resp.url).into_response()
+        };
+        apply_response_metadata(_py, res, resp.headers.as_ref(), None)
     } else if response_class_is(response_class_name(result).as_deref(), "RedirectResponse") {
-        result
+        let url = result
             .getattr("url")
             .ok()
             .and_then(|url| url.extract::<String>().ok())
-            .map(|url| {
-                let status = result
-                    .getattr("status_code")
-                    .ok()
-                    .and_then(|status| status.extract::<u16>().ok())
-                    .unwrap_or(307);
-                (url, status)
-            })
-    } else {
-        None
-    };
-
-    if let Some((url, status_code)) = redirect {
-        if status_code == 301 {
+            .unwrap_or_default();
+        let status = result
+            .getattr("status_code")
+            .ok()
+            .and_then(|status| status.extract::<u16>().ok())
+            .unwrap_or(307);
+        if status == 301 {
             Redirect::permanent(&url).into_response()
         } else {
             Redirect::temporary(&url).into_response()
@@ -474,7 +678,11 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
             }
         }
     };
-    (status_code, Body::from_stream(stream)).into_response()
+    let mut res = (status_code, Body::from_stream(stream)).into_response();
+    if let Ok(resp) = result.extract::<PyRef<'_, PyStreamingResponse>>() {
+        res = apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_ref());
+    }
+    res
 }
 
 #[inline(always)]
@@ -486,6 +694,8 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
     let class_name = response_class_name(result);
     if result.is_instance_of::<PyJSONResponse>()
         || response_class_is(class_name.as_deref(), "JSONResponse")
+        || response_class_is(class_name.as_deref(), "ORJSONResponse")
+        || response_class_is(class_name.as_deref(), "UJSONResponse")
     {
         return convert_json_response(py, result);
     }

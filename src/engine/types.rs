@@ -3,7 +3,10 @@ use pyo3::types::PyAny;
 
 use crate::{
     decorators::PyAPIRouter,
-    http::middleware::{CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware},
+    http::middleware::{
+        CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
+        TrustedHostMiddleware,
+    },
 };
 
 #[derive(Clone)]
@@ -133,6 +136,7 @@ pub struct FastrAPI {
     // CORS for rust side of things
     pub cors_config: Option<CORSMiddleware>,
     pub trusted_host_config: Option<TrustedHostMiddleware>,
+    pub https_redirect_config: Option<HTTPSRedirectMiddleware>,
     pub gzip_config: Option<GZipMiddleware>,
     pub session_config: Option<SessionMiddleware>,
 

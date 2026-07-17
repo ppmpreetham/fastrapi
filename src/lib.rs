@@ -33,7 +33,8 @@ pub use routing::security;
 pub use app::FastrAPI;
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{
-    PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse, PyStreamingResponse,
+    PyHTMLResponse, PyJSONResponse, PyORJSONResponse, PyPlainTextResponse, PyRedirectResponse,
+    PyStreamingResponse, PyUJSONResponse,
 };
 
 use crate::routing::security::{
@@ -47,7 +48,10 @@ use exceptions::{
     PyFastrAPIDeprecationWarning, PyFastrAPIError, PyHTTPException, PyRequestValidationError,
     PyResponseValidationError, PyValidationException, PyWebSocketException,
 };
-use middleware::{CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware};
+use middleware::{
+    CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
+    TrustedHostMiddleware,
+};
 use params::{
     PyBody, PyCookie, PyDepends, PyFile, PyForm, PyHeader, PyPath, PyQuery, PySecurity, Undefined,
     Unset,
@@ -81,6 +85,8 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "responses",
         add_classes!(
             PyJSONResponse,
+            PyORJSONResponse,
+            PyUJSONResponse,
             PyHTMLResponse,
             PyPlainTextResponse,
             PyRedirectResponse,
@@ -135,6 +141,7 @@ fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "middleware",
         add_classes!(
             CORSMiddleware,
+            HTTPSRedirectMiddleware,
             TrustedHostMiddleware,
             GZipMiddleware,
             SessionMiddleware

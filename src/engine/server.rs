@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     body::{Body, to_bytes},
     extract::{ConnectInfo, Request},
-    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
     middleware::{self as axum_middleware, Next},
     response::{Html, IntoResponse, Response},
     routing::{MethodRouter, *},
@@ -60,8 +60,8 @@ use crate::{
 };
 use crate::{
     http::middleware::{
-        CORSMiddleware, GZipMiddleware, SessionMiddleware, TrustedHostMiddleware, build_cors_layer,
-        parse_cors_params, parse_gzip_params, parse_session_params, parse_trusted_host_params,
+        CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware, TrustedHostMiddleware, build_cors_layer,
+        parse_cors_params, parse_gzip_params, parse_session_params, parse_https_redirect_params, parse_trusted_host_params,
     },
     routing::router::RouteMatch,
 };
@@ -842,6 +842,7 @@ fn apply_declared_middleware(
     middleware_item: &Bound<'_, PyAny>,
     cors_config: &mut Option<CORSMiddleware>,
     trusted_host_config: &mut Option<TrustedHostMiddleware>,
+    https_redirect_config: &mut Option<HTTPSRedirectMiddleware>,
     gzip_config: &mut Option<GZipMiddleware>,
     session_config: &mut Option<SessionMiddleware>,
 ) -> PyResult<()> {
@@ -851,6 +852,10 @@ fn apply_declared_middleware(
     }
     if let Ok(config) = middleware_item.extract::<PyRef<'_, TrustedHostMiddleware>>() {
         *trusted_host_config = Some(config.clone());
+        return Ok(());
+    }
+    if let Ok(config) = middleware_item.extract::<PyRef<'_, HTTPSRedirectMiddleware>>() {
+        *https_redirect_config = Some(config.clone());
         return Ok(());
     }
     if let Ok(config) = middleware_item.extract::<PyRef<'_, GZipMiddleware>>() {
@@ -880,6 +885,7 @@ fn apply_declared_middleware(
     match class_name.as_str() {
         "CORSMiddleware" => *cors_config = Some(parse_cors_params(kwargs)?),
         "TrustedHostMiddleware" => *trusted_host_config = Some(parse_trusted_host_params(kwargs)?),
+        "HTTPSRedirectMiddleware" => *https_redirect_config = Some(parse_https_redirect_params(kwargs)?),
         "GZipMiddleware" => *gzip_config = Some(parse_gzip_params(kwargs)?),
         "SessionMiddleware" => *session_config = Some(parse_session_params(kwargs)?),
         _ => {}
@@ -893,6 +899,7 @@ fn merge_declared_middlewares(
     app_config: &FastrAPI,
     cors_config: &mut Option<CORSMiddleware>,
     trusted_host_config: &mut Option<TrustedHostMiddleware>,
+    https_redirect_config: &mut Option<HTTPSRedirectMiddleware>,
     gzip_config: &mut Option<GZipMiddleware>,
     session_config: &mut Option<SessionMiddleware>,
 ) {
@@ -911,6 +918,7 @@ fn merge_declared_middlewares(
             &item,
             cors_config,
             trusted_host_config,
+            https_redirect_config,
             gzip_config,
             session_config,
         ) {
@@ -997,12 +1005,14 @@ fn build_router(
     let mut gzip_config = app_config.gzip_config.clone();
     let mut cors_config = app_config.cors_config.clone();
     let mut trusted_host_config = app_config.trusted_host_config.clone();
+    let mut https_redirect_config = app_config.https_redirect_config.clone();
 
     merge_declared_middlewares(
         py,
         app_config,
         &mut cors_config,
         &mut trusted_host_config,
+        &mut https_redirect_config,
         &mut gzip_config,
         &mut session_config,
     );
@@ -1249,7 +1259,48 @@ fn build_router(
         }
     }
 
-    // L5: Trusted Host
+
+    // L5: HTTPS Redirect
+    if let Some(_config) = https_redirect_config {
+        info!("🔗 Layer: HTTPSRedirect");
+        app = app.layer(axum_middleware::from_fn(
+            move |req: Request, next: Next| async move {
+                let uri = req.uri().clone();
+                let headers = req.headers().clone();
+
+                let mut is_https = false;
+                if let Some(scheme) = uri.scheme() {
+                    if scheme == &axum::http::uri::Scheme::HTTPS {
+                        is_https = true;
+                    }
+                } else if let Some(forwarded_proto) = headers.get("X-Forwarded-Proto") {
+                    if forwarded_proto == "https" {
+                        is_https = true;
+                    }
+                }
+
+                if !is_https {
+                    let mut parts = uri.into_parts();
+                    parts.scheme = Some(axum::http::uri::Scheme::HTTPS);
+                    if let Some(host) = headers.get("host").and_then(|h| h.to_str().ok()) {
+                        parts.authority = Some(host.parse().unwrap());
+                    }
+                    if let Ok(new_uri) = axum::http::Uri::from_parts(parts) {
+                        return (
+                            axum::http::StatusCode::TEMPORARY_REDIRECT,
+                            [(axum::http::header::LOCATION, new_uri.to_string())],
+                            "Redirecting...",
+                        )
+                            .into_response();
+                    }
+                }
+
+                next.run(req).await
+            },
+        ));
+    }
+
+    // L6: Trusted Host
     if let Some(config) = trusted_host_config {
         info!("???? Layer: TrustedHost");
         let allow_all = config.allowed_hosts.iter().any(|host| host == "*");
@@ -1722,15 +1773,8 @@ async fn record_prometheus_metrics(req: Request, next: Next) -> Response {
     response
 }
 async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> Response {
-    let method = match req.method().as_str() {
-        "GET" => HttpMethod::GET,
-        "POST" => HttpMethod::POST,
-        "PUT" => HttpMethod::PUT,
-        "DELETE" => HttpMethod::DELETE,
-        "PATCH" => HttpMethod::PATCH,
-        "OPTIONS" => HttpMethod::OPTIONS,
-        "HEAD" => HttpMethod::HEAD,
-        _ => return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response(),
+    let Ok(method) = HttpMethod::try_from(req.method()) else {
+        return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response();
     };
 
     let original_path = req.uri().path();

@@ -361,6 +361,7 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
         &mut schemas,
         app_responses.as_ref(),
         app.separate_input_output_schemas,
+        Some(&app.generate_unique_id_function),
     );
 
     if let Some(wh) = &app.webhooks
@@ -373,6 +374,7 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
             &mut schemas,
             None,
             app.separate_input_output_schemas,
+            Some(&app.generate_unique_id_function),
         );
         spec.webhooks = Some(wh_paths);
     }
@@ -390,6 +392,7 @@ pub fn build_paths_from_routes(
     schemas: &mut HashMap<String, JsonValue>,
     app_responses: Option<&JsonValue>,
     separate_input_output_schemas: bool,
+    generate_unique_id_function: Option<&Py<PyAny>>,
 ) -> HashMap<String, PathItem> {
     let mut paths: HashMap<String, PathItem> = HashMap::new();
 
@@ -415,7 +418,14 @@ pub fn build_paths_from_routes(
         let mut operation = Operation {
             summary: route.summary.clone(),
             description: route.description.clone().or(description),
-            operation_id: route.operation_id.clone(),
+            operation_id: route.operation_id.clone().or_else(|| {
+                generate_unique_id_function.and_then(|f| {
+                    f.bind(py)
+                        .call1((handler.func.bind(py),))
+                        .ok()
+                        .and_then(|res| res.extract::<String>().ok())
+                })
+            }),
             tags: if tags.is_empty() {
                 None
             } else {
@@ -685,7 +695,7 @@ pub fn parse_callbacks_to_json(
             if let Ok(router_ref) = item.cast::<crate::decorators::PyAPIRouter>() {
                 let router = router_ref.borrow();
                 let collected = collect_routes(py, &router);
-                let paths = build_paths_from_routes(py, collected, &mut dummy_schemas, None, false);
+                let paths = build_paths_from_routes(py, collected, &mut dummy_schemas, None, false, None);
 
                 for (path, path_item) in paths {
                     callbacks_map.insert(
@@ -710,6 +720,7 @@ pub fn parse_callbacks_to_json(
                                 &mut dummy_schemas,
                                 None,
                                 false,
+                                None,
                             );
                             for (path, path_item) in paths {
                                 inner_map.insert(
