@@ -419,18 +419,20 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
 
         if is_async {
             loop {
-                let awaitable = Python::attach(|py| content.bind(py).call_method0("__anext__").map(|a| a.unbind()));
-                let awaitable = match awaitable {
-                    Ok(a) => a,
-                    Err(e) => {
-                        Python::attach(|py| if !e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py) { error!("StreamingResponse async error: {:?}", e); });
-                        break;
+                let fut = Python::attach(|py| {
+                    match content.bind(py).call_method0("__anext__") {
+                        Ok(awaitable) => {
+                            rsloop::rust_async::into_future_with_locals(&locals, awaitable).ok()
+                        }
+                        Err(e) => {
+                            if !e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py) {
+                                error!("StreamingResponse async error: {:?}", e);
+                            }
+                            None
+                        }
                     }
-                };
-                let fut = match Python::attach(|py| rsloop::rust_async::into_future_with_locals(&locals, awaitable.bind(py).clone())) {
-                    Ok(f) => f,
-                    Err(_) => break,
-                };
+                });
+                let Some(fut) = fut else { break; };
                 match fut.await {
                     Ok(val) => {
                         let bytes = Python::attach(|py| {
@@ -449,21 +451,25 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
             }
         } else if is_sync {
             loop {
-                let val = Python::attach(|py| content.bind(py).call_method0("__next__").map(|a| a.unbind()));
-                match val {
-                    Ok(val) => {
-                        let bytes = Python::attach(|py| {
-                            let bound = val.bind(py);
-                            if let Ok(s) = bound.extract::<String>() { Ok(bytes::Bytes::from(s)) }
-                            else if let Ok(b) = bound.extract::<&[u8]>() { Ok(bytes::Bytes::from(b.to_vec())) }
+                let chunk = Python::attach(|py| {
+                    match content.bind(py).call_method0("__next__") {
+                        Ok(val) => {
+                            if let Ok(s) = val.extract::<String>() { Ok(Some(bytes::Bytes::from(s))) }
+                            else if let Ok(b) = val.extract::<&[u8]>() { Ok(Some(bytes::Bytes::from(b.to_vec()))) }
                             else { Err(()) }
-                        });
-                        if let Ok(b) = bytes { yield Ok::<_, std::convert::Infallible>(b); }
+                        }
+                        Err(e) => {
+                            if !e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                                error!("StreamingResponse sync error: {:?}", e);
+                            }
+                            Ok(None)
+                        }
                     }
-                    Err(e) => {
-                        Python::attach(|py| if !e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) { error!("StreamingResponse sync error: {:?}", e); });
-                        break;
-                    }
+                });
+                match chunk {
+                    Ok(Some(b)) => yield Ok::<_, std::convert::Infallible>(b),
+                    Ok(None) => break,
+                    Err(_) => continue,
                 }
             }
         }
