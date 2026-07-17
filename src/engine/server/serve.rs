@@ -1,6 +1,6 @@
-use crate::engine::server::lifecycle::*;
-use crate::engine::server::reload::*;
-use crate::engine::server::routes::*;
+use super::lifecycle::*;
+use super::reload::*;
+use super::routes::*;
 
 use crate::engine::types::FastrAPI;
 use axum::serve::ListenerExt;
@@ -22,6 +22,7 @@ pub struct AppState {
     pub reject_unknown_multipart_fields: bool,
     pub root_path: String,
 }
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn serve(
     py: Python<'_>,
@@ -29,6 +30,8 @@ pub fn serve(
     port: Option<u16>,
     app: Py<FastrAPI>,
 ) -> PyResult<()> {
+    println!("running on FastRAPI v{}", VERSION);
+
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .with_target(false)
@@ -153,6 +156,8 @@ pub fn serve_with_reload(
     reload_tick: u64,
     reload_ignore_worker_failure: bool,
 ) -> PyResult<()> {
+    println!("running on FastRAPI v{}", VERSION);
+
     let sys = py.import(intern!(py, "sys"))?;
     let executable: String = sys.getattr(intern!(py, "executable"))?.extract()?;
     let argv: Vec<String> = sys.getattr(intern!(py, "argv"))?.extract()?;

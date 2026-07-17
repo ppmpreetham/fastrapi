@@ -55,7 +55,8 @@ pub(crate) fn run_reload_supervisor(
                 if !reload_event_matches(&event, &config, &ignore_globs) {
                     continue;
                 }
-                println!("FastrAPI reload: Python file change detected; restarting server");
+                println!("");
+                println!("Python file change detected, restarting server...");
                 stop_child(&mut child);
                 child = spawn_reload_child(executable, argv).map_err(|err| err.to_string())?;
                 while rx.try_recv().is_ok() {}

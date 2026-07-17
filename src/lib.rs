@@ -14,9 +14,9 @@ pub mod routing;
 pub mod types;
 pub mod utils;
 
-pub use engine::server;
 pub use engine::app;
 pub use engine::background;
+pub use engine::server;
 pub use ffi::datastructures;
 pub use ffi::decorators;
 pub use ffi::exceptions;
@@ -75,6 +75,7 @@ fn register_rsloop_asyncio_alias(m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("fastrapi.asyncio", rsloop_module)?;
     Ok(())
 }
+
 #[pymodule(gil_used = false)]
 fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
