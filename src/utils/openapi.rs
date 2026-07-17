@@ -1,9 +1,11 @@
-use crate::FastrAPI;
-use crate::decorators::PyAPIRouter;
-use crate::ffi::pydantic;
-use crate::routing::types::{ParameterConstraints, ParameterSource, RouteEntry};
-use crate::types::route::HttpMethod;
-use crate::utils::py_dict_to_json;
+use crate::{
+    FastrAPI,
+    decorators::PyAPIRouter,
+    ffi::pydantic,
+    routing::types::{ParameterConstraints, ParameterSource, RouteEntry},
+    types::route::HttpMethod,
+    utils::py_dict_to_json,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use serde::{Deserialize, Serialize};

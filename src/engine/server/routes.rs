@@ -1,52 +1,37 @@
-use crate::engine::server::*;
-use crate::engine::types::{FastrAPI, FrontendMount, StaticMount};
+use crate::engine::server::dispatch::*;
+use crate::engine::server::files::*;
+use crate::engine::server::lifecycle::*;
+use crate::engine::server::serve::*;
+
+use std::time::Instant;
+use crate::engine::types::FastrAPI;
 use ahash::{AHashMap, AHashSet};
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{ConnectInfo, Request},
+    extract::Request,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
     middleware::{self as axum_middleware, Next},
     response::{Html, IntoResponse, Response},
     routing::{MethodRouter, *},
-    serve::ListenerExt,
 };
-use dashmap::DashMap;
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
-use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
-use parking_lot::Mutex;
-use pyo3::{
-    exceptions::{PyRuntimeError, PyTypeError},
-    intern,
-    prelude::*,
-};
-use smallvec::SmallVec;
-use std::{
-    collections::hash_map::Entry,
-    net::{IpAddr, SocketAddr},
-    path::{Component, Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{Arc, OnceLock},
-    time::{Duration, Instant},
-};
-use tokio::net::TcpListener;
-use tower::{ServiceExt, service_fn};
+use pyo3::prelude::*;
+use std::{sync::Arc, time::Duration};
 use tower_http::{
     catch_panic::CatchPanicLayer,
     compression::{CompressionLayer, predicate::SizeAbove},
     normalize_path::NormalizePathLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    services::{ServeDir, ServeFile},
     set_header::SetResponseHeaderLayer,
     timeout::TimeoutLayer,
     trace::TraceLayer,
 };
 use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer, cookie::Key};
-use tracing::{Level, error, info};
+use tracing::info;
 
 use crate::{
     ffi::py_handlers::{
-        ExecutionMode, render_no_request_json_response, render_no_request_response, run_py_handler,
+        ExecutionMode, render_no_request_json_response, render_no_request_response,
         run_py_handler_no_request,
     },
     globals::{MIDDLEWARES, PYTHON_RUNTIME},
@@ -60,8 +45,8 @@ use crate::{
     },
     routing::{
         prometheus::prometheus_handle,
-        router::{FrozenRouter, FrozenRouterBuilder, RouteMatch},
-        types::{BodyField, BodyPayload, HttpMethod, PathParamRange, RouteHandler, UploadedFile},
+        router::FrozenRouterBuilder,
+        types::{HttpMethod, RouteHandler},
     },
     utils::{local_guard, openapi::build_openapi_spec, py_any_to_json},
 };
@@ -552,7 +537,10 @@ pub(crate) fn apply_declared_middleware(
     Ok(())
 }
 
-pub(crate) fn cached_method_router(method: HttpMethod, cached: Arc<CachedResponse>) -> MethodRouter {
+pub(crate) fn cached_method_router(
+    method: HttpMethod,
+    cached: Arc<CachedResponse>,
+) -> MethodRouter {
     match_method_router!(method, {
         let cached = cached.clone();
         move || {
@@ -617,8 +605,6 @@ pub(crate) fn sync_no_request_method_router(
         }
     })
 }
-
-
 
 pub(crate) fn precompute_const_response(
     py: Python<'_>,
@@ -693,4 +679,28 @@ pub(crate) fn parse_header_value(value: &str) -> Option<HeaderValue> {
     HeaderValue::from_str(value).ok()
 }
 
+pub(crate) async fn record_prometheus_metrics(req: Request, next: Next) -> Response {
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
+    let start = Instant::now();
+    let response = next.run(req).await;
+    let status = response.status().as_u16().to_string();
+    let elapsed = start.elapsed().as_secs_f64();
 
+    metrics::counter!(
+        "fastrapi_requests_total",
+        "method" => method.clone(),
+        "path" => path.clone(),
+        "status" => status.clone(),
+    )
+    .increment(1);
+    metrics::histogram!(
+        "fastrapi_request_duration_seconds",
+        "method" => method,
+        "path" => path,
+        "status" => status,
+    )
+    .record(elapsed);
+
+    response
+}

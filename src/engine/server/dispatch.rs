@@ -1,69 +1,21 @@
-use crate::engine::server::*;
-use crate::engine::types::{FastrAPI, FrontendMount, StaticMount};
-use ahash::{AHashMap, AHashSet};
+use crate::engine::server::payload::*;
+use crate::engine::server::rate_limit::*;
+use crate::engine::server::serve::*;
+
 use axum::{
-    Json, Router,
-    body::{Body, to_bytes},
-    extract::{ConnectInfo, Request},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
-    middleware::{self as axum_middleware, Next},
-    response::{Html, IntoResponse, Response},
-    routing::{MethodRouter, *},
-    serve::ListenerExt,
-};
-use dashmap::DashMap;
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
-use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
-use parking_lot::Mutex;
-use pyo3::{
-    exceptions::{PyRuntimeError, PyTypeError},
-    intern,
-    prelude::*,
+    extract::Request,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use smallvec::SmallVec;
-use std::{
-    collections::hash_map::Entry,
-    net::{IpAddr, SocketAddr},
-    path::{Component, Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{Arc, OnceLock},
-    time::{Duration, Instant},
-};
-use tokio::net::TcpListener;
-use tower::{ServiceExt, service_fn};
-use tower_http::{
-    catch_panic::CatchPanicLayer,
-    compression::{CompressionLayer, predicate::SizeAbove},
-    normalize_path::NormalizePathLayer,
-    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    services::{ServeDir, ServeFile},
-    set_header::SetResponseHeaderLayer,
-    timeout::TimeoutLayer,
-    trace::TraceLayer,
-};
-use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer, cookie::Key};
-use tracing::{Level, error, info};
+use std::sync::Arc;
 
 use crate::{
-    ffi::py_handlers::{
-        ExecutionMode, render_no_request_json_response, render_no_request_response, run_py_handler,
-        run_py_handler_no_request,
-    },
-    globals::{MIDDLEWARES, PYTHON_RUNTIME},
-    http::{
-        middleware::{
-            CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
-            TrustedHostMiddleware, build_cors_layer, parse_cors_params, parse_gzip_params,
-            parse_https_redirect_params, parse_session_params, parse_trusted_host_params,
-        },
-        websocket::ws_handler,
-    },
+    ffi::py_handlers::{ExecutionMode, run_py_handler, run_py_handler_no_request},
     routing::{
-        prometheus::prometheus_handle,
-        router::{FrozenRouter, FrozenRouterBuilder, RouteMatch},
-        types::{BodyField, BodyPayload, HttpMethod, PathParamRange, RouteHandler, UploadedFile},
+        router::{FrozenRouter, RouteMatch},
+        types::{HttpMethod, PathParamRange},
     },
-    utils::{local_guard, openapi::build_openapi_spec, py_any_to_json},
 };
 
 pub(crate) async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> Response {
@@ -161,7 +113,11 @@ pub(crate) fn dispatch_path<'a>(state: &AppState, original_path: &'a str) -> Opt
         None
     }
 }
-pub(crate) fn request_matches_router(router: &FrozenRouter, state: &AppState, req: &Request) -> bool {
+pub(crate) fn request_matches_router(
+    router: &FrozenRouter,
+    state: &AppState,
+    req: &Request,
+) -> bool {
     let Ok(method) = HttpMethod::try_from(req.method()) else {
         return true;
     };

@@ -1,70 +1,8 @@
-use crate::engine::server::*;
-use crate::engine::types::{FastrAPI, FrontendMount, StaticMount};
-use ahash::{AHashMap, AHashSet};
-use axum::{
-    Json, Router,
-    body::{Body, to_bytes},
-    extract::{ConnectInfo, Request},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
-    middleware::{self as axum_middleware, Next},
-    response::{Html, IntoResponse, Response},
-    routing::{MethodRouter, *},
-    serve::ListenerExt,
-};
-use dashmap::DashMap;
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
-use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
-use parking_lot::Mutex;
-use pyo3::{
-    exceptions::{PyRuntimeError, PyTypeError},
-    intern,
-    prelude::*,
-};
-use smallvec::SmallVec;
-use std::{
-    collections::hash_map::Entry,
-    net::{IpAddr, SocketAddr},
-    path::{Component, Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{Arc, OnceLock},
-    time::{Duration, Instant},
-};
-use tokio::net::TcpListener;
-use tower::{ServiceExt, service_fn};
-use tower_http::{
-    catch_panic::CatchPanicLayer,
-    compression::{CompressionLayer, predicate::SizeAbove},
-    normalize_path::NormalizePathLayer,
-    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    services::{ServeDir, ServeFile},
-    set_header::SetResponseHeaderLayer,
-    timeout::TimeoutLayer,
-    trace::TraceLayer,
-};
-use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer, cookie::Key};
-use tracing::{Level, error, info};
 
-use crate::{
-    ffi::py_handlers::{
-        ExecutionMode, render_no_request_json_response, render_no_request_response, run_py_handler,
-        run_py_handler_no_request,
-    },
-    globals::{MIDDLEWARES, PYTHON_RUNTIME},
-    http::{
-        middleware::{
-            CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
-            TrustedHostMiddleware, build_cors_layer, parse_cors_params, parse_gzip_params,
-            parse_https_redirect_params, parse_session_params, parse_trusted_host_params,
-        },
-        websocket::ws_handler,
-    },
-    routing::{
-        prometheus::prometheus_handle,
-        router::{FrozenRouter, FrozenRouterBuilder, RouteMatch},
-        types::{BodyField, BodyPayload, HttpMethod, PathParamRange, RouteHandler, UploadedFile},
-    },
-    utils::{local_guard, openapi::build_openapi_spec, py_any_to_json},
-};
+use crate::engine::types::FastrAPI;
+use pyo3::{exceptions::PyTypeError, prelude::*};
+use std::sync::Arc;
+use tracing::error;
 
 pub(crate) struct EnteredLifespan {
     manager: Py<PyAny>,
@@ -225,7 +163,10 @@ pub(crate) fn create_event_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
         .call_method1("set_event_loop", (&event_loop,))?;
     Ok(event_loop.unbind())
 }
-pub(crate) fn run_awaitable_in_new_loop(py: Python<'_>, awaitable: Bound<'_, PyAny>) -> PyResult<()> {
+pub(crate) fn run_awaitable_in_new_loop(
+    py: Python<'_>,
+    awaitable: Bound<'_, PyAny>,
+) -> PyResult<()> {
     let event_loop = create_event_loop(py)?;
     let result = run_awaitable_in_loop(py, event_loop.bind(py), awaitable);
     shutdown_async_generators(event_loop.bind(py));

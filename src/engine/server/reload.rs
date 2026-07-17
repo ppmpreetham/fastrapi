@@ -1,79 +1,19 @@
-use crate::engine::server::*;
-use crate::engine::types::{FastrAPI, FrontendMount, StaticMount};
-use ahash::{AHashMap, AHashSet};
-use axum::{
-    Json, Router,
-    body::{Body, to_bytes},
-    extract::{ConnectInfo, Request},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
-    middleware::{self as axum_middleware, Next},
-    response::{Html, IntoResponse, Response},
-    routing::{MethodRouter, *},
-    serve::ListenerExt,
-};
-use dashmap::DashMap;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
-use parking_lot::Mutex;
-use pyo3::{
-    exceptions::{PyRuntimeError, PyTypeError},
-    intern,
-    prelude::*,
-};
-use smallvec::SmallVec;
 use std::{
-    collections::hash_map::Entry,
-    net::{IpAddr, SocketAddr},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, OnceLock},
-    time::{Duration, Instant},
-};
-use tokio::net::TcpListener;
-use tower::{ServiceExt, service_fn};
-use tower_http::{
-    catch_panic::CatchPanicLayer,
-    compression::{CompressionLayer, predicate::SizeAbove},
-    normalize_path::NormalizePathLayer,
-    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    services::{ServeDir, ServeFile},
-    set_header::SetResponseHeaderLayer,
-    timeout::TimeoutLayer,
-    trace::TraceLayer,
-};
-use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer, cookie::Key};
-use tracing::{Level, error, info};
-
-use crate::{
-    ffi::py_handlers::{
-        ExecutionMode, render_no_request_json_response, render_no_request_response, run_py_handler,
-        run_py_handler_no_request,
-    },
-    globals::{MIDDLEWARES, PYTHON_RUNTIME},
-    http::{
-        middleware::{
-            CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
-            TrustedHostMiddleware, build_cors_layer, parse_cors_params, parse_gzip_params,
-            parse_https_redirect_params, parse_session_params, parse_trusted_host_params,
-        },
-        websocket::ws_handler,
-    },
-    routing::{
-        prometheus::prometheus_handle,
-        router::{FrozenRouter, FrozenRouterBuilder, RouteMatch},
-        types::{BodyField, BodyPayload, HttpMethod, PathParamRange, RouteHandler, UploadedFile},
-    },
-    utils::{local_guard, openapi::build_openapi_spec, py_any_to_json},
+    time::Duration,
 };
 
 #[derive(Clone)]
 pub(crate) struct ReloadConfig {
-    watch_dirs: Vec<PathBuf>,
-    ignore_dirs: Vec<PathBuf>,
-    ignore_patterns: Vec<String>,
-    ignore_paths: Vec<PathBuf>,
-    tick_ms: u64,
-    ignore_worker_failure: bool,
+    pub(crate) watch_dirs: Vec<PathBuf>,
+    pub(crate) ignore_dirs: Vec<PathBuf>,
+    pub(crate) ignore_patterns: Vec<String>,
+    pub(crate) ignore_paths: Vec<PathBuf>,
+    pub(crate) tick_ms: u64,
+    pub(crate) ignore_worker_failure: bool,
 }
 
 pub(crate) fn run_reload_supervisor(
@@ -158,7 +98,11 @@ pub(crate) fn reload_event_matches(
     })
 }
 
-pub(crate) fn is_reload_ignored(path: &Path, config: &ReloadConfig, ignore_globs: &Option<GlobSet>) -> bool {
+pub(crate) fn is_reload_ignored(
+    path: &Path,
+    config: &ReloadConfig,
+    ignore_globs: &Option<GlobSet>,
+) -> bool {
     if path.ancestors().any(is_default_reload_ignored_dir) {
         return true;
     }
@@ -219,4 +163,24 @@ pub(crate) fn build_reload_ignore_globs(config: &ReloadConfig) -> Result<Option<
     }
 
     builder.build().map(Some).map_err(|err| err.to_string())
+}
+
+pub(crate) fn resolve_reload_dirs(
+    script_path: &str,
+    reload_dirs: Option<Vec<String>>,
+) -> Vec<PathBuf> {
+    if let Some(dirs) = reload_dirs {
+        return dirs.into_iter().map(PathBuf::from).collect();
+    }
+
+    let script = PathBuf::from(script_path);
+    if let Some(parent) = script.parent() {
+        if !parent.as_os_str().is_empty() {
+            return vec![parent.to_path_buf()];
+        }
+    }
+
+    std::env::current_dir()
+        .map(|dir| vec![dir])
+        .unwrap_or_else(|_| vec![PathBuf::from(".")])
 }
