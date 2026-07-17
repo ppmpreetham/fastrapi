@@ -21,7 +21,13 @@ impl Default for CORSMiddleware {
     fn default() -> Self {
         Self {
             allow_origins: vec![],
-            allow_methods: vec!["GET".into(), "POST".into(), "PUT".into(), "DELETE".into()],
+            allow_methods: vec![
+                String::from("GET"),
+                String::from("POST"),
+                String::from("PUT"),
+                String::from("DELETE"),
+                String::from("PATCH"),
+            ],
             allow_headers: vec![],
             allow_credentials: false,
             expose_headers: vec![],
@@ -35,7 +41,7 @@ impl CORSMiddleware {
     #[new]
     #[pyo3(signature = (
         allow_origins=vec![],
-        allow_methods=vec!["GET".into(), "POST".into(), "PUT".into(), "DELETE".into()],
+        allow_methods=vec!["GET".into(), "POST".into(), "PUT".into(), "DELETE".into(), "PATCH".into()],
         allow_headers=vec![],
         allow_credentials=false,
         expose_headers=vec![],
@@ -144,7 +150,7 @@ pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
 
     let (methods, has_wildcard_method) = parse_and_validate_vec(
         &config.allow_methods,
-        Method::from_str,
+        |m| Method::from_str(m),
         "HTTP method",
         "GET",
         true,

@@ -10,66 +10,60 @@ use axum::{
     routing::{MethodRouter, *},
     serve::ListenerExt,
 };
+use dashmap::DashMap;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
-use pyo3::intern;
-use pyo3::prelude::*;
+use parking_lot::Mutex;
+use pyo3::{
+    exceptions::{PyRuntimeError, PyTypeError},
+    intern,
+    prelude::*,
+};
 use smallvec::SmallVec;
-use std::collections::hash_map::Entry;
-use std::net::{IpAddr, SocketAddr};
-use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::{
+    collections::hash_map::Entry,
+    net::{IpAddr, SocketAddr},
+    path::{Component, Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
 use tokio::net::TcpListener;
 use tower::{ServiceExt, service_fn};
-use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::normalize_path::NormalizePathLayer;
-use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
-use tower_http::services::{ServeDir, ServeFile};
-use tower_http::set_header::SetResponseHeaderLayer;
-use tower_http::timeout::TimeoutLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::{
+    catch_panic::CatchPanicLayer,
+    compression::{CompressionLayer, predicate::SizeAbove},
+    normalize_path::NormalizePathLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    services::{ServeDir, ServeFile},
+    set_header::SetResponseHeaderLayer,
+    timeout::TimeoutLayer,
+    trace::TraceLayer,
+};
+use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer, cookie::Key};
 use tracing::{Level, error, info};
 
-// middleware Libraries
-use dashmap::DashMap;
-use parking_lot::Mutex;
-use tower_http::compression::{CompressionLayer, predicate::SizeAbove};
-use tower_sessions::cookie::Key;
-use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
-
-// internal Imports
-use crate::utils::local_guard;
-use crate::utils::openapi::build_openapi_spec;
 use crate::{
     ffi::py_handlers::{
         ExecutionMode, render_no_request_json_response, render_no_request_response, run_py_handler,
         run_py_handler_no_request,
     },
-    routing::{
-        router::{FrozenRouter, FrozenRouterBuilder},
-        types::RouteHandler,
-    },
-};
-use crate::{
     globals::{MIDDLEWARES, PYTHON_RUNTIME},
-    routing::types::HttpMethod,
-};
-use crate::{
-    http::middleware::{
-        CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
-        TrustedHostMiddleware, build_cors_layer, parse_cors_params, parse_gzip_params,
-        parse_https_redirect_params, parse_session_params, parse_trusted_host_params,
+    http::{
+        middleware::{
+            CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
+            TrustedHostMiddleware, build_cors_layer, parse_cors_params, parse_gzip_params,
+            parse_https_redirect_params, parse_session_params, parse_trusted_host_params,
+        },
+        websocket::ws_handler,
     },
-    routing::router::RouteMatch,
+    routing::{
+        prometheus::prometheus_handle,
+        router::{FrozenRouter, FrozenRouterBuilder, RouteMatch},
+        types::{BodyField, BodyPayload, HttpMethod, PathParamRange, RouteHandler, UploadedFile},
+    },
+    utils::{local_guard, openapi::build_openapi_spec, py_any_to_json},
 };
-use crate::{
-    http::websocket::ws_handler,
-    routing::types::{BodyField, BodyPayload, PathParamRange, UploadedFile},
-};
-use crate::{routing::prometheus::prometheus_handle, utils::py_any_to_json};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -1047,15 +1041,10 @@ fn build_router(
         })
         .for_each(|(path, method, cached)| {
             let method_router = cached_method_router(method, cached);
-            match cached_routes.entry(path) {
-                Entry::Occupied(mut entry) => {
-                    let merged = entry.get().clone().merge(method_router);
-                    *entry.get_mut() = merged;
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(method_router);
-                }
-            }
+            cached_routes
+                .entry(path)
+                .and_modify(|existing| *existing = existing.clone().merge(method_router.clone()))
+                .or_insert(method_router);
         });
 
     app = cached_routes
@@ -1078,15 +1067,10 @@ fn build_router(
         .for_each(|route| {
             let method_router =
                 no_request_method_router(route.method, route.handler.clone(), app_state.clone());
-            match direct_no_request_routes.entry(route.path.clone()) {
-                Entry::Occupied(mut entry) => {
-                    let merged = entry.get().clone().merge(method_router);
-                    *entry.get_mut() = merged;
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(method_router);
-                }
-            }
+            direct_no_request_routes
+                .entry(route.path.clone())
+                .and_modify(|existing| *existing = existing.clone().merge(method_router.clone()))
+                .or_insert(method_router);
         });
 
     app = direct_no_request_routes
@@ -1253,16 +1237,7 @@ fn build_router(
             }));
     }
 
-    // L4: Trusted Host
-    if let Some(config) = Option::<CORSMiddleware>::None {
-        info!("???????  Layer: CORS");
-        match build_cors_layer(&config) {
-            Ok(layer) => app = app.layer(layer),
-            Err(e) => eprintln!("Error building CORS layer: {:?}", e),
-        }
-    }
-
-    // L5: HTTPS Redirect
+    // L4: HTTPS Redirect
     if let Some(_config) = https_redirect_config {
         info!("🔗 Layer: HTTPSRedirect");
         app = app.layer(axum_middleware::from_fn(
@@ -1289,7 +1264,7 @@ fn build_router(
                     }
                     if let Ok(new_uri) = axum::http::Uri::from_parts(parts) {
                         return (
-                            axum::http::StatusCode::TEMPORARY_REDIRECT,
+                            StatusCode::TEMPORARY_REDIRECT,
                             [(axum::http::header::LOCATION, new_uri.to_string())],
                             "Redirecting...",
                         )
@@ -1302,7 +1277,7 @@ fn build_router(
         ));
     }
 
-    // L6: Trusted Host
+    // L5: Trusted Host
     if let Some(config) = trusted_host_config {
         info!("???? Layer: TrustedHost");
         let allow_all = config.allowed_hosts.iter().any(|host| host == "*");
@@ -1319,6 +1294,9 @@ fn build_router(
                         .headers()
                         .get("host")
                         .and_then(|h| h.to_str().ok())
+                        .unwrap_or("")
+                        .split(':')
+                        .next()
                         .unwrap_or("");
 
                     if allowed.contains(host_header) {
@@ -1328,7 +1306,7 @@ fn build_router(
                     if redirect && host_header.starts_with("www.") {
                         let root = host_header.strip_prefix("www.").unwrap();
                         if allowed.contains(root) {
-                            return (axum::http::StatusCode::MOVED_PERMANENTLY, "Redirecting...")
+                            return (StatusCode::MOVED_PERMANENTLY, "Redirecting...")
                                 .into_response();
                         }
                     }
@@ -1399,26 +1377,28 @@ fn parse_header_value(value: &str) -> Option<HeaderValue> {
     HeaderValue::from_str(value).ok()
 }
 
-fn cached_method_router(method: HttpMethod, cached: Arc<CachedResponse>) -> MethodRouter {
-    macro_rules! route_for {
-        ($method_fn:ident) => {{
-            let cached = cached.clone();
-            $method_fn(move || {
-                let cached = cached.clone();
-                async move { cached.to_response() }
-            })
-        }};
-    }
+macro_rules! match_method_router {
+    ($method:expr, $handler:expr) => {
+        match $method {
+            HttpMethod::GET => get($handler),
+            HttpMethod::POST => post($handler),
+            HttpMethod::PUT => put($handler),
+            HttpMethod::DELETE => delete($handler),
+            HttpMethod::PATCH => patch($handler),
+            HttpMethod::OPTIONS => options($handler),
+            HttpMethod::HEAD => head($handler),
+        }
+    };
+}
 
-    match method {
-        HttpMethod::GET => route_for!(get),
-        HttpMethod::POST => route_for!(post),
-        HttpMethod::PUT => route_for!(put),
-        HttpMethod::DELETE => route_for!(delete),
-        HttpMethod::PATCH => route_for!(patch),
-        HttpMethod::OPTIONS => route_for!(options),
-        HttpMethod::HEAD => route_for!(head),
-    }
+fn cached_method_router(method: HttpMethod, cached: Arc<CachedResponse>) -> MethodRouter {
+    match_method_router!(method, {
+        let cached = cached.clone();
+        move || {
+            let cached = cached.clone();
+            async move { cached.to_response() }
+        }
+    })
 }
 
 fn add_static_mount(app: Router, mount: StaticMount) -> Router {
@@ -1487,11 +1467,12 @@ async fn static_request_hits_symlink(directory: &Path, request_path: &str, html:
         && metadata.is_dir()
     {
         file_path.push("index.html");
+        return tokio::fs::symlink_metadata(&file_path)
+            .await
+            .is_ok_and(|m| m.file_type().is_symlink());
     }
 
-    tokio::fs::symlink_metadata(&file_path)
-        .await
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    false
 }
 fn no_request_method_router(
     method: HttpMethod,
@@ -1502,35 +1483,23 @@ fn no_request_method_router(
         return sync_no_request_method_router(method, handler);
     }
 
-    macro_rules! route_for {
-        ($method_fn:ident) => {{
+    match_method_router!(method, {
+        let handler = handler.clone();
+        let state = state.clone();
+        move || {
             let handler = handler.clone();
             let state = state.clone();
-            $method_fn(move || {
-                let handler = handler.clone();
-                let state = state.clone();
-                async move {
-                    run_py_handler_no_request(
-                        state.rt_handle,
-                        state.async_loop,
-                        state.sync_to_threadpool,
-                        handler,
-                    )
-                    .await
-                }
-            })
-        }};
-    }
-
-    match method {
-        HttpMethod::GET => route_for!(get),
-        HttpMethod::POST => route_for!(post),
-        HttpMethod::PUT => route_for!(put),
-        HttpMethod::DELETE => route_for!(delete),
-        HttpMethod::PATCH => route_for!(patch),
-        HttpMethod::OPTIONS => route_for!(options),
-        HttpMethod::HEAD => route_for!(head),
-    }
+            async move {
+                run_py_handler_no_request(
+                    state.rt_handle,
+                    state.async_loop,
+                    state.sync_to_threadpool,
+                    handler,
+                )
+                .await
+            }
+        }
+    })
 }
 
 fn sync_no_request_method_router(
@@ -1544,33 +1513,21 @@ fn sync_no_request_method_router(
             crate::types::response::ResponseType::Json
         );
 
-    macro_rules! route_for {
-        ($method_fn:ident) => {{
+    match_method_router!(method, {
+        let handler = handler.clone();
+        move || {
             let handler = handler.clone();
-            $method_fn(move || {
-                let handler = handler.clone();
-                async move {
-                    Python::attach(|py| {
-                        if use_json_fast_path {
-                            render_no_request_json_response(py, &handler)
-                        } else {
-                            render_no_request_response(py, &handler)
-                        }
-                    })
-                }
-            })
-        }};
-    }
-
-    match method {
-        HttpMethod::GET => route_for!(get),
-        HttpMethod::POST => route_for!(post),
-        HttpMethod::PUT => route_for!(put),
-        HttpMethod::DELETE => route_for!(delete),
-        HttpMethod::PATCH => route_for!(patch),
-        HttpMethod::OPTIONS => route_for!(options),
-        HttpMethod::HEAD => route_for!(head),
-    }
+            async move {
+                Python::attach(|py| {
+                    if use_json_fast_path {
+                        render_no_request_json_response(py, &handler)
+                    } else {
+                        render_no_request_response(py, &handler)
+                    }
+                })
+            }
+        }
+    })
 }
 
 fn is_rate_limited(req: &Request, handler: usize, limit: u32) -> bool {
@@ -1776,28 +1733,16 @@ async fn record_prometheus_metrics(req: Request, next: Next) -> Response {
 }
 async fn dispatch(router: Arc<FrozenRouter>, state: AppState, req: Request) -> Response {
     let Ok(method) = HttpMethod::try_from(req.method()) else {
-        return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response();
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
     };
 
-    let original_path = req.uri().path();
-    let root = state.root_path.trim_end_matches('/');
-    let path_str = if root.is_empty() {
-        original_path
-    } else if original_path == root {
-        "/"
-    } else if let Some(stripped) = original_path.strip_prefix(root) {
-        if stripped.starts_with('/') {
-            stripped
-        } else {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-    } else {
+    let Some(path_str) = dispatch_path(&state, req.uri().path()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
 
     let route_match = match router.resolve(method, path_str) {
         Some(v) => v,
-        None => return axum::http::StatusCode::NOT_FOUND.into_response(),
+        None => return StatusCode::NOT_FOUND.into_response(),
     };
 
     let (handler, params_iter) = match route_match {

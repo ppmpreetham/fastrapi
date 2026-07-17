@@ -2,6 +2,7 @@ use crate::FastrAPI;
 use crate::decorators::PyAPIRouter;
 use crate::ffi::pydantic;
 use crate::routing::types::{ParameterConstraints, ParameterSource, RouteEntry};
+use crate::types::route::HttpMethod;
 use crate::utils::py_dict_to_json;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
@@ -470,7 +471,10 @@ pub fn build_paths_from_routes(
 
         // Request body for POST/PUT/PATCH with validators
         if !handler.param_validators.is_empty()
-            && ["post", "put", "patch"].contains(&method.as_str())
+            && matches!(
+                route.method,
+                HttpMethod::POST | HttpMethod::PUT | HttpMethod::PATCH
+            )
         {
             let validator_count = handler.param_validators.len();
 
@@ -669,12 +673,12 @@ pub fn build_paths_from_routes(
             }
         }
 
-        match method.as_str() {
-            "get" => path_item.get = Some(operation_val),
-            "post" => path_item.post = Some(operation_val),
-            "put" => path_item.put = Some(operation_val),
-            "delete" => path_item.delete = Some(operation_val),
-            "patch" => path_item.patch = Some(operation_val),
+        match route.method {
+            HttpMethod::GET => path_item.get = Some(operation_val),
+            HttpMethod::POST => path_item.post = Some(operation_val),
+            HttpMethod::PUT => path_item.put = Some(operation_val),
+            HttpMethod::DELETE => path_item.delete = Some(operation_val),
+            HttpMethod::PATCH => path_item.patch = Some(operation_val),
             _ => {}
         }
     }
