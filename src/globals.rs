@@ -1,16 +1,5 @@
-use crate::http::middleware::PyMiddleware;
-use papaya::HashMap as PapayaHashMap;
-use pyo3::prelude::*;
-use pyo3::types::PyType;
-use std::sync::{Arc, LazyLock, OnceLock, atomic::AtomicUsize};
-
-pub static MIDDLEWARES: LazyLock<PapayaHashMap<String, Arc<PyMiddleware>>> =
-    LazyLock::new(|| PapayaHashMap::with_capacity(16));
-
-pub static MIDDLEWARE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-pub static BASEMODEL_TYPE: OnceLock<Py<PyType>> = OnceLock::new();
-
+use std::sync::LazyLock;
+crate::cached_py_import!(pub BASEMODEL_TYPE, "pydantic", "BaseModel");
 pub static PYTHON_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -25,9 +14,20 @@ pub static PYTHON_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| 
 });
 
 // Config
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Config {
-    // TODO: fields later
+    pub sync_threads: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        Self {
+            sync_threads: cpus * 4,
+        }
+    }
 }
 
 pub fn config() -> &'static Config {
