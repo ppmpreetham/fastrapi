@@ -1,94 +1,75 @@
-use crate::routing::types::{
-    HttpMethod, ParameterSource, RouteEntry, SerializationHint, WebSocketEntry,
-};
+use super::PyAPIRouter;
+use crate::routing::types::{HttpMethod, ParameterSource, SerializationHint, WebSocketEntry};
+use crate::utils::LockExt;
 use ahash::AHashSet;
 use hyper::StatusCode;
-use pyo3::prelude::{Bound, Py, PyAny, PyAnyMethods, PyResult, Python};
+use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict, PyTuple};
-use pyo3::types::{PyString, PyStringMethods};
+use smallvec::SmallVec;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use super::PyAPIRouter;
+#[inline]
+fn extract<'py, T>(kwargs: Option<&Bound<'py, PyDict>>, key: &str) -> Option<T>
+where
+    T: for<'a> pyo3::FromPyObject<'a, 'py>,
+{
+    let kw = kwargs?;
+    let obj = kw.get_item(key).ok()??;
+    obj.extract().ok()
+}
 
-impl PyAPIRouter {
-    pub fn create_method_decorator_kw(
-        &self,
+#[inline]
+fn extract_py(kwargs: Option<&Bound<'_, PyDict>>, key: &str) -> Option<Py<PyAny>> {
+    let kw = kwargs?;
+    let obj = kw.get_item(key).ok()??;
+    Some(obj.unbind())
+}
+
+#[inline]
+fn extract_bound<'py>(kwargs: Option<&Bound<'py, PyDict>>, key: &str) -> Option<Bound<'py, PyAny>> {
+    let kw = kwargs?;
+    kw.get_item(key).ok()?
+}
+
+struct RouteOptions {
+    default_status: Option<StatusCode>,
+    response_model: Option<Py<PyAny>>,
+    response_class: Option<Py<PyAny>>,
+    summary: Option<String>,
+    description: Option<String>,
+    include_in_schema: bool,
+    cache_resp: bool,
+    rate_limit: Option<u32>,
+    response_description: Option<String>,
+    operation_id: Option<String>,
+    responses: Option<sonic_rs::Value>,
+    openapi_extra: Option<sonic_rs::Value>,
+    callbacks: Option<sonic_rs::Value>,
+    bypass_serialization: bool,
+    merged_tags: Vec<String>,
+    resolved_deprecated: Option<bool>,
+}
+
+impl RouteOptions {
+    fn from_kwargs(
         py: Python<'_>,
-        method: HttpMethod,
-        path: String,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Py<PyAny>> {
-        let extract_opt = |key: &str| -> Option<Py<PyAny>> {
-            kwargs
-                .and_then(|kw| kw.get_item(key).ok())
-                .map(|x| x.unbind())
-        };
+        parent_tags: &[String],
+        parent_deprecated: Option<bool>,
+    ) -> PyResult<Self> {
+        let status_code = extract::<u16>(kwargs, "status_code");
+        let summary = extract::<String>(kwargs, "summary");
+        let description = extract::<String>(kwargs, "description");
+        let include_in_schema = extract::<bool>(kwargs, "include_in_schema").unwrap_or(true);
+        let cache_resp = extract::<bool>(kwargs, "cache_resp").unwrap_or(false);
+        let rate_limit = extract::<u32>(kwargs, "rate_limit");
+        let response_description = extract::<String>(kwargs, "response_description");
+        let operation_id = extract::<String>(kwargs, "operation_id");
+        let deprecated = extract::<bool>(kwargs, "deprecated");
 
-        let status_code: Option<u16> = kwargs
-            .and_then(|kw| kw.get_item("status_code").ok())
-            .and_then(|x| x.extract().ok());
-
-        let mut bypass_serialization = false;
-        let response_model = if let Some(kw) = kwargs
-            && let Ok(rm) = kw.get_item("response_model")
-        {
-            if rm.is_none() {
-                bypass_serialization = true;
-            }
-            Some(rm.unbind())
-        } else {
-            None
-        };
-
-        let response_class = extract_opt("response_class");
-        let tags = extract_opt("tags");
-        let summary: Option<String> = kwargs
-            .and_then(|kw| kw.get_item("summary").ok())
-            .and_then(|x| x.extract().ok());
-        let description: Option<String> = kwargs
-            .and_then(|kw| kw.get_item("description").ok())
-            .and_then(|x| x.extract().ok());
-        let deprecated: Option<bool> = kwargs
-            .and_then(|kw| kw.get_item("deprecated").ok())
-            .and_then(|x| x.extract().ok());
-        let include_in_schema: bool = kwargs
-            .and_then(|kw| kw.get_item("include_in_schema").ok())
-            .and_then(|x| x.extract().ok())
-            .unwrap_or(true);
-        let cache_response: bool = kwargs
-            .and_then(|kw| kw.get_item("cache_resp").ok())
-            .and_then(|x| x.extract().ok())
-            .unwrap_or(false);
-        let rate_limit_per_second: Option<u32> = kwargs
-            .and_then(|kw| kw.get_item("rate_limit").ok())
-            .and_then(|x| x.extract().ok());
-
-        let response_description: Option<String> = kwargs
-            .and_then(|kw| kw.get_item("response_description").ok())
-            .and_then(|x| x.extract().ok());
-
-        let operation_id: Option<String> = kwargs
-            .and_then(|kw| kw.get_item("operation_id").ok())
-            .and_then(|x| x.extract().ok());
-
-        let responses = kwargs
-            .and_then(|kw| kw.get_item("responses").ok())
-            .map(|d| crate::utils::py_any_to_json(py, &d));
-
-        let openapi_extra = kwargs
-            .and_then(|kw| kw.get_item("openapi_extra").ok())
-            .map(|d| crate::utils::py_any_to_json(py, &d));
-
-        let callbacks = kwargs
-            .and_then(|kw| kw.get_item("callbacks").ok())
-            .and_then(|x| crate::utils::openapi::parse_callbacks_to_json(py, &x));
-
-        if self.frozen.load(Ordering::Relaxed) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "Cannot modify router after it has been frozen",
-            ));
-        }
+        let response_model = extract_py(kwargs, "response_model");
+        let response_class = extract_py(kwargs, "response_class");
 
         let default_status = status_code
             .map(|c| {
@@ -100,125 +81,220 @@ impl PyAPIRouter {
             })
             .transpose()?;
 
-        let mut merged_tags = self.tags.clone();
+        let bypass_serialization = response_model
+            .as_ref()
+            .is_some_and(|rm| rm.bind(py).is_none());
 
-        if let Some(route_tags) = tags {
-            let tag_list = route_tags.bind(py);
+        let responses =
+            extract_bound(kwargs, "responses").map(|d| crate::utils::py_any_to_json(py, &d));
 
-            if let Ok(iter) = tag_list.try_iter() {
-                iter.flatten().for_each(|item| {
-                    if let Ok(py_str) = item.cast::<PyString>()
-                        && let Ok(tag_slice) = py_str.to_str()
-                        && !merged_tags.iter().any(|t| t == tag_slice)
-                    {
-                        merged_tags.push(tag_slice.to_string());
-                    }
-                });
+        let openapi_extra =
+            extract_bound(kwargs, "openapi_extra").map(|d| crate::utils::py_any_to_json(py, &d));
+
+        let callbacks = extract_bound(kwargs, "callbacks")
+            .and_then(|x| crate::utils::openapi::parse_callbacks_to_json(py, &x));
+
+        let mut merged_tags = parent_tags.to_vec();
+        if let Some(kw) = kwargs
+            && let Ok(Some(tags_ref)) = kw.get_item("tags")
+            && let Ok(iter) = tags_ref.try_iter()
+        {
+            for item in iter.flatten() {
+                if let Ok(tag_slice) = item.extract::<&str>()
+                    && !merged_tags.iter().any(|t| t == tag_slice)
+                {
+                    merged_tags.push(tag_slice.to_owned());
+                }
             }
         }
 
-        let deprecated = deprecated.or(self.deprecated);
-        let path_for_closure = path.clone();
+        let resolved_deprecated = deprecated.or(parent_deprecated);
+
+        Ok(Self {
+            default_status,
+            response_model,
+            response_class,
+            summary,
+            description,
+            include_in_schema,
+            cache_resp,
+            rate_limit,
+            response_description,
+            operation_id,
+            responses,
+            openapi_extra,
+            callbacks,
+            bypass_serialization,
+            merged_tags,
+            resolved_deprecated,
+        })
+    }
+}
+
+// ==========================================
+// 3. ROUTE ANALYSIS
+// ==========================================
+
+struct RouteAnalysis {
+    needs_kwargs: bool,
+    body_param_name_set: AHashSet<String>,
+    body_param_indices: SmallVec<[usize; 4]>,
+    defer_json_parse: bool,
+    has_multiple_query_params: bool,
+}
+
+impl RouteAnalysis {
+    fn new(metadata: &crate::ffi::pydantic::ParsedRouteMetadata) -> Self {
+        let needs_kwargs = !metadata.body_param_names.is_empty()
+            || !metadata.param_validators.is_empty()
+            || !metadata.dependencies.is_empty()
+            || !metadata.parsed_params.is_empty();
+
+        let mut body_param_name_set = AHashSet::with_capacity(
+            metadata.body_param_names.len() + metadata.param_validators.len(),
+        );
+
+        for p in metadata.parsed_params.iter() {
+            if matches!(p.source, ParameterSource::Body) {
+                body_param_name_set.insert(p.name.clone());
+            }
+        }
+        for v in metadata.param_validators.iter() {
+            body_param_name_set.insert(v.name.clone());
+        }
+
+        let mut body_param_indices: SmallVec<[usize; 4]> = SmallVec::new();
+        for (idx, param) in metadata.parsed_params.iter().enumerate() {
+            if matches!(param.source, ParameterSource::Body)
+                || body_param_name_set.contains(param.name.as_str())
+            {
+                body_param_indices.push(idx);
+            }
+        }
+
+        let defer_json_parse = body_param_indices.len() == 1
+            && metadata.parsed_params[body_param_indices[0]].is_pydantic_model;
+
+        let has_multiple_query_params = metadata
+            .parsed_params
+            .iter()
+            .filter(|p| matches!(p.source, ParameterSource::Query))
+            .count()
+            > 1;
+
+        Self {
+            needs_kwargs,
+            body_param_name_set,
+            body_param_indices,
+            defer_json_parse,
+            has_multiple_query_params,
+        }
+    }
+}
+
+impl PyAPIRouter {
+    pub fn create_method_decorator_kw(
+        &self,
+        py: Python<'_>,
+        method: HttpMethod,
+        path: String,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        if self.frozen.load(Ordering::Relaxed) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Cannot modify router after it has been frozen",
+            ));
+        }
+
+        let opts = RouteOptions::from_kwargs(py, kwargs, &self.tags, self.deprecated)?;
+        let path_for_closure = path;
         let routes = Arc::clone(&self.route_entries);
-        let response_model_capture = response_model.clone();
-        let response_class_capture = response_class.clone();
 
         let decorator = move |args: &Bound<'_, PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
-            let func: Py<PyAny> = args.get_item(0)?.unbind();
+            let func: Bound<'_, PyAny> = args.get_item(0)?;
 
-            let metadata =
-                crate::ffi::pydantic::parse_route_metadata(py, func.bind(py), &path_for_closure);
+            let metadata = crate::ffi::pydantic::parse_route_metadata(py, &func, &path_for_closure);
+            let analysis = RouteAnalysis::new(&metadata);
 
-            let final_response_type = if let Some(cls) = &response_class_capture {
+            let final_response_type = if let Some(cls) = &opts.response_class {
                 crate::ffi::pydantic::get_response_type_from_class(py, cls.bind(py))
             } else {
                 metadata.response_type
             };
 
-            let needs_kwargs = !metadata.body_param_names.is_empty()
-                || !metadata.param_validators.is_empty()
-                || !metadata.dependencies.is_empty()
-                || !metadata.parsed_params.is_empty();
+            let path_param_names: Vec<Arc<str>> =
+                crate::routing::params::extract_path_param_names(&path_for_closure)
+                    .into_iter()
+                    .map(|s| Arc::from(s.as_str()))
+                    .collect();
 
-            let mut body_param_name_set: AHashSet<String> = AHashSet::with_capacity(
-                metadata.body_param_names.len() + metadata.param_validators.len(),
-            );
-            metadata
-                .parsed_params
-                .iter()
-                .filter(|p| matches!(p.source, ParameterSource::Body))
-                .for_each(|p| {
-                    body_param_name_set.insert(p.name.clone());
-                });
-            metadata.param_validators.iter().for_each(|validator| {
-                body_param_name_set.insert(validator.name.clone());
-            });
-
-            let body_param_indices = metadata
-                .parsed_params
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, param)| {
-                    (matches!(param.source, ParameterSource::Body)
-                        || body_param_name_set.contains(param.name.as_str()))
-                    .then_some(idx)
-                })
-                .collect();
+            let serialization_hint = if opts.bypass_serialization {
+                SerializationHint::Unknown
+            } else if opts.response_model.is_some() {
+                SerializationHint::PydanticModel
+            } else {
+                metadata.serialization_hint
+            };
 
             let mut handler = crate::routing::types::RouteHandler {
-                func: func.clone_ref(py),
-                is_async: metadata.is_async,
-                is_fast_path: metadata.is_fast_path,
-                dependency_needs_request: metadata.dependency_needs_request,
-                all_deps_sync: metadata.all_deps_sync,
-                needs_kwargs,
-                param_validators: metadata.param_validators,
-                response_type: final_response_type,
-                serialization_hint: if bypass_serialization {
-                    SerializationHint::Unknown
-                } else if response_model_capture.is_some() {
-                    SerializationHint::PydanticModel
-                } else {
-                    metadata.serialization_hint
+                execution: crate::routing::types::ExecutionPlan {
+                    func: func.clone().unbind(),
+                    is_async: metadata.is_async,
+                    is_fast_path: metadata.is_fast_path,
+                    execution_mode: crate::ffi::py_handlers::ExecutionMode::SyncNoArgs,
+                    cache_response: opts.cache_resp,
+                    rate_limit_per_second: opts.rate_limit,
                 },
-                body_param_names: metadata.body_param_names,
-                body_param_name_set,
-                body_param_indices,
-                dependencies: metadata.dependencies,
-                parsed_params: metadata.parsed_params,
-                default_status,
-                response_model: response_model_capture.clone(),
-                response_class: response_class_capture.clone(),
-                bypass_serialization,
-                execution_mode: crate::ffi::py_handlers::ExecutionMode::SyncNoArgs,
-                cache_response,
-                rate_limit_per_second,
+                payload: crate::routing::types::PayloadSpec {
+                    dependency_needs_request: metadata.dependency_needs_request,
+                    all_deps_sync: metadata.all_deps_sync,
+                    needs_kwargs: analysis.needs_kwargs,
+                    body_param_names: metadata.body_param_names,
+                    body_param_name_set: analysis.body_param_name_set,
+                    body_param_indices: analysis.body_param_indices,
+                    dependencies: metadata.dependencies,
+                    parsed_params: metadata.parsed_params,
+                    has_multiple_query_params: analysis.has_multiple_query_params,
+                    path_param_names,
+                },
+                validation: crate::routing::types::ValidationRules {
+                    param_validators: metadata.param_validators,
+                    defer_json_parse: analysis.defer_json_parse,
+                    bypass_serialization: opts.bypass_serialization,
+                },
+                response: crate::routing::types::ResponseFormatter {
+                    response_type: final_response_type,
+                    serialization_hint,
+                    default_status: opts.default_status,
+                    response_model: opts.response_model.clone(),
+                    response_class: opts.response_class.clone(),
+                },
             };
+
             crate::ffi::py_handlers::assign_execution_mode(&mut handler);
-            let handler = Arc::new(handler);
 
-            let entry = RouteEntry {
-                method,
-                path: path_for_closure.clone(),
-                handler,
-                tags: merged_tags.clone(),
-                summary: summary.clone(),
-                description: description.clone(),
-                response_description: response_description.clone(),
-                operation_id: operation_id.clone(),
-                responses: responses.clone(),
-                openapi_extra: openapi_extra.clone(),
-                callbacks: callbacks.clone(),
-                deprecated,
-                include_in_schema,
-            };
+            routes
+                .lock_or_panic()
+                .push(crate::routing::types::RouteEntry {
+                    method,
+                    path: path_for_closure.clone(),
+                    handler: Arc::new(handler),
+                    tags: opts.merged_tags.clone(),
+                    summary: opts.summary.clone(),
+                    description: opts.description.clone(),
+                    response_description: opts.response_description.clone(),
+                    operation_id: opts.operation_id.clone(),
+                    responses: opts.responses.clone(),
+                    openapi_extra: opts.openapi_extra.clone(),
+                    callbacks: opts.callbacks.clone(),
+                    deprecated: opts.resolved_deprecated,
+                    include_in_schema: opts.include_in_schema,
+                });
 
-            routes.lock().unwrap().push(entry);
-
-            Ok(func)
+            Ok(func.unbind())
         };
 
         PyCFunction::new_closure(py, None, None, decorator).map(|f| f.into())
@@ -245,7 +321,7 @@ impl PyAPIRouter {
                 path: path.clone(),
                 handler: func.clone_ref(py),
             };
-            websockets.lock().unwrap().push(entry);
+            websockets.lock_or_panic().push(entry);
             Ok(func)
         };
         PyCFunction::new_closure(py, None, None, closure).map(|f| f.into())
