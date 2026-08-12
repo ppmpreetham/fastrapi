@@ -3,7 +3,7 @@ use crate::{
     decorators::PyAPIRouter,
     ffi::pydantic,
     routing::types::{ParameterConstraints, ParameterSource, RouteEntry},
-    types::route::HttpMethod,
+    types::route::{HttpMethod, RouteHandler},
     utils::py_dict_to_json,
 };
 use pyo3::prelude::*;
@@ -15,12 +15,12 @@ use tracing::debug;
 
 pub fn deep_merge_json(target: &mut JsonValue, source: JsonValue) {
     if source.is_object() && target.is_object() {
-        let source_obj = source.as_object().unwrap();
-        let target_obj = target.as_object_mut().unwrap();
+        let source_obj = source.as_object().expect("Source must be an object");
+        let target_obj = target.as_object_mut().expect("Target must be an object");
 
         for (k, v) in source_obj.iter() {
             if target_obj.contains_key(&k) {
-                let target_val = target_obj.get_mut(&k).unwrap();
+                let target_val = target_obj.get_mut(&k).expect("Key not found in target");
                 deep_merge_json(target_val, v.clone());
             } else {
                 target_obj.insert(k, v.clone());
@@ -389,6 +389,102 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
     sonic_rs::to_value(&spec).unwrap_or_else(|_| json!({}))
 }
 
+fn build_request_body(
+    py: Python<'_>,
+    handler: &RouteHandler,
+    route: &RouteEntry,
+    schemas: &mut HashMap<String, JsonValue>,
+) -> Option<RequestBody> {
+    if handler.validation.param_validators.is_empty()
+        || !matches!(
+            route.method,
+            HttpMethod::POST | HttpMethod::PUT | HttpMethod::PATCH
+        )
+    {
+        return None;
+    }
+
+    let validators = &handler.validation.param_validators;
+    if validators.len() == 1 {
+        let validator_bound = validators[0].model_class.bind(py);
+        let schema = extract_pydantic_schema(py, validator_bound, "validation")?;
+        let schema_name = get_schema_name(validator_bound);
+        schemas.insert(schema_name.clone(), schema);
+
+        let mut content = HashMap::new();
+        content.insert(
+            "application/json".to_string(),
+            MediaType {
+                schema: json!({ "$ref": format!("#/components/schemas/{}", schema_name) }),
+            },
+        );
+        return Some(RequestBody {
+            required: true,
+            content,
+        });
+    }
+
+    let mut properties = sonic_rs::Object::new();
+    let mut required_fields = Vec::new();
+
+    for validator in validators {
+        let validator_bound = validator.model_class.bind(py);
+        let Some(schema) = extract_pydantic_schema(py, validator_bound, "validation") else {
+            continue;
+        };
+        let schema_name = get_schema_name(validator_bound);
+        schemas.insert(schema_name.clone(), schema);
+        properties.insert(
+            &validator.name,
+            json!({ "$ref": format!("#/components/schemas/{}", schema_name) }),
+        );
+        required_fields.push(validator.name.clone());
+    }
+
+    if properties.is_empty() {
+        return None;
+    }
+
+    let func_name = handler
+        .execution
+        .func
+        .bind(py)
+        .getattr("__name__")
+        .ok()
+        .and_then(|name| name.extract::<String>().ok())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let path_slug = route
+        .path
+        .trim_start_matches('/')
+        .replace('/', "__")
+        .replace(['{', '}'], "_");
+
+    let method = route.method.as_ref().to_lowercase();
+    let wrapper_name = format!("Body_{}_{}_{}", func_name, path_slug, method);
+
+    schemas.insert(
+        wrapper_name.clone(),
+        json!({
+            "type": "object",
+            "properties": properties,
+            "required": required_fields,
+        }),
+    );
+
+    let mut content = HashMap::new();
+    content.insert(
+        "application/json".to_string(),
+        MediaType {
+            schema: json!({ "$ref": format!("#/components/schemas/{}", wrapper_name) }),
+        },
+    );
+    Some(RequestBody {
+        required: true,
+        content,
+    })
+}
+
 pub fn build_paths_from_routes(
     py: Python<'_>,
     collected: Vec<RouteEntry>,
@@ -405,11 +501,12 @@ pub fn build_paths_from_routes(
         }
 
         let path = route.path.clone();
-        let method = route.method.as_ref().to_lowercase();
+
         let handler = route.handler.clone();
         let tags = &route.tags;
 
         let description = handler
+            .execution
             .func
             .bind(py)
             .getattr("__doc__")
@@ -424,16 +521,12 @@ pub fn build_paths_from_routes(
             operation_id: route.operation_id.clone().or_else(|| {
                 generate_unique_id_function.and_then(|f| {
                     f.bind(py)
-                        .call1((handler.func.bind(py),))
+                        .call1((handler.execution.func.bind(py),))
                         .ok()
                         .and_then(|res| res.extract::<String>().ok())
                 })
             }),
-            tags: if tags.is_empty() {
-                None
-            } else {
-                Some(tags.clone())
-            },
+            tags: (!tags.is_empty()).then(|| tags.clone()),
             deprecated: route.deprecated,
             parameters: None,
             request_body: None,
@@ -441,141 +534,45 @@ pub fn build_paths_from_routes(
             callbacks: None,
         };
 
-        let mut parameters = Vec::new();
+        let parameters: Vec<Parameter> = handler
+            .payload
+            .parsed_params
+            .iter()
+            .filter_map(|param| {
+                let location = match param.source {
+                    ParameterSource::Path => "path",
+                    ParameterSource::Query => "query",
+                    ParameterSource::Header => "header",
+                    ParameterSource::Cookie => "cookie",
+                    ParameterSource::Body | ParameterSource::BackgroundTasks => return None,
+                };
 
-        handler.parsed_params.iter().for_each(|param| {
-            let location = match param.source {
-                ParameterSource::Path => "path",
-                ParameterSource::Query => "query",
-                ParameterSource::Header => "header",
-                ParameterSource::Cookie => "cookie",
-                ParameterSource::Body | ParameterSource::BackgroundTasks => return,
-            };
+                let schema = param
+                    .annotation
+                    .as_ref()
+                    .map(|annotation| python_type_to_openapi_type(py, annotation.bind(py)))
+                    .unwrap_or_else(|| json!({"type": "string"}));
 
-            let schema = param
-                .annotation
-                .as_ref()
-                .map(|annotation| python_type_to_openapi_type(py, annotation.bind(py)))
-                .unwrap_or_else(|| json!({"type": "string"}));
+                Some(Parameter {
+                    name: param.external_name.clone(),
+                    location: location.to_string(),
+                    required: Some(param.required || location == "path"),
+                    schema: Some(apply_parameter_constraints(schema, &param.constraints)),
+                    description: param.description.clone(),
+                })
+            })
+            .collect();
 
-            parameters.push(Parameter {
-                name: param.external_name.clone(),
-                location: location.to_string(),
-                required: Some(param.required || location == "path"),
-                schema: Some(apply_parameter_constraints(schema, &param.constraints)),
-                description: param.description.clone(),
-            });
-        });
+        operation.parameters = (!parameters.is_empty()).then_some(parameters);
 
-        if !parameters.is_empty() {
-            operation.parameters = Some(parameters);
-        }
-
-        // Request body for POST/PUT/PATCH with validators
-        if !handler.param_validators.is_empty()
-            && matches!(
-                route.method,
-                HttpMethod::POST | HttpMethod::PUT | HttpMethod::PATCH
-            )
-        {
-            let validator_count = handler.param_validators.len();
-
-            if validator_count == 1 {
-                let validator = &handler.param_validators[0];
-                let validator_bound = validator.model_class.bind(py);
-
-                let mode = "validation";
-                if let Some(schema) = extract_pydantic_schema(py, validator_bound, mode) {
-                    let schema_name = get_schema_name(validator_bound);
-                    schemas.insert(schema_name.clone(), schema.clone());
-
-                    operation.request_body = Some(RequestBody {
-                        required: true,
-                        content: {
-                            let mut content = HashMap::new();
-                            content.insert(
-                                "application/json".to_string(),
-                                MediaType {
-                                    schema: json!({
-                                        "$ref": format!("#/components/schemas/{}", schema_name)
-                                    }),
-                                },
-                            );
-                            content
-                        },
-                    });
-                }
-            } else if validator_count > 1 {
-                let mut properties = sonic_rs::Object::new();
-                let mut required_fields = Vec::new();
-
-                handler.param_validators.iter().for_each(|validator| {
-                    let validator_bound = validator.model_class.bind(py);
-
-                    let mode = "validation";
-                    if let Some(schema) = extract_pydantic_schema(py, validator_bound, mode) {
-                        let schema_name = get_schema_name(validator_bound);
-                        schemas.insert(schema_name.clone(), schema);
-                        properties.insert(
-                            &validator.name,
-                            json!({ "$ref": format!("#/components/schemas/{}", schema_name) }),
-                        );
-                        required_fields.push(validator.name.clone());
-                    }
-                });
-
-                if !properties.is_empty() {
-                    let func_name = handler
-                        .func
-                        .bind(py)
-                        .getattr("__name__")
-                        .ok()
-                        .and_then(|n| n.extract::<String>().ok())
-                        .unwrap_or_else(|| "unknown".to_string());
-
-                    // "/register" -> "register"
-                    // "/users/{id}" -> "users__id_"
-                    let path_slug = path
-                        .trim_start_matches('/')
-                        .replace('/', "__")
-                        .replace(['{', '}'], "_");
-
-                    let wrapper_name = format!("Body_{}_{}_{}", func_name, path_slug, method);
-
-                    schemas.insert(
-                        wrapper_name.clone(),
-                        json!({
-                            "type": "object",
-                            "properties": properties,
-                            "required": required_fields,
-                        }),
-                    );
-
-                    operation.request_body = Some(RequestBody {
-                        required: true,
-                        content: {
-                            let mut content = HashMap::new();
-                            content.insert(
-                                "application/json".to_string(),
-                                MediaType {
-                                    schema: json!({
-                                        "$ref": format!("#/components/schemas/{}", wrapper_name)
-                                    }),
-                                },
-                            );
-                            content
-                        },
-                    });
-                }
-            }
-        }
+        operation.request_body = build_request_body(py, &handler, &route, schemas);
         let response_desc = route
             .response_description
             .clone()
             .unwrap_or_else(|| "Successful Response".to_string());
 
         let mut response_schema = json!({"type": "object"});
-        if let Some(rm) = &handler.response_model {
+        if let Some(rm) = &handler.response.response_model {
             let rm_bound = rm.bind(py);
             let mode = if separate_input_output_schemas {
                 "serialization"
@@ -609,7 +606,9 @@ pub fn build_paths_from_routes(
         );
 
         // 422 for validation errors
-        if !handler.param_validators.is_empty() || !handler.parsed_params.is_empty() {
+        if !handler.validation.param_validators.is_empty()
+            || !handler.payload.parsed_params.is_empty()
+        {
             operation.responses.insert(
                 "422".to_string(),
                 Response {
