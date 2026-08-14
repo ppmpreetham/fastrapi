@@ -96,11 +96,10 @@ impl Default for FrozenRouterBuilder {
 }
 
 fn normalize_lookup(input: &str) -> &str {
-    let trimmed = input.trim();
-    if trimmed.len() > 1 {
-        trimmed.trim_end_matches('/')
+    if input.len() > 1 {
+        input.trim_end_matches('/')
     } else {
-        trimmed
+        input
     }
 }
 

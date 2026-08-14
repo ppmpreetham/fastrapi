@@ -2,6 +2,7 @@ use super::params;
 use super::security::PySecurityScopes;
 use super::types::{ParsedParameter, RequestInput};
 use crate::ffi::pydantic;
+
 use axum::response::Response;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -9,17 +10,13 @@ use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 type SharedPyObject = Py<PyAny>;
 
-static INSPECT_MODULE: OnceLock<Py<PyModule>> = OnceLock::new();
+crate::cached_py_import!(INSPECT_MODULE, "inspect");
 
 fn get_inspect(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
-    Ok(INSPECT_MODULE
-        .get_or_init(|| py.import(intern!(py, "inspect")).unwrap().unbind())
-        .bind(py)
-        .clone())
+    INSPECT_MODULE.get(py)
 }
 
 struct ParserKeys<'py> {
@@ -113,13 +110,7 @@ fn annotation_display_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Opt
     annotation
         .getattr(intern!(py, "__name__"))
         .ok()
-        .and_then(|value| {
-            value
-                .cast::<PyString>()
-                .ok()
-                .and_then(|name| name.to_str().ok())
-                .map(str::to_owned)
-        })
+        .and_then(|value| value.extract::<String>().ok())
         .or_else(|| {
             annotation
                 .str()
@@ -129,16 +120,10 @@ fn annotation_display_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Opt
 }
 
 fn extract_string_list(value: &Bound<'_, PyAny>) -> Option<Vec<String>> {
-    let mut values = Vec::new();
-    value.try_iter().ok()?.for_each(|item_res| {
-        if let Ok(item) = item_res
-            && let Ok(s) = item.extract::<String>()
-        {
-            values.push(s);
-        }
-    });
-
-    Some(values)
+    value.try_iter().ok().map(|iter| {
+        iter.filter_map(|item| item.ok()?.extract::<String>().ok())
+            .collect()
+    })
 }
 
 pub fn parse_dependencies(
@@ -277,11 +262,11 @@ fn extract_and_flatten(
         func_id,
         func: func.as_unbound().clone(),
         is_async,
-        param_name: parent_param_name, // Restored Rust String
+        param_name: parent_param_name,
         scopes,
         use_cache,
         is_top_level,
-        injection_plan, // Restored Rust String tuples
+        injection_plan,
         needs_request_object,
     });
 
@@ -309,8 +294,8 @@ fn build_injection_plan(
     for item in parameters.try_iter()? {
         let pair = item?.cast_into::<PyTuple>()?;
         let key = pair.get_item(0)?;
-        let param = pair.get_item(1)?;
         let name: String = key.extract()?;
+        let param = pair.get_item(1)?;
 
         if name == "self" || name == "cls" || name == "return" {
             continue;
@@ -321,23 +306,36 @@ fn build_injection_plan(
             continue;
         }
 
-        let mut special = false;
-        if let Ok(annotation) = param.getattr(keys.annotation)
-            && let Some(annotation_name) = annotation_display_name(py, &annotation)
-        {
-            if annotation_name.contains("Request") {
-                plan.push((name.clone(), InjectionType::Request));
-                needs_request_object = true;
-                special = true;
-            } else if annotation_name.contains("SecurityScopes") {
-                plan.push((name.clone(), InjectionType::SecurityScopes));
-                special = true;
-            }
-        }
+        let special_injection = param
+            .getattr(keys.annotation)
+            .ok()
+            .and_then(|ann| annotation_display_name(py, &ann))
+            .and_then(|ann_name| {
+                if ann_name.contains("Request")
+                    || ann_name.contains("HTTPConnection")
+                    || ann_name.contains("WebSocket")
+                {
+                    Some(InjectionType::Request)
+                } else if ann_name.contains("SecurityScopes") {
+                    Some(InjectionType::SecurityScopes)
+                } else {
+                    None
+                }
+            });
 
-        if !special {
-            let parsed_param = params::parse_parameter_spec(py, &name, &param, path_param_names)?;
-            plan.push((name, InjectionType::Parameter(Box::new(parsed_param))));
+        match special_injection {
+            Some(InjectionType::Request) => {
+                plan.push((name, InjectionType::Request));
+                needs_request_object = true;
+            }
+            Some(injection) => {
+                plan.push((name, injection));
+            }
+            None => {
+                let parsed_param =
+                    params::parse_parameter_spec(py, &name, &param, path_param_names)?;
+                plan.push((name, InjectionType::Parameter(Box::new(parsed_param))));
+            }
         }
     }
 
@@ -425,7 +423,6 @@ pub async fn execute_dependencies(
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
 ) -> Result<Vec<(String, SharedPyObject)>, DependencyExecutionError> {
-    let request = request;
     let mut results_registry: Vec<Option<SharedPyObject>> = vec![None; flat_plan.len()];
 
     let mut final_results = Vec::with_capacity(
