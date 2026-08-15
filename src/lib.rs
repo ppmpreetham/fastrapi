@@ -2,66 +2,55 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::too_many_arguments)]
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule};
-use pyo3_nest::{add_classes, submodule};
+use pyo3::types::{PyDict, PyModule};
 
 pub mod engine;
+pub mod error;
 pub mod ffi;
 mod globals;
 pub mod http;
 pub mod macros;
 pub mod routing;
+pub mod runtime;
 pub mod types;
 pub mod utils;
 
-pub use engine::app;
-pub use engine::background;
-pub use engine::server;
-pub use ffi::datastructures;
-pub use ffi::decorators;
-pub use ffi::exceptions;
-pub use ffi::py_handlers;
-pub use ffi::pydantic;
-pub use globals::{BASEMODEL_TYPE, MIDDLEWARES, PYTHON_RUNTIME, config};
-pub use http::middleware;
-pub use http::request;
-pub use http::responses;
-pub use http::staticfiles;
-pub use http::status;
-pub use http::websocket;
-pub use routing::dependencies;
-pub use routing::params;
-pub use routing::security;
+pub use engine::{app, background, server};
+pub use ffi::{datastructures, decorators, exceptions, pydantic};
+pub use http::{middleware, request, responses, staticfiles, status, websocket};
+pub use routing::{dependencies, params, security};
+pub use runtime::executor;
+pub use runtime::executor as py_handlers;
 
 pub use app::FastrAPI;
+pub use background::PyBackgroundTasks;
+pub use datastructures::PyUploadFile;
+pub use decorators::PyAPIRouter;
+pub use engine::metrics::PyInstrumentator;
+pub use exceptions::{
+    PyDependencyScopeError, PyFastAPIDeprecationWarning, PyFastAPIError, PyHTTPException,
+    PyPydanticV1NotSupportedError, PyRequestValidationError, PyResponseValidationError,
+    PyValidationException, PyWebSocketException, PyWebSocketRequestValidationError,
+};
+pub use middleware::{
+    CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
+    TrustedHostMiddleware,
+};
+pub use params::{
+    PyBody, PyCookie, PyDepends, PyFile, PyForm, PyHeader, PyPath, PyQuery, PySecurity, Undefined,
+    Unset,
+};
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{
     PyHTMLResponse, PyJSONResponse, PyORJSONResponse, PyPlainTextResponse, PyRedirectResponse,
     PyStreamingResponse, PyUJSONResponse,
 };
-
-use crate::routing::security::{
+pub use routing::security::{
     APIKeyCookie, APIKeyHeader, APIKeyQuery, HTTPAuthorizationCredentials, HTTPBasic,
     HTTPBasicCredentials, HTTPBearer, OAuth2PasswordBearer, PySecurityScopes,
 };
-use background::PyBackgroundTasks;
-use datastructures::PyUploadFile;
-use decorators::PyAPIRouter;
-use exceptions::{
-    PyFastrAPIDeprecationWarning, PyFastrAPIError, PyHTTPException, PyRequestValidationError,
-    PyResponseValidationError, PyValidationException, PyWebSocketException,
-};
-use middleware::{
-    CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
-    TrustedHostMiddleware,
-};
-use params::{
-    PyBody, PyCookie, PyDepends, PyFile, PyForm, PyHeader, PyPath, PyQuery, PySecurity, Undefined,
-    Unset,
-};
-use routing::prometheus::PyInstrumentator;
-use staticfiles::PyStaticFiles;
-use websocket::PyWebSocket;
+pub use staticfiles::PyStaticFiles;
+pub use websocket::PyWebSocket;
 
 fn register_rsloop_asyncio_alias(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -77,141 +66,199 @@ fn register_rsloop_asyncio_alias(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[pymodule(gil_used = false)]
-fn fastrapi(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let py = m.py();
-    m.setattr("__package__", "fastrapi")?;
-    m.setattr("__path__", PyList::empty(py))?;
+mod fastrapi {
+    use pyo3::prelude::*;
+    use pyo3::types::{PyList, PyModule};
 
-    m.add_class::<FastrAPI>()?;
+    // Top-level exported classes
+    #[pymodule_export]
+    use crate::FastrAPI;
 
-    submodule!(
-        m,
-        "responses",
-        add_classes!(
-            PyJSONResponse,
-            PyORJSONResponse,
-            PyUJSONResponse,
-            PyHTMLResponse,
-            PyPlainTextResponse,
-            PyRedirectResponse,
-            PyStreamingResponse
-        )
-    );
+    #[pymodule_export]
+    use crate::PyAPIRouter as APIRouter;
 
-    submodule!(
-        m,
-        "exceptions",
-        add_classes!(
-            PyFastrAPIError,
-            PyValidationException,
-            PyRequestValidationError,
-            PyResponseValidationError,
-            PyHTTPException,
-            PyWebSocketException,
-            PyFastrAPIDeprecationWarning
-        )
-    );
+    #[pymodule_export]
+    use crate::PyHTTPConnection as HTTPConnection;
 
-    submodule!(
-        m,
-        "params",
-        add_classes!(
-            PyQuery, PyPath, PyBody, PyCookie, PyHeader, PyForm, PyFile, Unset, Undefined,
-            PyDepends, PySecurity
-        )
-    );
+    #[pymodule_export]
+    use crate::PyRequest as Request;
 
-    submodule!(m, "request", add_classes!(PyRequest, PyHTTPConnection));
-    submodule!(m, "datastructures", add_classes!(PyUploadFile));
-    submodule!(m, "background", add_classes!(PyBackgroundTasks));
-    submodule!(
-        m,
-        "security",
-        add_classes!(
-            PySecurityScopes,
-            APIKeyHeader,
-            APIKeyQuery,
-            APIKeyCookie,
-            HTTPAuthorizationCredentials,
-            HTTPBearer,
-            OAuth2PasswordBearer,
-            HTTPBasicCredentials,
-            HTTPBasic
-        )
-    );
-    submodule!(m, "staticfiles", add_classes!(PyStaticFiles));
-    submodule!(
-        m,
-        "middleware",
-        add_classes!(
-            CORSMiddleware,
-            HTTPSRedirectMiddleware,
+    #[pymodule_export]
+    use crate::PyBackgroundTasks as BackgroundTasks;
+
+    #[pymodule_export]
+    use crate::PyUploadFile as UploadFile;
+
+    #[pymodule_export]
+    use crate::PyStaticFiles as StaticFiles;
+
+    #[pymodule_export]
+    use crate::PyHTTPException as HTTPException;
+
+    #[pymodule_export]
+    use crate::PyBody as Body;
+    #[pymodule_export]
+    use crate::PyCookie as Cookie;
+    #[pymodule_export]
+    use crate::PyDepends as Depends;
+    #[pymodule_export]
+    use crate::PyFile as File;
+    #[pymodule_export]
+    use crate::PyForm as Form;
+    #[pymodule_export]
+    use crate::PyHeader as Header;
+    #[pymodule_export]
+    use crate::PyPath as Path;
+    #[pymodule_export]
+    use crate::PyQuery as Query;
+    #[pymodule_export]
+    use crate::PySecurity as Security;
+
+    #[pymodule_export]
+    use crate::APIKeyCookie;
+    #[pymodule_export]
+    use crate::APIKeyHeader;
+    #[pymodule_export]
+    use crate::APIKeyQuery;
+    #[pymodule_export]
+    use crate::HTTPAuthorizationCredentials;
+    #[pymodule_export]
+    use crate::HTTPBasic;
+    #[pymodule_export]
+    use crate::HTTPBasicCredentials;
+    #[pymodule_export]
+    use crate::HTTPBearer;
+    #[pymodule_export]
+    use crate::OAuth2PasswordBearer;
+    #[pymodule_export]
+    use crate::PySecurityScopes as SecurityScopes;
+
+    #[pymodule_export]
+    use crate::PyInstrumentator as Instrumentator;
+
+    #[pymodule]
+    mod responses {
+        #[pymodule_export]
+        use crate::responses::{
+            PyHTMLResponse as HTMLResponse, PyJSONResponse as JSONResponse,
+            PyORJSONResponse as ORJSONResponse, PyPlainTextResponse as PlainTextResponse,
+            PyRedirectResponse as RedirectResponse, PyStreamingResponse as StreamingResponse,
+            PyUJSONResponse as UJSONResponse,
+        };
+    }
+
+    #[pymodule]
+    mod exceptions {
+        #[pymodule_export]
+        use crate::exceptions::{
+            PyDependencyScopeError as DependencyScopeError,
+            PyFastAPIDeprecationWarning as FastAPIDeprecationWarning,
+            PyFastAPIError as FastAPIError, PyHTTPException as HTTPException,
+            PyPydanticV1NotSupportedError as PydanticV1NotSupportedError,
+            PyRequestValidationError as RequestValidationError,
+            PyResponseValidationError as ResponseValidationError,
+            PyValidationException as ValidationException,
+            PyWebSocketException as WebSocketException,
+            PyWebSocketRequestValidationError as WebSocketRequestValidationError,
+        };
+    }
+
+    #[pymodule]
+    mod params {
+        #[pymodule_export]
+        use crate::params::{
+            PyBody as Body, PyCookie as Cookie, PyDepends as Depends, PyFile as File,
+            PyForm as Form, PyHeader as Header, PyPath as Path, PyQuery as Query,
+            PySecurity as Security, Undefined, Unset,
+        };
+    }
+
+    #[pymodule]
+    mod request {
+        #[pymodule_export]
+        use crate::request::{
+            PyAppInfo as AppInfo, PyClientInfo as ClientInfo, PyHTTPConnection as HTTPConnection,
+            PyRequest as Request,
+        };
+    }
+
+    #[pymodule]
+    mod requests {
+        #[pymodule_export]
+        use crate::request::{
+            PyAppInfo as AppInfo, PyClientInfo as ClientInfo, PyHTTPConnection as HTTPConnection,
+            PyRequest as Request,
+        };
+    }
+
+    #[pymodule]
+    mod datastructures {
+        #[pymodule_export]
+        use crate::datastructures::PyUploadFile as UploadFile;
+    }
+
+    #[pymodule]
+    mod background {
+        #[pymodule_export]
+        use crate::background::PyBackgroundTasks as BackgroundTasks;
+    }
+
+    #[pymodule]
+    mod security {
+        #[pymodule_export]
+        use crate::security::{
+            APIKeyCookie, APIKeyHeader, APIKeyQuery, HTTPAuthorizationCredentials, HTTPBasic,
+            HTTPBasicCredentials, HTTPBearer, OAuth2PasswordBearer,
+            PySecurityScopes as SecurityScopes,
+        };
+    }
+
+    #[pymodule]
+    mod staticfiles {
+        #[pymodule_export]
+        use crate::staticfiles::PyStaticFiles as StaticFiles;
+    }
+
+    #[pymodule]
+    mod middleware {
+        use pyo3::prelude::*;
+
+        #[pymodule_export]
+        use crate::middleware::{
+            CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
             TrustedHostMiddleware,
-            GZipMiddleware,
-            SessionMiddleware
-        )
-    );
+        };
 
-    submodule!(m, "middleware.cors", add_classes!(CORSMiddleware));
-    submodule!(m, "prometheus", add_classes!(PyInstrumentator));
-    m.add(
-        "Instrumentator",
-        m.getattr("prometheus")?.getattr("Instrumentator")?,
-    )?;
-    submodule!(m, "websocket", add_classes!(PyWebSocket));
+        #[pymodule]
+        mod cors {
 
-    status::create_status_submodule(m)?;
-    pydantic::register_pydantic_integration(m)?;
-    register_rsloop_asyncio_alias(m)?;
+            #[pymodule_export]
+            use crate::middleware::CORSMiddleware;
+        }
+    }
 
-    m.add(
-        "SecurityScopes",
-        m.getattr("security")?.getattr("SecurityScopes")?,
-    )?;
-    m.add(
-        "OAuth2PasswordBearer",
-        m.getattr("security")?.getattr("OAuth2PasswordBearer")?,
-    )?;
-    m.add("HTTPBearer", m.getattr("security")?.getattr("HTTPBearer")?)?;
-    m.add("HTTPBasic", m.getattr("security")?.getattr("HTTPBasic")?)?;
-    m.add(
-        "APIKeyHeader",
-        m.getattr("security")?.getattr("APIKeyHeader")?,
-    )?;
-    m.add(
-        "APIKeyQuery",
-        m.getattr("security")?.getattr("APIKeyQuery")?,
-    )?;
-    m.add(
-        "APIKeyCookie",
-        m.getattr("security")?.getattr("APIKeyCookie")?,
-    )?;
-    m.add("Depends", m.getattr("params")?.getattr("Depends")?)?;
-    m.add("Query", m.getattr("params")?.getattr("Query")?)?;
-    m.add("Path", m.getattr("params")?.getattr("Path")?)?;
-    m.add("Body", m.getattr("params")?.getattr("Body")?)?;
-    m.add(
-        "HTTPException",
-        m.getattr("exceptions")?.getattr("HTTPException")?,
-    )?;
-    m.add(
-        "BackgroundTasks",
-        m.getattr("background")?.getattr("BackgroundTasks")?,
-    )?;
-    m.add("Header", m.getattr("params")?.getattr("Header")?)?;
-    m.add("Cookie", m.getattr("params")?.getattr("Cookie")?)?;
-    m.add("Form", m.getattr("params")?.getattr("Form")?)?;
-    m.add("File", m.getattr("params")?.getattr("File")?)?;
-    m.add("Security", m.getattr("params")?.getattr("Security")?)?;
-    m.add(
-        "StaticFiles",
-        m.getattr("staticfiles")?.getattr("StaticFiles")?,
-    )?;
-    m.add(
-        "UploadFile",
-        m.getattr("datastructures")?.getattr("UploadFile")?,
-    )?;
-    m.add_class::<PyAPIRouter>()?;
+    #[pymodule]
+    mod prometheus {
+        #[pymodule_export]
+        use crate::engine::metrics::PyInstrumentator as Instrumentator;
+    }
 
-    Ok(())
+    #[pymodule]
+    mod websocket {
+        #[pymodule_export]
+        use crate::websocket::PyWebSocket as WebSocket;
+    }
+
+    #[pymodule_init]
+    fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        let py = m.py();
+        m.setattr("__package__", "fastrapi")?;
+        m.setattr("__path__", PyList::empty(py))?;
+
+        crate::status::create_status_submodule(m)?;
+        crate::pydantic::register_pydantic_integration(m)?;
+        super::register_rsloop_asyncio_alias(m)?;
+
+        Ok(())
+    }
 }

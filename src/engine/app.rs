@@ -1,22 +1,16 @@
+use super::server;
+pub use super::types::{FastrAPI, FrontendMount, StaticMount};
+use crate::decorators::PyAPIRouter;
+use crate::http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware};
+use crate::http::staticfiles::PyStaticFiles;
+use crate::routing::types::HttpMethod;
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyCFunction, PyDict, PyString, PyTuple};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use tracing::info;
-
-use super::server;
-pub use super::types::{FastrAPI, FrontendMount, StaticMount};
-use crate::decorators::PyAPIRouter;
-use crate::globals::{MIDDLEWARE_COUNTER, MIDDLEWARES};
-use crate::http::middleware::{
-    PyMiddleware, parse_cors_params, parse_gzip_params, parse_https_redirect_params,
-    parse_session_params, parse_trusted_host_params,
-};
-use crate::http::staticfiles::PyStaticFiles;
-use crate::routing::types::HttpMethod;
 
 #[pymethods]
 impl FastrAPI {
@@ -123,13 +117,14 @@ impl FastrAPI {
         request_id_header: Option<String>,
         powered_by_header: Option<String>,
     ) -> PyResult<Self> {
-        let default_response_class = default_response_class.unwrap_or_else(|| {
-            py.import(intern!(py, "fastrapi"))
+        let default_response_class = match default_response_class {
+            Some(c) => c,
+            None => py
+                .import(intern!(py, "fastrapi"))
                 .and_then(|m| m.getattr(intern!(py, "responses")))
                 .and_then(|r| r.getattr(intern!(py, "JSONResponse")))
-                .map(|obj| obj.unbind())
-                .unwrap()
-        });
+                .map(|obj| obj.unbind())?,
+        };
         let generate_unique_id_function = match generate_unique_id_function {
             Some(func) => func,
             None => py
@@ -190,11 +185,7 @@ impl FastrAPI {
             static_mounts: Vec::new(),
             frontend_mounts: Vec::new(),
             prometheus_config: None,
-            cors_config: None,
-            trusted_host_config: None,
-            https_redirect_config: None,
-            gzip_config: None,
-            session_config: None,
+            middlewares: MiddlewareContainer::default(),
             router: base_router,
         })
     }
@@ -202,44 +193,40 @@ impl FastrAPI {
     #[pyo3(signature = (middleware_class, **kwargs))]
     fn add_middleware(
         &mut self,
-        py: Python,
-        middleware_class: Py<PyAny>,
+        middleware_class: &Bound<'_, PyAny>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let class_name_obj = middleware_class.bind(py).getattr(intern!(py, "__name__"))?;
-        let class_name = class_name_obj.cast::<PyString>()?.to_str()?.to_owned();
+        let class_name =
+            middleware_class.getattr(pyo3::intern!(middleware_class.py(), "__name__"))?;
+        let class_name = class_name.cast::<PyString>()?.to_str()?;
 
-        let opts = &kwargs.cloned().unwrap_or_else(|| PyDict::new(py));
-        match class_name.as_str() {
-            "CORSMiddleware" => {
-                self.cors_config = Some(parse_cors_params(opts)?);
-                info!("Enabled CORSMiddleware");
+        let empty_dict;
+        let opts = match kwargs {
+            Some(dict) => dict,
+            None => {
+                empty_dict = PyDict::new(middleware_class.py());
+                &empty_dict
             }
-            "TrustedHostMiddleware" => {
-                self.trusted_host_config = Some(parse_trusted_host_params(opts)?);
-                info!("Enabled TrustedHostMiddleware");
-            }
-            "HTTPSRedirectMiddleware" => {
-                self.https_redirect_config = Some(parse_https_redirect_params(opts)?);
-                info!("Enabled HTTPSRedirectMiddleware");
-            }
-            "GZipMiddleware" => {
-                self.gzip_config = Some(parse_gzip_params(opts)?);
-                info!("Enabled GZipMiddleware");
-            }
-            "SessionMiddleware" => {
-                self.session_config = Some(parse_session_params(opts)?);
-                info!("Enabled SessionMiddleware");
-            }
-            _ => {
-                let msg = format!(
-                    "Middleware '{}' is not supported. Only CORSMiddleware, TrustedHostMiddleware, HTTPSRedirectMiddleware, GZipMiddleware, and SessionMiddleware are allowed via add_middleware.",
-                    class_name
-                );
-                return Err(pyo3::exceptions::PyValueError::new_err(msg));
-            }
+        };
+
+        if let Some(builder) = MIDDLEWARE_REGISTRY.get(class_name) {
+            builder.parse_kwargs(opts, &mut self.middlewares)?;
+            info!("Enabled {class_name}");
+            Ok(())
+        } else {
+            let names = MIDDLEWARE_REGISTRY.supported_names();
+            let msg = if names.len() > 1 {
+                let (last, rest) = names.split_last().unwrap();
+                format!(
+                    "Middleware '{class_name}' is not supported. Only {}, and {} are allowed via add_middleware.",
+                    rest.join(", "),
+                    last
+                )
+            } else {
+                format!("Middleware '{class_name}' is not supported.")
+            };
+            Err(PyValueError::new_err(msg))
         }
-        Ok(())
     }
 
     #[pyo3(signature = (path))]
@@ -319,19 +306,18 @@ impl FastrAPI {
     }
 
     // decorator for generic Python functions: @app.middleware("smtg")
-    fn middleware(&self, py: Python, middleware_type: String) -> PyResult<Py<PyAny>> {
+    fn middleware(slf: Py<Self>, py: Python<'_>, middleware_type: String) -> PyResult<Py<PyAny>> {
         let decorator = move |args: &Bound<'_, PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.unbind(); // 0th item is the function being decorated
             let py_middleware = PyMiddleware::new(func.clone_ref(py));
-            let id = MIDDLEWARE_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let middleware_id = format!("{}_{}", middleware_type, id);
-            MIDDLEWARES
-                .pin()
-                .insert(middleware_id.clone(), Arc::new(py_middleware));
-            info!("🔗 Registered middleware: {}", middleware_id);
+            slf.borrow_mut(py)
+                .middlewares
+                .py_middlewares
+                .push(Arc::new(py_middleware));
+            info!("🔗 Registered {} middleware", middleware_type);
             Ok(func)
         };
         PyCFunction::new_closure(
@@ -357,6 +343,9 @@ impl FastrAPI {
         reload_tick: u64,
         reload_ignore_worker_failure: bool,
     ) -> PyResult<()> {
+        const VERSION: &str = env!("CARGO_PKG_VERSION");
+        println!("running on FastRAPI v{}", VERSION);
+
         if reload && std::env::var_os("FASTRAPI_RELOAD_CHILD").is_none() {
             server::serve_with_reload(
                 py,
@@ -372,22 +361,20 @@ impl FastrAPI {
         }
     }
 
-    #[pyo3(signature = (router, *, prefix="".to_string(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (router, *, prefix="", tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
     fn include_router(
         &self,
-        py: Python<'_>,
-        router: Py<PyAPIRouter>,
-        prefix: String,
-        tags: Option<Py<PyAny>>,
-        dependencies: Option<Py<PyAny>>,
-        responses: Option<Py<PyAny>>,
+        router: &Bound<'_, PyAPIRouter>,
+        prefix: &str,
+        tags: Option<&Bound<'_, pyo3::PyAny>>,
+        dependencies: Option<&Bound<'_, pyo3::PyAny>>,
+        responses: Option<&Bound<'_, pyo3::PyAny>>,
         deprecated: Option<bool>,
         include_in_schema: bool,
-        default_response_class: Option<Py<PyAny>>,
-        generate_unique_id_function: Option<Py<PyAny>>,
+        default_response_class: Option<&Bound<'_, pyo3::PyAny>>,
+        generate_unique_id_function: Option<&Bound<'_, pyo3::PyAny>>,
     ) -> PyResult<()> {
-        self.router.bind(py).borrow().include_router(
-            py,
+        self.router.bind(router.py()).borrow().include_router(
             router,
             prefix,
             tags,
@@ -403,19 +390,17 @@ impl FastrAPI {
     #[pyo3(signature = (prefix, router, *, tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
     fn nest(
         &self,
-        py: Python<'_>,
-        prefix: String,
-        router: Py<PyAPIRouter>,
-        tags: Option<Py<PyAny>>,
-        dependencies: Option<Py<PyAny>>,
-        responses: Option<Py<PyAny>>,
+        prefix: &str,
+        router: &Bound<'_, PyAPIRouter>,
+        tags: Option<&Bound<'_, pyo3::PyAny>>,
+        dependencies: Option<&Bound<'_, pyo3::PyAny>>,
+        responses: Option<&Bound<'_, pyo3::PyAny>>,
         deprecated: Option<bool>,
         include_in_schema: bool,
-        default_response_class: Option<Py<PyAny>>,
-        generate_unique_id_function: Option<Py<PyAny>>,
+        default_response_class: Option<&Bound<'_, pyo3::PyAny>>,
+        generate_unique_id_function: Option<&Bound<'_, pyo3::PyAny>>,
     ) -> PyResult<()> {
         self.include_router(
-            py,
             router,
             prefix,
             tags,

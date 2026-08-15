@@ -1,25 +1,3 @@
-macro_rules! set_field {
-    ($kwargs:expr, $config:expr, $key:expr, $field:ident : $ty:ty) => {
-        if let Some(val) = $kwargs.get_item($key)? {
-            if !val.is_none() {
-                if let Ok(parsed) = val.extract::<$ty>() {
-                    $config.$field = parsed;
-                }
-            }
-        }
-    };
-    // variant for Option types
-    ($kwargs:expr, $config:expr, $key:expr, $field:ident : Option<$ty:ty>) => {
-        if let Some(val) = $kwargs.get_item($key)? {
-            if !val.is_none() {
-                if let Ok(parsed) = val.extract::<$ty>() {
-                    $config.$field = Some(parsed);
-                }
-            }
-        }
-    };
-}
-
 use crate::http::responses::convert_auto_response;
 use axum::{
     extract::Request,
@@ -36,13 +14,18 @@ pub mod cors;
 pub mod gzip;
 pub mod httpsredirect;
 mod rate_limit;
+pub mod registry;
 mod session;
 mod trustedhost;
 
+use axum::http::HeaderMap;
 pub use cors::{CORSMiddleware, build_cors_layer, parse_cors_params};
 pub use gzip::{GZipMiddleware, parse_gzip_params};
 pub use httpsredirect::{HTTPSRedirectMiddleware, parse_https_redirect_params};
 pub use rate_limit::rate_limit;
+pub use registry::{
+    MIDDLEWARE_REGISTRY, MiddlewareBuilder, MiddlewareContainer, MiddlewareRegistry,
+};
 pub use session::{SessionMiddleware, parse_session_params};
 pub use trustedhost::{TrustedHostMiddleware, parse_trusted_host_params};
 
@@ -61,7 +44,7 @@ struct PyRequestInfo {
     method: String,
     path: String,
     query: String,
-    headers: Vec<(String, String)>,
+    headers: HeaderMap,
 }
 
 enum MiddlewareDecision {
@@ -86,29 +69,47 @@ pub async fn execute_py_middlewares(
         method: request.method().as_str().to_string(),
         path: request.uri().path().to_string(),
         query: request.uri().query().unwrap_or("").to_string(),
-        headers: request
-            .headers()
-            .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.to_string(), val.to_string())))
-            .collect(),
+        headers: request.headers().clone(),
     };
 
     let result = tokio::task::spawn_blocking(move || {
         Python::attach(|py| {
             let py_dict = PyDict::new(py);
-            py_dict.set_item("method", req_info.method).ok();
-            py_dict.set_item("path", req_info.path).ok();
-            py_dict.set_item("query", req_info.query).ok();
 
+            let scope_dict = PyDict::new(py);
+            scope_dict
+                .set_item("type", "http")
+                .expect("Failed to set item");
+            scope_dict
+                .set_item("method", &req_info.method)
+                .expect("Failed to set item");
+            scope_dict
+                .set_item("path", &req_info.path)
+                .expect("Failed to set item");
+            scope_dict
+                .set_item(
+                    "query_string",
+                    pyo3::types::PyBytes::new(py, req_info.query.as_bytes()),
+                )
+                .expect("Failed to set item");
             let headers_dict = PyDict::new(py);
-            req_info.headers.into_iter().for_each(|(k, v)| {
-                let _ = headers_dict.set_item(k, v);
-            });
+            for (k, v) in req_info.headers.iter() {
+                headers_dict
+                    .set_item(
+                        pyo3::types::PyBytes::new(py, k.as_str().as_bytes()),
+                        pyo3::types::PyBytes::new(py, v.as_bytes()),
+                    )
+                    .expect("Failed to set item");
+            }
+            scope_dict.set_item("headers", &headers_dict).ok();
+            py_dict.set_item("scope", scope_dict).ok();
             py_dict.set_item("headers", headers_dict).ok();
+            py_dict.set_item("method", &req_info.method).ok();
+            py_dict.set_item("path", &req_info.path).ok();
 
             for middleware in middlewares.iter() {
                 let middleware_func = middleware.func.bind(py);
-                match middleware_func.as_borrowed().call1((&py_dict,)) {
+                match middleware_func.call1((&py_dict,)) {
                     Ok(result) => {
                         if !result.is_none() {
                             return MiddlewareDecision::Respond(convert_auto_response(py, &result));

@@ -1,37 +1,26 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use smart_default::SmartDefault;
 
-#[pyclass(name = "TrustedHostMiddleware", skip_from_py_object)]
-#[derive(Clone, Debug)]
+#[pyclass(
+    frozen,
+    name = "TrustedHostMiddleware",
+    get_all,
+    from_py_object,
+    eq,
+    new = "from_fields"
+)]
+#[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct TrustedHostMiddleware {
+    #[default(vec!["*".to_string()])]
     pub allowed_hosts: Vec<String>,
+
+    #[default(true)]
     pub www_redirect: bool,
 }
 
-impl Default for TrustedHostMiddleware {
-    fn default() -> Self {
-        Self {
-            allowed_hosts: vec!["*".to_string()],
-            www_redirect: true,
-        }
-    }
-}
-
-#[pymethods]
-impl TrustedHostMiddleware {
-    #[new]
-    #[pyo3(signature = (allowed_hosts=None, www_redirect=true))]
-    fn new(allowed_hosts: Option<Vec<String>>, www_redirect: bool) -> Self {
-        Self {
-            allowed_hosts: allowed_hosts.unwrap_or_else(|| vec!["*".to_string()]),
-            www_redirect,
-        }
-    }
-}
-
 pub fn parse_trusted_host_params(kwargs: &Bound<'_, PyDict>) -> PyResult<TrustedHostMiddleware> {
-    let mut config = TrustedHostMiddleware::default();
-    set_field!(kwargs, config, "allowed_hosts", allowed_hosts: Vec<String>);
-    set_field!(kwargs, config, "www_redirect", www_redirect: bool);
-    Ok(config)
+    kwargs
+        .extract::<TrustedHostMiddleware>()
+        .map_err(Into::into)
 }

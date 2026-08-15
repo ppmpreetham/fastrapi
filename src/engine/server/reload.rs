@@ -55,7 +55,6 @@ pub(crate) fn run_reload_supervisor(
                 if !reload_event_matches(&event, &config, &ignore_globs) {
                     continue;
                 }
-                println!("");
                 println!("Python file change detected, restarting server...");
                 stop_child(&mut child);
                 child = spawn_reload_child(executable, argv).map_err(|err| err.to_string())?;
@@ -175,10 +174,10 @@ pub(crate) fn resolve_reload_dirs(
     }
 
     let script = PathBuf::from(script_path);
-    if let Some(parent) = script.parent() {
-        if !parent.as_os_str().is_empty() {
-            return vec![parent.to_path_buf()];
-        }
+    if let Some(parent) = script.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        return vec![parent.to_path_buf()];
     }
 
     std::env::current_dir()

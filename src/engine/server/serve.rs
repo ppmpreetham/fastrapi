@@ -6,7 +6,6 @@ use crate::engine::types::FastrAPI;
 use axum::serve::ListenerExt;
 use pyo3::{exceptions::PyRuntimeError, intern, prelude::*};
 use std::{path::PathBuf, sync::Arc};
-use tokio::net::TcpListener;
 use tracing::{Level, error, info};
 
 use crate::globals::PYTHON_RUNTIME;
@@ -20,9 +19,8 @@ pub struct AppState {
     pub max_field_size: Option<usize>,
     pub max_file_size: Option<usize>,
     pub reject_unknown_multipart_fields: bool,
-    pub root_path: String,
+    pub root_path: Arc<str>,
 }
-const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn serve(
     py: Python<'_>,
@@ -30,8 +28,6 @@ pub fn serve(
     port: Option<u16>,
     app: Py<FastrAPI>,
 ) -> PyResult<()> {
-    println!("running on FastRAPI v{}", VERSION);
-
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .with_target(false)
@@ -53,7 +49,7 @@ pub fn serve(
         max_field_size: app_config.max_field_size,
         max_file_size: app_config.max_file_size,
         reject_unknown_multipart_fields: app_config.reject_unknown_multipart_fields,
-        root_path: app_config.root_path.clone(),
+        root_path: app_config.root_path.trim_end_matches('/').into(),
     };
 
     let docs_url = app_config.docs_url.clone();
@@ -75,7 +71,7 @@ pub fn serve(
     let redoc_url = app_config.redoc_url.clone();
     let scalar_url = app_config.scalar_url.clone();
     let elements_url = app_config.elements_url.clone();
-    let router = build_router(py, app_state.clone(), docs_url, openapi_url, &app_config);
+    let router = build_router(py, app_state, docs_url, openapi_url, &app_config);
     drop(app_config);
 
     let server_thread = std::thread::spawn(move || {
@@ -91,9 +87,9 @@ pub fn serve(
         };
         let addr = format!("{}:{}", host, port);
         let server_result = PYTHON_RUNTIME.block_on(async move {
-            let listener = TcpListener::bind(&addr)
+            let listener = tokio::net::TcpListener::bind(&addr)
                 .await
-                .map_err(|err| err.to_string())?;
+                .unwrap_or_else(|err| panic!("Failed to bind to {}: {}", addr, err));
 
             info!("🚀 FastrAPI running at http://{}", addr);
             if let Some(docs) = &docs_url_for_log {
@@ -156,8 +152,6 @@ pub fn serve_with_reload(
     reload_tick: u64,
     reload_ignore_worker_failure: bool,
 ) -> PyResult<()> {
-    println!("running on FastRAPI v{}", VERSION);
-
     let sys = py.import(intern!(py, "sys"))?;
     let executable: String = sys.getattr(intern!(py, "executable"))?.extract()?;
     let argv: Vec<String> = sys.getattr(intern!(py, "argv"))?.extract()?;

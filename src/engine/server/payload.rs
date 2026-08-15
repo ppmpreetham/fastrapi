@@ -1,13 +1,13 @@
 use super::serve::*;
 
+use crate::routing::types::{BodyField, BodyPayload, RouteHandler, UploadedFile};
+use ahash::AHashMap;
 use axum::{
     body::{Body, to_bytes},
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
-use pyo3::{intern, prelude::*};
-
-use crate::routing::types::{BodyField, BodyPayload, RouteHandler, UploadedFile};
+use futures_util::StreamExt;
 
 pub(crate) async fn extract_payload(
     headers: &HeaderMap,
@@ -15,22 +15,10 @@ pub(crate) async fn extract_payload(
     handler: &RouteHandler,
     state: &AppState,
 ) -> Result<Option<BodyPayload>, Response> {
-    let body = to_bytes(body, state.max_body_size.unwrap_or(usize::MAX))
-        .await
-        .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response())?;
-    if body.is_empty() {
-        return Ok(None);
-    }
-
     let content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-
-    if content_type.starts_with("application/x-www-form-urlencoded") {
-        return parse_urlencoded_form(&body, state.max_field_size)
-            .map(|form| Some(BodyPayload::Form(form)));
-    }
 
     if content_type.starts_with("multipart/form-data") {
         return parse_multipart_form(body, content_type, handler, state)
@@ -38,10 +26,19 @@ pub(crate) async fn extract_payload(
             .map(|form| Some(BodyPayload::Form(form)));
     }
 
-    let defer_json_parse = handler.body_param_indices.len() == 1
-        && handler.parsed_params[handler.body_param_indices[0]].is_pydantic_model;
+    let body = to_bytes(body, state.max_body_size.unwrap_or(usize::MAX))
+        .await
+        .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response())?;
+    if body.is_empty() {
+        return Ok(None);
+    }
 
-    if defer_json_parse {
+    if content_type.starts_with("application/x-www-form-urlencoded") {
+        return parse_urlencoded_form(&body, state.max_field_size)
+            .map(|form| Some(BodyPayload::Form(form)));
+    }
+
+    if handler.validation.defer_json_parse {
         return Ok(Some(BodyPayload::Json {
             raw: body,
             value: None,
@@ -59,10 +56,10 @@ pub(crate) async fn extract_payload(
 pub(crate) fn parse_urlencoded_form(
     body: &[u8],
     max_field_size: Option<usize>,
-) -> Result<ahash::AHashMap<String, BodyField>, Response> {
+) -> Result<AHashMap<String, BodyField>, Response> {
     let raw = std::str::from_utf8(body)
         .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid form body").into_response())?;
-    let mut form = ahash::AHashMap::new();
+    let mut form = AHashMap::new();
 
     form_urlencoded::parse(raw.as_bytes()).try_for_each(
         |(key, value)| -> Result<(), Response> {
@@ -78,21 +75,21 @@ pub(crate) fn parse_urlencoded_form(
 
     Ok(form)
 }
+
 pub(crate) async fn parse_multipart_form(
-    body: bytes::Bytes,
+    body: Body,
     content_type: &str,
     handler: &RouteHandler,
     state: &AppState,
-) -> Result<ahash::AHashMap<String, BodyField>, Response> {
+) -> Result<AHashMap<String, BodyField>, Response> {
     let boundary = multer::parse_boundary(content_type)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Missing multipart boundary").into_response())?;
-    let stream =
-        futures_util::stream::once(
-            async move { Ok::<bytes::Bytes, std::convert::Infallible>(body) },
-        );
+    let stream = body
+        .into_data_stream()
+        .map(|res| res.map_err(|e| e.to_string()));
     let constraints = multipart_constraints(handler, state);
     let mut multipart = multer::Multipart::with_constraints(stream, boundary, constraints);
-    let mut form = ahash::AHashMap::new();
+    let mut form = AHashMap::new();
 
     while let Some(field) = multipart
         .next_field()
@@ -148,35 +145,41 @@ pub(crate) fn multipart_constraints(
         size_limit = size_limit.whole_stream(limit as u64);
     }
 
-    match (state.max_field_size, state.max_file_size) {
-        (Some(field), Some(file)) => {
-            size_limit = size_limit.per_field(field.max(file) as u64);
-        }
-        (Some(field), None) => {
-            size_limit = size_limit.per_field(field as u64);
-        }
-        (None, Some(file)) => {
-            size_limit = size_limit.per_field(file as u64);
-        }
-        (None, None) => {}
+    if let Some(limit) = state
+        .max_field_size
+        .into_iter()
+        .chain(state.max_file_size)
+        .max()
+    {
+        size_limit = size_limit.per_field(limit as u64);
     }
 
-    let mut allowed = Vec::new();
+    let allowed: Vec<String> = handler
+        .payload
+        .parsed_params
+        .iter()
+        .filter(|p| matches!(p.source, crate::routing::types::ParameterSource::Body))
+        .flat_map(|param| {
+            if param.external_name != param.name {
+                vec![param.external_name.clone(), param.name.clone()]
+            } else {
+                vec![param.external_name.clone()]
+            }
+        })
+        .collect();
+
     for param in handler
+        .payload
         .parsed_params
         .iter()
         .filter(|p| matches!(p.source, crate::routing::types::ParameterSource::Body))
     {
-        allowed.push(param.external_name.clone());
-        if param.external_name != param.name {
-            allowed.push(param.name.clone());
-        }
-
-        let limit = if is_file_param(param) {
+        let limit = if param.is_file {
             state.max_file_size
         } else {
             state.max_field_size
         };
+
         if let Some(limit) = limit {
             size_limit = size_limit.for_field(param.external_name.clone(), limit as u64);
             if param.external_name != param.name {
@@ -190,38 +193,4 @@ pub(crate) fn multipart_constraints(
         constraints = constraints.allowed_fields(allowed);
     }
     constraints
-}
-
-pub(crate) fn is_file_param(param: &crate::routing::types::ParsedParameter) -> bool {
-    let default_is_file = param
-        .param_object
-        .as_ref()
-        .and_then(|obj| {
-            Python::attach(|py| {
-                obj.bind(py)
-                    .get_type()
-                    .name()
-                    .ok()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-        })
-        .map(|name| name == "File")
-        .unwrap_or(false);
-
-    let annotation_is_upload = param
-        .annotation
-        .as_ref()
-        .and_then(|annotation| {
-            Python::attach(|py| {
-                annotation
-                    .bind(py)
-                    .getattr(intern!(py, "__name__"))
-                    .ok()
-                    .and_then(|name| name.extract::<String>().ok())
-            })
-        })
-        .map(|name| name.contains("UploadFile"))
-        .unwrap_or(false);
-
-    default_is_file || annotation_is_upload
 }

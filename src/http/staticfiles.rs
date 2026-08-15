@@ -1,16 +1,12 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
-#[pyclass(name = "StaticFiles", skip_from_py_object)]
-#[derive(Clone)]
+#[pyclass(frozen, name = "StaticFiles", get_all, from_py_object, eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PyStaticFiles {
-    #[pyo3(get)]
     pub directory: String,
-    #[pyo3(get)]
     pub html: bool,
-    #[pyo3(get)]
     pub check_dir: bool,
-    #[pyo3(get)]
     pub follow_symlink: bool,
 }
 

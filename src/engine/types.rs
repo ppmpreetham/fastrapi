@@ -1,33 +1,37 @@
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
+use smart_default::SmartDefault;
 
-use crate::{
-    decorators::PyAPIRouter,
-    http::middleware::{
-        CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
-        TrustedHostMiddleware,
-    },
-};
+use crate::{decorators::PyAPIRouter, http::middleware::MiddlewareContainer};
 
-#[derive(Clone)]
+#[pyclass(frozen, new = "from_fields", get_all, from_py_object, eq)]
+#[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct StaticMount {
     pub path: String,
     pub directory: String,
+    #[default(false)]
     pub html: bool,
+    #[default(false)]
     pub follow_symlink: bool,
+    #[default(None)]
     pub name: Option<String>,
 }
 
-#[derive(Clone)]
+#[pyclass(frozen, new = "from_fields", get_all, from_py_object, eq)]
+#[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct FrontendMount {
     pub path: String,
     pub directory: String,
+    #[default(Some("auto".to_string()))]
     pub fallback: Option<String>,
+    #[default(true)]
     pub check_dir: bool,
 }
 
-#[derive(Clone)]
+#[pyclass(frozen, new = "from_fields", get_all, from_py_object, eq)]
+#[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct PrometheusConfig {
+    #[default("/metrics".to_string())]
     pub metrics_path: String,
 }
 
@@ -129,17 +133,11 @@ pub struct FastrAPI {
     pub request_id_header: Option<String>,
     #[pyo3(get, set)]
     pub powered_by_header: Option<String>,
-    pub static_mounts: Vec<StaticMount>,
-    pub frontend_mounts: Vec<FrontendMount>,
-    pub prometheus_config: Option<PrometheusConfig>,
-
-    // CORS for rust side of things
-    pub cors_config: Option<CORSMiddleware>,
-    pub trusted_host_config: Option<TrustedHostMiddleware>,
-    pub https_redirect_config: Option<HTTPSRedirectMiddleware>,
-    pub gzip_config: Option<GZipMiddleware>,
-    pub session_config: Option<SessionMiddleware>,
-
-    #[pyo3(get)]
+    #[pyo3(get, set)]
     pub router: Py<PyAPIRouter>,
+
+    pub(crate) static_mounts: Vec<StaticMount>,
+    pub(crate) frontend_mounts: Vec<FrontendMount>,
+    pub(crate) prometheus_config: Option<PrometheusConfig>,
+    pub(crate) middlewares: MiddlewareContainer,
 }

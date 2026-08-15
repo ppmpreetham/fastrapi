@@ -29,41 +29,24 @@ use tower_http::{
 use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer, cookie::Key};
 use tracing::info;
 
+use crate::match_method_router;
 use crate::{
-    ffi::py_handlers::{
-        ExecutionMode, render_no_request_json_response, render_no_request_response,
-        run_py_handler_no_request,
-    },
-    globals::{MIDDLEWARES, PYTHON_RUNTIME},
+    engine::metrics::prometheus_handle,
+    globals::PYTHON_RUNTIME,
     http::{
-        middleware::{
-            CORSMiddleware, GZipMiddleware, HTTPSRedirectMiddleware, SessionMiddleware,
-            TrustedHostMiddleware, build_cors_layer, parse_cors_params, parse_gzip_params,
-            parse_https_redirect_params, parse_session_params, parse_trusted_host_params,
-        },
+        middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware, build_cors_layer},
         websocket::ws_handler,
     },
     routing::{
-        prometheus::prometheus_handle,
-        router::FrozenRouterBuilder,
-        types::{HttpMethod, RouteHandler},
+        router::{FrozenRouter, FrozenRouterBuilder},
+        types::{HttpMethod, RouteEntry, RouteHandler, WebSocketEntry},
     },
-    utils::{local_guard, openapi::build_openapi_spec, py_any_to_json},
+    runtime::executor::{
+        ExecutionMode, render_no_request_json_response, render_no_request_response,
+        run_py_handler_no_request,
+    },
+    utils::{openapi::build_openapi_spec, py_any_to_json},
 };
-
-macro_rules! match_method_router {
-    ($method:expr, $handler:expr) => {
-        match $method {
-            HttpMethod::GET => get($handler),
-            HttpMethod::POST => post($handler),
-            HttpMethod::PUT => put($handler),
-            HttpMethod::DELETE => delete($handler),
-            HttpMethod::PATCH => patch($handler),
-            HttpMethod::OPTIONS => options($handler),
-            HttpMethod::HEAD => head($handler),
-        }
-    };
-}
 
 pub(crate) fn build_router(
     py: Python,
@@ -72,23 +55,8 @@ pub(crate) fn build_router(
     openapi_url: String,
     app_config: &FastrAPI,
 ) -> Router {
-    let mut app = Router::new();
-
-    let mut session_config = app_config.session_config.clone();
-    let mut gzip_config = app_config.gzip_config.clone();
-    let mut cors_config = app_config.cors_config.clone();
-    let mut trusted_host_config = app_config.trusted_host_config.clone();
-    let mut https_redirect_config = app_config.https_redirect_config.clone();
-
-    merge_declared_middlewares(
-        py,
-        app_config,
-        &mut cors_config,
-        &mut trusted_host_config,
-        &mut https_redirect_config,
-        &mut gzip_config,
-        &mut session_config,
-    );
+    let mut middlewares = app_config.middlewares.clone();
+    merge_declared_middlewares(py, app_config, &mut middlewares);
 
     let base_router = app_config.router.bind(py);
     let base_ref = base_router.borrow();
@@ -99,61 +67,59 @@ pub(crate) fn build_router(
     flat.0.iter().for_each(|route| {
         frozen_router_builder.add_route(route.method, route.path.clone(), route.handler.clone());
     });
-
     let frozen_router = Arc::new(frozen_router_builder.build());
+
+    let app = Router::new();
+    let app = register_routes(app, py, &app_state, app_config, &flat, frozen_router);
+    let app = register_docs_endpoints(app, py, app_config, docs_url.as_deref(), &openapi_url);
+    apply_middleware_stack(app, app_config, &middlewares)
+}
+
+pub(crate) fn register_routes(
+    mut app: Router,
+    py: Python<'_>,
+    app_state: &AppState,
+    app_config: &FastrAPI,
+    flat: &(Vec<RouteEntry>, Vec<WebSocketEntry>),
+    frozen_router: Arc<FrozenRouter>,
+) -> Router {
     let frontend_mounts = Arc::new(app_config.frontend_mounts.clone());
 
-    let mut cached_routes: AHashMap<String, MethodRouter> = AHashMap::new();
-    flat.0
-        .iter()
-        .filter(|route| {
-            route.handler.cache_response
-                && !route.path.contains('{')
-                && matches!(route.handler.execution_mode, ExecutionMode::SyncNoArgs)
-        })
-        .filter_map(|route| {
-            precompute_const_response(py, &route.handler)
-                .map(|cached| (route.path.clone(), route.method, cached))
-        })
-        .for_each(|(path, method, cached)| {
-            let method_router = cached_method_router(method, cached);
-            cached_routes
-                .entry(path)
-                .and_modify(|existing| *existing = existing.clone().merge(method_router.clone()))
-                .or_insert(method_router);
-        });
+    // 1. Cached routes
+    app = group_and_register_routes(app, &flat.0, |route| {
+        if route.handler.execution.cache_response
+            && !route.path.contains('{')
+            && matches!(
+                route.handler.execution.execution_mode,
+                ExecutionMode::SyncNoArgs
+            )
+        {
+            let cached = precompute_const_response(py, &route.handler)?;
+            Some((
+                route.path.as_str(),
+                cached_method_router(route.method, cached),
+            ))
+        } else {
+            None
+        }
+    });
 
-    app = cached_routes
-        .into_iter()
-        .fold(app, |current_app, (path, method_router)| {
-            current_app.route(&path, method_router)
-        });
-
-    let mut direct_no_request_routes: AHashMap<String, MethodRouter> = AHashMap::new();
-    flat.0
-        .iter()
-        .filter(|route| {
-            !route.handler.cache_response
-                && !route.path.contains('{')
-                && matches!(
-                    route.handler.execution_mode,
-                    ExecutionMode::SyncNoArgs | ExecutionMode::AsyncNoArgs
-                )
-        })
-        .for_each(|route| {
+    // 2. Direct no request routes
+    app = group_and_register_routes(app, &flat.0, |route| {
+        if !route.handler.execution.cache_response
+            && !route.path.contains('{')
+            && matches!(
+                route.handler.execution.execution_mode,
+                ExecutionMode::SyncNoArgs | ExecutionMode::AsyncNoArgs
+            )
+        {
             let method_router =
                 no_request_method_router(route.method, route.handler.clone(), app_state.clone());
-            direct_no_request_routes
-                .entry(route.path.clone())
-                .and_modify(|existing| *existing = existing.clone().merge(method_router.clone()))
-                .or_insert(method_router);
-        });
-
-    app = direct_no_request_routes
-        .into_iter()
-        .fold(app, |current_app, (path, method_router)| {
-            current_app.route(&path, method_router)
-        });
+            Some((route.path.as_str(), method_router))
+        } else {
+            None
+        }
+    });
 
     app = flat.1.iter().fold(app, |current_app, ws| {
         let path = ws.path.clone();
@@ -182,31 +148,54 @@ pub(crate) fn build_router(
             add_static_mount(current_app, mount)
         });
 
+    app.fallback({
+        let router = frozen_router;
+        let state = app_state.clone();
+        axum::routing::any(move |req: Request| async move {
+            match dispatch_or_not_found(router.clone(), state.clone(), req).await {
+                Ok(resp) => resp,
+                Err(req) => serve_frontend_mounts(frontend_mounts, req)
+                    .await
+                    .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response()),
+            }
+        })
+    })
+}
+
+pub(crate) fn register_docs_endpoints(
+    mut app: Router,
+    py: Python<'_>,
+    app_config: &FastrAPI,
+    docs_url: Option<&str>,
+    openapi_url: &str,
+) -> Router {
     let openapi_json = Arc::new(build_openapi_spec(py, app_config));
 
     app = app.route(
-        &openapi_url,
+        openapi_url,
         get({
-            let json = openapi_json.clone();
+            let json = openapi_json;
             move || {
                 let json = json.clone();
                 async move { Json(json.as_ref().clone()) }
             }
         }),
     );
+
     if let Some(docs) = docs_url {
-        let mut swagger_html = include_str!("../../../static/swagger-ui.html").to_string();
-        if let Some(params) = &app_config.swagger_ui_parameters {
-            let json_val = py_any_to_json(py, params.bind(py));
-            if let Ok(json_str) = sonic_rs::to_string(&json_val) {
-                swagger_html = swagger_html.replace("/* SWAGGER_UI_PARAMS */ {}", &json_str);
-            }
-        }
+        let swagger_html = if let Some(params) = &app_config.swagger_ui_parameters
+            && let Ok(json_str) = sonic_rs::to_string(&py_any_to_json(py, params.bind(py)))
+        {
+            include_str!("../../../static/swagger-ui.html")
+                .replace("/* SWAGGER_UI_PARAMS */ {}", &json_str)
+        } else {
+            include_str!("../../../static/swagger-ui.html").to_string()
+        };
         let swagger_html = Arc::new(swagger_html);
         app = app.route(
-            &docs,
+            docs,
             get({
-                let html = swagger_html.clone();
+                let html = swagger_html;
                 move || {
                     let html = html.clone();
                     async move { Html(html.as_ref().clone()) }
@@ -244,24 +233,17 @@ pub(crate) fn build_router(
         );
     }
 
-    app = app.fallback({
-        let router = frozen_router.clone();
-        let state = app_state.clone();
-        let frontend_mounts = frontend_mounts.clone();
-        axum::routing::any(move |req: Request| async move {
-            if request_matches_router(&router, &state, &req) {
-                return dispatch(router, state, req).await;
-            }
+    app
+}
 
-            serve_frontend_mounts(frontend_mounts, req)
-                .await
-                .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
-        })
-    });
-
+pub(crate) fn apply_middleware_stack(
+    mut app: Router,
+    app_config: &FastrAPI,
+    middlewares: &MiddlewareContainer,
+) -> Router {
     // L1: Sessions
-    if let Some(config) = session_config {
-        info!("???? Layer: Sessions");
+    if let Some(config) = &middlewares.session {
+        info!("🔑 Layer: Sessions");
         let key = Key::from(config.secret_key.as_bytes());
         let store = MemoryStore::default();
 
@@ -283,8 +265,8 @@ pub(crate) fn build_router(
     }
 
     // L2: GZip
-    if let Some(config) = gzip_config {
-        info!("???????  Layer: GZip (min: {} bytes)", config.minimum_size);
+    if let Some(config) = &middlewares.gzip {
+        info!("🗜️ Layer: GZip (min: {} bytes)", config.minimum_size);
         let predicate = SizeAbove::new(config.minimum_size as u16);
         app = app.layer(CompressionLayer::new().compress_when(predicate));
     }
@@ -294,27 +276,21 @@ pub(crate) fn build_router(
     }
 
     // L3: Python Middleware
-    if !MIDDLEWARES.is_empty() {
-        info!("Applying {} custom Python middleware(s)", MIDDLEWARES.len());
-
-        let guard = local_guard(&*MIDDLEWARES);
-        let middlewares = Arc::new(
-            MIDDLEWARES
-                .iter(&guard)
-                .map(|(_key, middleware_ref)| middleware_ref.clone())
-                .collect::<Vec<_>>(),
+    if !middlewares.py_middlewares.is_empty() {
+        info!(
+            "Applying {} custom Python middleware(s)",
+            middlewares.py_middlewares.len()
         );
-        app =
-            app.layer(axum_middleware::from_fn(move |req, next| {
-                let middlewares = middlewares.clone();
-                async move {
-                    crate::http::middleware::execute_py_middlewares(middlewares, req, next).await
-                }
-            }));
+
+        let py_mws = Arc::new(middlewares.py_middlewares.clone());
+        app = app.layer(axum_middleware::from_fn(move |req, next| {
+            let py_mws = py_mws.clone();
+            async move { crate::http::middleware::execute_py_middlewares(py_mws, req, next).await }
+        }));
     }
 
     // L4: HTTPS Redirect
-    if let Some(_config) = https_redirect_config {
+    if let Some(_config) = &middlewares.https_redirect {
         info!("🔗 Layer: HTTPSRedirect");
         app = app.layer(axum_middleware::from_fn(
             move |req: Request, next: Next| async move {
@@ -336,7 +312,7 @@ pub(crate) fn build_router(
                     let mut parts = uri.into_parts();
                     parts.scheme = Some(axum::http::uri::Scheme::HTTPS);
                     if let Some(host) = headers.get("host").and_then(|h| h.to_str().ok()) {
-                        parts.authority = Some(host.parse().unwrap());
+                        parts.authority = host.parse().ok();
                     }
                     if let Ok(new_uri) = axum::http::Uri::from_parts(parts) {
                         return (
@@ -354,13 +330,13 @@ pub(crate) fn build_router(
     }
 
     // L5: Trusted Host
-    if let Some(config) = trusted_host_config {
-        info!("???? Layer: TrustedHost");
+    if let Some(config) = &middlewares.trusted_host {
+        info!("🛡️ Layer: TrustedHost");
         let allow_all = config.allowed_hosts.iter().any(|host| host == "*");
 
         if !allow_all {
             let allowed: Arc<AHashSet<String>> =
-                Arc::new(config.allowed_hosts.into_iter().collect());
+                Arc::new(config.allowed_hosts.iter().cloned().collect());
             let redirect = config.www_redirect;
 
             app = app.layer(axum_middleware::from_fn(move |req: Request, next: Next| {
@@ -380,7 +356,7 @@ pub(crate) fn build_router(
                     }
 
                     if redirect && host_header.starts_with("www.") {
-                        let root = host_header.strip_prefix("www.").unwrap();
+                        let root = host_header.strip_prefix("www.").unwrap_or(host_header);
                         if allowed.contains(root) {
                             return (StatusCode::MOVED_PERMANENTLY, "Redirecting...")
                                 .into_response();
@@ -393,10 +369,10 @@ pub(crate) fn build_router(
         }
     }
 
-    // L5: CORS. Apply last so preflight can terminate before other layers.
-    if let Some(config) = cors_config {
+    // L6: CORS. apply last so preflight can terminate before other layers.
+    if let Some(config) = &middlewares.cors {
         info!("Layer: CORS");
-        match build_cors_layer(&config) {
+        match build_cors_layer(config) {
             Ok(layer) => app = app.layer(layer),
             Err(e) => eprintln!("Error building CORS layer: {:?}", e),
         }
@@ -448,11 +424,7 @@ pub(crate) fn build_router(
 pub(crate) fn merge_declared_middlewares(
     py: Python<'_>,
     app_config: &FastrAPI,
-    cors_config: &mut Option<CORSMiddleware>,
-    trusted_host_config: &mut Option<TrustedHostMiddleware>,
-    https_redirect_config: &mut Option<HTTPSRedirectMiddleware>,
-    gzip_config: &mut Option<GZipMiddleware>,
-    session_config: &mut Option<SessionMiddleware>,
+    container: &mut MiddlewareContainer,
 ) {
     let Some(middlewares) = &app_config.middleware else {
         return;
@@ -464,15 +436,7 @@ pub(crate) fn merge_declared_middlewares(
     };
 
     iter.flatten().for_each(|item| {
-        if let Err(err) = apply_declared_middleware(
-            py,
-            &item,
-            cors_config,
-            trusted_host_config,
-            https_redirect_config,
-            gzip_config,
-            session_config,
-        ) {
+        if let Err(err) = apply_declared_middleware(py, &item, container) {
             log_python_error("middleware setup failed", err);
         }
     });
@@ -481,31 +445,12 @@ pub(crate) fn merge_declared_middlewares(
 pub(crate) fn apply_declared_middleware(
     _py: Python<'_>,
     middleware_item: &Bound<'_, PyAny>,
-    cors_config: &mut Option<CORSMiddleware>,
-    trusted_host_config: &mut Option<TrustedHostMiddleware>,
-    https_redirect_config: &mut Option<HTTPSRedirectMiddleware>,
-    gzip_config: &mut Option<GZipMiddleware>,
-    session_config: &mut Option<SessionMiddleware>,
+    container: &mut MiddlewareContainer,
 ) -> PyResult<()> {
-    if let Ok(config) = middleware_item.extract::<PyRef<'_, CORSMiddleware>>() {
-        *cors_config = Some(config.clone());
-        return Ok(());
-    }
-    if let Ok(config) = middleware_item.extract::<PyRef<'_, TrustedHostMiddleware>>() {
-        *trusted_host_config = Some(config.clone());
-        return Ok(());
-    }
-    if let Ok(config) = middleware_item.extract::<PyRef<'_, HTTPSRedirectMiddleware>>() {
-        *https_redirect_config = Some(config.clone());
-        return Ok(());
-    }
-    if let Ok(config) = middleware_item.extract::<PyRef<'_, GZipMiddleware>>() {
-        *gzip_config = Some(config.clone());
-        return Ok(());
-    }
-    if let Ok(config) = middleware_item.extract::<PyRef<'_, SessionMiddleware>>() {
-        *session_config = Some(config.clone());
-        return Ok(());
+    for builder in MIDDLEWARE_REGISTRY.builders() {
+        if builder.try_from_instance(middleware_item, container)? {
+            return Ok(());
+        }
     }
 
     let Ok(cls) = middleware_item.getattr("cls") else {
@@ -523,26 +468,21 @@ pub(crate) fn apply_declared_middleware(
         .to_str()?
         .to_owned();
 
-    match class_name.as_str() {
-        "CORSMiddleware" => *cors_config = Some(parse_cors_params(kwargs)?),
-        "TrustedHostMiddleware" => *trusted_host_config = Some(parse_trusted_host_params(kwargs)?),
-        "HTTPSRedirectMiddleware" => {
-            *https_redirect_config = Some(parse_https_redirect_params(kwargs)?)
-        }
-        "GZipMiddleware" => *gzip_config = Some(parse_gzip_params(kwargs)?),
-        "SessionMiddleware" => *session_config = Some(parse_session_params(kwargs)?),
-        _ => {}
+    if let Some(builder) = MIDDLEWARE_REGISTRY.get(&class_name) {
+        builder.parse_kwargs(kwargs, container)?;
+    } else {
+        let py_middleware = PyMiddleware::new(cls.clone().unbind());
+        container.py_middlewares.push(Arc::new(py_middleware));
     }
 
     Ok(())
 }
-
 pub(crate) fn cached_method_router(
     method: HttpMethod,
     cached: Arc<CachedResponse>,
 ) -> MethodRouter {
     match_method_router!(method, {
-        let cached = cached.clone();
+        let cached = cached;
         move || {
             let cached = cached.clone();
             async move { cached.to_response() }
@@ -555,13 +495,15 @@ pub(crate) fn no_request_method_router(
     handler: Arc<crate::routing::types::RouteHandler>,
     state: AppState,
 ) -> MethodRouter {
-    if matches!(handler.execution_mode, ExecutionMode::SyncNoArgs) && !state.sync_to_threadpool {
+    if matches!(handler.execution.execution_mode, ExecutionMode::SyncNoArgs)
+        && !state.sync_to_threadpool
+    {
         return sync_no_request_method_router(method, handler);
     }
 
     match_method_router!(method, {
-        let handler = handler.clone();
-        let state = state.clone();
+        let handler = handler;
+        let state = state;
         move || {
             let handler = handler.clone();
             let state = state.clone();
@@ -582,15 +524,15 @@ pub(crate) fn sync_no_request_method_router(
     method: HttpMethod,
     handler: Arc<crate::routing::types::RouteHandler>,
 ) -> MethodRouter {
-    let use_json_fast_path = handler.response_model.is_none()
-        && handler.response_class.is_none()
+    let use_json_fast_path = handler.response.response_model.is_none()
+        && handler.response.response_class.is_none()
         && matches!(
-            handler.response_type,
+            handler.response.response_type,
             crate::types::response::ResponseType::Json
         );
 
     match_method_router!(method, {
-        let handler = handler.clone();
+        let handler = handler;
         move || {
             let handler = handler.clone();
             async move {
@@ -679,19 +621,63 @@ pub(crate) fn parse_header_value(value: &str) -> Option<HeaderValue> {
     HeaderValue::from_str(value).ok()
 }
 
+pub(crate) fn group_and_register_routes<F>(
+    mut app: Router,
+    routes: &[RouteEntry],
+    mut builder: F,
+) -> Router
+where
+    F: FnMut(&RouteEntry) -> Option<(&str, MethodRouter)>,
+{
+    let mut grouped_routes: AHashMap<&str, MethodRouter> = AHashMap::new();
+    for route in routes {
+        if let Some((path, method_router)) = builder(route) {
+            grouped_routes
+                .entry(path)
+                .and_modify(|existing| *existing = existing.clone().merge(method_router.clone()))
+                .or_insert(method_router);
+        }
+    }
+    for (path, method_router) in grouped_routes {
+        app = app.route(path, method_router);
+    }
+    app
+}
+
 pub(crate) async fn record_prometheus_metrics(req: Request, next: Next) -> Response {
-    let method = req.method().as_str().to_string();
+    let method = match *req.method() {
+        axum::http::Method::GET => "GET",
+        axum::http::Method::POST => "POST",
+        axum::http::Method::PUT => "PUT",
+        axum::http::Method::DELETE => "DELETE",
+        axum::http::Method::PATCH => "PATCH",
+        axum::http::Method::OPTIONS => "OPTIONS",
+        axum::http::Method::HEAD => "HEAD",
+        _ => "OTHER",
+    };
     let path = req.uri().path().to_string();
     let start = Instant::now();
     let response = next.run(req).await;
-    let status = response.status().as_u16().to_string();
+    let status = match response.status().as_u16() {
+        200 => "200",
+        201 => "201",
+        204 => "204",
+        400 => "400",
+        401 => "401",
+        403 => "403",
+        404 => "404",
+        422 => "422",
+        500 => "500",
+        _ => "UNKNOWN",
+    };
+
     let elapsed = start.elapsed().as_secs_f64();
 
     metrics::counter!(
         "fastrapi_requests_total",
-        "method" => method.clone(),
+        "method" => method,
         "path" => path.clone(),
-        "status" => status.clone(),
+        "status" => status,
     )
     .increment(1);
     metrics::histogram!(

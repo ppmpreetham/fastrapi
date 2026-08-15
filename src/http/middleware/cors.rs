@@ -6,64 +6,45 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
-#[pyclass(name = "CORSMiddleware", skip_from_py_object)]
-#[derive(Clone, Debug)]
+use smart_default::SmartDefault;
+
+fn default_methods() -> Vec<String> {
+    vec![
+        "GET".into(),
+        "POST".into(),
+        "PUT".into(),
+        "DELETE".into(),
+        "PATCH".into(),
+    ]
+}
+
+#[pyclass(
+    frozen,
+    name = "CORSMiddleware",
+    get_all,
+    from_py_object,
+    eq,
+    new = "from_fields"
+)]
+#[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct CORSMiddleware {
+    #[default(vec![])]
     pub allow_origins: Vec<String>,
+
+    #[default(_code = "default_methods()")]
     pub allow_methods: Vec<String>,
+
+    #[default(vec![])]
     pub allow_headers: Vec<String>,
+
+    #[default(false)]
     pub allow_credentials: bool,
+
+    #[default(vec![])]
     pub expose_headers: Vec<String>,
+
+    #[default(600)]
     pub max_age: u64,
-}
-
-impl Default for CORSMiddleware {
-    fn default() -> Self {
-        Self {
-            allow_origins: vec![],
-            allow_methods: vec![
-                String::from("GET"),
-                String::from("POST"),
-                String::from("PUT"),
-                String::from("DELETE"),
-                String::from("PATCH"),
-            ],
-            allow_headers: vec![],
-            allow_credentials: false,
-            expose_headers: vec![],
-            max_age: 600,
-        }
-    }
-}
-
-#[pymethods]
-impl CORSMiddleware {
-    #[new]
-    #[pyo3(signature = (
-        allow_origins=vec![],
-        allow_methods=vec!["GET".into(), "POST".into(), "PUT".into(), "DELETE".into(), "PATCH".into()],
-        allow_headers=vec![],
-        allow_credentials=false,
-        expose_headers=vec![],
-        max_age=600,
-    ))]
-    fn new(
-        allow_origins: Vec<String>,
-        allow_methods: Vec<String>,
-        allow_headers: Vec<String>,
-        allow_credentials: bool,
-        expose_headers: Vec<String>,
-        max_age: u64,
-    ) -> Self {
-        Self {
-            allow_origins,
-            allow_methods,
-            allow_headers,
-            allow_credentials,
-            expose_headers,
-            max_age,
-        }
-    }
 }
 
 fn parse_and_validate_vec<T, E, F>(
@@ -115,14 +96,7 @@ where
 }
 
 pub fn parse_cors_params(kwargs: &Bound<'_, PyDict>) -> PyResult<CORSMiddleware> {
-    let mut config = CORSMiddleware::default();
-    set_field!(kwargs, config, "allow_origins", allow_origins: Vec<String>);
-    set_field!(kwargs, config, "allow_methods", allow_methods: Vec<String>);
-    set_field!(kwargs, config, "allow_headers", allow_headers: Vec<String>);
-    set_field!(kwargs, config, "allow_credentials", allow_credentials: bool);
-    set_field!(kwargs, config, "expose_headers", expose_headers: Vec<String>);
-    set_field!(kwargs, config, "max_age", max_age: u64);
-    Ok(config)
+    kwargs.extract::<CORSMiddleware>().map_err(Into::into)
 }
 
 pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
@@ -150,7 +124,7 @@ pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
 
     let (methods, has_wildcard_method) = parse_and_validate_vec(
         &config.allow_methods,
-        |m| Method::from_str(m),
+        Method::from_str,
         "HTTP method",
         "GET",
         true,

@@ -8,14 +8,38 @@ use sonic_rs::json;
 
 // Base Errors
 
-#[pyclass(extends = PyRuntimeError, name = "FastrAPIError")]
-pub struct PyFastrAPIError;
+#[pyclass(extends = PyRuntimeError, subclass, name = "FastAPIError")]
+pub struct PyFastAPIError;
 
 #[pymethods]
-impl PyFastrAPIError {
+impl PyFastAPIError {
     #[new]
     fn new() -> Self {
         Self
+    }
+}
+
+pub type PyFastrAPIError = PyFastAPIError;
+
+#[pyclass(extends = PyFastAPIError, subclass, name = "DependencyScopeError")]
+pub struct PyDependencyScopeError;
+
+#[pymethods]
+impl PyDependencyScopeError {
+    #[new]
+    fn new() -> PyClassInitializer<Self> {
+        PyClassInitializer::from(PyFastAPIError).add_subclass(Self)
+    }
+}
+
+#[pyclass(extends = PyFastAPIError, subclass, name = "PydanticV1NotSupportedError")]
+pub struct PyPydanticV1NotSupportedError;
+
+#[pymethods]
+impl PyPydanticV1NotSupportedError {
+    #[new]
+    fn new() -> PyClassInitializer<Self> {
+        PyClassInitializer::from(PyFastAPIError).add_subclass(Self)
     }
 }
 
@@ -43,13 +67,11 @@ impl PyValidationException {
 
     fn __str__(&self, py: Python<'_>) -> String {
         let errors = self._errors.bind(py);
-        let len = if let Ok(list) = errors.cast::<pyo3::types::PyList>() {
-            list.len()
-        } else if let Ok(dict) = errors.cast::<pyo3::types::PyDict>() {
-            dict.len()
-        } else {
-            0
-        };
+        let len = errors
+            .cast::<pyo3::types::PyList>()
+            .map(|list| list.len())
+            .or_else(|_| errors.cast::<pyo3::types::PyDict>().map(|dict| dict.len()))
+            .unwrap_or(0);
         format!(
             "{} validation error{} occurred",
             len,
@@ -60,64 +82,25 @@ impl PyValidationException {
 
 // Request/Response Validation Errors
 
-#[pyclass(extends = PyValidationException, name = "RequestValidationError")]
-pub struct PyRequestValidationError {
-    #[pyo3(get)]
-    pub body: Py<PyAny>,
-}
-
-#[pymethods]
-impl PyRequestValidationError {
-    #[new]
-    #[pyo3(signature = (errors, *, body=None))]
-    fn new(
-        py: Python<'_>,
-        errors: Bound<'_, PyAny>,
-        body: Option<Bound<'_, PyAny>>,
-    ) -> PyClassInitializer<Self> {
-        let body_py = body.map(|b| b.into()).unwrap_or_else(|| py.None());
-        PyClassInitializer::from(PyValidationException::new(errors))
-            .add_subclass(Self { body: body_py })
-    }
-
-    #[pyo3(signature = (*_args, **_kwargs))]
-    fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
-}
-
-#[pyclass(extends = PyValidationException, name = "ResponseValidationError")]
-pub struct PyResponseValidationError {
-    #[pyo3(get)]
-    pub body: Py<PyAny>,
-}
-
-#[pymethods]
-impl PyResponseValidationError {
-    #[new]
-    #[pyo3(signature = (errors, *, body=None))]
-    fn new(
-        py: Python<'_>,
-        errors: Bound<'_, PyAny>,
-        body: Option<Bound<'_, PyAny>>,
-    ) -> PyClassInitializer<Self> {
-        let body_py = body.map(|b| b.into()).unwrap_or_else(|| py.None());
-        PyClassInitializer::from(PyValidationException::new(errors))
-            .add_subclass(Self { body: body_py })
-    }
-
-    #[pyo3(signature = (*_args, **_kwargs))]
-    fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
-}
+crate::define_validation_subclass!(PyRequestValidationError, "RequestValidationError");
+crate::define_validation_subclass!(
+    PyWebSocketRequestValidationError,
+    "WebSocketRequestValidationError"
+);
+crate::define_validation_subclass!(PyResponseValidationError, "ResponseValidationError");
 
 // HTTP Exceptions
 
-#[pyclass(extends = PyException, name = "HTTPException", skip_from_py_object)]
+#[pyclass(
+    extends = PyException,
+    name = "HTTPException",
+    get_all,
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyHTTPException {
-    #[pyo3(get)]
     pub status_code: u16,
-    #[pyo3(get)]
     pub detail: Py<PyAny>,
-    #[pyo3(get)]
     pub headers: Option<Py<PyDict>>,
 }
 
@@ -171,12 +154,15 @@ impl PyHTTPException {
 
 // WebSocket Exceptions
 
-#[pyclass(extends = PyException, name = "WebSocketException", skip_from_py_object)]
+#[pyclass(
+    extends = PyException,
+    name = "WebSocketException",
+    get_all,
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyWebSocketException {
-    #[pyo3(get)]
     pub code: u16,
-    #[pyo3(get)]
     pub reason: Option<String>,
 }
 
@@ -203,13 +189,15 @@ impl PyWebSocketException {
     }
 }
 
-#[pyclass(extends = PyUserWarning, name = "FastrAPIDeprecationWarning")]
-pub struct PyFastrAPIDeprecationWarning;
+#[pyclass(extends = PyUserWarning, name = "FastAPIDeprecationWarning")]
+pub struct PyFastAPIDeprecationWarning;
 
 #[pymethods]
-impl PyFastrAPIDeprecationWarning {
+impl PyFastAPIDeprecationWarning {
     #[new]
     fn new() -> Self {
         Self
     }
 }
+
+pub type PyFastrAPIDeprecationWarning = PyFastAPIDeprecationWarning;

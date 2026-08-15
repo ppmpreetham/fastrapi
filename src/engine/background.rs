@@ -1,3 +1,4 @@
+use crate::utils::LockExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyTuple};
 use std::sync::{Arc, Mutex};
@@ -8,6 +9,12 @@ use tracing::error;
 #[derive(Clone)]
 pub struct PyBackgroundTasks {
     tasks: Arc<Mutex<Vec<(Py<PyAny>, Vec<Py<PyAny>>)>>>,
+}
+
+impl Default for PyBackgroundTasks {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[pymethods]
@@ -32,44 +39,42 @@ impl PyBackgroundTasks {
 impl PyBackgroundTasks {
     pub fn execute_all(&self) -> Vec<JoinHandle<()>> {
         let tasks = {
-            let locked = self.tasks.lock().expect("Background tasks lock poisoned");
-            locked.clone()
+            let mut locked = self.tasks.lock_or_panic();
+            std::mem::take(&mut *locked)
         };
 
-        let mut handles = Vec::with_capacity(tasks.len());
-
-        for (func, args) in tasks {
-            let handle = tokio::task::spawn_blocking(move || {
-                Python::attach(|py| {
-                    let args_tuple = match PyTuple::new(py, &args) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            error!("Background task: failed to build args tuple: {}", e);
-                            return;
-                        }
-                    };
-                    match func.into_bound(py).call1(&args_tuple) {
-                        Ok(result) => {
-                            if result.hasattr("__await__").unwrap_or(false)
-                                && let Err(e) = py
-                                    .import("asyncio")
-                                    .and_then(|asyncio| asyncio.call_method1("run", (result,)))
-                            {
-                                error!("Async background task error: {}", e);
+        tasks
+            .into_iter()
+            .map(|(func, args)| {
+                tokio::task::spawn_blocking(move || {
+                    Python::attach(|py| {
+                        let args_tuple = match PyTuple::new(py, &args) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                error!("Background task: failed to build args tuple: {}", e);
+                                return;
+                            }
+                        };
+                        match func.into_bound(py).call1(&args_tuple) {
+                            Ok(result) => {
+                                if result.hasattr("__await__").unwrap_or(false)
+                                    && let Err(e) = py
+                                        .import("asyncio")
+                                        .and_then(|asyncio| asyncio.call_method1("run", (result,)))
+                                {
+                                    error!("Async background task error: {}", e);
+                                    e.print(py);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Background task error: {}", e);
                                 e.print(py);
                             }
                         }
-                        Err(e) => {
-                            error!("Background task error: {}", e);
-                            e.print(py);
-                        }
-                    }
-                    drop(args_tuple);
-                });
-            });
-            handles.push(handle);
-        }
-
-        handles
+                        drop(args_tuple);
+                    });
+                })
+            })
+            .collect()
     }
 }

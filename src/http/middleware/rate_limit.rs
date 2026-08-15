@@ -9,8 +9,10 @@ pub fn rate_limit(rps: u32) -> GovernorLayer<IpAddr> {
         GovernorConfigBuilder::default()
             .with_extractor(PeerIp::default())
             .expect_connect_info()
-            .quota_default(Quota::requests_per_second(NonZeroU32::new(rps).unwrap()))
+            .quota_default(Quota::requests_per_second(
+                NonZeroU32::new(rps).expect("Rate limit RPS must be greater than 0"),
+            ))
             .finish()
-            .unwrap(),
+            .expect("Failed to build rate limiter"),
     )
 }

@@ -1,12 +1,9 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes};
-#[pyclass(name = "UploadFile", module = "fastrapi.datastructures")]
+#[pyclass(name = "UploadFile", module = "fastrapi.datastructures", get_all)]
 pub struct PyUploadFile {
-    #[pyo3(get)]
     pub filename: Option<String>,
-    #[pyo3(get)]
     pub content_type: Option<String>,
-    #[pyo3(get)]
     pub size: Option<u64>,
     file_content: Vec<u8>,
     cursor: usize,

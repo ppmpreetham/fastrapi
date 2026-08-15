@@ -1,4 +1,3 @@
-
 use crate::engine::types::FastrAPI;
 use pyo3::{exceptions::PyTypeError, prelude::*};
 use std::sync::Arc;
