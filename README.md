@@ -348,20 +348,13 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 
 Some advanced features are still in development like:
 
-- [x] Add `ORJSONResponse` / `UJSONResponse`
-- [x] Add `headers`, `media_type`, `background` params to response wrapper classes
-- [x] Add `HTTPSRedirectMiddleware`
-- [x] Actually use `generate_unique_id_function` to generate operation IDs
 - [ ] Support `yield`-based dependencies (setup/teardown, e.g. `def get_db(): yield db; db.close()`)
 - [ ] Support `Annotated[Type, Depends(...)]` / `Annotated[str, Query(...)]` style DI
 - [ ] Execute app-level `dependencies=[...]` on every route
 - [ ] Execute router-level `dependencies=[...]` from `include_router`/`nest`/`APIRouter(dependencies=...)`
 - [ ] Add `app.dependency_overrides` for testing
 - [ ] Dispatch custom `@app.exception_handler(X)` handlers instead of only special-casing `PyHTTPException`
-- [ ] Make `app.state` persistent across requests (not rebuilt per-request scope)
 - [ ] Fix injected `Request` objects to have working `receive`/`send` so `.body()`/`.json()` work
-- [ ] Add `url_for()`
-- [ ] Expose `request.session` accessor for SessionMiddleware
 - [ ] Return structured validation errors (`[{"loc": [...], "msg": ..., "type": ...}]`) for path/query/header/cookie params, not just Pydantic body errors
 - [ ] Support repeated query-key list params (`?tags=a&tags=b` → `List[str]`)
 - [ ] Support repeated form-key list params
@@ -387,6 +380,10 @@ Some advanced features are still in development like:
 - [ ] Built-in TestClient (`starlette.testclient` style)
 - [ ] Advanced dependency scopes (request vs function)
 - [ ] Rust to Python FFI helpers
+- [ ] Full `fastapi.security` package (OAuth2, HTTPBearer, APIKey, etc.)
+- [ ] Full `WebSocket` class features (like `iter_json`, `iter_text`, `send_json`, state)
+- [ ] FastAPI CLI equivalents (`fastapi dev` and `fastapi run`)
+- [ ] Expose `jsonable_encoder` to Python
 
 ## Contributing
 
@@ -412,3 +409,5 @@ Built with [PyO3](https://github.com/PyO3/pyo3/) and [Axum](https://github.com/t
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=ppmpreetham/fastrapi&type=Date)](https://star-history.com/#ppmpreetham/fastrapi&Date)
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ppmpreetham/fastrapi)
