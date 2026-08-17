@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::{
     ffi::py_handlers::{ExecutionMode, run_py_handler, run_py_handler_no_request},
     routing::{
-        router::{FrozenRouter, RouteMatch},
+        router::{FrozenRouter, RouteMatch, RoutePattern, RouteTarget},
         types::{HttpMethod, PathParamRange},
     },
 };
@@ -32,33 +32,34 @@ pub(crate) async fn dispatch_or_not_found(
         return Err(req);
     };
 
-    let route_match = match router.resolve(method, path_str) {
-        Some(v) => v,
-        None => return Err(req),
+    let Some(route_match) = router.resolve(method, path_str) else {
+        return Err(req);
     };
 
-    let (handler, params_iter) = match route_match {
-        RouteMatch::Static(handler) => (handler, None),
-        RouteMatch::Params(handler, params) => (handler, Some(params)),
+    let (target, params_iter) = match route_match {
+        RouteMatch::Static(target) => (target, None),
+        RouteMatch::Params(target, params) => (target, Some(params)),
     };
+    let RouteTarget { handler, pattern } = target;
+
+    let tag = |resp: Response| tag_with_pattern(resp, &pattern);
 
     if let Some(limit) = handler.execution.rate_limit_per_second
         && is_rate_limited(&req, Arc::as_ptr(&handler) as usize, limit)
     {
-        return Ok(StatusCode::TOO_MANY_REQUESTS.into_response());
+        return Ok(tag(StatusCode::TOO_MANY_REQUESTS.into_response()));
     }
 
     if matches!(
         handler.execution.execution_mode,
         ExecutionMode::SyncNoArgs | ExecutionMode::AsyncNoArgs
     ) {
-        return Ok(run_py_handler_no_request(
-            state.rt_handle,
+        return Ok(tag(run_py_handler_no_request(
             state.async_loop,
             state.sync_to_threadpool,
             handler,
         )
-        .await);
+        .await));
     }
 
     let path_base = path_str.as_ptr() as usize;
@@ -85,17 +86,19 @@ pub(crate) async fn dispatch_or_not_found(
 
     let (request_parts, body) = req.into_parts();
 
-    let payload = if handler.payload.body_param_indices.is_empty() {
+    let needs_body =
+        !handler.payload.body_param_indices.is_empty() || handler.payload.request_param.is_some();
+
+    let payload = if !needs_body {
         None
     } else {
         match extract_payload(&request_parts.headers, body, &handler, &state).await {
-            Ok(p) => p,
+            Ok(p) => p.map(Arc::new),
             Err(resp) => return Ok(resp),
         }
     };
 
-    Ok(run_py_handler(
-        state.rt_handle,
+    Ok(tag(run_py_handler(
         state.async_loop,
         state.sync_to_threadpool,
         handler,
@@ -103,7 +106,13 @@ pub(crate) async fn dispatch_or_not_found(
         param_ranges,
         payload,
     )
-    .await)
+    .await))
+}
+
+#[inline]
+fn tag_with_pattern(mut resp: Response, pattern: &Arc<str>) -> Response {
+    resp.extensions_mut().insert(RoutePattern(pattern.clone()));
+    resp
 }
 
 pub(crate) fn dispatch_path<'a>(state: &AppState, original_path: &'a str) -> Option<&'a str> {

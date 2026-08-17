@@ -59,9 +59,68 @@ pub(crate) fn build_router(
     merge_declared_middlewares(py, app_config, &mut middlewares);
 
     let base_router = app_config.router.bind(py);
+    {
+        let mut base_mut = base_router.borrow_mut();
+        if base_mut.dependencies.is_none() {
+            base_mut.dependencies = app_config.dependencies.clone();
+        }
+    }
+    if let Some(overrides) = &app_config.dependency_overrides {
+        let items = overrides.bind(py).call_method0("items");
+        let map: ahash::AHashMap<u64, Py<PyAny>> = items
+            .ok()
+            .and_then(|items| items.try_iter().ok())
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                let item = item.ok()?;
+                let pair = item.cast::<pyo3::types::PyTuple>().ok()?;
+                let key = pair.get_item(0).ok()?;
+                let value = pair.get_item(1).ok()?;
+                Some((key.as_ptr() as u64, value.unbind()))
+            })
+            .collect();
+        crate::globals::set_dependency_overrides(map);
+    }
+
+    if let Some(handlers) = &app_config.exception_handlers
+        && let Ok(dict) = handlers.bind(py).cast::<pyo3::types::PyDict>()
+    {
+        crate::globals::set_exception_handlers(dict.clone().unbind());
+    }
+
     let base_ref = base_router.borrow();
     base_ref.freeze(py);
-    let flat = base_ref.flatten(py);
+    let base_flat = base_ref.flatten(py);
+
+    // Merge mounted sub-applications' routes under their prefixes.
+    let mut routes = base_flat.0.clone();
+    let mut ws_routes = base_flat.1.clone();
+    for mount in &app_config.app_mounts {
+        let sub = mount.app.bind(py);
+        let sub_ref = sub.borrow();
+        let sub_router = sub_ref.router.bind(py);
+        {
+            let mut sub_mut = sub_router.borrow_mut();
+            if sub_mut.dependencies.is_none() {
+                sub_mut.dependencies = sub_ref.dependencies.clone();
+            }
+        }
+        sub_router.borrow().freeze(py);
+        let sub_flat = sub_router.borrow().flatten(py);
+
+        routes.extend(sub_flat.0.iter().map(|route| {
+            let mut route = route.clone();
+            route.path = crate::routing::tree::join_path(&mount.path, &route.path);
+            route
+        }));
+        ws_routes.extend(sub_flat.1.iter().map(|ws| {
+            let mut ws = ws.clone();
+            ws.path = crate::routing::tree::join_path(&mount.path, &ws.path);
+            ws
+        }));
+    }
+    let flat = (routes, ws_routes);
 
     let mut frozen_router_builder = FrozenRouterBuilder::new();
     flat.0.iter().for_each(|route| {
@@ -72,10 +131,10 @@ pub(crate) fn build_router(
     let app = Router::new();
     let app = register_routes(app, py, &app_state, app_config, &flat, frozen_router);
     let app = register_docs_endpoints(app, py, app_config, docs_url.as_deref(), &openapi_url);
-    apply_middleware_stack(app, app_config, &middlewares)
+    apply_middleware_stack(app, app_config, &middlewares, app_state.async_loop)
 }
 
-pub(crate) fn register_routes(
+fn register_routes(
     mut app: Router,
     py: Python<'_>,
     app_state: &AppState,
@@ -124,17 +183,23 @@ pub(crate) fn register_routes(
     app = flat.1.iter().fold(app, |current_app, ws| {
         let path = ws.path.clone();
         let handler = Arc::new(ws.handler.clone_ref(py));
+        let deps: Arc<Vec<crate::routing::dependencies::DependencyNode>> =
+            Arc::new(ws.deps.to_vec());
+        let template: Arc<str> = Arc::from(path.as_str());
         let rt_handle = app_state.rt_handle.clone();
         let async_loop = app_state.async_loop.clone();
 
         current_app.route(
             &path,
-            axum::routing::get(move |ws_upgrade| {
+            axum::routing::get(move |ws_upgrade, parts: axum::http::request::Parts| {
                 ws_handler(
                     ws_upgrade,
                     axum::Extension(handler.clone()),
+                    axum::Extension(deps.clone()),
+                    axum::Extension(template.clone()),
                     axum::Extension(rt_handle.clone()),
                     axum::Extension(async_loop.clone()),
+                    parts,
                 )
             }),
         )
@@ -154,9 +219,19 @@ pub(crate) fn register_routes(
         axum::routing::any(move |req: Request| async move {
             match dispatch_or_not_found(router.clone(), state.clone(), req).await {
                 Ok(resp) => resp,
-                Err(req) => serve_frontend_mounts(frontend_mounts, req)
-                    .await
-                    .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response()),
+                Err(req) => {
+                    // `@app.exception_handler(404)` support: consult the
+                    // status-handler registry before the frontend fallback.
+                    let handler_resp = Python::attach(|py| {
+                        crate::engine::errors::dispatch_status_handler(py, 404)
+                    });
+                    match handler_resp {
+                        Some(resp) => resp,
+                        None => serve_frontend_mounts(frontend_mounts, req)
+                            .await
+                            .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response()),
+                    }
+                }
             }
         })
     })
@@ -236,11 +311,15 @@ pub(crate) fn register_docs_endpoints(
     app
 }
 
-pub(crate) fn apply_middleware_stack(
+fn apply_middleware_stack(
     mut app: Router,
     app_config: &FastrAPI,
     middlewares: &MiddlewareContainer,
+    async_loop: Arc<Py<PyAny>>,
 ) -> Router {
+    if !middlewares.order.is_empty() {
+        return super::middleware_stack::build_stack(app, app_config, middlewares, async_loop);
+    }
     // L1: Sessions
     if let Some(config) = &middlewares.session {
         info!("🔑 Layer: Sessions");
@@ -275,7 +354,7 @@ pub(crate) fn apply_middleware_stack(
         app = app.layer(axum_middleware::from_fn(record_prometheus_metrics));
     }
 
-    // L3: Python Middleware
+    // L3: Python Middleware (sync + async)
     if !middlewares.py_middlewares.is_empty() {
         info!(
             "Applying {} custom Python middleware(s)",
@@ -285,7 +364,10 @@ pub(crate) fn apply_middleware_stack(
         let py_mws = Arc::new(middlewares.py_middlewares.clone());
         app = app.layer(axum_middleware::from_fn(move |req, next| {
             let py_mws = py_mws.clone();
-            async move { crate::http::middleware::execute_py_middlewares(py_mws, req, next).await }
+            let async_loop = async_loop.clone();
+            async move {
+                crate::http::middleware::execute_py_middlewares(py_mws, req, next, async_loop).await
+            }
         }));
     }
 
@@ -421,7 +503,7 @@ pub(crate) fn apply_middleware_stack(
     app
 }
 
-pub(crate) fn merge_declared_middlewares(
+fn merge_declared_middlewares(
     py: Python<'_>,
     app_config: &FastrAPI,
     container: &mut MiddlewareContainer,
@@ -470,17 +552,15 @@ pub(crate) fn apply_declared_middleware(
 
     if let Some(builder) = MIDDLEWARE_REGISTRY.get(&class_name) {
         builder.parse_kwargs(kwargs, container)?;
+        container.record_layer(&class_name);
     } else {
-        let py_middleware = PyMiddleware::new(cls.clone().unbind());
+        let py_middleware = PyMiddleware::new(_py, cls.clone().unbind());
         container.py_middlewares.push(Arc::new(py_middleware));
     }
 
     Ok(())
 }
-pub(crate) fn cached_method_router(
-    method: HttpMethod,
-    cached: Arc<CachedResponse>,
-) -> MethodRouter {
+fn cached_method_router(method: HttpMethod, cached: Arc<CachedResponse>) -> MethodRouter {
     match_method_router!(method, {
         let cached = cached;
         move || {
@@ -490,7 +570,7 @@ pub(crate) fn cached_method_router(
     })
 }
 
-pub(crate) fn no_request_method_router(
+fn no_request_method_router(
     method: HttpMethod,
     handler: Arc<crate::routing::types::RouteHandler>,
     state: AppState,
@@ -508,19 +588,13 @@ pub(crate) fn no_request_method_router(
             let handler = handler.clone();
             let state = state.clone();
             async move {
-                run_py_handler_no_request(
-                    state.rt_handle,
-                    state.async_loop,
-                    state.sync_to_threadpool,
-                    handler,
-                )
-                .await
+                run_py_handler_no_request(state.async_loop, state.sync_to_threadpool, handler).await
             }
         }
     })
 }
 
-pub(crate) fn sync_no_request_method_router(
+fn sync_no_request_method_router(
     method: HttpMethod,
     handler: Arc<crate::routing::types::RouteHandler>,
 ) -> MethodRouter {
@@ -548,7 +622,7 @@ pub(crate) fn sync_no_request_method_router(
     })
 }
 
-pub(crate) fn precompute_const_response(
+fn precompute_const_response(
     py: Python<'_>,
     handler: &Arc<RouteHandler>,
 ) -> Option<Arc<CachedResponse>> {
@@ -567,7 +641,7 @@ pub(crate) fn precompute_const_response(
 }
 
 #[derive(Clone)]
-pub(crate) struct CachedResponse {
+struct CachedResponse {
     status: StatusCode,
     headers: CachedHeaders,
     body: bytes::Bytes,
@@ -655,7 +729,7 @@ pub(crate) async fn record_prometheus_metrics(req: Request, next: Next) -> Respo
         axum::http::Method::HEAD => "HEAD",
         _ => "OTHER",
     };
-    let path = req.uri().path().to_string();
+    let raw_path = req.uri().path().to_owned();
     let start = Instant::now();
     let response = next.run(req).await;
     let status = match response.status().as_u16() {
@@ -669,6 +743,15 @@ pub(crate) async fn record_prometheus_metrics(req: Request, next: Next) -> Respo
         422 => "422",
         500 => "500",
         _ => "UNKNOWN",
+    };
+
+    let path = match response
+        .extensions()
+        .get::<crate::routing::router::RoutePattern>()
+    {
+        Some(pattern) => pattern.0.to_string(),
+        None if response.status() == StatusCode::NOT_FOUND => "unmatched".to_string(),
+        None => raw_path,
     };
 
     let elapsed = start.elapsed().as_secs_f64();
