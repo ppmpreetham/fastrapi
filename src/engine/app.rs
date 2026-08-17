@@ -1,5 +1,5 @@
 use super::server;
-pub use super::types::{FastrAPI, FrontendMount, StaticMount};
+pub use super::types::{FastrAPI, FrontendMount, StaticMount, SubAppMount};
 use crate::decorators::PyAPIRouter;
 use crate::http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware};
 use crate::http::staticfiles::PyStaticFiles;
@@ -7,7 +7,7 @@ use crate::routing::types::HttpMethod;
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyCFunction, PyDict, PyString, PyTuple};
+use pyo3::types::{PyAny, PyCFunction, PyDict, PyList, PyString, PyTuple};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
@@ -36,6 +36,7 @@ impl FastrAPI {
         swagger_ui_oauth2_redirect_url=Some("/docs/oauth2-redirect".to_string()),
         swagger_ui_init_oauth=None,
         middleware=None,
+        dependency_overrides=None,
         exception_handlers=None,
         on_startup=None,
         on_shutdown=None,
@@ -87,6 +88,7 @@ impl FastrAPI {
         swagger_ui_oauth2_redirect_url: Option<String>,
         swagger_ui_init_oauth: Option<Py<PyAny>>,
         middleware: Option<Py<PyAny>>,
+        dependency_overrides: Option<Py<PyAny>>,
         exception_handlers: Option<Py<PyAny>>,
         on_startup: Option<Py<PyAny>>,
         on_shutdown: Option<Py<PyAny>>,
@@ -153,6 +155,7 @@ impl FastrAPI {
             swagger_ui_oauth2_redirect_url,
             swagger_ui_init_oauth,
             middleware,
+            dependency_overrides: dependency_overrides.or_else(|| Some(PyDict::new(py).into())),
             exception_handlers: exception_handlers.or_else(|| Some(PyDict::new(py).into())),
             on_startup,
             on_shutdown,
@@ -184,6 +187,7 @@ impl FastrAPI {
             powered_by_header,
             static_mounts: Vec::new(),
             frontend_mounts: Vec::new(),
+            app_mounts: Vec::new(),
             prometheus_config: None,
             middlewares: MiddlewareContainer::default(),
             router: base_router,
@@ -211,22 +215,17 @@ impl FastrAPI {
 
         if let Some(builder) = MIDDLEWARE_REGISTRY.get(class_name) {
             builder.parse_kwargs(opts, &mut self.middlewares)?;
+            self.middlewares.record_layer(class_name);
             info!("Enabled {class_name}");
-            Ok(())
         } else {
-            let names = MIDDLEWARE_REGISTRY.supported_names();
-            let msg = if names.len() > 1 {
-                let (last, rest) = names.split_last().unwrap();
-                format!(
-                    "Middleware '{class_name}' is not supported. Only {}, and {} are allowed via add_middleware.",
-                    rest.join(", "),
-                    last
-                )
-            } else {
-                format!("Middleware '{class_name}' is not supported.")
-            };
-            Err(PyValueError::new_err(msg))
+            let py = middleware_class.py();
+            let mw = PyMiddleware::from_custom(py, middleware_class, Some(opts))?;
+            info!("Enabled custom {:?} middleware", mw.kind);
+            self.middlewares
+                .order
+                .push(crate::http::middleware::DeclaredLayer::Custom(Arc::new(mw)));
         }
+        Ok(())
     }
 
     #[pyo3(signature = (path))]
@@ -256,13 +255,29 @@ impl FastrAPI {
             ));
         }
 
-        let static_files = app.bind(py).extract::<PyRef<'_, PyStaticFiles>>()?;
         let normalized_path = if path.len() > 1 {
             path.trim_end_matches('/').to_string()
         } else {
             path
         };
 
+        if let Ok(sub_app) = app.bind(py).extract::<PyRef<'_, FastrAPI>>() {
+            self.inherit_sub_app_lifespan(py, &sub_app)?;
+            let owned = app
+                .bind(py)
+                .clone()
+                .into_any()
+                .cast_into::<FastrAPI>()
+                .map_err(PyErr::from)?
+                .unbind();
+            self.app_mounts.push(SubAppMount {
+                path: normalized_path,
+                app: owned,
+            });
+            return Ok(());
+        }
+
+        let static_files = app.bind(py).extract::<PyRef<'_, PyStaticFiles>>()?;
         self.static_mounts.push(StaticMount {
             path: normalized_path,
             directory: static_files.directory.clone(),
@@ -305,14 +320,13 @@ impl FastrAPI {
         Ok(())
     }
 
-    // decorator for generic Python functions: @app.middleware("smtg")
     fn middleware(slf: Py<Self>, py: Python<'_>, middleware_type: String) -> PyResult<Py<PyAny>> {
         let decorator = move |args: &Bound<'_, PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.unbind(); // 0th item is the function being decorated
-            let py_middleware = PyMiddleware::new(func.clone_ref(py));
+            let py_middleware = PyMiddleware::new(py, func.clone_ref(py));
             slf.borrow_mut(py)
                 .middlewares
                 .py_middlewares
@@ -459,6 +473,26 @@ impl FastrAPI {
         py: Python<'py>,
     ) -> pyo3::PyRef<'py, crate::ffi::decorators::PyAPIRouter> {
         self.router.bind(py).borrow()
+    }
+
+    fn inherit_sub_app_lifespan(
+        &mut self,
+        py: Python<'_>,
+        sub: &PyRef<'_, FastrAPI>,
+    ) -> PyResult<()> {
+        let extend = |parent: &mut Option<Py<PyAny>>, child: &Option<Py<PyAny>>| -> PyResult<()> {
+            let Some(child_list) = child else {
+                return Ok(());
+            };
+            let list = parent.get_or_insert_with(|| PyList::empty(py).into());
+            list.bind(py)
+                .call_method1("extend", (child_list.bind(py),))?;
+            Ok(())
+        };
+
+        extend(&mut self.on_startup, &sub.on_startup)?;
+        extend(&mut self.on_shutdown, &sub.on_shutdown)?;
+        Ok(())
     }
 }
 crate::generate_http_methods!(FastrAPI, _router);

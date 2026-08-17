@@ -4,6 +4,13 @@ use smart_default::SmartDefault;
 
 use crate::{decorators::PyAPIRouter, http::middleware::MiddlewareContainer};
 
+/// sub-FastrAPI` app (`app.mount("/api", sub_api)`).
+#[derive(Clone)]
+pub struct SubAppMount {
+    pub path: String,
+    pub app: Py<FastrAPI>,
+}
+
 #[pyclass(frozen, new = "from_fields", get_all, from_py_object, eq)]
 #[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct StaticMount {
@@ -76,6 +83,8 @@ pub struct FastrAPI {
     #[pyo3(get, set)]
     pub middleware: Option<Py<PyAny>>,
     #[pyo3(get, set)]
+    pub dependency_overrides: Option<Py<PyAny>>,
+    #[pyo3(get, set)]
     pub exception_handlers: Option<Py<PyAny>>,
     #[pyo3(get, set)]
     pub on_startup: Option<Py<PyAny>>,
@@ -138,6 +147,7 @@ pub struct FastrAPI {
 
     pub(crate) static_mounts: Vec<StaticMount>,
     pub(crate) frontend_mounts: Vec<FrontendMount>,
+    pub(crate) app_mounts: Vec<SubAppMount>,
     pub(crate) prometheus_config: Option<PrometheusConfig>,
     pub(crate) middlewares: MiddlewareContainer,
 }
