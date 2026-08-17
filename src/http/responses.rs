@@ -1,6 +1,4 @@
-use crate::utils::{
-    py_json_response_with_status, py_json_response_with_status_hint, py_to_response,
-};
+use crate::utils::{py_json_response_with_status, py_to_response};
 use axum::{
     body::Body,
     http::{HeaderName, HeaderValue, StatusCode, header},
@@ -63,8 +61,6 @@ pub fn extract_base_response_data<'py>(
     }
 }
 
-// wrapper classes
-
 crate::define_response_class!(PyHTMLResponse, "HTMLResponse", String, 200);
 crate::define_response_class!(PyJSONResponse, "JSONResponse", Py<PyAny>, 200);
 crate::define_response_class!(PyORJSONResponse, "ORJSONResponse", Py<PyAny>, 200);
@@ -79,6 +75,41 @@ pub struct PyRedirectResponse {
     pub status_code: u16,
     pub headers: Option<Py<pyo3::types::PyDict>>,
     pub background: Option<Py<PyAny>>,
+}
+
+#[pyclass(name = "FileResponse", get_all, set_all, from_py_object)]
+#[derive(Clone)]
+pub struct PyFileResponse {
+    pub path: String,
+    pub status_code: u16,
+    pub headers: Option<Py<PyDict>>,
+    pub media_type: Option<String>,
+    pub filename: Option<String>,
+}
+
+#[pymethods]
+impl PyFileResponse {
+    #[new]
+    #[pyo3(signature = (path, status_code=200, headers=None, media_type=None, filename=None))]
+    fn new(
+        path: String,
+        status_code: u16,
+        headers: Option<Bound<'_, PyDict>>,
+        media_type: Option<String>,
+        filename: Option<String>,
+    ) -> Self {
+        Self {
+            path,
+            status_code,
+            headers: headers.map(|h| h.unbind()),
+            media_type,
+            filename,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("FileResponse(path={:?})", self.path)
+    }
 }
 
 #[pymethods]
@@ -158,6 +189,8 @@ pub fn convert_response_by_type(
         return Ok(convert_redirect_response(py, final_result));
     } else if final_result.is_instance_of::<PyStreamingResponse>() {
         return Ok(convert_streaming_response(py, final_result));
+    } else if final_result.is_instance_of::<PyFileResponse>() {
+        return Ok(convert_file_response(py, final_result));
     }
 
     let is_plain_value = final_result.is_instance_of::<pyo3::types::PyDict>()
@@ -236,16 +269,19 @@ pub fn convert_response_by_type(
                 .into_response()
         }
 
-        ResponseType::Json => py_json_response_with_status_hint(
+        ResponseType::Json => crate::utils::py_json_response_with_dump_options(
             py,
             default_status,
             final_result,
             handler.response.serialization_hint,
+            handler.response.dump_options.as_ref().map(|d| d.bind(py)),
         )?,
 
         ResponseType::Html => convert_html_response(py, final_result),
 
         ResponseType::Redirect => convert_redirect_response(py, final_result),
+
+        ResponseType::File => convert_file_response(py, final_result),
 
         ResponseType::Auto => {
             if final_result.is_instance_of::<PyJSONResponse>()
@@ -270,6 +306,10 @@ pub fn convert_response_by_type(
                 || response_class_is(class_name.as_deref(), "StreamingResponse")
             {
                 convert_streaming_response(py, final_result)
+            } else if final_result.is_instance_of::<PyFileResponse>()
+                || response_class_is(class_name.as_deref(), "FileResponse")
+            {
+                convert_file_response(py, final_result)
             } else {
                 py_to_response(py, final_result, default_status)
             }
@@ -554,9 +594,106 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
     {
         return convert_streaming_response(py, result);
     }
+    if result.is_instance_of::<PyFileResponse>()
+        || response_class_is(class_name.as_deref(), "FileResponse")
+    {
+        return convert_file_response(py, result);
+    }
 
     crate::utils::py_json_response(py, result).unwrap_or_else(|err| {
         err.print(py);
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })
+}
+
+fn guess_mime(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "pdf" => "application/pdf",
+        "csv" => "text/csv",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        _ => "application/octet-stream",
+    }
+}
+
+pub fn convert_file_response(py: Python<'_>, result: &Bound<'_, PyAny>) -> Response {
+    let get_str = |attr: &str| -> Option<String> {
+        result
+            .getattr(attr)
+            .ok()
+            .filter(|v| !v.is_none())
+            .and_then(|v| v.extract::<String>().ok())
+    };
+
+    let Some(path) = get_str("path") else {
+        error!("FileResponse is missing its 'path'");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let status = result
+        .getattr("status_code")
+        .ok()
+        .and_then(|s| s.extract::<u16>().ok())
+        .and_then(|s| StatusCode::from_u16(s).ok())
+        .unwrap_or(StatusCode::OK);
+
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let media_type = get_str("media_type").unwrap_or_else(|| guess_mime(&path).to_owned());
+            let mut builder = Response::builder()
+                .status(status)
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_str(&media_type)
+                        .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+                )
+                .header(header::CONTENT_LENGTH, bytes.len());
+
+            if let Some(filename) = get_str("filename") {
+                let escaped = filename.replace(['"', '\\'], "");
+                builder = builder.header(
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_str(&format!("attachment; filename=\"{escaped}\""))
+                        .unwrap_or(HeaderValue::from_static("attachment")),
+                );
+            }
+
+            let res = builder
+                .body(Body::from(bytes))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            let headers = result
+                .getattr("headers")
+                .ok()
+                .and_then(|h| h.extract::<Py<PyDict>>().ok());
+            apply_response_metadata(py, res, headers.as_ref(), None)
+        }
+        Err(err) => {
+            let status = match err.kind() {
+                std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+                std::io::ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            error!("FileResponse failed to read '{path}': {err}");
+            status.into_response()
+        }
+    }
 }

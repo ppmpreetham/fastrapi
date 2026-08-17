@@ -1,5 +1,7 @@
+use crate::routing::types::RequestInput;
 use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyAssertionError, PyRuntimeError, PyValueError};
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyString, PyTuple};
 use std::sync::Arc;
@@ -484,6 +486,41 @@ fn process_asgi_message(message: &Bound<'_, PyAny>, full_body: &mut Vec<u8>) -> 
     Ok(!more_body)
 }
 
+pub(crate) fn create_py_request<'a>(
+    py: Python<'_>,
+    input: &RequestInput<'_>,
+    raw_body: impl Into<Option<&'a [u8]>>,
+) -> PyResult<Py<PyAny>> {
+    let scope = PyDict::new(py);
+    scope.set_item(intern!(py, "type"), intern!(py, "http"))?;
+    scope.set_item(intern!(py, "method"), input.method)?;
+    scope.set_item(intern!(py, "path"), input.path)?;
+    scope.set_item(intern!(py, "query_string"), input.query_string)?;
+
+    let path_params = PyDict::new(py);
+    if let Some(params) = input.path_params.get() {
+        params
+            .iter()
+            .try_for_each(|(k, v)| path_params.set_item(k.as_ref(), v))?;
+    }
+    scope.set_item(intern!(py, "path_params"), path_params)?;
+
+    let bound_req = PyRequest::create_bound(
+        py,
+        scope.into_any().unbind(),
+        Some(Arc::new(input.headers.clone())),
+        raw_body,
+    )?;
+    Ok(bound_req.into_any().unbind())
+}
+
+pub(crate) fn create_stub_request(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let scope = PyDict::new(py);
+    scope.set_item(intern!(py, "type"), intern!(py, "http"))?;
+    let bound_req = PyRequest::create_bound(py, scope.into_any().unbind(), None, None)?;
+    Ok(bound_req.into_any().unbind())
+}
+
 #[pyclass(
     extends = PyHTTPConnection,
     name = "Request",
@@ -495,10 +532,16 @@ pub struct PyRequest {
     #[pyo3(get, set)]
     pub send: Py<PyAny>,
     pub(crate) _body: Arc<OnceCell<Arc<[u8]>>>,
+    pub(crate) raw_headers: Option<Arc<axum::http::HeaderMap>>,
 }
 
 impl PyRequest {
-    pub fn create_bound(py: Python<'_>, scope: Py<PyAny>) -> PyResult<Bound<'_, PyRequest>> {
+    pub fn create_bound<'a>(
+        py: Python<'_>,
+        scope: Py<PyAny>,
+        headers: Option<Arc<axum::http::HeaderMap>>,
+        raw_body: impl Into<Option<&'a [u8]>>,
+    ) -> PyResult<Bound<'_, PyRequest>> {
         let conn = PyHTTPConnection {
             scope,
             receive: py.None(),
@@ -506,9 +549,46 @@ impl PyRequest {
         let req = PyRequest {
             send: py.None(),
             _body: Arc::new(OnceCell::new()),
+            raw_headers: headers,
         };
+
+        if let Some(bytes) = raw_body.into() {
+            let _ = req._body.set(bytes.into());
+        }
+
         let initializer = PyClassInitializer::from(conn).add_subclass(req);
         Bound::new(py, initializer)
+    }
+
+    fn starlette_headers<'py>(
+        &self,
+        py: Python<'py>,
+        scope: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if let Ok(headers) = scope.get_item("_headers") {
+            return Ok(headers);
+        }
+
+        let raw_list = match &self.raw_headers {
+            Some(headers) => {
+                let list = pyo3::types::PyList::empty(py);
+                for (key, value) in headers.iter() {
+                    list.append((
+                        pyo3::types::PyBytes::new(py, key.as_str().as_bytes()),
+                        pyo3::types::PyBytes::new(py, value.as_bytes()),
+                    ))?;
+                }
+                list
+            }
+            None => pyo3::types::PyList::empty(py),
+        };
+
+        let headers_cls = STARLETTE_HEADERS.get(py)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("raw", &raw_list)?;
+        let headers_obj = headers_cls.call((), Some(&kwargs))?;
+        scope.set_item("_headers", &headers_obj)?;
+        Ok(headers_obj.into_any())
     }
 
     fn read_body<'py>(
@@ -516,6 +596,11 @@ impl PyRequest {
         py: Python<'py>,
         conn: &PyHTTPConnection,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(bytes) = self._body.get() {
+            let payload = PyBytes::new(py, bytes).into_any().unbind();
+            return rsloop::rust_async::future_into_py(py, async move { Ok(payload) });
+        }
+
         let scope_any: &Bound<'py, PyAny> = conn.scope.bind(py).as_any();
         let method_item = scope_any.get_item("method").ok();
         let method: &str = method_item
@@ -581,8 +666,44 @@ impl PyRequest {
         let req = Self {
             send: send.unwrap_or_else(|| py.None()),
             _body: Arc::new(OnceCell::new()),
+            raw_headers: None,
         };
         Ok(PyClassInitializer::from(conn).add_subclass(req))
+    }
+
+    #[getter]
+    pub fn headers<'py>(self_: &Bound<'_, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let conn: &Bound<'_, PyHTTPConnection> = self_.as_super();
+        let scope = conn.borrow().scope.bind(py).clone();
+        self_.borrow().starlette_headers(py, &scope)
+    }
+
+    #[getter]
+    pub fn cookies<'py>(self_: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let conn: &Bound<'py, PyHTTPConnection> = self_.as_super();
+        let scope = conn.borrow().scope.bind(py).clone();
+
+        if let Ok(cookies) = scope.get_item("_cookies") {
+            return Ok(cookies.cast_into()?);
+        }
+
+        let dict = PyDict::new(py);
+        if let Some(headers) = &self_.borrow().raw_headers {
+            for header_value in headers.get_all(axum::http::header::COOKIE) {
+                let Ok(raw) = header_value.to_str() else {
+                    continue;
+                };
+                for parsed in cookie::Cookie::split_parse(raw) {
+                    let Ok(cookie) = parsed else { continue };
+                    if let (Some(name), Some(value)) = (cookie.name_raw(), cookie.value_raw()) {
+                        dict.set_item(name, value)?;
+                    }
+                }
+            }
+        }
+
+        scope.set_item("_cookies", &dict)?;
+        Ok(dict)
     }
 
     fn body<'py>(self_: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
