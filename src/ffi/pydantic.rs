@@ -1,7 +1,7 @@
 use crate::ffi::datastructures::PyUploadFile;
 use crate::globals::BASEMODEL_TYPE;
 use crate::http::responses::{
-    PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse,
+    PyFileResponse, PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse,
 };
 use crate::routing::dependencies::{self, DependencyNode};
 use crate::routing::params;
@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyModule, PyString, PyTuple, PyType};
 use pyo3::{intern, prelude::*};
-use sonic_rs::{JsonContainerTrait, Value, json};
+use sonic_rs::{JsonContainerTrait, Value};
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -179,6 +179,7 @@ pub struct ParsedRouteMetadata {
     pub response_type: ResponseType,
     pub serialization_hint: SerializationHint,
     pub body_param_names: Vec<Py<PyString>>,
+    pub request_param: Option<Py<PyString>>,
     pub dependencies: Vec<DependencyNode>,
     pub dependency_needs_request: bool,
     pub all_deps_sync: bool,
@@ -211,6 +212,12 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     let mut param_validators = Vec::new();
     let mut body_param_names = Vec::new();
     let mut parsed_params = Vec::new();
+    let mut request_param: Option<Py<PyString>> = None;
+
+    let request_cls: Py<PyAny> = py
+        .get_type::<crate::http::request::PyRequest>()
+        .into_any()
+        .unbind();
 
     let _ = (|| -> PyResult<()> {
         let inspect = get_inspect(py)?;
@@ -231,13 +238,34 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                 continue;
             }
 
+            let raw_ann = param_obj
+                .getattr("annotation")
+                .ok()
+                .filter(|a| !params::is_inspect_empty(py, a));
+            if let Some(ann) = &raw_ann {
+                let ann_ref: &Bound<'_, PyAny> = ann;
+                if ann_ref.is(request_cls.bind(py)) {
+                    request_param = Some(pyo3::types::PyString::new(py, &param_name).unbind());
+                    continue;
+                }
+            }
+
             let mut parsed_param =
                 params::parse_parameter_spec(py, &param_name, &param_obj, &path_param_names)?;
 
             if !parsed_param.is_pydantic_model
                 && let Some(ann) = &parsed_param.annotation
             {
-                parsed_param.scalar_kind = resolve_scalar_kind(py, ann.bind(py));
+                parsed_param.scalar_kind = if parsed_param.is_list {
+                    ann.bind(py)
+                        .getattr("__args__")
+                        .ok()
+                        .and_then(|args| args.get_item(0).ok())
+                        .map(|elem| resolve_scalar_kind(py, &elem))
+                        .unwrap_or(crate::ffi::pydantic::ScalarKind::Str)
+                } else {
+                    resolve_scalar_kind(py, ann.bind(py))
+                };
             }
 
             if parsed_param.source == ParameterSource::Body {
@@ -298,6 +326,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         response_type,
         serialization_hint,
         body_param_names,
+        request_param,
         dependencies,
         dependency_needs_request,
         all_deps_sync,
@@ -307,12 +336,32 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     }
 }
 
+fn validation_error(loc: &[String], msg: impl std::fmt::Display, kind: &str) -> Response {
+    let detail = sonic_rs::json!({
+        "detail": [{
+            "loc": loc.iter().map(|s| sonic_rs::json!(s.as_str())).collect::<Vec<_>>(),
+            "msg": msg.to_string(),
+            "type": kind,
+        }]
+    });
+    (StatusCode::UNPROCESSABLE_ENTITY, Json(detail)).into_response()
+}
+
 fn validation_error_response(detail: impl Into<String>) -> Response {
-    (
-        StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({ "detail": detail.into() })),
-    )
-        .into_response()
+    validation_error(&["body".to_owned()], detail.into(), "value_error")
+}
+
+impl ParsedParameter {
+    pub(crate) fn error_loc(&self) -> Vec<String> {
+        let source = match self.source {
+            ParameterSource::Path => "path",
+            ParameterSource::Query => "query",
+            ParameterSource::Header => "header",
+            ParameterSource::Cookie => "cookie",
+            ParameterSource::Body | ParameterSource::BackgroundTasks => "body",
+        };
+        vec![source.to_owned(), self.external_name.clone()]
+    }
 }
 
 fn parse_bool(raw: &str) -> Option<bool> {
@@ -334,6 +383,7 @@ fn convert_scalar_value(
     raw: &str,
     param: &ParsedParameter,
 ) -> Result<Py<PyAny>, Response> {
+    let loc = param.error_loc();
     match param.scalar_kind {
         ScalarKind::Bool => parse_bool(raw)
             .map(|v| {
@@ -342,38 +392,50 @@ fn convert_scalar_value(
                     .into_any()
                     .unbind()
             })
-            .ok_or_else(|| validation_error_response(format!("Invalid boolean value: {}", raw))),
+            .ok_or_else(|| {
+                validation_error(
+                    &loc,
+                    "Value could not be parsed to a boolean".to_string(),
+                    "bool_parsing",
+                )
+            }),
 
         ScalarKind::Int => {
             let parsed = raw.parse::<i64>().map_err(|_| {
-                validation_error_response(format!("Invalid integer value: {}", raw))
+                validation_error(
+                    &loc,
+                    "Input should be a valid integer, unable to parse string as an integer",
+                    "int_parsing",
+                )
             })?;
             parsed
                 .into_pyobject(py)
                 .map(|v| v.into_any().unbind())
                 .map_err(|_| {
-                    validation_error_response(format!("Failed to convert integer value: {}", raw))
+                    validation_error(&loc, "Input should be a valid integer", "int_parsing")
                 })
         }
 
         ScalarKind::Float => {
-            let parsed = raw
-                .parse::<f64>()
-                .map_err(|_| validation_error_response(format!("Invalid number value: {}", raw)))?;
+            let parsed = raw.parse::<f64>().map_err(|_| {
+                validation_error(
+                    &loc,
+                    "Input should be a valid number, unable to parse string as a number",
+                    "float_parsing",
+                )
+            })?;
             parsed
                 .into_pyobject(py)
                 .map(|v| v.into_any().unbind())
                 .map_err(|_| {
-                    validation_error_response(format!("Failed to convert number value: {}", raw))
+                    validation_error(&loc, "Input should be a valid number", "float_parsing")
                 })
         }
 
         ScalarKind::Str => raw
             .into_pyobject(py)
             .map(|v| v.into_any().unbind())
-            .map_err(|_| {
-                validation_error_response(format!("Failed to convert string value: {}", raw))
-            }),
+            .map_err(|_| validation_error(&loc, "Input should be a valid string", "string_type")),
 
         ScalarKind::Other => {
             if let Some(ann) = param.annotation.as_ref().map(|a| a.bind(py))
@@ -383,7 +445,7 @@ fn convert_scalar_value(
             }
             raw.into_pyobject(py)
                 .map(|v| v.into_any().unbind())
-                .map_err(|_| validation_error_response(format!("Failed to convert value: {}", raw)))
+                .map_err(|_| validation_error(&loc, "Input should be valid", "value_error"))
         }
     }
 }
@@ -392,38 +454,41 @@ fn validate_scalar_constraints(
     param: &ParsedParameter,
     value: &Bound<'_, PyAny>,
 ) -> Result<(), Response> {
+    let loc = param.error_loc();
+
     if let Ok(number) = value.extract::<f64>() {
+        let numeric = |kind: &str, msg: String| validation_error(&loc, msg, kind);
         if let Some(gt) = param.constraints.gt
             && number <= gt
         {
-            return Err(validation_error_response(format!(
-                "{} must be greater than {}",
-                param.external_name, gt
-            )));
+            return Err(numeric(
+                "greater_than",
+                format!("Input should be greater than {gt}"),
+            ));
         }
         if let Some(ge) = param.constraints.ge
             && number < ge
         {
-            return Err(validation_error_response(format!(
-                "{} must be greater than or equal to {}",
-                param.external_name, ge
-            )));
+            return Err(numeric(
+                "greater_than_equal",
+                format!("Input should be greater than or equal to {ge}"),
+            ));
         }
         if let Some(lt) = param.constraints.lt
             && number >= lt
         {
-            return Err(validation_error_response(format!(
-                "{} must be less than {}",
-                param.external_name, lt
-            )));
+            return Err(numeric(
+                "less_than",
+                format!("Input should be less than {lt}"),
+            ));
         }
         if let Some(le) = param.constraints.le
             && number > le
         {
-            return Err(validation_error_response(format!(
-                "{} must be less than or equal to {}",
-                param.external_name, le
-            )));
+            return Err(numeric(
+                "less_than_equal",
+                format!("Input should be less than or equal to {le}"),
+            ));
         }
     }
 
@@ -431,26 +496,29 @@ fn validate_scalar_constraints(
         if let Some(min_length) = param.constraints.min_length
             && text.len() < min_length
         {
-            return Err(validation_error_response(format!(
-                "{} is shorter than {}",
-                param.external_name, min_length
-            )));
+            return Err(validation_error(
+                &loc,
+                format!("String should have at least {min_length} characters"),
+                "too_short",
+            ));
         }
         if let Some(max_length) = param.constraints.max_length
             && text.len() > max_length
         {
-            return Err(validation_error_response(format!(
-                "{} is longer than {}",
-                param.external_name, max_length
-            )));
+            return Err(validation_error(
+                &loc,
+                format!("String should have at most {max_length} characters"),
+                "too_long",
+            ));
         }
         if let Some(pattern) = &param.constraints.pattern
             && !pattern.is_match(text)
         {
-            return Err(validation_error_response(format!(
-                "{} does not match expected pattern",
-                param.external_name
-            )));
+            return Err(validation_error(
+                &loc,
+                "String should match pattern",
+                "string_pattern_mismatch",
+            ));
         }
     }
 
@@ -481,12 +549,86 @@ fn raw_value_for_parameter<'a>(
     }
 }
 
+fn raw_values_for_list<'a>(
+    param: &ParsedParameter,
+    request_input: &'a RequestInput<'_>,
+) -> Vec<Cow<'a, str>> {
+    let matches_name = |key: &str| key == param.external_name || key == param.name;
+
+    match param.source {
+        ParameterSource::Query => request_input
+            .get_all_query_params()
+            .iter()
+            .filter(|(k, _)| matches_name(k.as_ref()))
+            .map(|(_, v)| v.clone())
+            .collect(),
+        ParameterSource::Header | ParameterSource::Cookie | ParameterSource::Path => {
+            raw_value_for_parameter(param, request_input)
+                .into_iter()
+                .collect()
+        }
+        ParameterSource::Body | ParameterSource::BackgroundTasks => Vec::new(),
+    }
+}
+
+fn resolve_list_parameter(
+    py: Python<'_>,
+    param: &ParsedParameter,
+    request_input: &RequestInput<'_>,
+) -> Result<Option<Py<PyAny>>, Response> {
+    let raws = raw_values_for_list(param, request_input);
+
+    if raws.is_empty() {
+        return Ok(match (param.has_default, param.required) {
+            (true, _) => Some(
+                param
+                    .default_value
+                    .as_ref()
+                    .map(|v| v.clone_ref(py))
+                    .unwrap_or_else(|| py.None()),
+            ),
+            (false, true) => {
+                return Err(validation_error(
+                    &param.error_loc(),
+                    "Field required",
+                    "missing",
+                ));
+            }
+            (false, false) => None,
+        });
+    }
+
+    let mut items = Vec::with_capacity(raws.len());
+    for raw in &raws {
+        let value = convert_scalar_value(py, raw, param)?;
+        validate_scalar_constraints(param, value.bind(py))?;
+        items.push(value);
+    }
+
+    pyo3::types::PyList::new(py, items)
+        .map_err(|err| {
+            use axum::response::IntoResponse;
+            err.print(py);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to build list parameter",
+            )
+                .into_response()
+        })
+        .map(|list| Some(list.into_any().unbind()))
+}
+
 pub fn resolve_parameter_value(
     py: Python<'_>,
     param: &ParsedParameter,
     request_input: &RequestInput<'_>,
 ) -> Result<Option<Py<PyAny>>, Response> {
+    if param.is_list {
+        return resolve_list_parameter(py, param, request_input);
+    }
+
     let Some(raw) = raw_value_for_parameter(param, request_input) else {
+        let loc = param.error_loc();
         if param.has_default {
             return Ok(Some(
                 param
@@ -497,10 +639,7 @@ pub fn resolve_parameter_value(
             ));
         }
         if param.required {
-            return Err(validation_error_response(format!(
-                "Missing required parameter: {}",
-                param.external_name
-            )));
+            return Err(validation_error(&loc, "Field required", "missing"));
         }
         return Ok(None);
     };
@@ -508,6 +647,29 @@ pub fn resolve_parameter_value(
     let value = convert_scalar_value(py, &raw, param)?;
     validate_scalar_constraints(param, value.bind(py))?;
     Ok(Some(value))
+}
+
+fn form_field_to_py(
+    py: Python<'_>,
+    field: &BodyField,
+    param: &ParsedParameter,
+) -> Result<Py<PyAny>, Response> {
+    match field {
+        BodyField::Text(raw) => convert_scalar_value(py, raw, param),
+        BodyField::File(file) => Py::new(
+            py,
+            PyUploadFile::from_bytes(
+                file.filename.clone(),
+                file.content_type.clone(),
+                file.content.clone(),
+            ),
+        )
+        .map(|upload| upload.into_any())
+        .map_err(|err| {
+            err.print(py);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }),
+    }
 }
 
 fn apply_body_and_validation(
@@ -527,7 +689,11 @@ fn apply_body_and_validation(
             .iter()
             .any(|&idx| handler.payload.parsed_params[idx].required)
         {
-            return Err(validation_error_response("Request body is required"));
+            return Err(validation_error(
+                &["body".to_owned()],
+                "Field required",
+                "missing",
+            ));
         }
         handler.payload.body_param_indices.iter().for_each(|&idx| {
             let param = &handler.payload.parsed_params[idx];
@@ -549,9 +715,13 @@ fn apply_body_and_validation(
         if param.is_pydantic_model
             && let BodyPayload::Json { raw, .. } = payload
         {
-            let idx = param
-                .validator_index
-                .ok_or_else(|| validation_error_response("Body validator is not registered"))?;
+            let idx = param.validator_index.ok_or_else(|| {
+                validation_error(
+                    &["body".to_owned()],
+                    "Body validator is not registered",
+                    "value_error",
+                )
+            })?;
 
             let validator = &handler.validation.param_validators[idx];
             let validated = validate_json_with_pydantic(py, validator, raw)?;
@@ -574,50 +744,51 @@ fn apply_body_and_validation(
         BodyPayload::Form(form) => {
             for &idx in &handler.payload.body_param_indices {
                 let param = &handler.payload.parsed_params[idx];
-                let value = form
+                let values = form
                     .get(&param.external_name)
                     .or_else(|| form.get(&param.name));
 
-                if let Some(value) = value {
-                    match value {
-                        BodyField::Text(raw) => {
-                            let value = convert_scalar_value(py, raw, param)?;
-                            validate_scalar_constraints(param, value.bind(py))?;
-                            kwargs.set_item(param.name_py.bind(py), value).ok();
-                        }
-                        BodyField::File(file) => {
-                            let upload = Py::new(
-                                py,
-                                PyUploadFile::from_bytes(
-                                    file.filename.clone(),
-                                    file.content_type.clone(),
-                                    file.content.clone(),
-                                ),
-                            )
-                            .map_err(|err| {
-                                err.print(py);
-                                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                            })?
-                            .into_any();
-                            kwargs.set_item(param.name_py.bind(py), upload).ok();
-                        }
+                let Some(values) = values else {
+                    if param.has_default {
+                        let default_value = param
+                            .default_value
+                            .as_ref()
+                            .map(|d| d.clone_ref(py))
+                            .unwrap_or_else(|| py.None());
+                        kwargs.set_item(param.name_py.bind(py), default_value).ok();
+                    } else if param.required {
+                        return Err(validation_error(
+                            &["body".to_owned(), param.external_name.clone()],
+                            "Field required",
+                            "missing",
+                        ));
                     }
                     continue;
-                }
+                };
 
-                if param.has_default {
-                    let default_value = param
-                        .default_value
-                        .as_ref()
-                        .map(|d| d.clone_ref(py))
-                        .unwrap_or_else(|| py.None());
-                    kwargs.set_item(param.name_py.bind(py), default_value).ok();
-                } else if param.required {
-                    return Err(validation_error_response(format!(
-                        "Missing field: {}",
-                        param.external_name
-                    )));
-                }
+                let converted: Result<Vec<Py<PyAny>>, Response> = values
+                    .iter()
+                    .map(|v| form_field_to_py(py, v, param))
+                    .collect();
+                let converted = converted?;
+
+                let value: Py<PyAny> = if param.is_list {
+                    pyo3::types::PyList::new(py, converted)
+                        .map_err(|err| {
+                            err.print(py);
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        })?
+                        .into_any()
+                        .unbind()
+                } else {
+                    let value = converted
+                        .into_iter()
+                        .last()
+                        .expect("form entry is never empty");
+                    validate_scalar_constraints(param, value.bind(py))?;
+                    value
+                };
+                kwargs.set_item(param.name_py.bind(py), value).ok();
             }
 
             return Ok(());
@@ -645,9 +816,13 @@ fn apply_body_and_validation(
 
         if let Some(value) = value {
             if param.is_pydantic_model {
-                let idx = param
-                    .validator_index
-                    .ok_or_else(|| validation_error_response("Body validator is not registered"))?;
+                let idx = param.validator_index.ok_or_else(|| {
+                    validation_error(
+                        &["body".to_owned()],
+                        "Body validator is not registered",
+                        "value_error",
+                    )
+                })?;
 
                 let validator = &handler.validation.param_validators[idx];
                 let validated =
@@ -688,6 +863,23 @@ pub fn apply_request_data(
 ) -> Result<Option<Py<crate::engine::background::PyBackgroundTasks>>, Response> {
     if handler.payload.has_multiple_query_params {
         request_input.get_all_query_params();
+    }
+
+    if let Some(name) = &handler.payload.request_param {
+        let fail = |err: PyErr| -> Response {
+            err.print(py);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        };
+        let req = crate::http::request::create_py_request(
+            py,
+            request_input,
+            payload.and_then(|p| match p {
+                BodyPayload::Json { raw, .. } => Some(raw.as_ref()),
+                _ => None,
+            }),
+        )
+        .map_err(fail)?;
+        kwargs.set_item(name.bind(py), req).map_err(fail)?;
     }
 
     let mut bg_tasks_instance: Option<Py<crate::engine::background::PyBackgroundTasks>> = None;
@@ -743,6 +935,8 @@ pub fn get_response_type_from_class(py: Python<'_>, cls: &Bound<'_, PyAny>) -> R
         ResponseType::Html
     } else if cls.is(py.get_type::<PyRedirectResponse>()) {
         ResponseType::Redirect
+    } else if cls.is(py.get_type::<PyFileResponse>()) {
+        ResponseType::File
     } else {
         ResponseType::Auto
     }
@@ -798,6 +992,8 @@ pub fn get_response_type(py: Python<'_>, func: &Bound<'_, PyAny>) -> ResponseTyp
             return Ok(ResponseType::Html);
         } else if ann.is(py.get_type::<PyRedirectResponse>()) {
             return Ok(ResponseType::Redirect);
+        } else if ann.is(py.get_type::<PyFileResponse>()) {
+            return Ok(ResponseType::File);
         }
 
         let type_name = ann

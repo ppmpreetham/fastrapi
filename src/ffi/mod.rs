@@ -1,5 +1,6 @@
 pub mod datastructures;
 pub mod decorators;
+pub mod encoders;
 pub mod exceptions;
 pub mod pydantic;
 

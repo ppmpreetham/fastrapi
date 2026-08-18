@@ -1,4 +1,5 @@
 use super::PyAPIRouter;
+use crate::routing::dependencies::DependencyNode;
 use crate::routing::types::{HttpMethod, ParameterSource, SerializationHint, WebSocketEntry};
 use crate::utils::LockExt;
 use ahash::AHashSet;
@@ -49,6 +50,7 @@ struct RouteOptions {
     bypass_serialization: bool,
     merged_tags: Vec<String>,
     resolved_deprecated: Option<bool>,
+    dump_options: Option<Py<PyDict>>,
 }
 
 impl RouteOptions {
@@ -84,6 +86,8 @@ impl RouteOptions {
         let bypass_serialization = response_model
             .as_ref()
             .is_some_and(|rm| rm.bind(py).is_none());
+
+        let dump_options = build_dump_options(py, kwargs)?;
 
         let responses =
             extract_bound(kwargs, "responses").map(|d| crate::utils::py_any_to_json(py, &d));
@@ -127,13 +131,54 @@ impl RouteOptions {
             bypass_serialization,
             merged_tags,
             resolved_deprecated,
+            dump_options,
         })
     }
 }
+fn build_dump_options(
+    py: Python<'_>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyDict>>> {
+    let include = extract_py(kwargs, "response_model_include");
+    let exclude = extract_py(kwargs, "response_model_exclude");
+    let by_alias = extract::<bool>(kwargs, "response_model_by_alias").unwrap_or(false);
+    let exclude_unset = extract::<bool>(kwargs, "response_model_exclude_unset").unwrap_or(false);
+    let exclude_defaults =
+        extract::<bool>(kwargs, "response_model_exclude_defaults").unwrap_or(false);
+    let exclude_none = extract::<bool>(kwargs, "response_model_exclude_none").unwrap_or(false);
 
-// ==========================================
-// 3. ROUTE ANALYSIS
-// ==========================================
+    if include.is_none()
+        && exclude.is_none()
+        && !by_alias
+        && !exclude_unset
+        && !exclude_defaults
+        && !exclude_none
+    {
+        return Ok(None);
+    }
+
+    let options = PyDict::new(py);
+    if let Some(inc) = include {
+        options.set_item("include", inc)?;
+    }
+    if let Some(exc) = exclude {
+        options.set_item("exclude", exc)?;
+    }
+    if by_alias {
+        options.set_item("by_alias", true)?;
+    }
+    if exclude_unset {
+        options.set_item("exclude_unset", true)?;
+    }
+    if exclude_defaults {
+        options.set_item("exclude_defaults", true)?;
+    }
+    if exclude_none {
+        options.set_item("exclude_none", true)?;
+    }
+
+    Ok(Some(options.unbind()))
+}
 
 struct RouteAnalysis {
     needs_kwargs: bool,
@@ -148,7 +193,8 @@ impl RouteAnalysis {
         let needs_kwargs = !metadata.body_param_names.is_empty()
             || !metadata.param_validators.is_empty()
             || !metadata.dependencies.is_empty()
-            || !metadata.parsed_params.is_empty();
+            || !metadata.parsed_params.is_empty()
+            || metadata.request_param.is_some();
 
         let mut body_param_name_set = AHashSet::with_capacity(
             metadata.body_param_names.len() + metadata.param_validators.len(),
@@ -209,6 +255,7 @@ impl PyAPIRouter {
         let opts = RouteOptions::from_kwargs(py, kwargs, &self.tags, self.deprecated)?;
         let path_for_closure = path;
         let routes = Arc::clone(&self.route_entries);
+        let router_route_class = self.route_class.clone();
 
         let decorator = move |args: &Bound<'_, PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
@@ -219,7 +266,35 @@ impl PyAPIRouter {
             let metadata = crate::ffi::pydantic::parse_route_metadata(py, &func, &path_for_closure);
             let analysis = RouteAnalysis::new(&metadata);
 
-            let final_response_type = if let Some(cls) = &opts.response_class {
+            let mut security_requirements = Vec::new();
+            for node in &metadata.dependencies {
+                let bound = node.func.bind(py);
+                if let Some(spec) = crate::routing::security::describe_scheme(py, bound) {
+                    use crate::types::route::{CompiledSecurityScheme, RouteSecurityRequirement};
+                    security_requirements.push(RouteSecurityRequirement {
+                        scheme: Arc::new(CompiledSecurityScheme {
+                            id: bound.as_ptr() as u32,
+                            name: spec.name,
+                            description: spec.description,
+                            scopes: spec.scopes,
+                            kind: spec.kind,
+                        }),
+                        scopes: node.scopes.clone().into(),
+                    });
+                }
+            }
+
+            let effective_response_class = opts.response_class.clone().or_else(|| {
+                router_route_class.as_ref().and_then(|rc| {
+                    rc.bind(py)
+                        .getattr("response_class")
+                        .ok()
+                        .filter(|c| !c.is_none())
+                        .map(|c| c.unbind())
+                })
+            });
+
+            let final_response_type = if let Some(cls) = &effective_response_class {
                 crate::ffi::pydantic::get_response_type_from_class(py, cls.bind(py))
             } else {
                 metadata.response_type
@@ -252,6 +327,7 @@ impl PyAPIRouter {
                     dependency_needs_request: metadata.dependency_needs_request,
                     all_deps_sync: metadata.all_deps_sync,
                     needs_kwargs: analysis.needs_kwargs,
+                    request_param: metadata.request_param.clone(),
                     body_param_names: metadata.body_param_names,
                     body_param_name_set: analysis.body_param_name_set,
                     body_param_indices: analysis.body_param_indices,
@@ -270,7 +346,8 @@ impl PyAPIRouter {
                     serialization_hint,
                     default_status: opts.default_status,
                     response_model: opts.response_model.clone(),
-                    response_class: opts.response_class.clone(),
+                    response_class: effective_response_class,
+                    dump_options: opts.dump_options.clone(),
                 },
             };
 
@@ -292,6 +369,7 @@ impl PyAPIRouter {
                     callbacks: opts.callbacks.clone(),
                     deprecated: opts.resolved_deprecated,
                     include_in_schema: opts.include_in_schema,
+                    security: security_requirements,
                 });
 
             Ok(func.unbind())
@@ -317,9 +395,21 @@ impl PyAPIRouter {
               -> PyResult<Py<PyAny>> {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.unbind();
+
+            let path_param_names = crate::routing::params::extract_path_param_names(&path);
+            let deps: SmallVec<[DependencyNode; 4]> =
+                crate::routing::dependencies::parse_dependencies(
+                    py,
+                    func.bind(py),
+                    &path_param_names,
+                )
+                .unwrap_or_default()
+                .into();
+
             let entry = WebSocketEntry {
                 path: path.clone(),
                 handler: func.clone_ref(py),
+                deps,
             };
             websockets.lock_or_panic().push(entry);
             Ok(func)

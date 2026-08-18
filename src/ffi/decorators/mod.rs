@@ -31,6 +31,8 @@ pub struct PyAPIRouter {
     pub default_response_class: Option<Py<PyAny>>,
     #[pyo3(get)]
     pub generate_unique_id_function: Option<Py<PyAny>>,
+    #[pyo3(get)]
+    pub route_class: Option<Py<PyAny>>,
 
     pub route_entries: Arc<Mutex<Vec<RouteEntry>>>,
     pub websocket_entries: Arc<Mutex<Vec<WebSocketEntry>>>,
@@ -50,6 +52,7 @@ impl PyAPIRouter {
             include_in_schema: true,
             default_response_class: None,
             generate_unique_id_function: None,
+            route_class: None,
 
             route_entries: Arc::new(Mutex::new(Vec::new())),
             websocket_entries: Arc::new(Mutex::new(Vec::new())),
@@ -63,7 +66,7 @@ impl PyAPIRouter {
 #[pymethods]
 impl PyAPIRouter {
     #[new]
-    #[pyo3(signature = (*, prefix="".to_string(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (*, prefix="".to_string(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None, route_class=None))]
     fn new(
         prefix: String,
         tags: Option<Py<PyAny>>,
@@ -73,6 +76,7 @@ impl PyAPIRouter {
         include_in_schema: bool,
         default_response_class: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
+        route_class: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let tag_vec = Python::attach(|py| {
             tags.as_ref()
@@ -84,6 +88,15 @@ impl PyAPIRouter {
                 .unwrap_or_default()
         });
 
+        if let Some(rc) = &route_class {
+            let is_type = Python::attach(|py| rc.bind(py).is_instance_of::<pyo3::types::PyType>());
+            if !is_type {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "route_class must be a class (subclass of APIRoute)",
+                ));
+            }
+        }
+
         Ok(Self {
             prefix,
             tags: tag_vec,
@@ -93,6 +106,7 @@ impl PyAPIRouter {
             include_in_schema,
             default_response_class,
             generate_unique_id_function,
+            route_class,
             route_entries: Arc::new(Mutex::new(Vec::new())),
             websocket_entries: Arc::new(Mutex::new(Vec::new())),
             sub_routers: Arc::new(Mutex::new(Vec::new())),
