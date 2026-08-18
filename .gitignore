@@ -2,6 +2,8 @@
 NUL.*
 benchsrc/
 src/components/
+others/
+.zed/debug.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -31,6 +33,7 @@ venv/
 *.egg-info/
 .installed.cfg
 *.egg
+copier.ps1
 
 # Installer logs
 pip-log.txt
