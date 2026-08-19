@@ -1,6 +1,5 @@
 use crate::ffi::exceptions::PyHTTPException;
 use crate::ffi::pydantic;
-use crate::http::request::PyRequest;
 use crate::routing::dependencies::{self, DependencyExecutionError};
 use crate::routing::types::{BodyPayload, PathParamRange, RequestInput, RouteHandler};
 use crate::types::response::ResponseType;
@@ -10,23 +9,15 @@ use axum::{
 };
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList, PyString};
+use pyo3::types::{PyDict, PyString};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tracing::error;
 
-static SYNC_HANDLER_SEMAPHORE: std::sync::OnceLock<tokio::sync::Semaphore> =
-    std::sync::OnceLock::new();
-
-#[inline(always)]
-fn get_sync_semaphore() -> &'static tokio::sync::Semaphore {
-    SYNC_HANDLER_SEMAPHORE.get_or_init(|| {
-        let permits = crate::globals::config().sync_threads;
-        tokio::sync::Semaphore::new(permits)
-    })
-}
+use super::blocking;
+use crate::http::request::create_py_request;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
@@ -54,7 +45,10 @@ fn specialized_response_conversion(
                 return s.to_string_lossy().into_owned().into_response();
             }
 
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            match crate::http::responses::convert_response_by_type(py, result, handler) {
+                Ok(resp) => resp,
+                Err(err) => python_error_to_response(py, err),
+            }
         }
 
         _ => match crate::http::responses::convert_response_by_type(py, result, handler) {
@@ -65,6 +59,21 @@ fn specialized_response_conversion(
 }
 
 fn python_error_to_response(py: Python<'_>, err: PyErr) -> Response {
+    python_error_to_response_in(py, err, None)
+}
+
+/// @app.exception_handler registry
+pub(crate) fn python_error_to_response_in(
+    py: Python<'_>,
+    err: PyErr,
+    request_input: Option<&RequestInput<'_>>,
+) -> Response {
+    if let Some(response) =
+        crate::engine::errors::dispatch_exception_handler(py, &err, request_input)
+    {
+        return response;
+    }
+
     if let Ok(http_error) = err.value(py).extract::<PyRef<'_, PyHTTPException>>() {
         return http_error.to_response(py);
     }
@@ -96,7 +105,7 @@ fn log_python_error(py: Python<'_>, err: &PyErr) {
     }
 }
 
-fn build_request_input_from_parts<'a>(
+pub(crate) fn build_request_input_from_parts<'a>(
     parts: &'a Parts,
     param_ranges: &'a [PathParamRange],
 ) -> RequestInput<'a> {
@@ -122,68 +131,22 @@ fn build_request_input_from_parts<'a>(
     }
 }
 
-fn create_request_object(py: Python<'_>, request_input: &RequestInput<'_>) -> PyResult<Py<PyAny>> {
-    let scope = PyDict::new(py);
-    scope.set_item(intern!(py, "type"), intern!(py, "http"))?;
-    scope.set_item(intern!(py, "method"), request_input.method)?;
-    scope.set_item(intern!(py, "path"), request_input.path)?;
-    scope.set_item(intern!(py, "query_string"), request_input.query_string)?;
-
-    let path_params = PyDict::new(py);
-    if let Some(params) = request_input.path_params.get() {
-        params
-            .iter()
-            .try_for_each(|(k, v)| path_params.set_item(k.as_ref(), v))?;
-    }
-    scope.set_item(intern!(py, "path_params"), path_params)?;
-
-    let query_params = PyDict::new(py);
-    request_input
-        .get_all_query_params()
-        .into_iter()
-        .try_for_each(|(k, v)| query_params.set_item(k.as_ref(), v.as_ref()))?;
-    scope.set_item(intern!(py, "query_params"), query_params)?;
-
-    scope.set_item(
-        intern!(py, "headers"),
-        PyList::new(
-            py,
-            request_input.headers.iter().map(|(key, value)| {
-                (
-                    PyBytes::new(py, key.as_str().as_bytes()),
-                    PyBytes::new(py, value.as_bytes()),
-                )
-            }),
-        )?,
-    )?;
-
-    let cookies = PyDict::new(py);
-    request_input
-        .get_all_cookies()
-        .into_iter()
-        .try_for_each(|(k, v)| cookies.set_item(k, v))?;
-    scope.set_item(intern!(py, "cookies"), cookies)?;
-
-    let bound_req = PyRequest::create_bound(py, scope.into_any().unbind())?;
-    Ok(bound_req.into_any().unbind())
-}
-
 #[inline(always)]
 fn spawn_background_tasks(
-    rt_handle: &tokio::runtime::Handle,
+    async_loop: &Arc<Py<PyAny>>,
     bg_tasks: Option<Py<crate::engine::background::PyBackgroundTasks>>,
 ) {
     if let Some(tasks) = bg_tasks {
-        rt_handle.spawn(async move {
-            let handles = Python::attach(|py| match tasks.try_borrow(py) {
-                Ok(bg) => bg.execute_all(),
+        let async_loop = async_loop.clone();
+        tokio::spawn(async move {
+            for task in Python::attach(|py| match tasks.try_borrow(py) {
+                Ok(bg) => bg.execute_all(&async_loop),
                 Err(e) => {
                     tracing::error!("Failed to borrow BackgroundTasks: {}", e);
                     Vec::new()
                 }
-            });
-            for handle in handles {
-                let _ = handle.await;
+            }) {
+                task.await;
             }
         });
     }
@@ -215,8 +178,8 @@ fn resolve_sync_deps<'py>(
     request_input: &RequestInput<'_>,
     request_object: Option<Py<PyAny>>,
     kwargs: &Bound<'py, PyDict>,
-) -> Result<(), Response> {
-    let dep_results = dependencies::execute_dependencies_sync(
+) -> Result<Vec<crate::routing::dependencies::TeardownTask>, Response> {
+    let (dep_results, teardowns) = dependencies::execute_dependencies_sync(
         py,
         &handler.payload.dependencies,
         request_input,
@@ -231,7 +194,78 @@ fn resolve_sync_deps<'py>(
         kwargs
             .set_item(pyo3::types::PyString::intern(py, &name), value.bind(py))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-    })
+    })?;
+    Ok(teardowns)
+}
+
+#[inline(always)]
+fn execute_teardowns_sync(
+    py: Python<'_>,
+    teardowns: Vec<crate::routing::dependencies::TeardownTask>,
+) {
+    for task in teardowns.into_iter().rev() {
+        if task.is_async {
+            tracing::error!("Async generator dependency found in sync route!");
+        } else {
+            match task
+                .generator
+                .bind(py)
+                .call_method0(pyo3::intern!(py, "__next__"))
+            {
+                Ok(_) => tracing::error!("Sync generator dependency yielded twice!"),
+                Err(e) => {
+                    if !e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                        tracing::error!("Error during sync generator dependency teardown: {}", e);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) async fn execute_teardowns_async(
+    async_loop: &Arc<Py<PyAny>>,
+    teardowns: Vec<crate::routing::dependencies::TeardownTask>,
+) {
+    for task in teardowns.into_iter().rev() {
+        if task.is_async {
+            let future_anext = Python::attach(|py| -> PyResult<_> {
+                let anext_coroutine = task
+                    .generator
+                    .bind(py)
+                    .call_method0(pyo3::intern!(py, "__anext__"))?;
+                let locals = rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
+                rsloop::rust_async::into_future_with_locals(&locals, anext_coroutine)
+            });
+            match future_anext {
+                Ok(fut) => {
+                    let _ = fut.await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to tear down async generator dependency: {}", e);
+                }
+            }
+        } else {
+            let task_gen = task.generator;
+            let _ = blocking::run_python(move |py| {
+                match task_gen
+                    .bind(py)
+                    .call_method0(pyo3::intern!(py, "__next__"))
+                {
+                    Ok(_) => tracing::error!("Sync generator dependency yielded twice!"),
+                    Err(e) => {
+                        if !e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                            tracing::error!(
+                                "Error during sync generator dependency teardown: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            })
+            .await;
+        }
+    }
 }
 
 #[inline(always)]
@@ -272,18 +306,35 @@ pub(crate) fn render_no_request_json_response(py: Python<'_>, handler: &RouteHan
             .into_response();
     }
 
-    crate::utils::py_json_response_with_status_hint(
+    let is_plain_value = result.is_instance_of::<pyo3::types::PyDict>()
+        || result.is_instance_of::<pyo3::types::PyList>()
+        || result.is_instance_of::<pyo3::types::PySet>()
+        || result.is_instance_of::<PyString>()
+        || result.is_instance_of::<pyo3::types::PyBool>()
+        || result.is_instance_of::<pyo3::types::PyInt>()
+        || result.is_instance_of::<pyo3::types::PyFloat>();
+
+    if !is_plain_value {
+        return match crate::http::responses::convert_response_by_type(py, &result, handler) {
+            Ok(resp) => resp,
+            Err(err) => python_error_to_response(py, err),
+        };
+    }
+
+    crate::utils::py_json_response_with_dump_options(
         py,
         handler.response.default_status.unwrap_or(StatusCode::OK),
         &result,
         handler.response.serialization_hint,
+        handler.response.dump_options.as_ref().map(|d| d.bind(py)),
     )
     .unwrap_or_else(|err| python_error_to_response(py, err))
 }
 
 #[inline(always)]
-async fn await_python_future<F>(
+async fn await_python_future<'a, F>(
     handler: Arc<RouteHandler>,
+    request_input: Option<&RequestInput<'a>>,
     future_result: Result<F, Response>,
 ) -> Result<Response, Response>
 where
@@ -297,7 +348,7 @@ where
     let result = future.await;
     Python::attach(|py| match result {
         Ok(res) => Ok(specialized_response_conversion(py, res.bind(py), &handler)),
-        Err(err) => Err(python_error_to_response(py, err)),
+        Err(err) => Err(python_error_to_response_in(py, err, request_input)),
     })
 }
 
@@ -321,11 +372,7 @@ fn into_asyncio_future(
         .map_err(|err| python_error_to_response(py, err))
 }
 
-async fn core_sync_no_args(
-    rt_handle: tokio::runtime::Handle,
-    handler: Arc<RouteHandler>,
-    sync_to_threadpool: bool,
-) -> Response {
+async fn core_sync_no_args(handler: Arc<RouteHandler>, sync_to_threadpool: bool) -> Response {
     if !sync_to_threadpool {
         return Python::attach(|py| match call_handler_and_convert(py, &handler, None) {
             Ok(res) => res,
@@ -333,26 +380,17 @@ async fn core_sync_no_args(
         });
     }
 
-    let _permit = match get_sync_semaphore().acquire().await {
-        Ok(permit) => permit,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    rt_handle
-        .spawn_blocking(move || {
-            Python::attach(|py| match call_handler_and_convert(py, &handler, None) {
-                Ok(res) => res,
-                Err(err) => python_error_to_response(py, err),
-            })
-        })
-        .await
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    blocking::run_python(
+        move |py| match call_handler_and_convert(py, &handler, None) {
+            Ok(res) => res,
+            Err(err) => python_error_to_response(py, err),
+        },
+    )
+    .await
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-async fn core_async_no_args(
-    _rt_handle: tokio::runtime::Handle,
-    async_loop: Arc<Py<PyAny>>,
-    handler: Arc<RouteHandler>,
-) -> Response {
+async fn core_async_no_args(async_loop: Arc<Py<PyAny>>, handler: Arc<RouteHandler>) -> Response {
     let handler_clone = handler.clone();
     let future_res = Python::attach(|py| -> Result<_, Response> {
         let coroutine = handler_clone
@@ -363,167 +401,193 @@ async fn core_async_no_args(
             .map_err(|err| python_error_to_response(py, err))?;
         into_asyncio_future(py, &async_loop, coroutine)
     });
-    match await_python_future(handler, future_res).await {
+    match await_python_future(handler, None, future_res).await {
         Ok(res) => res,
         Err(err) => err,
     }
 }
 
+fn payload_raw_bytes(payload: Option<&BodyPayload>) -> Option<&[u8]> {
+    match payload {
+        Some(BodyPayload::Json { raw, .. }) => Some(raw),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn run_sync_gil_section(
+    py: Python<'_>,
+    state: &GilSection<'_, '_, '_>,
+) -> Result<
+    (
+        Response,
+        Option<Py<crate::engine::background::PyBackgroundTasks>>,
+    ),
+    Response,
+> {
+    let GilSection {
+        handler,
+        request_input,
+        payload,
+        needs_request_object,
+    } = *state;
+
+    let (kwargs, bg_tasks) = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
+
+    let req_obj = if needs_request_object {
+        Some(
+            create_py_request(py, request_input, payload_raw_bytes(payload))
+                .map_err(|e| python_error_to_response_in(py, e, Some(request_input)))?,
+        )
+    } else {
+        None
+    };
+
+    let teardowns = resolve_sync_deps(py, handler, request_input, req_obj, &kwargs)?;
+
+    let response = call_handler_and_convert(py, handler, Some(&kwargs))
+        .map_err(|err| python_error_to_response(py, err))?;
+
+    execute_teardowns_sync(py, teardowns);
+    Ok((response, bg_tasks))
+}
+
+struct GilSection<'a, 'b, 'c> {
+    handler: &'a RouteHandler,
+    request_input: &'b RequestInput<'c>,
+    payload: Option<&'a BodyPayload>,
+    needs_request_object: bool,
+}
+
 async fn core_sync_no_deps(
-    rt_handle: tokio::runtime::Handle,
-    handler: Arc<RouteHandler>,
-    request_parts: Parts,
-    param_ranges: SmallVec<[PathParamRange; 4]>,
-    payload: Option<BodyPayload>,
-    sync_to_threadpool: bool,
-) -> Response {
-    if !sync_to_threadpool {
-        let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
-        return Python::attach(|py| -> Result<Response, Response> {
-            let (kwargs, bg_tasks) =
-                prepare_kwargs_and_payload(py, &handler, &request_input, payload.as_ref())?;
-            let response = call_handler_and_convert(py, &handler, Some(&kwargs))
-                .map_err(|err| python_error_to_response(py, err))?;
-            spawn_background_tasks(&rt_handle, bg_tasks);
-            Ok(response)
-        })
-        .unwrap_or_else(|e| e);
-    }
-
-    let Ok(_permit) = get_sync_semaphore().acquire().await else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-
-    let rt_handle_clone = rt_handle.clone();
-    rt_handle
-        .spawn_blocking(move || {
-            let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
-            Python::attach(|py| -> Result<Response, Response> {
-                let (kwargs, bg_tasks) =
-                    prepare_kwargs_and_payload(py, &handler, &request_input, payload.as_ref())?;
-                let response = call_handler_and_convert(py, &handler, Some(&kwargs))
-                    .map_err(|err| python_error_to_response(py, err))?;
-                spawn_background_tasks(&rt_handle_clone, bg_tasks);
-                Ok(response)
-            })
-            .unwrap_or_else(|e| e)
-        })
-        .await
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-}
-
-async fn core_sync_deps<const NEEDS_REQ: bool>(
-    rt_handle: tokio::runtime::Handle,
-    handler: Arc<RouteHandler>,
-    request_parts: Parts,
-    param_ranges: SmallVec<[PathParamRange; 4]>,
-    payload: Option<BodyPayload>,
-    sync_to_threadpool: bool,
-) -> Response {
-    if !sync_to_threadpool {
-        let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
-        return Python::attach(|py| -> Result<Response, Response> {
-            let (kwargs, bg_tasks) =
-                prepare_kwargs_and_payload(py, &handler, &request_input, payload.as_ref())?;
-            let req_obj = if NEEDS_REQ {
-                Some(
-                    create_request_object(py, &request_input)
-                        .map_err(|e| python_error_to_response(py, e))?,
-                )
-            } else {
-                None
-            };
-            resolve_sync_deps(py, &handler, &request_input, req_obj, &kwargs)?;
-            let response = call_handler_and_convert(py, &handler, Some(&kwargs))
-                .map_err(|err| python_error_to_response(py, err))?;
-            spawn_background_tasks(&rt_handle, bg_tasks);
-            Ok(response)
-        })
-        .unwrap_or_else(|e| e);
-    }
-
-    let Ok(_permit) = get_sync_semaphore().acquire().await else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let rt_handle_clone = rt_handle.clone();
-    rt_handle
-        .spawn_blocking(move || {
-            let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
-            Python::attach(|py| -> Result<Response, Response> {
-                let (kwargs, bg_tasks) =
-                    prepare_kwargs_and_payload(py, &handler, &request_input, payload.as_ref())?;
-                let req_obj = if NEEDS_REQ {
-                    Some(
-                        create_request_object(py, &request_input)
-                            .map_err(|e| python_error_to_response(py, e))?,
-                    )
-                } else {
-                    None
-                };
-                resolve_sync_deps(py, &handler, &request_input, req_obj, &kwargs)?;
-                let response = call_handler_and_convert(py, &handler, Some(&kwargs))
-                    .map_err(|err| python_error_to_response(py, err))?;
-                spawn_background_tasks(&rt_handle_clone, bg_tasks);
-                Ok(response)
-            })
-            .unwrap_or_else(|e| e)
-        })
-        .await
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-}
-
-async fn core_async_no_deps(
-    rt_handle: tokio::runtime::Handle,
     async_loop: Arc<Py<PyAny>>,
     handler: Arc<RouteHandler>,
     request_parts: Parts,
     param_ranges: SmallVec<[PathParamRange; 4]>,
-    payload: Option<BodyPayload>,
+    payload: Option<Arc<BodyPayload>>,
+    sync_to_threadpool: bool,
 ) -> Response {
-    let handler_clone = handler.clone();
-    let setup_result = rt_handle
-        .spawn_blocking(move || {
-            let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
-            Python::attach(
-                |py| -> Result<
-                    (
-                        Py<PyAny>,
-                        Option<Py<crate::engine::background::PyBackgroundTasks>>,
-                    ),
-                    Response,
-                > {
-                    let (kwargs, bg_tasks) = prepare_kwargs_and_payload(
-                        py,
-                        &handler_clone,
-                        &request_input,
-                        payload.as_ref(),
-                    )?;
-
-                    let coroutine = handler_clone
-                        .execution
-                        .func
-                        .bind(py)
-                        .call((), Some(&kwargs))
-                        .map(Bound::unbind)
-                        .map_err(|err| python_error_to_response(py, err))?;
-
-                    Ok((coroutine, bg_tasks))
+    if !sync_to_threadpool {
+        let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+        return Python::attach(|py| -> Result<Response, Response> {
+            let (response, bg_tasks) = run_sync_gil_section(
+                py,
+                &GilSection {
+                    handler: &handler,
+                    request_input: &request_input,
+                    payload: payload.as_deref(),
+                    needs_request_object: false,
                 },
-            )
+            )?;
+            spawn_background_tasks(&async_loop, bg_tasks);
+            Ok(response)
         })
-        .await
-        .unwrap_or_else(|_| Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()));
+        .unwrap_or_else(|e| e);
+    }
 
-    let (coroutine, bg_tasks) = match setup_result {
-        Ok(res) => res,
+    blocking::run_python(move |py| {
+        let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+        let result = run_sync_gil_section(
+            py,
+            &GilSection {
+                handler: &handler,
+                request_input: &request_input,
+                payload: payload.as_deref(),
+                needs_request_object: false,
+            },
+        );
+        match result {
+            Ok((response, bg_tasks)) => {
+                spawn_background_tasks(&async_loop, bg_tasks);
+                response
+            }
+            Err(e) => e,
+        }
+    })
+    .await
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+async fn core_sync_deps<const NEEDS_REQ: bool>(
+    async_loop: Arc<Py<PyAny>>,
+    handler: Arc<RouteHandler>,
+    request_parts: Parts,
+    param_ranges: SmallVec<[PathParamRange; 4]>,
+    payload: Option<Arc<BodyPayload>>,
+    sync_to_threadpool: bool,
+) -> Response {
+    if !sync_to_threadpool {
+        let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+        return Python::attach(|py| -> Result<Response, Response> {
+            let (response, bg_tasks) = run_sync_gil_section(
+                py,
+                &GilSection {
+                    handler: &handler,
+                    request_input: &request_input,
+                    payload: payload.as_deref(),
+                    needs_request_object: NEEDS_REQ,
+                },
+            )?;
+            spawn_background_tasks(&async_loop, bg_tasks);
+            Ok(response)
+        })
+        .unwrap_or_else(|e| e);
+    }
+
+    blocking::run_python(move |py| {
+        let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+        let result = run_sync_gil_section(
+            py,
+            &GilSection {
+                handler: &handler,
+                request_input: &request_input,
+                payload: payload.as_deref(),
+                needs_request_object: NEEDS_REQ,
+            },
+        );
+        match result {
+            Ok((response, bg_tasks)) => {
+                spawn_background_tasks(&async_loop, bg_tasks);
+                response
+            }
+            Err(e) => e,
+        }
+    })
+    .await
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+async fn core_async_no_deps(
+    async_loop: Arc<Py<PyAny>>,
+    handler: Arc<RouteHandler>,
+    request_parts: Parts,
+    param_ranges: SmallVec<[PathParamRange; 4]>,
+    payload: Option<Arc<BodyPayload>>,
+) -> Response {
+    let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+    let future_res = Python::attach(|py| -> Result<_, Response> {
+        let (kwargs, bg_tasks) =
+            prepare_kwargs_and_payload(py, &handler, &request_input, payload.as_deref())?;
+
+        let coroutine = handler
+            .execution
+            .func
+            .bind(py)
+            .call((), Some(&kwargs))
+            .map_err(|err| python_error_to_response_in(py, err, Some(&request_input)))?;
+
+        let future = into_asyncio_future(py, &async_loop, coroutine)?;
+        Ok((future, bg_tasks))
+    });
+
+    let (future_res, bg_tasks) = match future_res {
+        Ok((f, bg)) => (f, bg),
         Err(resp) => return resp,
     };
 
-    let future_res =
-        Python::attach(|py| into_asyncio_future(py, &async_loop, coroutine.into_bound(py)));
-    match await_python_future(handler, future_res).await {
+    match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
-            spawn_background_tasks(&rt_handle, bg_tasks);
+            spawn_background_tasks(&async_loop, bg_tasks);
             response
         }
         Err(err_resp) => err_resp,
@@ -531,69 +595,55 @@ async fn core_async_no_deps(
 }
 
 async fn core_async_sync_deps<const NEEDS_REQ: bool>(
-    rt_handle: tokio::runtime::Handle,
     async_loop: Arc<Py<PyAny>>,
     handler: Arc<RouteHandler>,
     request_parts: Parts,
     param_ranges: SmallVec<[PathParamRange; 4]>,
-    payload: Option<BodyPayload>,
+    payload: Option<Arc<BodyPayload>>,
 ) -> Response {
-    let handler_clone = handler.clone();
-    let setup_result = rt_handle
-        .spawn_blocking(move || {
-            let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
-            Python::attach(
-                |py| -> Result<
-                    (
-                        Py<PyAny>,
-                        Option<Py<crate::engine::background::PyBackgroundTasks>>,
-                    ),
-                    Response,
-                > {
-                    let (kwargs, bg_tasks) = prepare_kwargs_and_payload(
-                        py,
-                        &handler_clone,
-                        &request_input,
-                        payload.as_ref(),
-                    )?;
+    let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+    let setup = Python::attach(
+        |py| -> Result<
+            (
+                std::pin::Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>>,
+                Option<Py<crate::engine::background::PyBackgroundTasks>>,
+            ),
+            Response,
+        > {
+            let (kwargs, bg_tasks) =
+                prepare_kwargs_and_payload(py, &handler, &request_input, payload.as_deref())?;
 
-                    let req_obj = if NEEDS_REQ {
-                        Some(
-                            create_request_object(py, &request_input)
-                                .map_err(|e| python_error_to_response(py, e))?,
-                        )
-                    } else {
-                        None
-                    };
+            let req_obj = if NEEDS_REQ {
+                Some(
+                    create_py_request(py, &request_input, payload_raw_bytes(payload.as_deref()))
+                        .map_err(|e| python_error_to_response_in(py, e, Some(&request_input)))?,
+                )
+            } else {
+                None
+            };
 
-                    resolve_sync_deps(py, &handler_clone, &request_input, req_obj, &kwargs)?;
+            resolve_sync_deps(py, &handler, &request_input, req_obj, &kwargs)?;
 
-                    let coroutine = handler_clone
-                        .execution
-                        .func
-                        .bind(py)
-                        .call((), Some(&kwargs))
-                        .map(Bound::unbind)
-                        .map_err(|err| python_error_to_response(py, err))?;
+            let coroutine = handler
+                .execution
+                .func
+                .bind(py)
+                .call((), Some(&kwargs))
+                .map_err(|err| python_error_to_response_in(py, err, Some(&request_input)))?;
 
-                    Ok((coroutine, bg_tasks))
-                },
-            )
-        })
-        .await
-        .unwrap_or_else(|_| Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()));
+            let future = into_asyncio_future(py, &async_loop, coroutine)?;
+            Ok((future, bg_tasks))
+        },
+    );
 
-    let (coroutine, bg_tasks) = match setup_result {
-        Ok(res) => res,
+    let (future_res, bg_tasks) = match setup {
+        Ok(pair) => pair,
         Err(resp) => return resp,
     };
 
-    let future_res =
-        Python::attach(|py| into_asyncio_future(py, &async_loop, coroutine.into_bound(py)));
-
-    match await_python_future(handler, future_res).await {
+    match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
-            spawn_background_tasks(&rt_handle, bg_tasks);
+            spawn_background_tasks(&async_loop, bg_tasks);
             response
         }
         Err(err_resp) => err_resp,
@@ -601,60 +651,43 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
 }
 
 async fn core_async_async_deps<const NEEDS_REQ: bool>(
-    rt_handle: tokio::runtime::Handle,
     async_loop: Arc<Py<PyAny>>,
     handler: Arc<RouteHandler>,
     request_parts: Parts,
     param_ranges: SmallVec<[PathParamRange; 4]>,
-    payload: Option<BodyPayload>,
+    payload: Option<Arc<BodyPayload>>,
 ) -> Response {
-    let handler_clone = handler.clone();
-    let prep_parts = request_parts.clone();
-    let prep_ranges = param_ranges.clone();
-    let prep_payload = payload.clone();
+    let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+    let prep = Python::attach(
+        |py| -> Result<
+            (
+                Option<Py<PyAny>>,
+                Py<PyDict>,
+                Option<Py<crate::engine::background::PyBackgroundTasks>>,
+            ),
+            Response,
+        > {
+            let (kwargs, bg_tasks) =
+                prepare_kwargs_and_payload(py, &handler, &request_input, payload.as_deref())?;
 
-    let prep_res = rt_handle
-        .spawn_blocking(move || {
-            let request_input = build_request_input_from_parts(&prep_parts, &prep_ranges);
-            Python::attach(
-                |py| -> Result<
-                    (
-                        Option<Py<PyAny>>,
-                        Py<PyDict>,
-                        Option<Py<crate::engine::background::PyBackgroundTasks>>,
-                    ),
-                    Response,
-                > {
-                    let (kwargs, bg_tasks) = prepare_kwargs_and_payload(
-                        py,
-                        &handler_clone,
-                        &request_input,
-                        prep_payload.as_ref(),
-                    )?;
+            let req_obj = if NEEDS_REQ {
+                Some(
+                    create_py_request(py, &request_input, payload_raw_bytes(payload.as_deref()))
+                        .map_err(|e| python_error_to_response_in(py, e, Some(&request_input)))?,
+                )
+            } else {
+                None
+            };
+            Ok((req_obj, kwargs.unbind(), bg_tasks))
+        },
+    );
 
-                    let req_obj = if NEEDS_REQ {
-                        Some(
-                            create_request_object(py, &request_input)
-                                .map_err(|e| python_error_to_response(py, e))?,
-                        )
-                    } else {
-                        None
-                    };
-                    Ok((req_obj, kwargs.unbind(), bg_tasks))
-                },
-            )
-        })
-        .await
-        .unwrap_or_else(|_| Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()));
-
-    let (request_object, kwargs_unbind, bg_tasks) = match prep_res {
+    let (request_object, kwargs_unbind, bg_tasks) = match prep {
         Ok(res) => res,
         Err(r) => return r,
     };
 
-    let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
-    let dependency_results = match dependencies::execute_dependencies(
-        rt_handle.clone(),
+    let (dependency_results, teardowns) = match dependencies::execute_dependencies(
         &async_loop,
         &handler.payload.dependencies,
         &request_input,
@@ -665,53 +698,47 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
         Ok(results) => results,
         Err(DependencyExecutionError::Response(r)) => return *r,
         Err(DependencyExecutionError::Python(err)) => {
-            return rt_handle
-                .spawn_blocking(move || Python::attach(|py| python_error_to_response(py, err)))
+            return blocking::run_python(move |py| python_error_to_response(py, err))
                 .await
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 
-    let handler_ref = handler.clone();
-    let setup_result = rt_handle
-        .spawn_blocking(move || {
-            Python::attach(|py| -> Result<Py<PyAny>, Response> {
-                let kwargs = kwargs_unbind.bind(py);
+    let setup = Python::attach(|py| -> Result<_, Response> {
+        let kwargs = kwargs_unbind.bind(py);
 
-                dependency_results
-                    .into_iter()
-                    .try_for_each(|(name, value)| {
-                        kwargs
-                            .set_item(pyo3::types::PyString::intern(py, &name), value.bind(py))
-                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-                    })?;
+        dependency_results
+            .into_iter()
+            .try_for_each(|(name, value)| {
+                kwargs
+                    .set_item(PyString::intern(py, &name), value.bind(py))
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            })?;
 
-                handler_ref
-                    .execution
-                    .func
-                    .bind(py)
-                    .call((), Some(kwargs))
-                    .map(Bound::unbind)
-                    .map_err(|err| python_error_to_response(py, err))
-            })
-        })
-        .await
-        .unwrap_or_else(|_| Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()));
+        let coroutine = handler
+            .execution
+            .func
+            .bind(py)
+            .call((), Some(kwargs))
+            .map_err(|err| python_error_to_response_in(py, err, Some(&request_input)))?;
 
-    let coroutine = match setup_result {
-        Ok(coroutine) => coroutine,
+        into_asyncio_future(py, &async_loop, coroutine)
+    });
+
+    let future_res = match setup {
+        Ok(f) => f,
         Err(resp) => return resp,
     };
 
-    let future_res =
-        Python::attach(|py| into_asyncio_future(py, &async_loop, coroutine.into_bound(py)));
-    match await_python_future(handler, future_res).await {
+    let response = match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
-            spawn_background_tasks(&rt_handle, bg_tasks);
+            spawn_background_tasks(&async_loop, bg_tasks);
             response
         }
         Err(err_resp) => err_resp,
-    }
+    };
+    execute_teardowns_async(&async_loop, teardowns).await;
+    response
 }
 
 pub fn assign_execution_mode(handler: &mut RouteHandler) {
@@ -739,23 +766,20 @@ pub fn assign_execution_mode(handler: &mut RouteHandler) {
 }
 
 pub async fn run_py_handler(
-    rt_handle: tokio::runtime::Handle,
     async_loop: Arc<Py<PyAny>>,
     sync_to_threadpool: bool,
     handler: Arc<RouteHandler>,
     request_parts: Parts,
     param_ranges: SmallVec<[PathParamRange; 4]>,
-    payload: Option<BodyPayload>,
+    payload: Option<Arc<BodyPayload>>,
 ) -> Response {
     match handler.execution.execution_mode {
-        ExecutionMode::SyncNoArgs => {
-            core_sync_no_args(rt_handle, handler, sync_to_threadpool).await
-        }
-        ExecutionMode::AsyncNoArgs => core_async_no_args(rt_handle, async_loop, handler).await,
+        ExecutionMode::SyncNoArgs => core_sync_no_args(handler, sync_to_threadpool).await,
+        ExecutionMode::AsyncNoArgs => core_async_no_args(async_loop, handler).await,
 
         ExecutionMode::SyncNoDeps => {
             core_sync_no_deps(
-                rt_handle,
+                async_loop,
                 handler,
                 request_parts,
                 param_ranges,
@@ -766,7 +790,7 @@ pub async fn run_py_handler(
         }
         ExecutionMode::SyncDepsNoReq => {
             core_sync_deps::<false>(
-                rt_handle,
+                async_loop,
                 handler,
                 request_parts,
                 param_ranges,
@@ -777,7 +801,7 @@ pub async fn run_py_handler(
         }
         ExecutionMode::SyncDepsReq => {
             core_sync_deps::<true>(
-                rt_handle,
+                async_loop,
                 handler,
                 request_parts,
                 param_ranges,
@@ -787,41 +811,18 @@ pub async fn run_py_handler(
             .await
         }
         ExecutionMode::AsyncNoDeps => {
-            core_async_no_deps(
-                rt_handle,
-                async_loop,
-                handler,
-                request_parts,
-                param_ranges,
-                payload,
-            )
-            .await
+            core_async_no_deps(async_loop, handler, request_parts, param_ranges, payload).await
         }
         ExecutionMode::AsyncSyncDepsNoReq => {
-            core_async_sync_deps::<false>(
-                rt_handle,
-                async_loop,
-                handler,
-                request_parts,
-                param_ranges,
-                payload,
-            )
-            .await
+            core_async_sync_deps::<false>(async_loop, handler, request_parts, param_ranges, payload)
+                .await
         }
         ExecutionMode::AsyncSyncDepsReq => {
-            core_async_sync_deps::<true>(
-                rt_handle,
-                async_loop,
-                handler,
-                request_parts,
-                param_ranges,
-                payload,
-            )
-            .await
+            core_async_sync_deps::<true>(async_loop, handler, request_parts, param_ranges, payload)
+                .await
         }
         ExecutionMode::AsyncAsyncDepsNoReq => {
             core_async_async_deps::<false>(
-                rt_handle,
                 async_loop,
                 handler,
                 request_parts,
@@ -831,31 +832,21 @@ pub async fn run_py_handler(
             .await
         }
         ExecutionMode::AsyncAsyncDepsReq => {
-            core_async_async_deps::<true>(
-                rt_handle,
-                async_loop,
-                handler,
-                request_parts,
-                param_ranges,
-                payload,
-            )
-            .await
+            core_async_async_deps::<true>(async_loop, handler, request_parts, param_ranges, payload)
+                .await
         }
     }
 }
 
 #[inline(always)]
 pub async fn run_py_handler_no_request(
-    rt_handle: tokio::runtime::Handle,
     async_loop: Arc<Py<PyAny>>,
     sync_to_threadpool: bool,
     handler: Arc<RouteHandler>,
 ) -> Response {
     match handler.execution.execution_mode {
-        ExecutionMode::SyncNoArgs => {
-            core_sync_no_args(rt_handle, handler, sync_to_threadpool).await
-        }
-        ExecutionMode::AsyncNoArgs => core_async_no_args(rt_handle, async_loop, handler).await,
+        ExecutionMode::SyncNoArgs => core_sync_no_args(handler, sync_to_threadpool).await,
+        ExecutionMode::AsyncNoArgs => core_async_no_args(async_loop, handler).await,
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
