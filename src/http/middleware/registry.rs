@@ -11,7 +11,16 @@ use super::httpsredirect::{HTTPSRedirectMiddleware, parse_https_redirect_params}
 use super::session::{SessionMiddleware, parse_session_params};
 use super::trustedhost::{TrustedHostMiddleware, parse_trusted_host_params};
 
-/// Holds the configured middleware instances and settings for an application.
+#[derive(Clone)]
+pub enum DeclaredLayer {
+    Cors,
+    TrustedHost,
+    HttpsRedirect,
+    GZip,
+    Session,
+    Custom(Arc<PyMiddleware>),
+}
+
 #[derive(Clone, Default)]
 pub struct MiddlewareContainer {
     pub cors: Option<CORSMiddleware>,
@@ -20,29 +29,38 @@ pub struct MiddlewareContainer {
     pub gzip: Option<GZipMiddleware>,
     pub session: Option<SessionMiddleware>,
     pub py_middlewares: Vec<Arc<PyMiddleware>>,
+    pub order: Vec<DeclaredLayer>,
 }
 
-/// Extensible trait for building and configuring built-in middlewares.
+impl MiddlewareContainer {
+    pub(crate) fn record_layer(&mut self, class_name: &str) {
+        let layer = match class_name {
+            "CORSMiddleware" => DeclaredLayer::Cors,
+            "TrustedHostMiddleware" => DeclaredLayer::TrustedHost,
+            "HTTPSRedirectMiddleware" => DeclaredLayer::HttpsRedirect,
+            "GZipMiddleware" => DeclaredLayer::GZip,
+            "SessionMiddleware" => DeclaredLayer::Session,
+            _ => return,
+        };
+        self.order.push(layer);
+    }
+}
+
 pub trait MiddlewareBuilder: Send + Sync {
-    /// The Python class name this builder matches (e.g. "CORSMiddleware").
     fn name(&self) -> &'static str;
 
-    /// Attempt to downcast a direct PyClass instance and store it in `container`.
     fn try_from_instance(
         &self,
         item: &Bound<'_, PyAny>,
         container: &mut MiddlewareContainer,
     ) -> PyResult<bool>;
 
-    /// Parse keyword arguments dictionary and store the resulting configuration in `container`.
     fn parse_kwargs(
         &self,
         kwargs: &Bound<'_, PyDict>,
         container: &mut MiddlewareContainer,
     ) -> PyResult<()>;
 }
-
-// Concrete Builders
 
 struct CorsMiddlewareBuilder;
 
@@ -194,7 +212,6 @@ impl MiddlewareBuilder for SessionMiddlewareBuilder {
     }
 }
 
-/// Registry of built-in middleware builders.
 pub struct MiddlewareRegistry {
     builders: Vec<Box<dyn MiddlewareBuilder>>,
     name_map: HashMap<&'static str, usize>,
@@ -242,6 +259,5 @@ impl Default for MiddlewareRegistry {
     }
 }
 
-/// Global default registry for built in middlewares.
 pub static MIDDLEWARE_REGISTRY: LazyLock<MiddlewareRegistry> =
     LazyLock::new(MiddlewareRegistry::new);
