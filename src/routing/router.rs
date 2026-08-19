@@ -3,15 +3,24 @@ use ahash::AHashMap;
 use pyo3::{Py, PyAny};
 use std::{borrow::Cow, sync::Arc};
 
+#[derive(Clone, Debug)]
+pub struct RoutePattern(pub Arc<str>);
+
+#[derive(Clone)]
+pub struct RouteTarget {
+    pub handler: Arc<RouteHandler>,
+    pub pattern: Arc<str>,
+}
+
 pub enum RouteMatch<'a> {
-    Static(Arc<RouteHandler>),
-    Params(Arc<RouteHandler>, matchit::Params<'a, 'a>),
+    Static(RouteTarget),
+    Params(RouteTarget, matchit::Params<'a, 'a>),
 }
 
 #[derive(Clone)]
 pub struct FrozenRouter {
-    static_routes: [AHashMap<Box<str>, Arc<RouteHandler>>; HTTP_METHOD_COUNT],
-    param_routes: [Option<matchit::Router<Arc<RouteHandler>>>; HTTP_METHOD_COUNT],
+    static_routes: [AHashMap<Box<str>, RouteTarget>; HTTP_METHOD_COUNT],
+    param_routes: [Option<matchit::Router<RouteTarget>>; HTTP_METHOD_COUNT],
     websocket_routes: AHashMap<String, Py<PyAny>>,
 }
 
@@ -20,8 +29,8 @@ impl FrozenRouter {
     pub fn resolve<'a>(&'a self, method: HttpMethod, path: &'a str) -> Option<RouteMatch<'a>> {
         let idx = method as usize;
         let normalized = normalize_lookup(path);
-        if let Some(handler) = self.static_routes[idx].get(normalized) {
-            return Some(RouteMatch::Static(handler.clone()));
+        if let Some(target) = self.static_routes[idx].get(normalized) {
+            return Some(RouteMatch::Static(target.clone()));
         }
         let matched = self.param_routes[idx].as_ref()?.at(path).ok()?;
         Some(RouteMatch::Params(matched.value.clone(), matched.params))
@@ -34,8 +43,8 @@ impl FrozenRouter {
 }
 
 pub struct FrozenRouterBuilder {
-    static_routes: [AHashMap<Box<str>, Arc<RouteHandler>>; HTTP_METHOD_COUNT],
-    param_entries: [Vec<(String, Arc<RouteHandler>)>; HTTP_METHOD_COUNT],
+    static_routes: [AHashMap<Box<str>, RouteTarget>; HTTP_METHOD_COUNT],
+    param_entries: [Vec<(String, RouteTarget)>; HTTP_METHOD_COUNT],
     websocket_routes: AHashMap<String, Py<PyAny>>,
 }
 
@@ -52,10 +61,15 @@ impl FrozenRouterBuilder {
         let idx = method as usize;
         let (normalized, has_params) = normalize_register(&path);
 
+        let target = RouteTarget {
+            handler,
+            pattern: Arc::from(normalized.as_ref()),
+        };
+
         if has_params {
-            self.param_entries[idx].push((normalized.into_owned(), handler));
+            self.param_entries[idx].push((normalized.into_owned(), target));
         } else {
-            self.static_routes[idx].insert(normalized.into_owned().into_boxed_str(), handler);
+            self.static_routes[idx].insert(normalized.into_owned().into_boxed_str(), target);
         }
     }
 
@@ -72,8 +86,8 @@ impl FrozenRouterBuilder {
                 return None;
             }
             let mut router = matchit::Router::new();
-            entries.iter().for_each(|(path, handler)| {
-                if let Err(e) = router.insert(path, handler.clone()) {
+            entries.iter().for_each(|(path, target)| {
+                if let Err(e) = router.insert(path, target.clone()) {
                     tracing::warn!("Failed to insert parameterized route '{}': {}", path, e);
                 }
             });

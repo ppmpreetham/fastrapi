@@ -56,12 +56,28 @@ pub struct DependencyNode {
     pub func_id: u64,
     pub func: Py<PyAny>,
     pub is_async: bool,
+    pub is_generator: bool,
+    pub is_async_generator: bool,
+    /// Position of this node inside the flattened plan.
+    pub index: usize,
     pub param_name: Option<String>,
     pub scopes: Vec<String>,
     pub use_cache: bool,
     pub is_top_level: bool,
     pub injection_plan: Vec<(Py<PyString>, InjectionType)>,
     pub needs_request_object: bool,
+}
+
+impl DependencyNode {
+    #[inline]
+    pub fn is_sync_callable(&self) -> bool {
+        !self.is_async && !self.is_async_generator
+    }
+}
+
+pub struct TeardownTask {
+    pub generator: Py<PyAny>,
+    pub is_async: bool,
 }
 
 pub enum DependencyExecutionError {
@@ -100,6 +116,44 @@ fn is_async_callable(
         && let Ok(is_coroutine) =
             inspect.call_method1(intern!(py, "iscoroutinefunction"), (call_method,))
         && is_coroutine.is_truthy().unwrap_or(false)
+    {
+        return true;
+    }
+    false
+}
+
+fn is_generator_callable(
+    py: Python<'_>,
+    inspect: &Bound<'_, PyModule>,
+    func: &Bound<'_, PyAny>,
+) -> bool {
+    if let Ok(is_gen) = inspect.call_method1(intern!(py, "isgeneratorfunction"), (func,))
+        && is_gen.is_truthy().unwrap_or(false)
+    {
+        return true;
+    }
+    if let Ok(call_method) = func.getattr(intern!(py, "__call__"))
+        && let Ok(is_gen) = inspect.call_method1(intern!(py, "isgeneratorfunction"), (call_method,))
+        && is_gen.is_truthy().unwrap_or(false)
+    {
+        return true;
+    }
+    false
+}
+
+fn is_async_generator_callable(
+    py: Python<'_>,
+    inspect: &Bound<'_, PyModule>,
+    func: &Bound<'_, PyAny>,
+) -> bool {
+    if let Ok(is_gen) = inspect.call_method1(intern!(py, "isasyncgenfunction"), (func,))
+        && is_gen.is_truthy().unwrap_or(false)
+    {
+        return true;
+    }
+    if let Ok(call_method) = func.getattr(intern!(py, "__call__"))
+        && let Ok(is_gen) = inspect.call_method1(intern!(py, "isasyncgenfunction"), (call_method,))
+        && is_gen.is_truthy().unwrap_or(false)
     {
         return true;
     }
@@ -151,7 +205,85 @@ pub fn parse_dependencies(
     )?;
 
     flat_plan.pop();
+    adapt_security_schemes(py, &mut flat_plan);
     Ok(flat_plan)
+}
+fn adapt_security_schemes(py: Python<'_>, nodes: &mut [DependencyNode]) {
+    for node in nodes.iter_mut() {
+        if crate::routing::security::describe_scheme(py, node.func.bind(py)).is_some() {
+            node.injection_plan = vec![(
+                PyString::intern(py, "request").unbind(),
+                InjectionType::Request,
+            )];
+            node.needs_request_object = true;
+        }
+    }
+}
+
+pub fn parse_external_dependencies(
+    py: Python<'_>,
+    callables: &[Py<PyAny>],
+    path_param_names: &[String],
+) -> PyResult<Vec<DependencyNode>> {
+    let inspect = get_inspect(py)?;
+    let keys = ParserKeys::new(py);
+    let mut flat_plan = Vec::new();
+    let mut visited = HashMap::new();
+
+    for callable in callables {
+        let bound = callable.bind(py);
+        extract_and_flatten(
+            py,
+            &inspect,
+            &keys,
+            bound,
+            path_param_names,
+            true,
+            None,
+            Vec::new(),
+            true,
+            &mut flat_plan,
+            &mut visited,
+        )?;
+    }
+
+    adapt_security_schemes(py, &mut flat_plan);
+    Ok(flat_plan)
+}
+
+pub fn shift_dependency_indices(nodes: &mut [DependencyNode], offset: usize) {
+    for node in nodes.iter_mut() {
+        node.index += offset;
+        for (_, injection) in node.injection_plan.iter_mut() {
+            if let InjectionType::Dependency(target) = injection {
+                *target += offset;
+            }
+        }
+    }
+}
+
+pub(crate) fn override_node_callable(
+    py: Python<'_>,
+    node: &mut DependencyNode,
+    replacement: &Py<PyAny>,
+) {
+    node.func = replacement.clone_ref(py);
+    if let Ok(inspect) = INSPECT_MODULE.get(py) {
+        let bound = node.func.bind(py);
+        node.is_async = is_async_callable(py, &inspect, bound);
+        node.is_generator = is_generator_callable(py, &inspect, bound);
+        node.is_async_generator = is_async_generator_callable(py, &inspect, bound);
+    }
+}
+
+pub fn collect_dependency_callables(
+    py: Python<'_>,
+    dependencies: Option<&Py<PyAny>>,
+) -> Vec<Py<PyAny>> {
+    dependencies
+        .and_then(|deps| deps.bind(py).try_iter().ok())
+        .map(|iter| iter.flatten().map(Bound::unbind).collect())
+        .unwrap_or_default()
 }
 
 fn extract_and_flatten(
@@ -190,21 +322,28 @@ fn extract_and_flatten(
         }
 
         if let Ok(default) = param_obj.getattr(keys.default) {
-            if params::is_inspect_empty(py, &default) {
-                continue;
-            }
+            let default_is_empty = params::is_inspect_empty(py, &default);
+            let marker: Option<Bound<'_, PyAny>> = if default_is_empty {
+                params::find_annotated_dependency_marker(&param_obj)
+            } else {
+                Some(default)
+            };
 
-            let is_depends = default.hasattr(keys.dependency).unwrap_or(false);
-            let is_security = default.hasattr(keys.scopes).unwrap_or(false);
+            let Some(marker) = marker else {
+                continue;
+            };
+
+            let is_depends = marker.hasattr(keys.dependency).unwrap_or(false);
+            let is_security = marker.hasattr(keys.scopes).unwrap_or(false);
 
             if !is_depends && !is_security {
                 continue;
             }
 
-            let target_callable = if let Ok(dep) = default.getattr(keys.dependency) {
+            let target_callable = if let Ok(dep) = marker.getattr(keys.dependency) {
                 if dep.is_none() {
                     if let Ok(annotation) = param_obj.getattr(keys.annotation) {
-                        annotation
+                        params::base_annotation(py, &annotation)
                     } else {
                         continue;
                     }
@@ -216,7 +355,7 @@ fn extract_and_flatten(
             };
 
             let child_scopes = if is_security {
-                default
+                marker
                     .getattr(keys.scopes)
                     .ok()
                     .and_then(|value| extract_string_list(&value))
@@ -225,7 +364,7 @@ fn extract_and_flatten(
                 Vec::new()
             };
 
-            let child_use_cache = default
+            let child_use_cache = marker
                 .getattr(keys.use_cache)
                 .ok()
                 .and_then(|value| value.is_truthy().ok())
@@ -256,12 +395,17 @@ fn extract_and_flatten(
         .map(|(name, injection)| (PyString::intern(py, &name).unbind(), injection))
         .collect();
     let is_async = is_async_callable(py, inspect, func);
+    let is_generator = is_generator_callable(py, inspect, func);
+    let is_async_generator = is_async_generator_callable(py, inspect, func);
 
     let node_index = flat_plan.len();
     flat_plan.push(DependencyNode {
         func_id,
         func: func.as_unbound().clone(),
         is_async,
+        is_generator,
+        is_async_generator,
+        index: node_index,
         param_name: parent_param_name,
         scopes,
         use_cache,
@@ -386,9 +530,10 @@ pub fn execute_dependencies_sync(
     flat_plan: &[DependencyNode],
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
-) -> Result<Vec<(String, SharedPyObject)>, DependencyExecutionError> {
+) -> Result<(Vec<(String, SharedPyObject)>, Vec<TeardownTask>), DependencyExecutionError> {
     let request = request;
     let mut results_registry: Vec<Option<SharedPyObject>> = vec![None; flat_plan.len()];
+    let mut teardown_tasks = Vec::new();
 
     let mut final_results = Vec::with_capacity(
         flat_plan
@@ -397,14 +542,14 @@ pub fn execute_dependencies_sync(
             .count(),
     );
 
-    for (i, dep) in flat_plan.iter().enumerate() {
-        let py_kwargs =
-            build_dependency_kwargs(py, dep, &results_registry, request_input, request.as_ref())?;
-        let bound_func = dep.func.bind(py);
-        let bound_kwargs = py_kwargs.bind(py);
-        let result: SharedPyObject = bound_func.call((), Some(bound_kwargs))?.unbind();
+    for dep in flat_plan {
+        let (result, teardown) =
+            execute_sync_node(py, dep, &results_registry, request_input, request.as_ref())?;
+        if let Some(teardown) = teardown {
+            teardown_tasks.push(teardown);
+        }
 
-        results_registry[i] = Some(result.clone_ref(py));
+        results_registry[dep.index] = Some(result.clone_ref(py));
 
         if dep.is_top_level
             && let Some(name) = &dep.param_name
@@ -413,17 +558,17 @@ pub fn execute_dependencies_sync(
         }
     }
 
-    Ok(final_results)
+    Ok((final_results, teardown_tasks))
 }
 
 pub async fn execute_dependencies(
-    rt_handle: tokio::runtime::Handle,
     async_loop: &Arc<Py<PyAny>>,
     flat_plan: &[DependencyNode],
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
-) -> Result<Vec<(String, SharedPyObject)>, DependencyExecutionError> {
+) -> Result<(Vec<(String, SharedPyObject)>, Vec<TeardownTask>), DependencyExecutionError> {
     let mut results_registry: Vec<Option<SharedPyObject>> = vec![None; flat_plan.len()];
+    let mut teardown_tasks = Vec::new();
 
     let mut final_results = Vec::with_capacity(
         flat_plan
@@ -432,8 +577,87 @@ pub async fn execute_dependencies(
             .count(),
     );
 
-    for (i, dep) in flat_plan.iter().enumerate() {
-        let result: SharedPyObject = if dep.is_async {
+    let mut idx = 0;
+    while idx < flat_plan.len() {
+        let dep = &flat_plan[idx];
+
+        if dep.is_sync_callable() {
+            let run_end = idx
+                + flat_plan[idx..]
+                    .iter()
+                    .take_while(|node| node.is_sync_callable())
+                    .count();
+
+            Python::attach(|py| -> Result<(), DependencyExecutionError> {
+                for node in &flat_plan[idx..run_end] {
+                    let (result, teardown) = execute_sync_node(
+                        py,
+                        node,
+                        &results_registry,
+                        request_input,
+                        request.as_ref(),
+                    )?;
+                    if let Some(teardown) = teardown {
+                        teardown_tasks.push(teardown);
+                    }
+                    register_result(py, node, result, &mut results_registry, &mut final_results);
+                }
+                Ok(())
+            })?;
+
+            idx = run_end;
+            continue;
+        }
+
+        if dep.is_async_generator {
+            let future = Python::attach(|py| -> Result<_, DependencyExecutionError> {
+                let py_kwargs = build_dependency_kwargs(
+                    py,
+                    dep,
+                    &results_registry,
+                    request_input,
+                    request.as_ref(),
+                )?;
+                let bound_func = dep.func.bind(py);
+                let bound_kwargs = py_kwargs.bind(py);
+                let generator = bound_func.call((), Some(bound_kwargs))?;
+
+                let anext_coroutine = generator.call_method0(intern!(py, "__anext__"))?;
+
+                let locals = rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
+                Ok((
+                    generator.unbind(),
+                    rsloop::rust_async::into_future_with_locals(&locals, anext_coroutine)?,
+                ))
+            })?;
+
+            let (generator, future_anext) = future;
+            let outcome = future_anext.await;
+            Python::attach(|py| -> Result<(), DependencyExecutionError> {
+                let value = match outcome {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err(
+                            if e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py) {
+                                DependencyExecutionError::Python(
+                                    pyo3::exceptions::PyRuntimeError::new_err(
+                                        "Async generator dependency exited before yielding",
+                                    ),
+                                )
+                            } else {
+                                DependencyExecutionError::Python(e)
+                            },
+                        );
+                    }
+                };
+                teardown_tasks.push(TeardownTask {
+                    generator: generator.clone_ref(py),
+                    is_async: true,
+                });
+                register_result(py, dep, value, &mut results_registry, &mut final_results);
+                Ok(())
+            })?;
+        } else {
             let future = Python::attach(|py| -> Result<_, DependencyExecutionError> {
                 let py_kwargs = build_dependency_kwargs(
                     py,
@@ -450,38 +674,71 @@ pub async fn execute_dependencies(
                     &locals, coroutine,
                 )?)
             })?;
-            future.await.map_err(DependencyExecutionError::Python)?
-        } else {
-            let py_kwargs = Python::attach(|py| -> Result<_, DependencyExecutionError> {
-                build_dependency_kwargs(py, dep, &results_registry, request_input, request.as_ref())
+            let outcome = future.await;
+
+            Python::attach(|py| -> Result<(), DependencyExecutionError> {
+                let result = outcome.map_err(DependencyExecutionError::Python)?;
+                register_result(py, dep, result, &mut results_registry, &mut final_results);
+                Ok(())
             })?;
-
-            let py_func = dep.func.clone();
-
-            rt_handle
-                .spawn_blocking(move || {
-                    Python::attach(|py| -> Result<Py<PyAny>, DependencyExecutionError> {
-                        let bound_func = py_func.bind(py);
-                        let bound_kwargs = py_kwargs.bind(py);
-                        Ok(bound_func.call((), Some(bound_kwargs))?.unbind())
-                    })
-                })
-                .await
-                .unwrap_or_else(|_| {
-                    Err(DependencyExecutionError::Python(Python::attach(|_py| {
-                        pyo3::exceptions::PyRuntimeError::new_err("Spawn blocking failed")
-                    })))
-                })?
-        };
-
-        results_registry[i] = Some(result.clone());
-
-        if dep.is_top_level
-            && let Some(name) = &dep.param_name
-        {
-            final_results.push((name.clone(), result));
         }
+
+        idx += 1;
     }
 
-    Ok(final_results)
+    Ok((final_results, teardown_tasks))
+}
+
+#[inline]
+fn register_result(
+    _py: Python<'_>,
+    dep: &DependencyNode,
+    result: SharedPyObject,
+    results_registry: &mut [Option<SharedPyObject>],
+    final_results: &mut Vec<(String, SharedPyObject)>,
+) {
+    results_registry[dep.index] = Some(result.clone());
+    if dep.is_top_level
+        && let Some(name) = &dep.param_name
+    {
+        final_results.push((name.clone(), result));
+    }
+}
+
+#[inline]
+fn execute_sync_node(
+    py: Python<'_>,
+    dep: &DependencyNode,
+    results_registry: &[Option<SharedPyObject>],
+    request_input: &RequestInput<'_>,
+    request: Option<&SharedPyObject>,
+) -> Result<(SharedPyObject, Option<TeardownTask>), DependencyExecutionError> {
+    let py_kwargs = build_dependency_kwargs(py, dep, results_registry, request_input, request)?;
+    let bound_func = dep.func.bind(py);
+    let bound_kwargs = py_kwargs.bind(py);
+
+    if dep.is_generator {
+        let generator = bound_func.call((), Some(bound_kwargs))?;
+        let value = match generator.call_method0(intern!(py, "__next__")) {
+            Ok(v) => v.unbind(),
+            Err(e) => {
+                return Err(
+                    if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                        DependencyExecutionError::Python(pyo3::exceptions::PyRuntimeError::new_err(
+                            "Generator dependency exited before yielding",
+                        ))
+                    } else {
+                        DependencyExecutionError::Python(e)
+                    },
+                );
+            }
+        };
+        let teardown = TeardownTask {
+            generator: generator.unbind(),
+            is_async: false,
+        };
+        Ok((value, Some(teardown)))
+    } else {
+        Ok((bound_func.call((), Some(bound_kwargs))?.unbind(), None))
+    }
 }

@@ -1,7 +1,9 @@
 use super::super::types::{ParameterConstraints, ParameterSource, ParsedParameter};
 use super::constraints::extract_constraints;
 use super::utils::{
-    annotation_name, is_background_tasks_type, is_ellipsis, is_inspect_empty, is_upload_file_type,
+    annotation_name, base_annotation, find_annotated_marker, is_background_tasks_type,
+    is_dependency_marker, is_ellipsis, is_inspect_empty, is_upload_file_type,
+    list_element_annotation,
 };
 use crate::ffi::pydantic;
 use pyo3::prelude::*;
@@ -61,27 +63,53 @@ fn external_name_for_param(
     param_name.to_string()
 }
 
+#[inline]
+fn type_name_of(value: &Bound<'_, PyAny>) -> String {
+    value
+        .get_type()
+        .name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 pub fn parse_parameter_spec(
     py: Python<'_>,
     param_name: &str,
     param_obj: &Bound<'_, PyAny>,
     path_param_names: &[String],
 ) -> PyResult<ParsedParameter> {
-    let annotation = param_obj
+    let raw_annotation = param_obj
         .getattr("annotation")
         .ok()
-        .filter(|annotation| !is_inspect_empty(py, annotation))
-        .map(|annotation| annotation.unbind());
+        .filter(|annotation| !is_inspect_empty(py, annotation));
+    let has_annotation = raw_annotation.is_some();
+    let annotation = raw_annotation.map(|raw| base_annotation(py, &raw).unbind());
+    let (is_list, element_annotation) = annotation
+        .as_ref()
+        .map(|ann| {
+            let (is_list, elem) = list_element_annotation(py, ann.bind(py));
+            (is_list, elem.map(|e| e.unbind()))
+        })
+        .unwrap_or((false, None));
 
-    let is_pydantic_model = annotation
+    let effective_annotation = if is_list {
+        element_annotation.or_else(|| annotation.clone())
+    } else {
+        annotation.clone()
+    };
+
+    let is_pydantic_model = effective_annotation
         .as_ref()
         .is_some_and(|ann| pydantic::is_pydantic_model(py, ann.bind(py)));
 
-    let ann_name = annotation.as_ref().and_then(|ann| annotation_name(py, ann));
+    let ann_name = effective_annotation
+        .as_ref()
+        .and_then(|ann| annotation_name(py, ann));
     let is_upload_file = ann_name.as_deref().is_some_and(is_upload_file_type);
     let is_background_tasks = ann_name.as_deref().is_some_and(is_background_tasks_type);
 
     let default = param_obj.getattr("default")?;
+    let has_plain_default = !is_inspect_empty(py, &default);
     let is_path_param = path_param_names.iter().any(|name| name == param_name);
 
     let initial_source = if is_background_tasks {
@@ -90,47 +118,66 @@ pub fn parse_parameter_spec(
         ParameterSource::Path
     } else if is_upload_file || is_pydantic_model {
         ParameterSource::Body
+    } else if !has_annotation && !has_plain_default {
+        // FastAPI rule: a required parameter with no annotation IS the body
+        // (`def echo(data)`), not a query parameter.
+        ParameterSource::Body
     } else {
         ParameterSource::Query
     };
 
+    let plain_default_is_marker =
+        has_plain_default && source_from_param_class(&type_name_of(&default)).is_some();
+
+    let driver = if plain_default_is_marker {
+        Some(default.clone())
+    } else {
+        find_annotated_marker(param_obj).filter(|marker| !is_dependency_marker(marker))
+    };
+
     let (source, default_value, has_default, required, description, constraints, param_object) =
-        if !is_inspect_empty(py, &default) {
-            let type_name = default.get_type().name()?;
-            if let Some(param_source) = source_from_param_class(&type_name.to_string_lossy()) {
-                let (value, has_val, is_req) = extract_param_default(&default);
-                let desc = default
-                    .getattr("description")
-                    .ok()
-                    .and_then(|value| value.extract::<Option<String>>().ok())
-                    .flatten();
-                let cons = extract_constraints(&default);
-                (
-                    param_source,
-                    value,
-                    has_val,
-                    is_req,
-                    desc,
-                    cons,
-                    Some(default.unbind()),
-                )
-            } else {
-                (
-                    initial_source,
-                    Some(default.unbind()),
-                    true,
-                    false,
-                    None,
-                    ParameterConstraints::default(),
-                    None,
-                )
+        if let Some(marker) = driver {
+            let param_source =
+                source_from_param_class(&type_name_of(&marker)).unwrap_or(initial_source);
+            let (mut value, mut has_val, mut is_req) = extract_param_default(&marker);
+            if has_plain_default && !plain_default_is_marker && !is_ellipsis(&default) {
+                value = (!default.is_none()).then(|| default.clone().unbind());
+                has_val = true;
+                is_req = false;
             }
+            let desc = marker
+                .getattr("description")
+                .ok()
+                .and_then(|value| value.extract::<Option<String>>().ok())
+                .flatten();
+            let cons = extract_constraints(&marker);
+            (
+                param_source,
+                value,
+                has_val,
+                is_req,
+                desc,
+                cons,
+                Some(marker.unbind()),
+            )
+        } else if has_plain_default {
+            (
+                initial_source,
+                Some(default.unbind()),
+                true,
+                false,
+                None,
+                ParameterConstraints::default(),
+                None,
+            )
         } else {
+            let required = is_path_param
+                || (matches!(initial_source, ParameterSource::Body) && !has_annotation);
             (
                 initial_source,
                 None,
                 false,
-                is_path_param,
+                required,
                 None,
                 ParameterConstraints::default(),
                 None,
@@ -157,6 +204,7 @@ pub fn parse_parameter_spec(
         default_value,
         has_default,
         required,
+        is_list,
         description,
         constraints,
         param_object,
