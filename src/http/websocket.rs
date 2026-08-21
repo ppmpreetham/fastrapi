@@ -1,37 +1,41 @@
-use crate::utils::{json_to_py_object, py_any_to_json};
+use crate::ffi::py_handlers::schedule_python_coroutine;
+use crate::routing::dependencies::{self, DependencyExecutionError};
+use crate::routing::types::PathParamRange;
+use crate::runtime::executor::build_request_input_from_parts;
 use axum::{extract::Extension, response::IntoResponse};
 use bytes::Bytes;
 use fastwebsockets::{FragmentCollector, Frame, OpCode, upgrade};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::error;
 
-use crate::ffi::py_handlers::schedule_python_coroutine;
+pub use crate::http::ws_python::PyWebSocket;
+use crate::http::ws_python::WSMessage;
 
 pub async fn ws_handler(
     ws: upgrade::IncomingUpgrade,
     Extension(handler): Extension<Arc<Py<PyAny>>>,
+    Extension(deps): Extension<Arc<Vec<dependencies::DependencyNode>>>,
+    Extension(template): Extension<Arc<str>>,
     Extension(_rt_handle): Extension<tokio::runtime::Handle>,
     Extension(async_loop): Extension<Arc<Py<PyAny>>>,
+    parts: axum::http::request::Parts,
 ) -> axum::response::Response {
     let (response, fut) = match ws.upgrade() {
         Ok(res) => res,
         Err(_) => {
-            return axum::response::Response::builder()
-                .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-                .body(axum::body::Body::empty())
-                .unwrap()
-                .into_response();
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
     tokio::task::spawn(async move {
-        if let Err(e) = handle_connection(fut, handler, async_loop).await {
+        if let Err(e) = handle_connection(fut, handler, deps, template, async_loop, parts).await {
             error!("WebSocket error: {e}");
         }
     });
@@ -39,16 +43,13 @@ pub async fn ws_handler(
     response.into_response()
 }
 
-enum WSMessage {
-    Text(Bytes),
-    Binary(Bytes),
-    Close,
-}
-
 async fn handle_connection(
     fut: upgrade::UpgradeFut,
     handler: Arc<Py<PyAny>>,
+    deps: Arc<Vec<dependencies::DependencyNode>>,
+    template: Arc<str>,
     async_loop: Arc<Py<PyAny>>,
+    parts: axum::http::request::Parts,
 ) -> Result<(), crate::error::FastRapiError> {
     let ws_stream = fut.await?;
     let mut ws = FragmentCollector::new(ws_stream);
@@ -56,17 +57,39 @@ async fn handle_connection(
     let (tx_to_rust, mut rx_from_python) = mpsc::channel::<WSMessage>(1024);
     let (tx_to_python, rx_from_rust) = mpsc::channel::<WSMessage>(1024);
 
+    let param_ranges = match_path_params(&template, parts.uri.path());
+    let request_input = build_request_input_from_parts(&parts, &param_ranges);
+
+    let (dependency_results, _teardowns) =
+        dependencies::execute_dependencies(&async_loop, &deps, &request_input, None)
+            .await
+            .map_err(|e| match e {
+                DependencyExecutionError::Python(err) => err.into(),
+                DependencyExecutionError::Response(_) => crate::error::FastRapiError::from(
+                    pyo3::exceptions::PyRuntimeError::new_err("websocket dependency failed"),
+                ),
+            })?;
+
     let (py_ws_obj, python_handler_future) = Python::attach(|py| {
         let py_ws_obj = Py::new(
             py,
             PyWebSocket {
                 tx: tx_to_rust,
-                rx: Arc::new(std::sync::Mutex::new(Some(rx_from_rust))),
+                rx: Arc::new(parking_lot::Mutex::new(Some(rx_from_rust))),
                 is_connected: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                scope: Some(build_scope(py)),
             },
         )?;
 
-        let coroutine = handler.bind(py).call1((py_ws_obj.clone_ref(py),))?;
+        let kwargs = PyDict::new(py);
+        for (name, value) in dependency_results {
+            kwargs.set_item(name.as_str(), value.bind(py))?;
+        }
+
+        let coroutine = handler
+            .bind(py)
+            .call((py_ws_obj.clone_ref(py),), Some(&kwargs))?;
+
         let fut: Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>> =
             schedule_python_coroutine(py, &async_loop, coroutine)?;
 
@@ -98,6 +121,39 @@ async fn handle_connection(
     Ok(())
 }
 
+fn match_path_params(template: &str, actual_path: &str) -> smallvec::SmallVec<[PathParamRange; 4]> {
+    let mut ranges = smallvec::SmallVec::new();
+
+    let mut template_segments = template.split('/');
+    let mut actual_segments = actual_path.split('/');
+
+    loop {
+        match (template_segments.next(), actual_segments.next()) {
+            (Some(t), Some(a)) if t.starts_with('{') && t.ends_with('}') => {
+                let name: Arc<str> = Arc::from(t.trim_start_matches('{').trim_end_matches('}'));
+                let start = a.as_ptr() as usize - actual_path.as_ptr() as usize;
+                ranges.push(PathParamRange {
+                    key: name,
+                    start,
+                    end: start + a.len(),
+                });
+            }
+            (Some(_), Some(_)) => {}
+            _ => break,
+        }
+    }
+
+    ranges
+}
+
+fn build_scope(py: Python<'_>) -> Py<PyDict> {
+    let scope = PyDict::new(py);
+    let _ = scope.set_item("type", "websocket");
+    let _ = scope.set_item("path", "");
+    let _ = scope.set_item("query_string", "");
+    scope.unbind()
+}
+
 async fn socket_pump(
     ws: &mut FragmentCollector<TokioIo<Upgraded>>,
     tx_to_python: mpsc::Sender<WSMessage>,
@@ -109,7 +165,8 @@ async fn socket_pump(
                 let frame = frame?;
                 match frame.opcode {
                     OpCode::Close => {
-                        let _ = tx_to_python.send(WSMessage::Close).await;
+                        let code = close_code(&frame);
+                        let _ = tx_to_python.send(WSMessage::Close(code)).await;
                         break;
                     }
                     OpCode::Text | OpCode::Binary => {
@@ -140,8 +197,8 @@ async fn socket_pump(
                     WSMessage::Binary(data) => {
                         ws.write_frame(Frame::binary(data.to_vec().into())).await?;
                     }
-                    WSMessage::Close => {
-                        ws.write_frame(Frame::close_raw(vec![].into())).await?;
+                    WSMessage::Close(code) => {
+                        ws.write_frame(close_frame(code)).await?;
                         break;
                     }
                 }
@@ -152,149 +209,16 @@ async fn socket_pump(
     Ok(())
 }
 
-#[pyclass(name = "WebSocket")]
-pub struct PyWebSocket {
-    tx: mpsc::Sender<WSMessage>,
-    rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<WSMessage>>>>,
-    is_connected: Arc<std::sync::atomic::AtomicBool>,
+fn close_code(frame: &Frame<'_>) -> u16 {
+    let payload: &[u8] = frame.payload.as_ref();
+    payload
+        .first_chunk::<2>()
+        .map(|prefix| u16::from_be_bytes(*prefix))
+        .unwrap_or(1000)
 }
 
-async fn fetch_msg(
-    rx_arc: Arc<std::sync::Mutex<Option<mpsc::Receiver<WSMessage>>>>,
-) -> PyResult<WSMessage> {
-    let mut rx = rx_arc
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Mutex Poisoned"))?
-        .take()
-        .ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(
-                "Concurrent receive operations are not supported",
-            )
-        })?;
-
-    let res = rx.recv().await;
-    if let Ok(mut lock) = rx_arc.lock() {
-        *lock = Some(rx);
-    } else {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err("Mutex Poisoned"));
-    }
-
-    match res {
-        Some(WSMessage::Close) | None => Err(pyo3::exceptions::PyConnectionError::new_err(
-            "WebSocket closed",
-        )),
-        Some(msg) => Ok(msg),
-    }
-}
-
-#[pymethods]
-impl PyWebSocket {
-    fn accept<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        rsloop::rust_async::future_into_py(py, async move { Ok(()) })
-    }
-
-    fn send_text<'py>(&self, py: Python<'py>, data: String) -> PyResult<Bound<'py, PyAny>> {
-        let tx = self.tx.clone();
-        let bytes = Bytes::from(data);
-
-        rsloop::rust_async::future_into_py(py, async move {
-            tx.send(WSMessage::Text(bytes))
-                .await
-                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("WebSocket closed"))?;
-            Ok(())
-        })
-    }
-
-    fn send_bytes<'py>(&self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
-        let tx = self.tx.clone();
-        let bytes = Bytes::from(data);
-
-        rsloop::rust_async::future_into_py(py, async move {
-            tx.send(WSMessage::Binary(bytes))
-                .await
-                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("WebSocket closed"))?;
-            Ok(())
-        })
-    }
-
-    fn send_json<'py>(
-        &self,
-        py: Python<'py>,
-        data: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let json_str = py_any_to_json(py, data).to_string();
-        self.send_text(py, json_str)
-    }
-
-    fn receive_text<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let rx_arc = self.rx.clone();
-
-        rsloop::rust_async::future_into_py(py, async move {
-            match fetch_msg(rx_arc).await? {
-                WSMessage::Text(bytes) => String::from_utf8(bytes.to_vec())
-                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string())),
-                WSMessage::Binary(_) => Err(pyo3::exceptions::PyTypeError::new_err(
-                    "Expected text, got binary",
-                )),
-                WSMessage::Close => unreachable!(),
-            }
-        })
-    }
-
-    fn receive_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let rx_arc = self.rx.clone();
-
-        rsloop::rust_async::future_into_py(py, async move {
-            match fetch_msg(rx_arc).await? {
-                WSMessage::Binary(data) => Ok(data.to_vec()),
-                WSMessage::Text(_) => Err(pyo3::exceptions::PyTypeError::new_err(
-                    "Expected binary, got text",
-                )),
-                WSMessage::Close => unreachable!(),
-            }
-        })
-    }
-
-    fn receive_json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let rx_arc = self.rx.clone();
-
-        rsloop::rust_async::future_into_py(py, async move {
-            match fetch_msg(rx_arc).await? {
-                WSMessage::Text(bytes) => {
-                    let text = String::from_utf8(bytes.to_vec())
-                        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-
-                    Python::attach(|py| {
-                        let json: sonic_rs::Value = sonic_rs::from_str(&text)
-                            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-                        Ok(json_to_py_object(py, &json))
-                    })
-                }
-                WSMessage::Binary(_) => Err(pyo3::exceptions::PyTypeError::new_err(
-                    "Expected text, got binary",
-                )),
-                WSMessage::Close => unreachable!(),
-            }
-        })
-    }
-
-    fn close<'py>(&self, py: Python<'py>, _code: Option<u16>) -> PyResult<Bound<'py, PyAny>> {
-        let tx = self.tx.clone();
-
-        rsloop::rust_async::future_into_py(py, async move {
-            tx.send(WSMessage::Close).await.map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("WebSocket already closed")
-            })?;
-            Ok(())
-        })
-    }
-
-    #[getter]
-    fn client_state(&self) -> PyResult<u8> {
-        if self.is_connected.load(std::sync::atomic::Ordering::Relaxed) {
-            Ok(1) // Connected
-        } else {
-            Ok(3) // Disconnected
-        }
-    }
+fn close_frame(code: u16) -> Frame<'static> {
+    let mut payload = Vec::with_capacity(2);
+    payload.extend_from_slice(&code.to_be_bytes());
+    Frame::close_raw(payload.into())
 }
