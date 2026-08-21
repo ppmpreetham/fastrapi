@@ -2,7 +2,6 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyModule;
 
-/// Lazily imports a Python module once and caches it.
 pub struct LazyPyModule {
     module_name: &'static str,
     cell: PyOnceLock<Py<PyModule>>,
@@ -25,7 +24,6 @@ impl LazyPyModule {
     }
 }
 
-/// Lazily imports a Python attribute (e.g. class or function from a module) once and caches it.
 pub struct LazyPyAttr {
     module_name: &'static str,
     attr_name: &'static str,
@@ -65,7 +63,6 @@ impl LazyPyAttr {
     }
 }
 
-/// Lazily imports a nested attribute (e.g. `inspect.Parameter.empty`) once and caches it.
 pub struct LazyPyNestedAttr {
     module_name: &'static str,
     parent_attr: &'static str,

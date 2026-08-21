@@ -108,6 +108,8 @@ pub struct Operation {
     pub responses: HashMap<String, Response>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callbacks: Option<HashMap<String, JsonValue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security: Option<Vec<JsonValue>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +146,9 @@ pub struct Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Components {
     pub schemas: HashMap<String, JsonValue>,
+
+    #[serde(skip_serializing_if = "HashMap::is_empty", rename = "securitySchemes")]
+    pub security_schemes: HashMap<String, JsonValue>,
 }
 
 impl Default for OpenApiSpec {
@@ -166,6 +171,7 @@ impl Default for OpenApiSpec {
             external_docs: None,
             components: Some(Components {
                 schemas: HashMap::new(),
+                security_schemes: HashMap::new(),
             }),
         }
     }
@@ -358,13 +364,16 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
     };
 
     let mut schemas: HashMap<String, JsonValue> = HashMap::new();
+    let mut security_schemes: HashMap<String, JsonValue> = HashMap::new();
+
     spec.paths = build_paths_from_routes(
         py,
-        collected,
+        &collected,
         &mut schemas,
         app_responses.as_ref(),
         app.separate_input_output_schemas,
         Some(&app.generate_unique_id_function),
+        &mut security_schemes,
     );
 
     if let Some(wh) = &app.webhooks
@@ -373,20 +382,93 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
         let wh_collected = collect_routes(py, &router.borrow());
         let wh_paths = build_paths_from_routes(
             py,
-            wh_collected,
+            &wh_collected,
             &mut schemas,
             None,
             app.separate_input_output_schemas,
             Some(&app.generate_unique_id_function),
+            &mut security_schemes,
         );
         spec.webhooks = Some(wh_paths);
     }
 
     if let Some(components) = &mut spec.components {
         components.schemas = schemas;
+        components.security_schemes = security_schemes;
     }
     debug!("Built OpenAPI spec with {} paths", spec.paths.len());
     sonic_rs::to_value(&spec).unwrap_or_else(|_| json!({}))
+}
+
+/// OpenAPI securitySchemes entry
+fn scheme_to_openapi(
+    kind: &crate::types::route::SecurityKind,
+    description: Option<&str>,
+    scopes: Option<&sonic_rs::Value>,
+) -> JsonValue {
+    use crate::types::route::SecurityKind;
+
+    let mut base = match kind {
+        SecurityKind::OAuth2PasswordBearer { token_url, .. } => {
+            let flow_scopes = scopes.cloned().unwrap_or_else(|| json!({}));
+            json!({
+                "type": "oauth2",
+                "flows": { "password": { "tokenUrl": token_url, "scopes": flow_scopes } }
+            })
+        }
+        SecurityKind::OAuth2AuthorizationCode {
+            authorization_url,
+            token_url,
+            refresh_url,
+            ..
+        } => {
+            let flow_scopes = scopes.cloned().unwrap_or_else(|| json!({}));
+            let mut code_flow = json!({
+                "authorizationUrl": authorization_url,
+                "tokenUrl": token_url,
+                "scopes": flow_scopes,
+            });
+            if let Some(refresh) = refresh_url
+                && let Some(obj) = code_flow.as_object_mut()
+            {
+                let key = String::from("refreshUrl");
+                obj.insert(&key, json!(refresh));
+            }
+            json!({ "type": "oauth2", "flows": { "authorizationCode": code_flow } })
+        }
+        SecurityKind::OpenIdConnect { url, .. } => json!({
+            "type": "openIdConnect",
+            "openIdConnectUrl": url
+        }),
+        SecurityKind::HTTPBearer { bearer_format, .. } => {
+            let mut entry = json!({ "type": "http", "scheme": "bearer" });
+            if let Some(fmt) = bearer_format
+                && let Some(obj) = entry.as_object_mut()
+            {
+                let key = String::from("bearerFormat");
+                obj.insert(&key, json!(fmt));
+            }
+            entry
+        }
+        SecurityKind::HTTPBasic { .. } => json!({ "type": "http", "scheme": "basic" }),
+        SecurityKind::HTTPDigest { .. } => json!({ "type": "http", "scheme": "digest" }),
+        SecurityKind::APIKeyHeader { name, .. } => {
+            json!({ "type": "apiKey", "in": "header", "name": name })
+        }
+        SecurityKind::APIKeyQuery { name, .. } => {
+            json!({ "type": "apiKey", "in": "query", "name": name })
+        }
+        SecurityKind::APIKeyCookie { name, .. } => {
+            json!({ "type": "apiKey", "in": "cookie", "name": name })
+        }
+    };
+
+    if let (Some(obj), Some(desc)) = (base.as_object_mut(), description) {
+        let key = String::from("description");
+        obj.insert(&key, json!(desc));
+    }
+
+    base
 }
 
 fn build_request_body(
@@ -487,11 +569,12 @@ fn build_request_body(
 
 pub fn build_paths_from_routes(
     py: Python<'_>,
-    collected: Vec<RouteEntry>,
+    collected: &[RouteEntry],
     schemas: &mut HashMap<String, JsonValue>,
     app_responses: Option<&JsonValue>,
     separate_input_output_schemas: bool,
     generate_unique_id_function: Option<&Py<PyAny>>,
+    security_schemes: &mut HashMap<String, JsonValue>,
 ) -> HashMap<String, PathItem> {
     let mut paths: HashMap<String, PathItem> = HashMap::new();
 
@@ -532,7 +615,29 @@ pub fn build_paths_from_routes(
             request_body: None,
             responses: HashMap::new(),
             callbacks: None,
+            security: None,
         };
+
+        if !route.security.is_empty() {
+            let mut grouped = sonic_rs::Object::new();
+            for req in &route.security {
+                let compiled = req.scheme.as_ref();
+                security_schemes
+                    .entry(compiled.name.clone())
+                    .or_insert_with(|| {
+                        scheme_to_openapi(
+                            &compiled.kind,
+                            compiled.description.as_deref(),
+                            compiled.scopes.as_ref(),
+                        )
+                    });
+                let scope_list: Vec<JsonValue> = req.scopes.iter().map(|s| json!(s)).collect();
+                grouped.insert(&compiled.name, json!(scope_list));
+            }
+            operation.security = Some(vec![
+                sonic_rs::to_value(&grouped).unwrap_or_else(|_| json!({})),
+            ]);
+        }
 
         let parameters: Vec<Parameter> = handler
             .payload
@@ -565,7 +670,7 @@ pub fn build_paths_from_routes(
 
         operation.parameters = (!parameters.is_empty()).then_some(parameters);
 
-        operation.request_body = build_request_body(py, &handler, &route, schemas);
+        operation.request_body = build_request_body(py, &handler, route, schemas);
         let response_desc = route
             .response_description
             .clone()
@@ -692,14 +797,22 @@ pub fn parse_callbacks_to_json(
 ) -> Option<JsonValue> {
     let mut callbacks_map = sonic_rs::Object::new();
     let mut dummy_schemas = HashMap::new();
+    let mut dummy_security = HashMap::new();
 
     if let Ok(list) = callbacks_bound.try_iter() {
         for item in list.flatten() {
             if let Ok(router_ref) = item.cast::<crate::decorators::PyAPIRouter>() {
                 let router = router_ref.borrow();
                 let collected = collect_routes(py, &router);
-                let paths =
-                    build_paths_from_routes(py, collected, &mut dummy_schemas, None, false, None);
+                let paths = build_paths_from_routes(
+                    py,
+                    &collected,
+                    &mut dummy_schemas,
+                    None,
+                    false,
+                    None,
+                    &mut dummy_security,
+                );
 
                 for (path, path_item) in paths {
                     let value = sonic_rs::to_value(&path_item).unwrap_or_else(|_| json!({}));
@@ -719,11 +832,12 @@ pub fn parse_callbacks_to_json(
                         let collected = collect_routes(py, &router);
                         let paths = build_paths_from_routes(
                             py,
-                            collected,
+                            &collected,
                             &mut dummy_schemas,
                             None,
                             false,
                             None,
+                            &mut dummy_security,
                         );
 
                         for (path, path_item) in paths {

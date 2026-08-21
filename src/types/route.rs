@@ -3,7 +3,7 @@ use crate::routing::dependencies::DependencyNode;
 use crate::types::response::ResponseType;
 use ahash::{AHashMap, AHashSet};
 use axum::http::Method;
-use pyo3::types::PyString;
+use pyo3::types::{PyDict, PyString};
 use pyo3::{Py, PyAny};
 use regex::Regex;
 use smallvec::SmallVec;
@@ -74,6 +74,7 @@ pub struct ParsedParameter {
     pub default_value: Option<Py<PyAny>>,
     pub has_default: bool,
     pub required: bool,
+    pub is_list: bool,
     pub description: Option<String>,
     pub constraints: ParameterConstraints,
     pub param_object: Option<Py<PyAny>>,
@@ -109,7 +110,7 @@ pub enum BodyPayload {
         raw: bytes::Bytes,
         value: Option<sonic_rs::Value>,
     },
-    Form(AHashMap<String, BodyField>),
+    Form(AHashMap<String, SmallVec<[BodyField; 2]>>),
 }
 
 #[derive(Clone)]
@@ -133,18 +134,50 @@ pub enum SerializationHint {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SecurityKind {
-    OAuth2PasswordBearer { token_url: String, auto_error: bool },
-    HTTPBearer { auto_error: bool },
-    HTTPBasic { auto_error: bool },
-    APIKeyHeader { name: String, auto_error: bool },
-    APIKeyQuery { name: String, auto_error: bool },
-    APIKeyCookie { name: String, auto_error: bool },
+    OAuth2PasswordBearer {
+        token_url: String,
+        auto_error: bool,
+    },
+    OAuth2AuthorizationCode {
+        authorization_url: String,
+        token_url: String,
+        refresh_url: Option<String>,
+        auto_error: bool,
+    },
+    OpenIdConnect {
+        url: String,
+        auto_error: bool,
+    },
+    HTTPBearer {
+        auto_error: bool,
+        bearer_format: Option<String>,
+    },
+    HTTPBasic {
+        auto_error: bool,
+    },
+    HTTPDigest {
+        auto_error: bool,
+    },
+    APIKeyHeader {
+        name: String,
+        auto_error: bool,
+    },
+    APIKeyQuery {
+        name: String,
+        auto_error: bool,
+    },
+    APIKeyCookie {
+        name: String,
+        auto_error: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub struct CompiledSecurityScheme {
     pub id: u32,
-    pub name: String, // for OpenAPI schema key generation
+    pub name: String,
+    pub description: Option<String>,
+    pub scopes: Option<sonic_rs::Value>,
     pub kind: SecurityKind,
 }
 
@@ -169,6 +202,7 @@ pub struct PayloadSpec {
     pub dependency_needs_request: bool,
     pub all_deps_sync: bool,
     pub needs_kwargs: bool,
+    pub request_param: Option<Py<PyString>>,
     pub body_param_names: Vec<Py<PyString>>,
     pub body_param_name_set: AHashSet<String>,
     pub body_param_indices: SmallVec<[usize; 4]>,
@@ -192,6 +226,7 @@ pub struct ResponseFormatter {
     pub default_status: Option<axum::http::StatusCode>,
     pub response_model: Option<Py<PyAny>>,
     pub response_class: Option<Py<PyAny>>,
+    pub dump_options: Option<Py<PyDict>>,
 }
 
 #[derive(Clone)]
@@ -217,12 +252,14 @@ pub struct RouteEntry {
     pub callbacks: Option<sonic_rs::Value>,
     pub deprecated: Option<bool>,
     pub include_in_schema: bool,
+    pub security: Vec<RouteSecurityRequirement>,
 }
 
 #[derive(Clone)]
 pub struct WebSocketEntry {
     pub path: String,
     pub handler: Py<PyAny>,
+    pub deps: SmallVec<[DependencyNode; 4]>,
 }
 
 #[derive(Clone)]

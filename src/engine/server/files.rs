@@ -39,11 +39,7 @@ pub(crate) async fn serve_frontend_mounts(
     serve_frontend_file(req, fallback_path, status).await
 }
 
-pub(crate) async fn serve_frontend_file(
-    req: Request,
-    path: PathBuf,
-    status: StatusCode,
-) -> Option<Response> {
+async fn serve_frontend_file(req: Request, path: PathBuf, status: StatusCode) -> Option<Response> {
     let mut response = ServeFile::new(path)
         .oneshot(req)
         .await
@@ -85,7 +81,7 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
     app.nest_service(&mount_path, service)
 }
 
-pub(crate) fn frontend_safe_path(directory: &str, request_path: &str) -> Option<PathBuf> {
+fn frontend_safe_path(directory: &str, request_path: &str) -> Option<PathBuf> {
     let decoded = percent_encoding::percent_decode_str(request_path)
         .decode_utf8()
         .ok()?;
@@ -106,7 +102,7 @@ pub(crate) fn frontend_safe_path(directory: &str, request_path: &str) -> Option<
     Some(file_path)
 }
 
-pub(crate) fn frontend_navigation_request(req: &Request, relative_path: &str) -> bool {
+fn frontend_navigation_request(req: &Request, relative_path: &str) -> bool {
     relative_path
         .rsplit('/')
         .next()
@@ -118,7 +114,7 @@ pub(crate) fn frontend_navigation_request(req: &Request, relative_path: &str) ->
             .is_some_and(|accept| accept.contains("text/html") || accept.contains("*/*"))
 }
 
-pub(crate) async fn frontend_fallback_path(
+async fn frontend_fallback_path(
     mount: &FrontendMount,
     fallback: &str,
     navigation: bool,
@@ -152,7 +148,7 @@ pub(crate) async fn frontend_fallback_path(
     None
 }
 
-pub(crate) fn frontend_match<'a>(
+fn frontend_match<'a>(
     mounts: &'a [FrontendMount],
     request_path: &str,
 ) -> Option<(&'a FrontendMount, String)> {
@@ -172,11 +168,7 @@ pub(crate) fn frontend_match<'a>(
         .max_by_key(|(mount, _)| mount.path.len())
 }
 
-pub(crate) async fn static_request_hits_symlink(
-    directory: &Path,
-    request_path: &str,
-    html: bool,
-) -> bool {
+async fn static_request_hits_symlink(directory: &Path, request_path: &str, html: bool) -> bool {
     let decoded = match percent_encoding::percent_decode_str(request_path).decode_utf8() {
         Ok(decoded) => decoded,
         Err(_) => return false,

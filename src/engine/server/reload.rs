@@ -133,13 +133,13 @@ pub(crate) fn is_reload_ignored(
         .is_some_and(|globs| globs.is_match(path))
 }
 
-pub(crate) fn is_default_reload_ignored_dir(path: &Path) -> bool {
+fn is_default_reload_ignored_dir(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| matches!(name, ".git" | ".venv" | "__pycache__" | "target"))
 }
 
-pub(crate) fn build_reload_ignore_globs(config: &ReloadConfig) -> Result<Option<GlobSet>, String> {
+fn build_reload_ignore_globs(config: &ReloadConfig) -> Result<Option<GlobSet>, String> {
     if config.ignore_patterns.is_empty() {
         return Ok(None);
     }

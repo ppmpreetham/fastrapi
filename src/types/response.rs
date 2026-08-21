@@ -4,5 +4,6 @@ pub enum ResponseType {
     Html,
     PlainText,
     Redirect,
+    File,
     Auto,
 }

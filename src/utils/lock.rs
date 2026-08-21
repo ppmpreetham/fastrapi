@@ -1,8 +1,6 @@
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-/// Extension trait for ergonomic lock acquisition with consistent error messaging.
 pub trait LockExt<T> {
-    /// Locks the mutex, panicking with a standardized message if poisoned.
     fn lock_or_panic(&self) -> MutexGuard<'_, T>;
 }
 
