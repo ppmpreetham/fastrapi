@@ -13,7 +13,7 @@ FastrAPI is a high-performance web framework that supercharges your Python APIs 
 - **Async Native**: Built on Tokio's async runtime, FastrAPI maximizes concurrency for handling thousands of requests with ease.
 - **Ultra Lightweight**: Minimal runtime overhead with maximum throughput.
 - **Drop in Replacement**: Drop in compatibility with the same FastAPI's beloved decorator syntax, so you can switch without rewriting your codebase.
-- **Middleware Support**: `tower-http` support for CORS, GZip, Session, and TrustedHost middleware.
+- **Middleware Support**: `tower-http` support for CORS, GZip, Session, and TrustedHost middleware — plus sync/async Python middlewares and Starlette-style `call_next` classes via `app.add_middleware(Cls)`.
 
 ---
 
@@ -334,7 +334,7 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 | JSON serialization speed                            | slow                                                           | fast thanks to `sonic-rs`                                                          | 🟢                                |
 | Prometheus metrics endpoint                         | No                                                             | Yes                                                                                | 🟢                                |
 | `app.mount()` / `StaticFiles`                       | Yes                                                            | Full support                                                                       | 🟢                                |
-| Exception Handlers (`@app.exception_handler`)       | Yes, global error catching                                     | Full support (plus Axum `.fallback()` alias)                                       | 🟡                                |
+| Exception Handlers (`@app.exception_handler`)       | Yes, global error catching                                     | Full support (MRO dispatch + status handlers, plus Axum `.fallback()` alias)       | 🟢                                |
 | `APIRouter` + `include_router()`                    | Yes, mature ecosystem                                          | Full support                                                                       | 🟡                                |
 | `StreamingResponse` / SSE                           | Yes, chunked streaming                                         | Full support (async & sync generators)                                             | 🟡                                |
 | Frontend serving support (React, Vue, Svelte, etc.) | Yes                                                            | Yes                                                                                | 🟡                                |
@@ -342,37 +342,14 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 | `response_model=None` + raw Response return         | Fully supported                                                | serialization                                                                      | 🔴 (for now)                      |
 | Concurrency & resource safety                       | asyncio + threadpool                                           | Native Tokio + Rust memory & thread safety                                         | 🔴 (slow due to context switches) |
 
-<!-- frontend, prometheus, rate limiting -->
-
 ## Current Limitations
 
 Some advanced features are still in development like:
 
 - [ ] Support `yield`-based dependencies (setup/teardown, e.g. `def get_db(): yield db; db.close()`)
-- [ ] Support `Annotated[Type, Depends(...)]` / `Annotated[str, Query(...)]` style DI
-- [ ] Execute app-level `dependencies=[...]` on every route
-- [ ] Execute router-level `dependencies=[...]` from `include_router`/`nest`/`APIRouter(dependencies=...)`
-- [ ] Add `app.dependency_overrides` for testing
-- [ ] Dispatch custom `@app.exception_handler(X)` handlers instead of only special-casing `PyHTTPException`
-- [ ] Fix injected `Request` objects to have working `receive`/`send` so `.body()`/`.json()` work
-- [ ] Return structured validation errors (`[{"loc": [...], "msg": ..., "type": ...}]`) for path/query/header/cookie params, not just Pydantic body errors
-- [ ] Support repeated query-key list params (`?tags=a&tags=b` → `List[str]`)
-- [ ] Support repeated form-key list params
-- [ ] Improve scalar coercion for `List[int]`, `Union`/`Optional`, and other complex annotations
-- [ ] Implement `response_model_include`
-- [ ] Implement `response_model_exclude`
-- [ ] Implement `response_model_by_alias`
-- [ ] Implement `response_model_exclude_unset`
-- [ ] Implement `response_model_exclude_defaults`
-- [ ] Implement `response_model_exclude_none`
-- [ ] Add `FileResponse`
 - [ ] Add Jinja2Templates equivalent
-- [ ] Support mounting sub-applications (not just `PyStaticFiles`) via `app.mount()`
 - [ ] Support arbitrary Starlette-style ASGI middleware classes
-- [ ] Support custom `route_class`
 - [ ] Logging middlewares
-- [ ] Async Middleware support
-- [ ] Full middleware ordering control
 - [ ] Better error handling (currently shows Rust errors)
 - [ ] Proper Python-friendly error pages (no Rust tracebacks in production)
 - [ ] GraphQL support
@@ -380,10 +357,16 @@ Some advanced features are still in development like:
 - [ ] Built-in TestClient (`starlette.testclient` style)
 - [ ] Advanced dependency scopes (request vs function)
 - [ ] Rust to Python FFI helpers
-- [ ] Full `fastapi.security` package (OAuth2, HTTPBearer, APIKey, etc.)
-- [ ] Full `WebSocket` class features (like `iter_json`, `iter_text`, `send_json`, state)
 - [ ] FastAPI CLI equivalents (`fastapi dev` and `fastapi run`)
-- [ ] Expose `jsonable_encoder` to Python
+- [ ] Per-parameter OpenAPI metadata completeness (per-param `deprecated`, `examples`, `include_in_schema`)
+- [ ] `UploadFile` with async `read`/`write`/`seek` and spooled-to-disk storage for large uploads
+- [ ] Background tasks attachable directly to every response class (`JSONResponse(..., background=task)`)
+- [ ] Automatic `HEAD` handling for `GET` routes (Starlette parity)
+- [ ] Starlette path convertors in route templates (`{p:path}`, typed convertors)
+- [ ] Persist `app.state` across requests
+- [ ] Support raw ASGI-protocol middleware
+- [ ] Broaden scalar coercion for `Union`/`Optional`/nested generics
+- [ ] Fix `response_model_by_alias` default
 
 ## Contributing
 

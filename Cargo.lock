@@ -1000,6 +1000,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cookie",
+ "crossbeam-channel",
  "dashmap",
  "fastwebsockets",
  "form_urlencoded",
@@ -2322,11 +2323,14 @@ dependencies = [
  "bytes",
  "inventory",
  "libc",
+ "lock_api",
  "once_cell",
+ "parking_lot",
  "portable-atomic",
  "pyo3-build-config",
  "pyo3-ffi",
  "pyo3-macros",
+ "serde",
 ]
 
 [[package]]

@@ -2,7 +2,7 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::too_many_arguments)]
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyDict, PyModule, PyString};
 
 pub mod engine;
 pub mod error;
@@ -42,12 +42,13 @@ pub use params::{
 };
 pub use request::{PyHTTPConnection, PyRequest};
 pub use responses::{
-    PyHTMLResponse, PyJSONResponse, PyORJSONResponse, PyPlainTextResponse, PyRedirectResponse,
-    PyStreamingResponse, PyUJSONResponse,
+    PyFileResponse, PyHTMLResponse, PyJSONResponse, PyORJSONResponse, PyPlainTextResponse,
+    PyRedirectResponse, PyStreamingResponse, PyUJSONResponse,
 };
 pub use routing::security::{
     APIKeyCookie, APIKeyHeader, APIKeyQuery, HTTPAuthorizationCredentials, HTTPBasic,
-    HTTPBasicCredentials, HTTPBearer, OAuth2PasswordBearer, PySecurityScopes,
+    HTTPBasicCredentials, HTTPBearer, OAuth2AuthorizationCodeBearer, OAuth2PasswordBearer,
+    OpenIdConnect, PySecurityScopes,
 };
 pub use staticfiles::PyStaticFiles;
 pub use websocket::PyWebSocket;
@@ -62,6 +63,44 @@ fn register_rsloop_asyncio_alias(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .getattr("modules")?
         .cast_into::<PyDict>()?;
     sys_modules.set_item("fastrapi.asyncio", rsloop_module)?;
+    Ok(())
+}
+
+fn register_submodules_in_sys_modules(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    fn walk(
+        module: &Bound<'_, PyModule>,
+        qualified_name: &str,
+        visited: &mut std::collections::HashSet<usize>,
+    ) -> PyResult<()> {
+        // Modules can reference each other cyclically (the compiled core
+        // re-exports itself), so guard traversal by object identity.
+        if !visited.insert(module.as_ptr() as usize) {
+            return Ok(());
+        }
+
+        let py = module.py();
+        let sys_modules = py.import("sys")?.getattr("modules")?;
+        let dict = module.dict();
+
+        for (key, value) in dict.iter() {
+            let Ok(key) = key.cast::<PyString>() else {
+                continue;
+            };
+            let Ok(value_module) = value.cast::<PyModule>() else {
+                continue;
+            };
+
+            let child_name = format!("{}.{}", qualified_name, key.to_str()?);
+            if !sys_modules.contains(child_name.as_str())? {
+                sys_modules.set_item(child_name.as_str(), value_module)?;
+            }
+            walk(value_module, &child_name, visited)?;
+        }
+
+        Ok(())
+    }
+
+    walk(m, "fastrapi", &mut Default::default())?;
     Ok(())
 }
 
@@ -140,10 +179,10 @@ mod fastrapi {
     mod responses {
         #[pymodule_export]
         use crate::responses::{
-            PyHTMLResponse as HTMLResponse, PyJSONResponse as JSONResponse,
-            PyORJSONResponse as ORJSONResponse, PyPlainTextResponse as PlainTextResponse,
-            PyRedirectResponse as RedirectResponse, PyStreamingResponse as StreamingResponse,
-            PyUJSONResponse as UJSONResponse,
+            PyFileResponse as FileResponse, PyHTMLResponse as HTMLResponse,
+            PyJSONResponse as JSONResponse, PyORJSONResponse as ORJSONResponse,
+            PyPlainTextResponse as PlainTextResponse, PyRedirectResponse as RedirectResponse,
+            PyStreamingResponse as StreamingResponse, PyUJSONResponse as UJSONResponse,
         };
     }
 
@@ -208,8 +247,8 @@ mod fastrapi {
         #[pymodule_export]
         use crate::security::{
             APIKeyCookie, APIKeyHeader, APIKeyQuery, HTTPAuthorizationCredentials, HTTPBasic,
-            HTTPBasicCredentials, HTTPBearer, OAuth2PasswordBearer,
-            PySecurityScopes as SecurityScopes,
+            HTTPBasicCredentials, HTTPBearer, HTTPDigest, OAuth2AuthorizationCodeBearer,
+            OAuth2PasswordBearer, OpenIdConnect, PySecurityScopes as SecurityScopes,
         };
     }
 
@@ -258,6 +297,12 @@ mod fastrapi {
         crate::status::create_status_submodule(m)?;
         crate::pydantic::register_pydantic_integration(m)?;
         super::register_rsloop_asyncio_alias(m)?;
+        // fastrapi.jsonable_encoder + fastrapi.encoders.jsonable_encoder
+        crate::ffi::encoders::register(m)?;
+        let encoders = PyModule::new(py, "encoders")?;
+        crate::ffi::encoders::register(&encoders)?;
+        m.add("encoders", encoders)?;
+        super::register_submodules_in_sys_modules(m)?;
 
         Ok(())
     }
