@@ -5,12 +5,12 @@ pub use crate::routing::tree::*;
 
 use crate::routing::types::{HttpMethod, RouteEntry, SubRouterMount, WebSocketEntry};
 
-use crate::utils::LockExt;
+use parking_lot::Mutex;
 use pyo3::Bound;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::{Py, PyAny, PyAnyMethods, PyResult, Python, pyclass, pymethods};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 #[pyclass(name = "APIRouter", skip_from_py_object)]
 #[derive(Clone)]
@@ -151,7 +151,7 @@ impl PyAPIRouter {
             .filter_map(|item| item.ok()?.extract::<String>().ok())
             .collect();
 
-        self.sub_routers.lock_or_panic().push(SubRouterMount {
+        self.sub_routers.lock().push(SubRouterMount {
             router: router.clone().unbind(),
             prefix: prefix.to_owned(),
             tags: tag_vec,

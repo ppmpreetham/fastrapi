@@ -1,7 +1,6 @@
 use super::PyAPIRouter;
 use crate::routing::dependencies::DependencyNode;
 use crate::routing::types::{HttpMethod, ParameterSource, SerializationHint, WebSocketEntry};
-use crate::utils::LockExt;
 use ahash::AHashSet;
 use hyper::StatusCode;
 use pyo3::prelude::*;
@@ -44,9 +43,9 @@ struct RouteOptions {
     rate_limit: Option<u32>,
     response_description: Option<String>,
     operation_id: Option<String>,
-    responses: Option<sonic_rs::Value>,
-    openapi_extra: Option<sonic_rs::Value>,
-    callbacks: Option<sonic_rs::Value>,
+    responses: Option<simd_json::OwnedValue>,
+    openapi_extra: Option<simd_json::OwnedValue>,
+    callbacks: Option<simd_json::OwnedValue>,
     bypass_serialization: bool,
     merged_tags: Vec<String>,
     resolved_deprecated: Option<bool>,
@@ -141,7 +140,7 @@ fn build_dump_options(
 ) -> PyResult<Option<Py<PyDict>>> {
     let include = extract_py(kwargs, "response_model_include");
     let exclude = extract_py(kwargs, "response_model_exclude");
-    let by_alias = extract::<bool>(kwargs, "response_model_by_alias").unwrap_or(false);
+    let by_alias = extract::<bool>(kwargs, "response_model_by_alias").unwrap_or(true);
     let exclude_unset = extract::<bool>(kwargs, "response_model_exclude_unset").unwrap_or(false);
     let exclude_defaults =
         extract::<bool>(kwargs, "response_model_exclude_defaults").unwrap_or(false);
@@ -353,24 +352,22 @@ impl PyAPIRouter {
 
             crate::ffi::py_handlers::assign_execution_mode(&mut handler);
 
-            routes
-                .lock_or_panic()
-                .push(crate::routing::types::RouteEntry {
-                    method,
-                    path: path_for_closure.clone(),
-                    handler: Arc::new(handler),
-                    tags: opts.merged_tags.clone(),
-                    summary: opts.summary.clone(),
-                    description: opts.description.clone(),
-                    response_description: opts.response_description.clone(),
-                    operation_id: opts.operation_id.clone(),
-                    responses: opts.responses.clone(),
-                    openapi_extra: opts.openapi_extra.clone(),
-                    callbacks: opts.callbacks.clone(),
-                    deprecated: opts.resolved_deprecated,
-                    include_in_schema: opts.include_in_schema,
-                    security: security_requirements,
-                });
+            routes.lock().push(crate::routing::types::RouteEntry {
+                method,
+                path: path_for_closure.clone(),
+                handler: Arc::new(handler),
+                tags: opts.merged_tags.clone(),
+                summary: opts.summary.clone(),
+                description: opts.description.clone(),
+                response_description: opts.response_description.clone(),
+                operation_id: opts.operation_id.clone(),
+                responses: opts.responses.clone(),
+                openapi_extra: opts.openapi_extra.clone(),
+                callbacks: opts.callbacks.clone(),
+                deprecated: opts.resolved_deprecated,
+                include_in_schema: opts.include_in_schema,
+                security: security_requirements,
+            });
 
             Ok(func.unbind())
         };
@@ -411,7 +408,7 @@ impl PyAPIRouter {
                 handler: func.clone_ref(py),
                 deps,
             };
-            websockets.lock_or_panic().push(entry);
+            websockets.lock().push(entry);
             Ok(func)
         };
         PyCFunction::new_closure(py, None, None, closure).map(|f| f.into())

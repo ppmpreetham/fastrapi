@@ -1,10 +1,12 @@
-use axum::http::StatusCode;
+use std::borrow::Cow;
+
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyUserWarning};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
-use sonic_rs::json;
+use pyo3::types::{PyDict, PyString, PyTuple};
+use simd_json::json;
 
 // Base Errors
 
@@ -143,12 +145,57 @@ impl PyHTTPException {
     }
 }
 
+fn response_headers(py: Python<'_>, headers: Option<&Py<PyDict>>) -> HeaderMap {
+    let mut map = HeaderMap::new();
+    let Some(headers) = headers else { return map };
+
+    for (name, value) in headers.bind(py).iter() {
+        let Ok(name) = name.extract::<Cow<'_, str>>() else {
+            continue;
+        };
+        let Ok(value) = value.extract::<Cow<'_, str>>() else {
+            continue;
+        };
+        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let Ok(value) = HeaderValue::from_str(&value) else {
+            continue;
+        };
+        map.append(name, value);
+    }
+    map
+}
+
+fn body_allowed(status: StatusCode) -> bool {
+    let code = status.as_u16();
+    code >= 200 && !matches!(code, 204 | 205 | 304)
+}
+
 impl PyHTTPException {
+    pub(crate) fn bad_request(py: Python<'_>, detail: &str) -> PyErr {
+        let exc = Self {
+            status_code: 400,
+            detail: PyString::new(py, detail).into_any().unbind(),
+            headers: None,
+        };
+        match Py::new(py, exc).map(Py::into_any) {
+            Ok(instance) => PyErr::from_value(instance.into_bound(py)),
+            Err(err) => err,
+        }
+    }
+
     pub fn to_response(&self, py: Python<'_>) -> Response {
         let status =
             StatusCode::try_from(self.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let detail_json = crate::utils::py_any_to_json(py, self.detail.bind(py));
-        (status, Json(json!({ "detail": detail_json }))).into_response()
+        let headers = response_headers(py, self.headers.as_ref());
+
+        if !body_allowed(status) {
+            return (status, headers).into_response();
+        }
+
+        let detail = crate::utils::py_any_to_json(py, self.detail.bind(py));
+        (status, headers, Json(json!({ "detail": detail }))).into_response()
     }
 }
 

@@ -10,13 +10,15 @@ use crate::routing::types::{
     RouteHandler, SerializationHint,
 };
 use crate::types::response::ResponseType;
-use crate::utils::{json_to_py_object, py_to_response};
+use crate::utils::{json_to_py_object, py_any_to_json, py_to_response};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyModule, PyString, PyTuple, PyType};
 use pyo3::{intern, prelude::*};
-use sonic_rs::{JsonContainerTrait, Value};
+use simd_json::OwnedValue as Value;
+use simd_json::prelude::*;
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -26,7 +28,7 @@ fn get_inspect(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     INSPECT_MODULE.get(py)
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ScalarKind {
     Bool,
     Int,
@@ -65,6 +67,104 @@ pub fn resolve_scalar_kind(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Sca
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum ScalarCoercion {
+    Single(ScalarKind),
+    Union(SmallVec<[ScalarKind; 4]>),
+}
+
+pub fn resolve_scalar_coercion(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> ScalarCoercion {
+    let mut kinds = SmallVec::new();
+    collect_scalar_kinds(py, annotation, &mut kinds);
+    match kinds.as_slice() {
+        [] => ScalarCoercion::Single(ScalarKind::Other),
+        [only] => ScalarCoercion::Single(*only),
+        _ => {
+            if kinds.contains(&ScalarKind::Str) {
+                ScalarCoercion::Single(ScalarKind::Str)
+            } else {
+                ScalarCoercion::Union(kinds)
+            }
+        }
+    }
+}
+
+fn collect_scalar_kinds(
+    py: Python<'_>,
+    annotation: &Bound<'_, PyAny>,
+    out: &mut SmallVec<[ScalarKind; 4]>,
+) {
+    if let Some(args) = union_args(py, annotation) {
+        for arg in args.iter() {
+            if is_none_type(&arg) {
+                continue;
+            }
+            collect_scalar_kinds(py, &arg, out);
+        }
+        return;
+    }
+    if let Some((true, Some(element))) = Some(params::list_element_annotation(py, annotation)) {
+        collect_scalar_kinds(py, &element, out);
+        return;
+    }
+    out.push(resolve_scalar_kind(py, annotation));
+}
+
+crate::cached_py_import!(TYPING_MODULE, "typing");
+crate::cached_py_import!(ENUM_MODULE, "enum");
+
+pub fn union_args<'py>(
+    py: Python<'py>,
+    annotation: &Bound<'py, PyAny>,
+) -> Option<Bound<'py, PyTuple>> {
+    let origin = TYPING_MODULE
+        .get(py)
+        .ok()?
+        .getattr(intern!(py, "get_origin"))
+        .ok()?
+        .call1((annotation,))
+        .ok()?;
+    if origin.is_none() {
+        return None;
+    }
+    let is_union = TYPING_MODULE
+        .get(py)
+        .ok()
+        .and_then(|typing| typing.getattr(intern!(py, "Union")).ok())
+        .is_some_and(|marker| origin.is(&marker))
+        || py
+            .import(intern!(py, "types"))
+            .ok()
+            .and_then(|types| types.getattr(intern!(py, "UnionType")).ok())
+            .is_some_and(|marker| origin.is(&marker));
+    if !is_union {
+        return None;
+    }
+    annotation
+        .getattr(intern!(py, "__args__"))
+        .ok()?
+        .cast_into()
+        .ok()
+}
+
+pub fn is_none_type(obj: &Bound<'_, PyAny>) -> bool {
+    obj.getattr(intern!(obj.py(), "__name__"))
+        .and_then(|name| name.extract::<String>())
+        .is_ok_and(|name| name == "NoneType")
+}
+
+pub fn strip_optional<'py>(
+    py: Python<'py>,
+    annotation: &Bound<'py, PyAny>,
+) -> Option<Bound<'py, PyAny>> {
+    let args = union_args(py, annotation)?;
+    let members: Vec<_> = args.iter().filter(|arg| !is_none_type(arg)).collect();
+    if members.len() == 1 {
+        return members.into_iter().next();
+    }
+    None
+}
+
 pub fn load_module(py: Python<'_>, module: &str, class_name: &str) -> PyResult<Py<PyAny>> {
     let module = PyModule::import(py, module)?;
     let cls = module.getattr(class_name)?;
@@ -74,16 +174,50 @@ pub fn load_module(py: Python<'_>, module: &str, class_name: &str) -> PyResult<P
 pub fn pydantic_error_to_response(py: Python<'_>, err: &pyo3::PyErr) -> axum::response::Response {
     use crate::utils::py_json_response_with_status;
     use axum::response::IntoResponse;
-    use pyo3::types::PyDict;
+    use pyo3::types::{PyDict, PyList};
 
     let value = err.value(py);
     if let Ok(errors) = value.call_method0(pyo3::intern!(py, "errors"))
-        && let dict = PyDict::new(py)
-        && dict.set_item(pyo3::intern!(py, "detail"), errors).is_ok()
-        && let Ok(resp) =
-            py_json_response_with_status(py, StatusCode::UNPROCESSABLE_ENTITY, dict.as_any())
+        && let Ok(list) = errors.cast::<PyList>()
     {
-        return resp;
+        let detail = PyList::empty(py);
+        for item in list.iter() {
+            let Ok(entry) = item.cast::<PyDict>() else {
+                continue;
+            };
+            let out = PyDict::new(py);
+            for key in ["type", "loc", "msg", "input", "ctx"] {
+                let Some(field) = entry.get_item(key).ok() else {
+                    continue;
+                };
+                let Some(field) = field else {
+                    continue;
+                };
+                if field.is_none() && key != "input" {
+                    continue;
+                }
+                if key == "loc" {
+                    let rooted = PyList::empty(py);
+                    if rooted.append(pyo3::intern!(py, "body")).is_ok()
+                        && let Ok(mut parts) = field.try_iter()
+                        && parts.try_for_each(|part| rooted.append(part?)).is_ok()
+                    {
+                        _ = out.set_item(key, rooted);
+                        continue;
+                    }
+                }
+                _ = out.set_item(key, field);
+            }
+            detail.append(out).ok();
+        }
+
+        let dict = PyDict::new(py);
+        if dict.set_item(pyo3::intern!(py, "detail"), detail).is_ok()
+            && let Ok(resp) =
+                py_json_response_with_status(py, StatusCode::UNPROCESSABLE_ENTITY, dict.as_any())
+        {
+            return resp;
+        }
     }
 
     (StatusCode::UNPROCESSABLE_ENTITY, "Validation failed").into_response()
@@ -109,6 +243,12 @@ pub fn validate_json_with_pydantic<'py>(
     validator: &PydanticValidator,
     raw_payload: &[u8],
 ) -> Result<Py<PyAny>, Response> {
+    if let Some(handled) =
+        crate::ffi::kernel_validation::maybe_validate_with_kernel(py, validator, raw_payload)
+    {
+        return handled;
+    }
+
     if let Some(validate_json_method) = &validator.validate_json_method {
         let raw_str = std::str::from_utf8(raw_payload).map_err(|_| {
             (StatusCode::UNPROCESSABLE_ENTITY, "Invalid UTF-8 payload").into_response()
@@ -128,7 +268,8 @@ pub fn validate_json_with_pydantic<'py>(
         };
     }
 
-    let payload: Value = sonic_rs::from_slice(raw_payload)
+    let mut json_buf = raw_payload.to_vec();
+    let payload: Value = simd_json::to_owned_value(&mut json_buf)
         .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response())?;
     validate_python_with_pydantic(py, validator.validate_python.bind(py), &payload)
 }
@@ -170,7 +311,7 @@ fn test_model(
 
 pub fn register_pydantic_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(test_model, m)?)?;
-    let _ = get_base_model(m.py());
+    _ = get_base_model(m.py());
     Ok(())
 }
 
@@ -203,10 +344,10 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         dependencies::parse_dependencies(py, func, &path_param_names).unwrap_or_default();
 
     let dependency_needs_request = dependencies.iter().any(|dep| dep.needs_request_object);
-    let all_deps_sync = dependencies.iter().all(|dep| !dep.is_async);
+    let all_deps_sync = dependencies.iter().all(|dep| dep.is_sync_callable());
     let dep_param_names: HashSet<String> = dependencies
         .iter()
-        .filter_map(|d| d.param_name.clone())
+        .filter_map(|d| d.param_name.as_ref().map(|n| n.bind(py).to_string()))
         .collect();
 
     let mut param_validators = Vec::new();
@@ -219,7 +360,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         .into_any()
         .unbind();
 
-    let _ = (|| -> PyResult<()> {
+    _ = (|| -> PyResult<()> {
         let inspect = get_inspect(py)?;
         let signature = inspect.call_method1("signature", (func,))?;
         let parameters = signature.getattr("parameters")?;
@@ -252,21 +393,6 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
 
             let mut parsed_param =
                 params::parse_parameter_spec(py, &param_name, &param_obj, &path_param_names)?;
-
-            if !parsed_param.is_pydantic_model
-                && let Some(ann) = &parsed_param.annotation
-            {
-                parsed_param.scalar_kind = if parsed_param.is_list {
-                    ann.bind(py)
-                        .getattr("__args__")
-                        .ok()
-                        .and_then(|args| args.get_item(0).ok())
-                        .map(|elem| resolve_scalar_kind(py, &elem))
-                        .unwrap_or(crate::ffi::pydantic::ScalarKind::Str)
-                } else {
-                    resolve_scalar_kind(py, ann.bind(py))
-                };
-            }
 
             if parsed_param.source == ParameterSource::Body {
                 body_param_names.push(parsed_param.name.clone());
@@ -336,19 +462,30 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     }
 }
 
-fn validation_error(loc: &[String], msg: impl std::fmt::Display, kind: &str) -> Response {
-    let detail = sonic_rs::json!({
+fn validation_error(
+    loc: &[String],
+    msg: impl std::fmt::Display,
+    kind: &str,
+    input: simd_json::OwnedValue,
+) -> Response {
+    let detail = simd_json::json!({
         "detail": [{
-            "loc": loc.iter().map(|s| sonic_rs::json!(s.as_str())).collect::<Vec<_>>(),
-            "msg": msg.to_string(),
             "type": kind,
+            "loc": loc.iter().map(|s| simd_json::json!(s.as_str())).collect::<Vec<_>>(),
+            "msg": msg.to_string(),
+            "input": input,
         }]
     });
     (StatusCode::UNPROCESSABLE_ENTITY, Json(detail)).into_response()
 }
 
 fn validation_error_response(detail: impl Into<String>) -> Response {
-    validation_error(&["body".to_owned()], detail.into(), "value_error")
+    validation_error(
+        &["body".to_owned()],
+        detail.into(),
+        "value_error",
+        simd_json::json!(null),
+    )
 }
 
 impl ParsedParameter {
@@ -384,7 +521,50 @@ fn convert_scalar_value(
     param: &ParsedParameter,
 ) -> Result<Py<PyAny>, Response> {
     let loc = param.error_loc();
-    match param.scalar_kind {
+    match &param.coercion {
+        ScalarCoercion::Single(kind) => convert_with_kind(py, raw, *kind, param),
+        ScalarCoercion::Union(kinds) => kinds
+            .iter()
+            .find_map(|kind| try_convert_kind(py, raw, *kind))
+            .ok_or_else(|| {
+                validation_error(
+                    &loc,
+                    "Input should be a valid union member",
+                    "union_tag_invalid",
+                    simd_json::json!(raw),
+                )
+            }),
+    }
+}
+
+fn try_convert_kind(py: Python<'_>, raw: &str, kind: ScalarKind) -> Option<Py<PyAny>> {
+    match kind {
+        ScalarKind::Bool => {
+            parse_bool(raw).map(|parsed| PyBool::new(py, parsed).to_owned().into_any().unbind())
+        }
+        ScalarKind::Int => raw
+            .parse::<i64>()
+            .ok()
+            .and_then(|parsed| parsed.into_pyobject(py).ok())
+            .map(|v| v.into_any().unbind()),
+        ScalarKind::Float => raw
+            .parse::<f64>()
+            .ok()
+            .and_then(|parsed| parsed.into_pyobject(py).ok())
+            .map(|v| v.into_any().unbind()),
+        ScalarKind::Str => raw.into_pyobject(py).ok().map(|v| v.into_any().unbind()),
+        ScalarKind::Other => None,
+    }
+}
+
+fn convert_with_kind(
+    py: Python<'_>,
+    raw: &str,
+    kind: ScalarKind,
+    param: &ParsedParameter,
+) -> Result<Py<PyAny>, Response> {
+    let loc = param.error_loc();
+    match kind {
         ScalarKind::Bool => parse_bool(raw)
             .map(|v| {
                 pyo3::types::PyBool::new(py, v)
@@ -395,8 +575,9 @@ fn convert_scalar_value(
             .ok_or_else(|| {
                 validation_error(
                     &loc,
-                    "Value could not be parsed to a boolean".to_string(),
+                    "Value could not be parsed to a boolean",
                     "bool_parsing",
+                    simd_json::json!(raw),
                 )
             }),
 
@@ -406,13 +587,19 @@ fn convert_scalar_value(
                     &loc,
                     "Input should be a valid integer, unable to parse string as an integer",
                     "int_parsing",
+                    simd_json::json!(raw),
                 )
             })?;
             parsed
                 .into_pyobject(py)
                 .map(|v| v.into_any().unbind())
                 .map_err(|_| {
-                    validation_error(&loc, "Input should be a valid integer", "int_parsing")
+                    validation_error(
+                        &loc,
+                        "Input should be a valid integer",
+                        "int_parsing",
+                        simd_json::json!(raw),
+                    )
                 })
         }
 
@@ -422,42 +609,146 @@ fn convert_scalar_value(
                     &loc,
                     "Input should be a valid number, unable to parse string as a number",
                     "float_parsing",
+                    simd_json::json!(raw),
                 )
             })?;
             parsed
                 .into_pyobject(py)
                 .map(|v| v.into_any().unbind())
                 .map_err(|_| {
-                    validation_error(&loc, "Input should be a valid number", "float_parsing")
+                    validation_error(
+                        &loc,
+                        "Input should be a valid number",
+                        "float_parsing",
+                        simd_json::json!(raw),
+                    )
                 })
         }
 
         ScalarKind::Str => raw
             .into_pyobject(py)
             .map(|v| v.into_any().unbind())
-            .map_err(|_| validation_error(&loc, "Input should be a valid string", "string_type")),
+            .map_err(|_| {
+                validation_error(
+                    &loc,
+                    "Input should be a valid string",
+                    "string_type",
+                    simd_json::json!(raw),
+                )
+            }),
 
         ScalarKind::Other => {
-            if let Some(ann) = param.annotation.as_ref().map(|a| a.bind(py))
+            let ann = param.annotation.as_ref().map(|a| a.bind(py));
+            if let Some(ann) = ann
                 && let Ok(v) = ann.call1((raw,))
             {
                 return Ok(v.unbind());
             }
-            raw.into_pyobject(py)
-                .map(|v| v.into_any().unbind())
-                .map_err(|_| validation_error(&loc, "Input should be valid", "value_error"))
+            let (kind, msg, ctx) = annotation_rejection(py, ann);
+            let detail = simd_json::json!({
+                "detail": [{
+                    "type": kind,
+                    "loc": loc.iter().map(|s| simd_json::json!(s.as_str())).collect::<Vec<_>>(),
+                    "msg": msg,
+                    "input": simd_json::json!(raw),
+                    "ctx": ctx,
+                }]
+            });
+            Err((StatusCode::UNPROCESSABLE_ENTITY, Json(detail)).into_response())
+        }
+    }
+}
+
+fn annotation_rejection(
+    py: Python<'_>,
+    ann: Option<&Bound<'_, PyAny>>,
+) -> (&'static str, String, simd_json::OwnedValue) {
+    let Some(ann) = ann else {
+        return (
+            "value_error",
+            "Input should be a valid value".to_string(),
+            simd_json::json!({}),
+        );
+    };
+
+    let is_enum = ann.cast::<PyType>().is_ok_and(|ty| {
+        ENUM_MODULE
+            .get(py)
+            .ok()
+            .and_then(|m| m.getattr(intern!(py, "Enum")).ok())
+            .and_then(|base| ty.is_subclass(base.as_any()).ok())
+            .unwrap_or(false)
+    });
+    let members: Option<Vec<String>> = if is_enum {
+        ann.try_iter().ok().map(|iter| {
+            iter.filter_map(|member| {
+                let member = member.ok()?;
+                let value = member.getattr(intern!(py, "value")).ok()?;
+                value.str().ok()?.to_str().ok().map(String::from)
+            })
+            .collect()
+        })
+    } else {
+        TYPING_MODULE
+            .get(py)
+            .ok()
+            .and_then(|typing| typing.getattr(intern!(py, "get_origin")).ok())
+            .and_then(|get_origin| get_origin.call1((ann,)).ok())
+            .and_then(|origin| {
+                TYPING_MODULE
+                    .get(py)
+                    .ok()?
+                    .getattr(intern!(py, "Literal"))
+                    .ok()
+                    .map(|literal| origin.is(&literal))
+            })
+            .filter(|is_literal| *is_literal)
+            .and_then(|_| {
+                ann.getattr(intern!(py, "__args__")).ok().and_then(|args| {
+                    args.try_iter().ok().map(|iter| {
+                        iter.filter_map(|a| a.ok()?.str().ok()?.to_str().ok().map(String::from))
+                            .collect()
+                    })
+                })
+            })
+    };
+
+    match members {
+        Some(values) if !values.is_empty() => {
+            let expected = values
+                .iter()
+                .map(|v| format!("'{v}'"))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            let kind = if is_enum { "enum" } else { "literal_error" };
+            let msg = format!("Input should be {expected}");
+            (kind, msg, simd_json::json!({ "expected": expected }))
+        }
+        _ => {
+            let name = ann
+                .getattr(intern!(py, "__name__"))
+                .ok()
+                .and_then(|name| name.extract::<String>().ok())
+                .unwrap_or_else(|| "value".to_string());
+            (
+                "value_error",
+                format!("Input should be a valid {name}"),
+                simd_json::json!({}),
+            )
         }
     }
 }
 
 fn validate_scalar_constraints(
+    py: Python<'_>,
     param: &ParsedParameter,
     value: &Bound<'_, PyAny>,
 ) -> Result<(), Response> {
     let loc = param.error_loc();
 
     if let Ok(number) = value.extract::<f64>() {
-        let numeric = |kind: &str, msg: String| validation_error(&loc, msg, kind);
+        let numeric =
+            |kind: &str, msg: String| validation_error(&loc, msg, kind, py_any_to_json(py, value));
         if let Some(gt) = param.constraints.gt
             && number <= gt
         {
@@ -500,6 +791,7 @@ fn validate_scalar_constraints(
                 &loc,
                 format!("String should have at least {min_length} characters"),
                 "too_short",
+                py_any_to_json(py, value),
             ));
         }
         if let Some(max_length) = param.constraints.max_length
@@ -509,6 +801,7 @@ fn validate_scalar_constraints(
                 &loc,
                 format!("String should have at most {max_length} characters"),
                 "too_long",
+                py_any_to_json(py, value),
             ));
         }
         if let Some(pattern) = &param.constraints.pattern
@@ -518,6 +811,7 @@ fn validate_scalar_constraints(
                 &loc,
                 "String should match pattern",
                 "string_pattern_mismatch",
+                py_any_to_json(py, value),
             ));
         }
     }
@@ -592,6 +886,7 @@ fn resolve_list_parameter(
                     &param.error_loc(),
                     "Field required",
                     "missing",
+                    simd_json::json!(null),
                 ));
             }
             (false, false) => None,
@@ -601,7 +896,7 @@ fn resolve_list_parameter(
     let mut items = Vec::with_capacity(raws.len());
     for raw in &raws {
         let value = convert_scalar_value(py, raw, param)?;
-        validate_scalar_constraints(param, value.bind(py))?;
+        validate_scalar_constraints(py, param, value.bind(py))?;
         items.push(value);
     }
 
@@ -639,13 +934,18 @@ pub fn resolve_parameter_value(
             ));
         }
         if param.required {
-            return Err(validation_error(&loc, "Field required", "missing"));
+            return Err(validation_error(
+                &loc,
+                "Field required",
+                "missing",
+                simd_json::json!(null),
+            ));
         }
         return Ok(None);
     };
 
     let value = convert_scalar_value(py, &raw, param)?;
-    validate_scalar_constraints(param, value.bind(py))?;
+    validate_scalar_constraints(py, param, value.bind(py))?;
     Ok(Some(value))
 }
 
@@ -659,6 +959,7 @@ fn form_field_to_py(
         BodyField::File(file) => Py::new(
             py,
             PyUploadFile::from_bytes(
+                py,
                 file.filename.clone(),
                 file.content_type.clone(),
                 file.content.clone(),
@@ -693,6 +994,7 @@ fn apply_body_and_validation(
                 &["body".to_owned()],
                 "Field required",
                 "missing",
+                simd_json::json!(null),
             ));
         }
         handler.payload.body_param_indices.iter().for_each(|&idx| {
@@ -703,7 +1005,7 @@ fn apply_body_and_validation(
                     .as_ref()
                     .map(|d| d.clone_ref(py))
                     .unwrap_or_else(|| py.None());
-                let _ = kwargs.set_item(param.name_py.bind(py), value);
+                _ = kwargs.set_item(param.name_py.bind(py), value);
             }
         });
 
@@ -720,10 +1022,37 @@ fn apply_body_and_validation(
                     &["body".to_owned()],
                     "Body validator is not registered",
                     "value_error",
+                    simd_json::json!(null),
                 )
             })?;
 
             let validator = &handler.validation.param_validators[idx];
+
+            if param.embed {
+                let mut json_buf = raw.to_vec();
+                let value: Value = simd_json::to_owned_value(&mut json_buf).map_err(|_| {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response()
+                })?;
+                let inner = value
+                    .as_object()
+                    .and_then(|obj| {
+                        obj.get(&param.external_name)
+                            .or_else(|| obj.get(&param.name))
+                    })
+                    .ok_or_else(|| {
+                        validation_error(
+                            &["body".to_owned(), param.external_name.clone()],
+                            "Field required",
+                            "missing",
+                            value.clone(),
+                        )
+                    })?;
+                let validated =
+                    validate_python_with_pydantic(py, validator.validate_python.bind(py), inner)?;
+                kwargs.set_item(param.name_py.bind(py), validated).ok();
+                return Ok(());
+            }
+
             let validated = validate_json_with_pydantic(py, validator, raw)?;
             kwargs.set_item(param.name_py.bind(py), validated).ok();
             return Ok(());
@@ -735,7 +1064,8 @@ fn apply_body_and_validation(
         BodyPayload::Json { raw, value } => match value {
             Some(payload) => payload,
             None => {
-                parsed_storage = sonic_rs::from_slice(raw).map_err(|_| {
+                let mut json_buf = raw.to_vec();
+                parsed_storage = simd_json::to_owned_value(&mut json_buf).map_err(|_| {
                     (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response()
                 })?;
                 &parsed_storage
@@ -761,6 +1091,7 @@ fn apply_body_and_validation(
                             &["body".to_owned(), param.external_name.clone()],
                             "Field required",
                             "missing",
+                            simd_json::json!(null),
                         ));
                     }
                     continue;
@@ -785,7 +1116,7 @@ fn apply_body_and_validation(
                         .into_iter()
                         .last()
                         .expect("form entry is never empty");
-                    validate_scalar_constraints(param, value.bind(py))?;
+                    validate_scalar_constraints(py, param, value.bind(py))?;
                     value
                 };
                 kwargs.set_item(param.name_py.bind(py), value).ok();
@@ -804,9 +1135,14 @@ fn apply_body_and_validation(
         return Ok(());
     }
 
-    let obj = json_payload
-        .as_object()
-        .ok_or_else(|| validation_error_response("Body must be an object"))?;
+    let obj = json_payload.as_object().ok_or_else(|| {
+        validation_error(
+            &["body".to_owned()],
+            "Input should be a valid dictionary or object to extract fields from",
+            "model_attributes_type",
+            json_payload.clone(),
+        )
+    })?;
 
     for &idx in &handler.payload.body_param_indices {
         let param = &handler.payload.parsed_params[idx];
@@ -821,6 +1157,7 @@ fn apply_body_and_validation(
                         &["body".to_owned()],
                         "Body validator is not registered",
                         "value_error",
+                        simd_json::json!(null),
                     )
                 })?;
 
@@ -910,12 +1247,12 @@ pub fn apply_request_data(
                     bg_tasks_instance = Some(bg.clone());
                     bg
                 };
-                let _ = kwargs.set_item(param.name_py.bind(py), instance);
+                _ = kwargs.set_item(param.name_py.bind(py), instance);
                 return Ok(());
             }
 
             if let Some(value) = resolve_parameter_value(py, param, request_input)? {
-                let _ = kwargs.set_item(param.name_py.bind(py), value);
+                _ = kwargs.set_item(param.name_py.bind(py), value);
             }
 
             Ok(())
