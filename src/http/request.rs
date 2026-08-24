@@ -1,3 +1,5 @@
+use crate::ffi::exceptions::PyHTTPException;
+use crate::http::form;
 use crate::routing::types::RequestInput;
 use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyAssertionError, PyRuntimeError, PyValueError};
@@ -15,7 +17,6 @@ crate::cached_py_import!(
     "QueryParams"
 );
 crate::cached_py_import!(STARLETTE_STATE, "starlette.datastructures", "State");
-crate::cached_py_import!(STARLETTE_FORM_DATA, "starlette.datastructures", "FormData");
 crate::cached_py_import!(TYPES_MODULE, "types");
 crate::cached_py_import!(HTTP_COOKIES_SIMPLE_COOKIE, "http.cookies", "SimpleCookie");
 crate::cached_py_import!(JSON_MODULE, "json");
@@ -52,10 +53,12 @@ impl PyAppInfo {
     fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
         if !scope.contains("state")? {
-            let namespace = TYPES_MODULE.get(py)?.call_method0("SimpleNamespace")?;
-            scope.set_item("state", namespace)?;
+            let namespace = TYPES_MODULE
+                .get(py)?
+                .call_method0(intern!(py, "SimpleNamespace"))?;
+            scope.set_item(intern!(py, "state"), namespace)?;
         }
-        Ok(scope.get_item("state")?.into())
+        Ok(scope.get_item(intern!(py, "state"))?.into())
     }
 }
 
@@ -80,7 +83,7 @@ impl PyHTTPConnection {
     pub fn new(py: Python<'_>, scope: Py<PyAny>, receive: Option<Py<PyAny>>) -> PyResult<Self> {
         let scope_bound = scope.bind(py);
 
-        if let Ok(scope_type) = scope_bound.get_item("type") {
+        if let Ok(scope_type) = scope_bound.get_item(intern!(py, "type")) {
             let type_str: String = scope_type.extract()?;
             if type_str != "http" && type_str != "websocket" {
                 return Err(PyValueError::new_err(
@@ -98,7 +101,7 @@ impl PyHTTPConnection {
     #[getter]
     pub fn app(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
-        if let Ok(app) = scope.get_item("app")
+        if let Ok(app) = scope.get_item(intern!(py, "app"))
             && !app.is_none()
         {
             return Ok(app.into());
@@ -113,7 +116,7 @@ impl PyHTTPConnection {
     pub fn url(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let url_class = STARLETTE_URL.get(py)?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("scope", &self.scope)?;
+        kwargs.set_item(intern!(py, "scope"), &self.scope)?;
         let url = url_class.call((), Some(&kwargs))?;
         Ok(url.into())
     }
@@ -123,20 +126,20 @@ impl PyHTTPConnection {
         let url_class = STARLETTE_URL.get(py)?;
         let scope = self.scope.bind(py);
 
-        if let Ok(base_scope) = scope.call_method0("copy") {
-            let _ = base_scope.set_item("path", "/");
-            let _ = base_scope.set_item("query_string", PyBytes::new(py, b""));
+        if let Ok(base_scope) = scope.call_method0(intern!(py, "copy")) {
+            _ = base_scope.set_item(intern!(py, "path"), "/");
+            _ = base_scope.set_item(intern!(py, "query_string"), PyBytes::new(py, b""));
             let root_path = scope
-                .get_item("root_path")
+                .get_item(intern!(py, "root_path"))
                 .unwrap_or_else(|_| PyString::new(py, "").into_any());
-            let _ = base_scope.set_item("root_path", root_path);
+            _ = base_scope.set_item(intern!(py, "root_path"), root_path);
             let kwargs = PyDict::new(py);
-            kwargs.set_item("scope", base_scope)?;
+            kwargs.set_item(intern!(py, "scope"), base_scope)?;
             let url = url_class.call((), Some(&kwargs))?;
             Ok(url.into())
         } else {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("scope", &self.scope)?;
+            kwargs.set_item(intern!(py, "scope"), &self.scope)?;
             let url = url_class.call((), Some(&kwargs))?;
             Ok(url.into())
         }
@@ -145,18 +148,18 @@ impl PyHTTPConnection {
     #[getter]
     pub fn headers(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
-        if let Ok(headers) = scope.get_item("_headers") {
+        if let Ok(headers) = scope.get_item(intern!(py, "_headers")) {
             return Ok(headers.into());
         }
         if let Ok(headers_cls) = STARLETTE_HEADERS.get(py) {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("scope", &self.scope)?;
+            kwargs.set_item(intern!(py, "scope"), &self.scope)?;
             if let Ok(h) = headers_cls.call((), Some(&kwargs)) {
-                let _ = scope.set_item("_headers", &h);
+                _ = scope.set_item(intern!(py, "_headers"), &h);
                 return Ok(h.into());
             }
         }
-        match scope.get_item("headers") {
+        match scope.get_item(intern!(py, "headers")) {
             Ok(h) => Ok(h.into()),
             Err(_) => Ok(PyDict::new(py).into()),
         }
@@ -165,21 +168,21 @@ impl PyHTTPConnection {
     #[getter]
     pub fn query_params(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
-        if let Ok(params) = scope.get_item("_query_params") {
+        if let Ok(params) = scope.get_item(intern!(py, "_query_params")) {
             return Ok(params.into());
         }
         if let Ok(qp_cls) = STARLETTE_QUERY_PARAMS.get(py) {
             let query_string = scope
-                .get_item("query_string")
+                .get_item(intern!(py, "query_string"))
                 .unwrap_or_else(|_| PyBytes::new(py, b"").into_any());
             let kwargs = PyDict::new(py);
-            kwargs.set_item("query_string", query_string)?;
+            kwargs.set_item(intern!(py, "query_string"), query_string)?;
             if let Ok(qp) = qp_cls.call((), Some(&kwargs)) {
-                let _ = scope.set_item("_query_params", &qp);
+                _ = scope.set_item(intern!(py, "_query_params"), &qp);
                 return Ok(qp.into());
             }
         }
-        match scope.get_item("query_params") {
+        match scope.get_item(intern!(py, "query_params")) {
             Ok(params) => Ok(params.into()),
             Err(_) => Ok(PyDict::new(py).into()),
         }
@@ -189,7 +192,7 @@ impl PyHTTPConnection {
     pub fn path_params(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
         Ok(scope
-            .get_item("path_params")
+            .get_item(intern!(py, "path_params"))
             .map(Into::into)
             .unwrap_or_else(|_| PyDict::new(py).into()))
     }
@@ -198,11 +201,11 @@ impl PyHTTPConnection {
     pub fn cookies<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let scope = self.scope.bind(py);
 
-        if let Ok(cookies) = scope.get_item("_cookies") {
+        if let Ok(cookies) = scope.get_item(intern!(py, "_cookies")) {
             return Ok(cookies.cast_into()?);
         }
 
-        if let Ok(cookies) = scope.get_item("cookies") {
+        if let Ok(cookies) = scope.get_item(intern!(py, "cookies")) {
             return Ok(cookies.cast_into()?);
         }
 
@@ -215,15 +218,15 @@ impl PyHTTPConnection {
 
             let dict = PyDict::new(py);
 
-            let items = cookie_obj.call_method0("items")?;
+            let items = cookie_obj.call_method0(intern!(py, "items"))?;
             for item in items.try_iter()? {
                 let item = item?;
                 let (k, v) = item.extract::<(&str, Bound<'_, PyAny>)>()?;
-                let val = v.getattr("value")?;
+                let val = v.getattr(intern!(py, "value"))?;
                 dict.set_item(k, val)?;
             }
 
-            scope.set_item("_cookies", &dict)?;
+            scope.set_item(intern!(py, "_cookies"), &dict)?;
             return Ok(dict);
         }
 
@@ -234,7 +237,7 @@ impl PyHTTPConnection {
     pub fn client(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
         scope
-            .get_item("client")
+            .get_item(intern!(py, "client"))
             .map(|client| {
                 if let Ok((host, port)) = client.extract::<(String, u16)>() {
                     let client_info = PyClientInfo { host, port };
@@ -249,7 +252,7 @@ impl PyHTTPConnection {
     pub fn session(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.scope
             .bind(py)
-            .get_item("session")
+            .get_item(intern!(py, "session"))
             .map(Into::into)
             .map_err(|_| {
                 PyAssertionError::new_err(
@@ -262,7 +265,7 @@ impl PyHTTPConnection {
     pub fn auth(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.scope
             .bind(py)
-            .get_item("auth")
+            .get_item(intern!(py, "auth"))
             .map(Into::into)
             .map_err(|_| {
                 PyAssertionError::new_err(
@@ -275,7 +278,7 @@ impl PyHTTPConnection {
     pub fn user(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.scope
             .bind(py)
-            .get_item("user")
+            .get_item(intern!(py, "user"))
             .map(Into::into)
             .map_err(|_| {
                 PyAssertionError::new_err(
@@ -287,26 +290,28 @@ impl PyHTTPConnection {
     #[getter]
     pub fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
-        if let Ok(state) = scope.get_item("_state") {
+        if let Ok(state) = scope.get_item(intern!(py, "_state")) {
             return Ok(state.into());
         }
 
         if let Ok(state_cls) = STARLETTE_STATE.get(py) {
             if !scope.contains("state")? {
-                scope.set_item("state", PyDict::new(py))?;
+                scope.set_item(intern!(py, "state"), PyDict::new(py))?;
             }
-            let state_dict = scope.get_item("state")?;
+            let state_dict = scope.get_item(intern!(py, "state"))?;
             if let Ok(st) = state_cls.call1((state_dict,)) {
-                let _ = scope.set_item("_state", &st);
+                _ = scope.set_item(intern!(py, "_state"), &st);
                 return Ok(st.into());
             }
         }
 
         if !scope.contains("state")? {
-            let namespace = TYPES_MODULE.get(py)?.call_method0("SimpleNamespace")?;
-            scope.set_item("state", namespace)?;
+            let namespace = TYPES_MODULE
+                .get(py)?
+                .call_method0(intern!(py, "SimpleNamespace"))?;
+            scope.set_item(intern!(py, "state"), namespace)?;
         }
-        Ok(scope.get_item("state")?.into())
+        Ok(scope.get_item(intern!(py, "state"))?.into())
     }
 
     #[pyo3(signature = (name, **path_params))]
@@ -318,8 +323,8 @@ impl PyHTTPConnection {
     ) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
         let provider = scope
-            .get_item("router")
-            .or_else(|_| scope.get_item("app"))
+            .get_item(intern!(py, "router"))
+            .or_else(|_| scope.get_item(intern!(py, "app")))
             .map_err(|_| {
                 PyRuntimeError::new_err(
                     "The `url_for` method can only be used inside a Starlette application or with a router.",
@@ -327,15 +332,15 @@ impl PyHTTPConnection {
             })?;
 
         let url_path = if let Some(params) = path_params {
-            provider.call_method("url_path_for", (name,), Some(params))?
+            provider.call_method(intern!(py, "url_path_for"), (name,), Some(params))?
         } else {
             provider.call_method1("url_path_for", (name,))?
         };
 
         let base_url = self.base_url(py)?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("base_url", base_url)?;
-        let abs_url = url_path.call_method("make_absolute_url", (), Some(&kwargs))?;
+        kwargs.set_item(intern!(py, "base_url"), base_url)?;
+        let abs_url = url_path.call_method(intern!(py, "make_absolute_url"), (), Some(&kwargs))?;
         Ok(abs_url.into())
     }
 
@@ -361,7 +366,7 @@ impl PyHTTPConnection {
 
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
-        Ok(scope.call_method0("__iter__")?.into())
+        Ok(scope.call_method0(intern!(py, "__iter__"))?.into())
     }
 
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
@@ -391,31 +396,31 @@ impl PyHTTPConnection {
 
     fn keys(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
-        Ok(scope.call_method0("keys")?.into())
+        Ok(scope.call_method0(intern!(py, "keys"))?.into())
     }
 
     fn values(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
-        Ok(scope.call_method0("values")?.into())
+        Ok(scope.call_method0(intern!(py, "values"))?.into())
     }
 
     fn items(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
-        Ok(scope.call_method0("items")?.into())
+        Ok(scope.call_method0(intern!(py, "items"))?.into())
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let scope = self.scope.bind(py);
         let type_str: String = scope
-            .get_item("type")
+            .get_item(intern!(py, "type"))
             .and_then(|t| t.extract())
             .unwrap_or_default();
         let path_str: String = scope
-            .get_item("path")
+            .get_item(intern!(py, "path"))
             .and_then(|p| p.extract())
             .unwrap_or_default();
         let method_str: String = scope
-            .get_item("method")
+            .get_item(intern!(py, "method"))
             .and_then(|m| m.extract())
             .unwrap_or_default();
 
@@ -439,7 +444,7 @@ impl PyHTTPConnection {
 
 fn extract_content_length(scope: &Bound<'_, PyAny>) -> Option<usize> {
     scope
-        .get_item("headers")
+        .get_item(intern!(scope.py(), "headers"))
         .ok()?
         .try_iter()
         .ok()?
@@ -461,14 +466,14 @@ fn extract_content_length(scope: &Bound<'_, PyAny>) -> Option<usize> {
 }
 
 fn process_asgi_message(message: &Bound<'_, PyAny>, full_body: &mut Vec<u8>) -> PyResult<bool> {
-    let typ_item = message.get_item("type")?;
+    let typ_item = message.get_item(intern!(message.py(), "type"))?;
     let typ: &str = typ_item.extract()?;
 
     if typ != "http.request" {
         return Ok(false);
     }
 
-    if let Ok(body_item) = message.get_item("body") {
+    if let Ok(body_item) = message.get_item(intern!(message.py(), "body")) {
         if let Ok(py_bytes) = body_item.cast::<PyBytes>() {
             full_body.extend_from_slice(py_bytes.as_bytes());
         } else {
@@ -478,7 +483,7 @@ fn process_asgi_message(message: &Bound<'_, PyAny>, full_body: &mut Vec<u8>) -> 
     }
 
     let more_body = message
-        .get_item("more_body")
+        .get_item(intern!(message.py(), "more_body"))
         .ok()
         .and_then(|m| m.extract::<bool>().ok())
         .unwrap_or(false);
@@ -496,12 +501,15 @@ pub(crate) fn create_py_request<'a>(
     scope.set_item(intern!(py, "method"), input.method)?;
     scope.set_item(intern!(py, "path"), input.path)?;
     scope.set_item(intern!(py, "query_string"), input.query_string)?;
+    if let Some(app) = crate::globals::serve_app() {
+        scope.set_item(intern!(py, "app"), app.bind(py))?;
+    }
 
     let path_params = PyDict::new(py);
     if let Some(params) = input.path_params.get() {
         params
             .iter()
-            .try_for_each(|(k, v)| path_params.set_item(k.as_ref(), v))?;
+            .try_for_each(|(k, v)| path_params.set_item(*k, v))?;
     }
     scope.set_item(intern!(py, "path_params"), path_params)?;
 
@@ -553,7 +561,7 @@ impl PyRequest {
         };
 
         if let Some(bytes) = raw_body.into() {
-            let _ = req._body.set(bytes.into());
+            _ = req._body.set(bytes.into());
         }
 
         let initializer = PyClassInitializer::from(conn).add_subclass(req);
@@ -565,7 +573,7 @@ impl PyRequest {
         py: Python<'py>,
         scope: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if let Ok(headers) = scope.get_item("_headers") {
+        if let Ok(headers) = scope.get_item(intern!(py, "_headers")) {
             return Ok(headers);
         }
 
@@ -585,9 +593,9 @@ impl PyRequest {
 
         let headers_cls = STARLETTE_HEADERS.get(py)?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("raw", &raw_list)?;
+        kwargs.set_item(intern!(py, "raw"), &raw_list)?;
         let headers_obj = headers_cls.call((), Some(&kwargs))?;
-        scope.set_item("_headers", &headers_obj)?;
+        scope.set_item(intern!(py, "_headers"), &headers_obj)?;
         Ok(headers_obj.into_any())
     }
 
@@ -602,7 +610,7 @@ impl PyRequest {
         }
 
         let scope_any: &Bound<'py, PyAny> = conn.scope.bind(py).as_any();
-        let method_item = scope_any.get_item("method").ok();
+        let method_item = scope_any.get_item(intern!(py, "method")).ok();
         let method: &str = method_item
             .as_ref()
             .and_then(|m| m.extract::<&str>().ok())
@@ -683,7 +691,7 @@ impl PyRequest {
         let conn: &Bound<'py, PyHTTPConnection> = self_.as_super();
         let scope = conn.borrow().scope.bind(py).clone();
 
-        if let Ok(cookies) = scope.get_item("_cookies") {
+        if let Ok(cookies) = scope.get_item(intern!(py, "_cookies")) {
             return Ok(cookies.cast_into()?);
         }
 
@@ -702,7 +710,7 @@ impl PyRequest {
             }
         }
 
-        scope.set_item("_cookies", &dict)?;
+        scope.set_item(intern!(py, "_cookies"), &dict)?;
         Ok(dict)
     }
 
@@ -736,20 +744,32 @@ impl PyRequest {
         let conn_borrow = conn.borrow();
         let req_borrow = self_.borrow();
         let body_awaitable = req_borrow.read_body(py, &conn_borrow)?;
-        let headers_obj = conn_borrow.headers(py)?;
+        let content_type = form::content_type_of(py, conn_borrow.scope.bind(py));
         let locals = rsloop::rust_async::get_current_locals(py)?;
         let body_fut = rsloop::rust_async::into_future_with_locals(&locals, body_awaitable)?;
+        let body_cell = req_borrow._body.clone();
 
         rsloop::rust_async::future_into_py_with_locals(py, locals, async move {
-            let _body_bytes: Py<PyAny> = body_fut.await?;
-            Python::attach(|py| {
-                if let Ok(form_cls) = STARLETTE_FORM_DATA.get(py) {
-                    let form_obj = form_cls.call0()?;
-                    return Ok(form_obj.unbind());
+            let body_bytes: Py<PyAny> = body_fut.await?;
+
+            let raw: Arc<[u8]> = body_cell.get().cloned().unwrap_or_else(|| {
+                Python::attach(|py| {
+                    body_bytes
+                        .bind(py)
+                        .cast::<PyBytes>()
+                        .map(|bytes| Arc::from(bytes.as_bytes()))
+                        .unwrap_or_default()
+                })
+            });
+
+            // starlette turns a malformed body into a 400 carrying the parser message.
+            let entries = match form::parse_form(&content_type, &raw).await {
+                Ok(entries) => entries,
+                Err(message) => {
+                    return Python::attach(|py| Err(PyHTTPException::bad_request(py, &message)));
                 }
-                let _ = headers_obj;
-                Ok(PyDict::new(py).into_any().unbind())
-            })
+            };
+            Python::attach(|py| form::to_form_data(py, entries))
         })
     }
 
@@ -765,11 +785,11 @@ impl PyRequest {
         let conn: &Bound<'_, PyHTTPConnection> = self_.as_super();
         let scope = conn.borrow().scope.bind(self_.py()).clone();
         let method: String = scope
-            .get_item("method")
+            .get_item(intern!(self_.py(), "method"))
             .and_then(|m| m.extract())
             .unwrap_or_else(|_| "".to_string());
         let path: String = scope
-            .get_item("path")
+            .get_item(intern!(self_.py(), "path"))
             .and_then(|p| p.extract())
             .unwrap_or_else(|_| "".to_string());
         Ok(format!("Request(method={:?}, path={:?})", method, path))

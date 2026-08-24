@@ -4,28 +4,76 @@ use axum::{
     http::{HeaderName, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
-use pyo3::{prelude::*, types::PyDict};
+use pyo3::{intern, prelude::*, types::PyDict, types::PyType};
 use tracing::error;
 
 use pyo3::{Py, PyAny, pyclass, pymethods};
 
 use crate::types::response::ResponseType;
 
-fn response_class_name(result: &Bound<'_, PyAny>) -> Option<String> {
-    result
-        .get_type()
-        .name()
-        .ok()
-        .and_then(|name| name.to_str().ok().map(str::to_owned))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResponseKind {
+    Unknown,
+    Base,
+    Json,
+    Text,
+    Html,
+    Redirect,
+    Streaming,
+    File,
 }
 
-fn response_class_is(class_name: Option<&str>, expected: &str) -> bool {
-    class_name.is_some_and(|name| name == expected || name.rsplit('.').next() == Some(expected))
+static RESPONSE_KIND_CACHE: std::sync::LazyLock<
+    papaya::HashMap<usize, (Py<PyType>, ResponseKind)>,
+> = std::sync::LazyLock::new(|| papaya::HashMap::with_capacity(32));
+
+#[inline]
+fn response_kind(result: &Bound<'_, PyAny>) -> ResponseKind {
+    let ty = result.get_type();
+    let type_ptr = ty.as_ptr() as usize;
+
+    let guard = RESPONSE_KIND_CACHE.guard();
+    if let Some((_, kind)) = RESPONSE_KIND_CACHE.get(&type_ptr, &guard) {
+        return *kind;
+    }
+    drop(guard);
+
+    let kind = probe_response_kind(&ty);
+    RESPONSE_KIND_CACHE
+        .pin()
+        .insert(type_ptr, (ty.unbind(), kind));
+    kind
+}
+
+fn probe_response_kind(ty: &Bound<'_, PyType>) -> ResponseKind {
+    let Ok(name) = ty.name() else {
+        return ResponseKind::Unknown;
+    };
+    let Ok(name) = name.to_str() else {
+        return ResponseKind::Unknown;
+    };
+    match name.rsplit('.').next().unwrap_or(name) {
+        "Response" => ResponseKind::Base,
+        "JSONResponse" | "ORJSONResponse" | "UJSONResponse" => ResponseKind::Json,
+        "PlainTextResponse" => ResponseKind::Text,
+        "HTMLResponse" => ResponseKind::Html,
+        "RedirectResponse" => ResponseKind::Redirect,
+        "StreamingResponse" => ResponseKind::Streaming,
+        "FileResponse" => ResponseKind::File,
+        _ => ResponseKind::Unknown,
+    }
+}
+
+fn is_starlette_response(result: &Bound<'_, PyAny>) -> bool {
+    let py = result.py();
+    result.hasattr(intern!(py, "body")).unwrap_or(false)
+        && result.hasattr(intern!(py, "status_code")).unwrap_or(false)
+        && result.hasattr(intern!(py, "headers")).unwrap_or(false)
 }
 
 fn response_status(result: &Bound<'_, PyAny>, default: StatusCode) -> StatusCode {
     result
-        .getattr("status_code")
+        .getattr(intern!(result.py(), "status_code"))
         .ok()
         .and_then(|status| status.extract::<u16>().ok())
         .and_then(|status| StatusCode::from_u16(status).ok())
@@ -44,13 +92,13 @@ pub fn extract_base_response_data<'py>(
     default_status: StatusCode,
 ) -> BaseResponseData<'py> {
     let status_code = response_status(result, default_status);
-    let content = result.getattr("content").ok();
+    let content = result.getattr(intern!(result.py(), "content")).ok();
     let headers = result
-        .getattr("headers")
+        .getattr(intern!(result.py(), "headers"))
         .ok()
         .and_then(|h| h.extract::<Py<PyDict>>().ok());
     let media_type = result
-        .getattr("media_type")
+        .getattr(intern!(result.py(), "media_type"))
         .ok()
         .and_then(|m| m.extract::<String>().ok());
     BaseResponseData {
@@ -135,7 +183,7 @@ pub fn apply_response_metadata(
     py: Python<'_>,
     mut res: Response,
     headers: Option<&Py<PyDict>>,
-    media_type: Option<&String>,
+    media_type: Option<&str>,
 ) -> Response {
     if let Some(headers) = headers
         && let Ok(dict) = headers.bind(py).cast::<PyDict>()
@@ -152,7 +200,7 @@ pub fn apply_response_metadata(
     }
 
     if let Some(media_type) = media_type
-        && let Ok(hval) = HeaderValue::try_from(media_type.as_str())
+        && let Ok(hval) = HeaderValue::try_from(media_type)
     {
         res.headers_mut()
             .insert(axum::http::header::CONTENT_TYPE, hval);
@@ -178,6 +226,7 @@ pub fn convert_response_by_type(
     let default_status = handler.response.default_status.unwrap_or(StatusCode::OK);
     let mut final_result = result;
     let validated_storage;
+    crate::engine::background::spawn_response_background(py, result);
 
     if final_result.is_instance_of::<PyJSONResponse>() {
         return Ok(convert_json_response(py, final_result));
@@ -200,40 +249,28 @@ pub fn convert_response_by_type(
         || final_result.is_instance_of::<pyo3::types::PyInt>()
         || final_result.is_instance_of::<pyo3::types::PyFloat>();
 
-    let mut class_name = if !is_plain_value {
-        let name = response_class_name(final_result);
-        if let Some(ref name) = name
-            && response_class_is(Some(name.as_str()), "Response")
-        {
+    let mut kind = if !is_plain_value {
+        let kind = response_kind(final_result);
+        if kind == ResponseKind::Base {
             return Ok(convert_auto_response(py, final_result));
         }
-        name
+        kind
     } else {
-        None
+        ResponseKind::Unknown
     };
 
-    if !is_plain_value {
-        let has_body = final_result.getattr("body").is_ok();
-
-        if has_body {
-            return Ok(convert_auto_response(py, final_result));
-        }
+    if !is_plain_value && is_starlette_response(final_result) {
+        return Ok(convert_auto_response(py, final_result));
     }
 
     if !is_plain_value {
-        if response_class_is(class_name.as_deref(), "JSONResponse")
-            || response_class_is(class_name.as_deref(), "ORJSONResponse")
-            || response_class_is(class_name.as_deref(), "UJSONResponse")
-        {
-            return Ok(convert_json_response(py, final_result));
-        } else if response_class_is(class_name.as_deref(), "PlainTextResponse") {
-            return Ok(convert_text_response(py, final_result));
-        } else if response_class_is(class_name.as_deref(), "HTMLResponse") {
-            return Ok(convert_html_response(py, final_result));
-        } else if response_class_is(class_name.as_deref(), "RedirectResponse") {
-            return Ok(convert_redirect_response(py, final_result));
-        } else if response_class_is(class_name.as_deref(), "StreamingResponse") {
-            return Ok(convert_streaming_response(py, final_result));
+        match kind {
+            ResponseKind::Json => return Ok(convert_json_response(py, final_result)),
+            ResponseKind::Text => return Ok(convert_text_response(py, final_result)),
+            ResponseKind::Html => return Ok(convert_html_response(py, final_result)),
+            ResponseKind::Redirect => return Ok(convert_redirect_response(py, final_result)),
+            ResponseKind::Streaming => return Ok(convert_streaming_response(py, final_result)),
+            _ => {}
         }
     }
 
@@ -242,7 +279,7 @@ pub fn convert_response_by_type(
             .bind(py)
             .call_method1("model_validate", (final_result,))?;
         final_result = &validated_storage;
-        class_name = response_class_name(final_result);
+        kind = response_kind(final_result);
     }
 
     let response = match handler.response.response_type {
@@ -284,30 +321,24 @@ pub fn convert_response_by_type(
         ResponseType::File => convert_file_response(py, final_result),
 
         ResponseType::Auto => {
-            if final_result.is_instance_of::<PyJSONResponse>()
-                || response_class_is(class_name.as_deref(), "JSONResponse")
-                || response_class_is(class_name.as_deref(), "ORJSONResponse")
-                || response_class_is(class_name.as_deref(), "UJSONResponse")
-            {
+            if final_result.is_instance_of::<PyJSONResponse>() || kind == ResponseKind::Json {
                 convert_json_response(py, final_result)
             } else if final_result.is_instance_of::<PyPlainTextResponse>()
-                || response_class_is(class_name.as_deref(), "PlainTextResponse")
+                || kind == ResponseKind::Text
             {
                 convert_text_response(py, final_result)
-            } else if final_result.is_instance_of::<PyHTMLResponse>()
-                || response_class_is(class_name.as_deref(), "HTMLResponse")
+            } else if final_result.is_instance_of::<PyHTMLResponse>() || kind == ResponseKind::Html
             {
                 convert_html_response(py, final_result)
             } else if final_result.is_instance_of::<PyRedirectResponse>()
-                || response_class_is(class_name.as_deref(), "RedirectResponse")
+                || kind == ResponseKind::Redirect
             {
                 convert_redirect_response(py, final_result)
             } else if final_result.is_instance_of::<PyStreamingResponse>()
-                || response_class_is(class_name.as_deref(), "StreamingResponse")
+                || kind == ResponseKind::Streaming
             {
                 convert_streaming_response(py, final_result)
-            } else if final_result.is_instance_of::<PyFileResponse>()
-                || response_class_is(class_name.as_deref(), "FileResponse")
+            } else if final_result.is_instance_of::<PyFileResponse>() || kind == ResponseKind::File
             {
                 convert_file_response(py, final_result)
             } else {
@@ -325,15 +356,15 @@ pub fn convert_html_response(py: Python, result: &Bound<PyAny>) -> Response {
         let resp = resp_bound.borrow();
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
         let res = (status_code, Html(resp.content.clone())).into_response();
-        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_ref())
-    } else if response_class_is(response_class_name(result).as_deref(), "HTMLResponse") {
+        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_deref())
+    } else if response_kind(result) == ResponseKind::Html {
         let data = extract_base_response_data(result, StatusCode::OK);
         let content = data
             .content
             .and_then(|content| content.extract::<String>().ok())
             .unwrap_or_default();
         let res = (data.status_code, Html(content)).into_response();
-        apply_response_metadata(py, res, data.headers.as_ref(), data.media_type.as_ref())
+        apply_response_metadata(py, res, data.headers.as_ref(), data.media_type.as_deref())
     } else {
         error!("Expected HTMLResponse, but got another type.");
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -350,7 +381,7 @@ pub fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
                 err.print(py);
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             });
-        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_ref())
+        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_deref())
     } else if let Ok(resp_bound) = result.cast::<PyORJSONResponse>() {
         let resp = resp_bound.borrow();
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
@@ -359,7 +390,7 @@ pub fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
                 err.print(py);
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             });
-        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_ref())
+        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_deref())
     } else if let Ok(resp_bound) = result.cast::<PyUJSONResponse>() {
         let resp = resp_bound.borrow();
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
@@ -368,11 +399,13 @@ pub fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
                 err.print(py);
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             });
-        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_ref())
-    } else if response_class_is(response_class_name(result).as_deref(), "JSONResponse")
-        || response_class_is(response_class_name(result).as_deref(), "ORJSONResponse")
-        || response_class_is(response_class_name(result).as_deref(), "UJSONResponse")
-    {
+        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_deref())
+    } else {
+        if response_kind(result) != ResponseKind::Json {
+            error!("Expected JSONResponse, but got another type.");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+
         let data = extract_base_response_data(result, StatusCode::OK);
         let res = match data.content {
             Some(ref content) => py_json_response_with_status(py, data.status_code, content)
@@ -382,10 +415,7 @@ pub fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
                 }),
             None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
-        apply_response_metadata(py, res, data.headers.as_ref(), data.media_type.as_ref())
-    } else {
-        error!("Expected JSONResponse, but got another type.");
-        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        apply_response_metadata(py, res, data.headers.as_ref(), data.media_type.as_deref())
     }
 }
 
@@ -403,8 +433,8 @@ pub fn convert_text_response(py: Python, result: &Bound<PyAny>) -> Response {
             resp.content.clone(),
         )
             .into_response();
-        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_ref())
-    } else if response_class_is(response_class_name(result).as_deref(), "PlainTextResponse") {
+        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_deref())
+    } else if response_kind(result) == ResponseKind::Text {
         let data = extract_base_response_data(result, StatusCode::OK);
         let content = data
             .content
@@ -419,7 +449,7 @@ pub fn convert_text_response(py: Python, result: &Bound<PyAny>) -> Response {
             content,
         )
             .into_response();
-        apply_response_metadata(py, res, data.headers.as_ref(), data.media_type.as_ref())
+        apply_response_metadata(py, res, data.headers.as_ref(), data.media_type.as_deref())
     } else {
         error!("Expected PlainTextResponse, but got another type.");
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -436,19 +466,19 @@ pub fn convert_redirect_response(py: Python, result: &Bound<PyAny>) -> Response 
             Redirect::temporary(&resp.url).into_response()
         };
         apply_response_metadata(py, res, resp.headers.as_ref(), None)
-    } else if response_class_is(response_class_name(result).as_deref(), "RedirectResponse") {
+    } else if response_kind(result) == ResponseKind::Redirect {
         let url = result
-            .getattr("url")
+            .getattr(intern!(py, "url"))
             .ok()
             .and_then(|url| url.extract::<String>().ok())
             .unwrap_or_default();
         let status = result
-            .getattr("status_code")
+            .getattr(intern!(py, "status_code"))
             .ok()
             .and_then(|status| status.extract::<u16>().ok())
             .unwrap_or(307);
         let headers = result
-            .getattr("headers")
+            .getattr(intern!(py, "headers"))
             .ok()
             .and_then(|h| h.extract::<Py<PyDict>>().ok());
         let res = if status == 301 {
@@ -474,7 +504,7 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
                 resp.headers.clone(),
                 resp.media_type.clone(),
             )
-        } else if response_class_is(response_class_name(result).as_deref(), "StreamingResponse") {
+        } else if response_kind(result) == ResponseKind::Streaming {
             let data = extract_base_response_data(result, StatusCode::OK);
             let content = data
                 .content
@@ -496,13 +526,13 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
     let stream = async_stream::stream! {
         let (is_async, is_sync) = Python::attach(|py| {
             let b = content.bind(py);
-            (b.hasattr("__anext__").unwrap_or(false), b.hasattr("__next__").unwrap_or(false))
+            (b.hasattr(intern!(py, "__anext__")).unwrap_or(false), b.hasattr(intern!(py, "__next__")).unwrap_or(false))
         });
 
         if is_async {
             loop {
                 let fut = Python::attach(|py| {
-                    match content.bind(py).call_method0("__anext__") {
+                    match content.bind(py).call_method0(intern!(py, "__anext__")) {
                         Ok(awaitable) => {
                             rsloop::rust_async::into_future_with_locals(&locals, awaitable).ok()
                         }
@@ -534,7 +564,7 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
         } else if is_sync {
             loop {
                 let chunk = Python::attach(|py| {
-                    match content.bind(py).call_method0("__next__") {
+                    match content.bind(py).call_method0(intern!(py, "__next__")) {
                         Ok(val) => {
                             if let Ok(s) = val.extract::<&str>() { Ok(Some(bytes::Bytes::copy_from_slice(s.as_bytes()))) }
                             else if let Ok(b) = val.extract::<&[u8]>() { Ok(Some(bytes::Bytes::copy_from_slice(b))) }
@@ -557,7 +587,7 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
         }
     };
     let res = (status_code, Body::from_stream(stream)).into_response();
-    apply_response_metadata(py, res, headers.as_ref(), media_type.as_ref())
+    apply_response_metadata(py, res, headers.as_ref(), media_type.as_deref())
 }
 
 #[inline(always)]
@@ -566,41 +596,28 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
         return StatusCode::NO_CONTENT.into_response();
     }
 
-    let class_name = response_class_name(result);
-    if result.is_instance_of::<PyJSONResponse>()
-        || response_class_is(class_name.as_deref(), "JSONResponse")
-        || response_class_is(class_name.as_deref(), "ORJSONResponse")
-        || response_class_is(class_name.as_deref(), "UJSONResponse")
-    {
+    let kind = response_kind(result);
+    if result.is_instance_of::<PyJSONResponse>() || kind == ResponseKind::Json {
         return convert_json_response(py, result);
     }
-    if result.is_instance_of::<PyPlainTextResponse>()
-        || response_class_is(class_name.as_deref(), "PlainTextResponse")
-    {
+    if result.is_instance_of::<PyPlainTextResponse>() || kind == ResponseKind::Text {
         return convert_text_response(py, result);
     }
-    if result.is_instance_of::<PyHTMLResponse>()
-        || response_class_is(class_name.as_deref(), "HTMLResponse")
-    {
+    if result.is_instance_of::<PyHTMLResponse>() || kind == ResponseKind::Html {
         return convert_html_response(py, result);
     }
-    if result.is_instance_of::<PyRedirectResponse>()
-        || response_class_is(class_name.as_deref(), "RedirectResponse")
-    {
+    if result.is_instance_of::<PyRedirectResponse>() || kind == ResponseKind::Redirect {
         return convert_redirect_response(py, result);
     }
-    if result.is_instance_of::<PyStreamingResponse>()
-        || response_class_is(class_name.as_deref(), "StreamingResponse")
-    {
+    if result.is_instance_of::<PyStreamingResponse>() || kind == ResponseKind::Streaming {
         return convert_streaming_response(py, result);
     }
-    if result.is_instance_of::<PyFileResponse>()
-        || response_class_is(class_name.as_deref(), "FileResponse")
-    {
+    if result.is_instance_of::<PyFileResponse>() || kind == ResponseKind::File {
         return convert_file_response(py, result);
     }
 
-    crate::utils::py_json_response(py, result).unwrap_or_else(|err| {
+    let status = response_status(result, StatusCode::OK);
+    crate::utils::py_json_response_with_status(py, status, result).unwrap_or_else(|err| {
         err.print(py);
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })
@@ -650,7 +667,7 @@ pub fn convert_file_response(py: Python<'_>, result: &Bound<'_, PyAny>) -> Respo
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let status = result
-        .getattr("status_code")
+        .getattr(intern!(py, "status_code"))
         .ok()
         .and_then(|s| s.extract::<u16>().ok())
         .and_then(|s| StatusCode::from_u16(s).ok())
@@ -658,12 +675,13 @@ pub fn convert_file_response(py: Python<'_>, result: &Bound<'_, PyAny>) -> Respo
 
     match std::fs::read(&path) {
         Ok(bytes) => {
-            let media_type = get_str("media_type").unwrap_or_else(|| guess_mime(&path).to_owned());
+            let declared = get_str("media_type");
+            let media_type = declared.as_deref().unwrap_or_else(|| guess_mime(&path));
             let mut builder = Response::builder()
                 .status(status)
                 .header(
                     header::CONTENT_TYPE,
-                    HeaderValue::from_str(&media_type)
+                    HeaderValue::from_str(media_type)
                         .unwrap_or(HeaderValue::from_static("application/octet-stream")),
                 )
                 .header(header::CONTENT_LENGTH, bytes.len());
@@ -681,7 +699,7 @@ pub fn convert_file_response(py: Python<'_>, result: &Bound<'_, PyAny>) -> Respo
                 .body(Body::from(bytes))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
             let headers = result
-                .getattr("headers")
+                .getattr(intern!(py, "headers"))
                 .ok()
                 .and_then(|h| h.extract::<Py<PyDict>>().ok());
             apply_response_metadata(py, res, headers.as_ref(), None)
