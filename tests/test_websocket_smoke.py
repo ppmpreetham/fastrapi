@@ -28,7 +28,7 @@ def _serve(app: FastrAPI, port: int) -> None:
             with socket.create_connection(("127.0.0.1", port), timeout=0.5) as sock:
                 sock.sendall(
                     (
-                        "GET /api-docs/openapi.json HTTP/1.1\r\n"
+                        "GET /openapi.json HTTP/1.1\r\n"
                         f"Host: 127.0.0.1:{port}\r\n"
                         "Connection: close\r\n"
                         "\r\n"

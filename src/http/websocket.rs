@@ -2,9 +2,9 @@ use crate::ffi::py_handlers::schedule_python_coroutine;
 use crate::routing::dependencies::{self, DependencyExecutionError};
 use crate::routing::types::PathParamRange;
 use crate::runtime::executor::build_request_input_from_parts;
-use axum::{extract::Extension, response::IntoResponse};
+use axum::{extract::State, response::IntoResponse};
 use bytes::Bytes;
-use fastwebsockets::{FragmentCollector, Frame, OpCode, upgrade};
+use fastwebsockets::{FragmentCollector, Frame, OpCode, Payload, upgrade};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use pyo3::prelude::*;
@@ -18,13 +18,18 @@ use tracing::error;
 pub use crate::http::ws_python::PyWebSocket;
 use crate::http::ws_python::WSMessage;
 
+#[derive(Clone)]
+pub struct WsRouteState {
+    pub handler: Arc<Py<PyAny>>,
+    pub deps: Arc<Vec<dependencies::DependencyNode>>,
+    pub template: Arc<str>,
+    pub param_names: Arc<[Arc<str>]>,
+    pub async_loop: Arc<Py<PyAny>>,
+}
+
 pub async fn ws_handler(
     ws: upgrade::IncomingUpgrade,
-    Extension(handler): Extension<Arc<Py<PyAny>>>,
-    Extension(deps): Extension<Arc<Vec<dependencies::DependencyNode>>>,
-    Extension(template): Extension<Arc<str>>,
-    Extension(_rt_handle): Extension<tokio::runtime::Handle>,
-    Extension(async_loop): Extension<Arc<Py<PyAny>>>,
+    State(route): State<Arc<WsRouteState>>,
     parts: axum::http::request::Parts,
 ) -> axum::response::Response {
     let (response, fut) = match ws.upgrade() {
@@ -34,8 +39,8 @@ pub async fn ws_handler(
         }
     };
 
-    tokio::task::spawn(async move {
-        if let Err(e) = handle_connection(fut, handler, deps, template, async_loop, parts).await {
+    crate::globals::spawn(async move {
+        if let Err(e) = handle_connection(fut, route, parts).await {
             error!("WebSocket error: {e}");
         }
     });
@@ -45,10 +50,7 @@ pub async fn ws_handler(
 
 async fn handle_connection(
     fut: upgrade::UpgradeFut,
-    handler: Arc<Py<PyAny>>,
-    deps: Arc<Vec<dependencies::DependencyNode>>,
-    template: Arc<str>,
-    async_loop: Arc<Py<PyAny>>,
+    route: Arc<WsRouteState>,
     parts: axum::http::request::Parts,
 ) -> Result<(), crate::error::FastRapiError> {
     let ws_stream = fut.await?;
@@ -57,11 +59,11 @@ async fn handle_connection(
     let (tx_to_rust, mut rx_from_python) = mpsc::channel::<WSMessage>(1024);
     let (tx_to_python, rx_from_rust) = mpsc::channel::<WSMessage>(1024);
 
-    let param_ranges = match_path_params(&template, parts.uri.path());
-    let request_input = build_request_input_from_parts(&parts, &param_ranges);
+    let param_ranges = match_path_params(&route, parts.uri.path());
+    let request_input = build_request_input_from_parts(&parts, &param_ranges, &route.param_names);
 
     let (dependency_results, _teardowns) =
-        dependencies::execute_dependencies(&async_loop, &deps, &request_input, None)
+        dependencies::execute_dependencies(&route.async_loop, &route.deps, &request_input, None)
             .await
             .map_err(|e| match e {
                 DependencyExecutionError::Python(err) => err.into(),
@@ -83,15 +85,16 @@ async fn handle_connection(
 
         let kwargs = PyDict::new(py);
         for (name, value) in dependency_results {
-            kwargs.set_item(name.as_str(), value.bind(py))?;
+            kwargs.set_item(name, value.bind(py))?;
         }
 
-        let coroutine = handler
+        let coroutine = route
+            .handler
             .bind(py)
             .call((py_ws_obj.clone_ref(py),), Some(&kwargs))?;
 
         let fut: Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>> =
-            schedule_python_coroutine(py, &async_loop, coroutine)?;
+            schedule_python_coroutine(py, &route.async_loop, coroutine)?;
 
         Ok::<_, PyErr>((py_ws_obj, fut))
     })?;
@@ -121,22 +124,37 @@ async fn handle_connection(
     Ok(())
 }
 
-fn match_path_params(template: &str, actual_path: &str) -> smallvec::SmallVec<[PathParamRange; 4]> {
+pub fn ws_param_names(template: &str) -> Arc<[Arc<str>]> {
+    template
+        .split('/')
+        .filter(|s| s.starts_with('{') && s.ends_with('}'))
+        .map(|s| {
+            let name = s.trim_start_matches('{').trim_end_matches('}');
+            Arc::from(name.split(':').next().unwrap_or(name))
+        })
+        .collect()
+}
+
+fn match_path_params(
+    route: &WsRouteState,
+    actual_path: &str,
+) -> smallvec::SmallVec<[PathParamRange; 4]> {
     let mut ranges = smallvec::SmallVec::new();
 
-    let mut template_segments = template.split('/');
+    let mut template_segments = route.template.split('/');
     let mut actual_segments = actual_path.split('/');
+    let mut name_index = 0;
 
     loop {
         match (template_segments.next(), actual_segments.next()) {
             (Some(t), Some(a)) if t.starts_with('{') && t.ends_with('}') => {
-                let name: Arc<str> = Arc::from(t.trim_start_matches('{').trim_end_matches('}'));
                 let start = a.as_ptr() as usize - actual_path.as_ptr() as usize;
                 ranges.push(PathParamRange {
-                    key: name,
+                    name_index,
                     start,
                     end: start + a.len(),
                 });
+                name_index += 1;
             }
             (Some(_), Some(_)) => {}
             _ => break,
@@ -148,9 +166,9 @@ fn match_path_params(template: &str, actual_path: &str) -> smallvec::SmallVec<[P
 
 fn build_scope(py: Python<'_>) -> Py<PyDict> {
     let scope = PyDict::new(py);
-    let _ = scope.set_item("type", "websocket");
-    let _ = scope.set_item("path", "");
-    let _ = scope.set_item("query_string", "");
+    _ = scope.set_item("type", "websocket");
+    _ = scope.set_item("path", "");
+    _ = scope.set_item("query_string", "");
     scope.unbind()
 }
 
@@ -166,11 +184,11 @@ async fn socket_pump(
                 match frame.opcode {
                     OpCode::Close => {
                         let code = close_code(&frame);
-                        let _ = tx_to_python.send(WSMessage::Close(code)).await;
+                        _ = tx_to_python.send(WSMessage::Close(code)).await;
                         break;
                     }
                     OpCode::Text | OpCode::Binary => {
-                        let bytes = Bytes::from(frame.payload.to_vec());
+                        let bytes = payload_into_bytes(frame.payload);
                         let msg = if frame.opcode == OpCode::Text {
                             WSMessage::Text(bytes)
                         } else {
@@ -181,8 +199,8 @@ async fn socket_pump(
                         }
                     }
                     OpCode::Ping => {
-                        let payload = frame.payload.to_vec();
-                        ws.write_frame(Frame::pong(payload.into())).await?;
+                        ws.write_frame(Frame::pong(payload_into_owned(frame.payload)))
+                            .await?;
                     }
                     OpCode::Pong => {}
                     _ => {}
@@ -192,13 +210,14 @@ async fn socket_pump(
             Some(msg) = rx_from_python.recv() => {
                 match msg {
                     WSMessage::Text(bytes) => {
-                        ws.write_frame(Frame::text(bytes.to_vec().into())).await?;
+                        ws.write_frame(Frame::text(bytes_into_payload(bytes))).await?;
                     }
                     WSMessage::Binary(data) => {
-                        ws.write_frame(Frame::binary(data.to_vec().into())).await?;
+                        ws.write_frame(Frame::binary(bytes_into_payload(data)))
+                            .await?;
                     }
                     WSMessage::Close(code) => {
-                        ws.write_frame(close_frame(code)).await?;
+                        ws.write_frame(Frame::close(code, &[])).await?;
                         break;
                     }
                 }
@@ -217,8 +236,24 @@ fn close_code(frame: &Frame<'_>) -> u16 {
         .unwrap_or(1000)
 }
 
-fn close_frame(code: u16) -> Frame<'static> {
-    let mut payload = Vec::with_capacity(2);
-    payload.extend_from_slice(&code.to_be_bytes());
-    Frame::close_raw(payload.into())
+fn payload_into_bytes(payload: Payload<'_>) -> Bytes {
+    match payload {
+        Payload::Owned(vec) => Bytes::from(vec),
+        Payload::Bytes(buf) => buf.freeze(),
+        Payload::Borrowed(slice) => Bytes::copy_from_slice(slice),
+        Payload::BorrowedMut(slice) => Bytes::copy_from_slice(slice),
+    }
+}
+
+fn payload_into_owned(payload: Payload<'_>) -> Payload<'static> {
+    match payload {
+        Payload::Owned(vec) => Payload::Owned(vec),
+        Payload::Bytes(buf) => Payload::Bytes(buf),
+        Payload::Borrowed(slice) => Payload::Owned(slice.to_vec()),
+        Payload::BorrowedMut(slice) => Payload::Owned(slice.to_vec()),
+    }
+}
+
+fn bytes_into_payload(bytes: Bytes) -> Payload<'static> {
+    Payload::Bytes(bytes.into())
 }

@@ -1,11 +1,11 @@
-use bytes::Bytes;
+use bytes::{BufMut, Bytes};
 use parking_lot::Mutex as PlMutex;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::utils::{json_to_py_object, py_any_to_json};
+use crate::utils::{json_to_py_object, write_py_json};
 
 crate::cached_py_import!(WS_STARLETTE_HEADERS, "starlette.datastructures", "Headers");
 crate::cached_py_import!(
@@ -32,7 +32,8 @@ fn expected(expected: &str, got: &str) -> PyErr {
 }
 
 fn parse_json_bytes(bytes: &Bytes) -> PyResult<Py<PyAny>> {
-    let value: sonic_rs::Value = sonic_rs::from_slice(bytes)
+    let mut json_buf = bytes.to_vec();
+    let value = simd_json::to_owned_value(&mut json_buf)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     Ok(Python::attach(|py| json_to_py_object(py, &value)))
 }
@@ -97,8 +98,17 @@ impl PyWebSocket {
         py: Python<'py>,
         data: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let json_str = py_any_to_json(py, data).to_string();
-        self.send_text(py, json_str)
+        let mut buf = bytes::BytesMut::new();
+        let mut writer = (&mut buf).writer();
+        write_py_json(py, data, &mut writer)?;
+        let payload = buf.freeze();
+        let tx = self.tx.clone();
+        rsloop::rust_async::future_into_py(py, async move {
+            tx.send(WSMessage::Text(payload))
+                .await
+                .map_err(|_| closed())?;
+            Ok(())
+        })
     }
 
     fn receive_text<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {

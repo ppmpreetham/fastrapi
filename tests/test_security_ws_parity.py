@@ -39,7 +39,7 @@ class LiveServer:
             try:
                 with socket.create_connection(("127.0.0.1", self.port), timeout=0.4) as s:
                     probe = (
-                        "GET /api-docs/openapi.json HTTP/1.1\r\n"
+                        "GET /openapi.json HTTP/1.1\r\n"
                         f"Host: 127.0.0.1:{self.port}\r\nConnection: close\r\n\r\n"
                     ).encode()
                     s.sendall(probe)
@@ -72,10 +72,36 @@ class LiveServer:
             parsed = body_str
         return status, parsed
 
+    def http_headers(self, method: str, path: str, headers=None):
+        """Like http(), but also returns the response headers (lowercased)."""
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as s:
+            head = f"{method} {path} HTTP/1.0\r\nHost: x\r\n"
+            for k, v in (headers or {}).items():
+                head += f"{k}: {v}\r\n"
+            s.sendall((head + "\r\n").encode())
+            raw = b""
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                raw += chunk
+        head_part, _, body = raw.partition(b"\r\n\r\n")
+        status = int(head_part.split(b" ")[1])
+        resp_headers = {}
+        for line in head_part.split(b"\r\n")[1:]:
+            name, sep, value = line.partition(b":")
+            if sep:
+                resp_headers[name.decode().strip().lower()] = value.decode().strip()
+        try:
+            parsed = json.loads(body.decode(errors="replace"))
+        except ValueError:
+            parsed = body.decode(errors="replace")
+        return status, resp_headers, parsed
+
     def openapi(self):
         with socket.create_connection(("127.0.0.1", self.port), timeout=5) as s:
             s.sendall(
-                b"GET /api-docs/openapi.json HTTP/1.0\r\nHost: x\r\n\r\n"
+                b"GET /openapi.json HTTP/1.0\r\nHost: x\r\n\r\n"
             )
             raw = b""
             while True:
@@ -168,6 +194,50 @@ def test_http_basic_and_api_key():
 
     status, body = live.http("GET", "/keyed", {"X-Key": "abc"})
     assert (status, body) == (200, {"key": "abc"})
+
+
+def test_unauthorized_carries_www_authenticate_challenge():
+    """RFC 9110 requires a 401 to carry a WWW-Authenticate challenge.
+
+    Regression guard: `HTTPException`'s `headers` argument is positional, so
+    building it with `HTTPException(status, detail, **headers)` turns each
+    header name into a keyword argument. `HTTPException.__new__` rejects those,
+    and the caller gets a 500 instead of a 401 with a challenge.
+    """
+    from fastrapi.security import HTTPBearer
+
+    bearer = HTTPBearer()
+    basic_realm = HTTPBasic(realm="myrealm")
+    api_key = APIKeyHeader(name="X-Key")
+    app = FastrAPI()
+
+    @app.get("/bearer")
+    def bearer_route(creds=Depends(bearer)):
+        return {}
+
+    @app.get("/basic-realm")
+    def basic_realm_route(creds=Depends(basic_realm)):
+        return {}
+
+    @app.get("/keyed")
+    def keyed_route(key=Depends(api_key)):
+        return {}
+
+    live = LiveServer(app)
+
+    status, headers, _ = live.http_headers("GET", "/bearer")
+    assert status == 401
+    assert headers.get("www-authenticate") == "Bearer"
+
+    # fastapi sends a bare `Basic` when no realm is set, and quotes the realm when it is.
+    status, headers, _ = live.http_headers("GET", "/basic-realm")
+    assert status == 401
+    assert headers.get("www-authenticate") == 'Basic realm="myrealm"'
+
+    # api keys are non-standard but fastapi still answers 401 with an `APIKey` challenge.
+    status, headers, _ = live.http_headers("GET", "/keyed")
+    assert status == 401
+    assert headers.get("www-authenticate") == "APIKey"
 
 
 # ---------------------------------------------------------------- openapi
