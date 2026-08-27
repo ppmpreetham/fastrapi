@@ -56,9 +56,12 @@ pub fn base_annotation<'py>(_py: Python<'py>, annotation: &Bound<'py, PyAny>) ->
 }
 
 pub fn list_element_annotation<'py>(
-    _py: Python<'py>,
+    py: Python<'py>,
     annotation: &Bound<'py, PyAny>,
 ) -> (bool, Option<Bound<'py, PyAny>>) {
+    // `Optional[List[int]]` and `Union[List[int], None]` behave as list params.
+    let annotation =
+        crate::ffi::pydantic::strip_optional(py, annotation).unwrap_or_else(|| annotation.clone());
     let is_type_named = |obj: &Bound<'py, PyAny>, name: &str| {
         obj.get_type()
             .name()
@@ -79,7 +82,7 @@ pub fn list_element_annotation<'py>(
         return (true, Some(elem));
     }
 
-    if is_type_named(annotation, "list") || is_type_named(annotation, "set") {
+    if is_type_named(&annotation, "list") || is_type_named(&annotation, "set") {
         return (true, None);
     }
 

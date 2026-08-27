@@ -1,6 +1,5 @@
 use crate::ffi::decorators::PyAPIRouter;
 use crate::routing::types::{RouteEntry, WebSocketEntry};
-use crate::utils::LockExt;
 use pyo3::Py;
 use pyo3::prelude::Python;
 use std::sync::Arc;
@@ -15,13 +14,13 @@ impl PyAPIRouter {
             return;
         }
         let flat = Arc::new(flatten_router(py, self));
-        *self.cached_flat.lock_or_panic() = Some(flat);
+        *self.cached_flat.lock() = Some(flat);
         self.mark_frozen();
     }
 
     pub fn flatten(&self, py: Python<'_>) -> Arc<(Vec<RouteEntry>, Vec<WebSocketEntry>)> {
         if self.frozen.load(Ordering::Acquire) {
-            if let Some(cached) = self.cached_flat.lock_or_panic().as_ref() {
+            if let Some(cached) = self.cached_flat.lock().as_ref() {
                 return cached.clone();
             }
             return Arc::new(flatten_router(py, self));
@@ -67,7 +66,7 @@ pub fn flatten_router(
             router.dependencies.as_ref(),
         ));
 
-        let route_entries = router.route_entries.lock_or_panic().clone();
+        let route_entries = router.route_entries.lock().clone();
         routes.extend(route_entries.into_iter().map(|mut entry| {
             entry.tags = entry
                 .tags
@@ -89,7 +88,7 @@ pub fn flatten_router(
             entry
         }));
 
-        let ws_entries = router.websocket_entries.lock_or_panic().clone();
+        let ws_entries = router.websocket_entries.lock().clone();
         ws_routes.extend(ws_entries.into_iter().map(|mut ws| {
             ws.path = join_path(&full_prefix, &ws.path);
             if !chain_deps.is_empty() || !overrides.is_empty() {
@@ -103,7 +102,7 @@ pub fn flatten_router(
             ws
         }));
 
-        let subs = router.sub_routers.lock_or_panic().clone();
+        let subs = router.sub_routers.lock().clone();
         stack.extend(subs.into_iter().map(|sub| {
             let sub_router = sub.router.bind(py).borrow();
 
@@ -206,7 +205,7 @@ fn prepend_chain_dependencies(
         .payload
         .dependencies
         .iter()
-        .all(|node| !node.is_async);
+        .all(|node| node.is_sync_callable());
 
     crate::ffi::py_handlers::assign_execution_mode(&mut merged);
 
@@ -244,7 +243,7 @@ fn apply_dependency_overrides(
         .payload
         .dependencies
         .iter()
-        .all(|node| !node.is_async);
+        .all(|node| node.is_sync_callable());
 
     crate::ffi::py_handlers::assign_execution_mode(&mut merged);
     Arc::new(merged)

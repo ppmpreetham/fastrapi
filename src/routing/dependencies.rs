@@ -60,7 +60,7 @@ pub struct DependencyNode {
     pub is_async_generator: bool,
     /// Position of this node inside the flattened plan.
     pub index: usize,
-    pub param_name: Option<String>,
+    pub param_name: Option<Py<PyString>>,
     pub scopes: Vec<String>,
     pub use_cache: bool,
     pub is_top_level: bool,
@@ -79,6 +79,11 @@ pub struct TeardownTask {
     pub generator: Py<PyAny>,
     pub is_async: bool,
 }
+
+pub type TeardownTasks = SmallVec<[TeardownTask; 4]>;
+pub type ResolvedDependency = (Py<PyString>, SharedPyObject);
+pub type ResolvedDependencies = SmallVec<[ResolvedDependency; 4]>;
+pub type ResultRegistry = SmallVec<[Option<SharedPyObject>; 8]>;
 
 pub enum DependencyExecutionError {
     Python(PyErr),
@@ -315,7 +320,7 @@ fn extract_and_flatten(
         let pair = item?.cast_into::<PyTuple>()?;
         let param_name = pair.get_item(0)?;
         let param_obj = pair.get_item(1)?;
-        let param_name_str = param_name.extract::<String>()?;
+        let param_name_str: &str = param_name.cast::<PyString>()?.to_str()?;
 
         if param_name_str == "self" || param_name_str == "cls" || param_name_str == "return" {
             continue;
@@ -377,14 +382,14 @@ fn extract_and_flatten(
                 &target_callable,
                 path_param_names,
                 is_top_level && parent_param_name.is_none(),
-                Some(param_name_str.clone()),
+                Some(param_name_str.to_owned()),
                 child_scopes,
                 child_use_cache,
                 flat_plan,
                 visited,
             )?;
 
-            sub_deps.push((param_name_str, target_index));
+            sub_deps.push((param_name_str.to_owned(), target_index));
         }
     }
 
@@ -406,7 +411,9 @@ fn extract_and_flatten(
         is_generator,
         is_async_generator,
         index: node_index,
-        param_name: parent_param_name,
+        param_name: parent_param_name
+            .as_deref()
+            .map(|name| PyString::intern(py, name).unbind()),
         scopes,
         use_cache,
         is_top_level,
@@ -530,12 +537,12 @@ pub fn execute_dependencies_sync(
     flat_plan: &[DependencyNode],
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
-) -> Result<(Vec<(String, SharedPyObject)>, Vec<TeardownTask>), DependencyExecutionError> {
+) -> Result<(ResolvedDependencies, TeardownTasks), DependencyExecutionError> {
     let request = request;
-    let mut results_registry: Vec<Option<SharedPyObject>> = vec![None; flat_plan.len()];
-    let mut teardown_tasks = Vec::new();
+    let mut results_registry: ResultRegistry = smallvec::smallvec![None; flat_plan.len()];
+    let mut teardown_tasks = TeardownTasks::new();
 
-    let mut final_results = Vec::with_capacity(
+    let mut final_results = ResolvedDependencies::with_capacity(
         flat_plan
             .iter()
             .filter(|node| node.is_top_level && node.param_name.is_some())
@@ -554,7 +561,7 @@ pub fn execute_dependencies_sync(
         if dep.is_top_level
             && let Some(name) = &dep.param_name
         {
-            final_results.push((name.clone(), result));
+            final_results.push((name.clone_ref(py), result));
         }
     }
 
@@ -566,11 +573,11 @@ pub async fn execute_dependencies(
     flat_plan: &[DependencyNode],
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
-) -> Result<(Vec<(String, SharedPyObject)>, Vec<TeardownTask>), DependencyExecutionError> {
-    let mut results_registry: Vec<Option<SharedPyObject>> = vec![None; flat_plan.len()];
-    let mut teardown_tasks = Vec::new();
+) -> Result<(ResolvedDependencies, TeardownTasks), DependencyExecutionError> {
+    let mut results_registry: ResultRegistry = smallvec::smallvec![None; flat_plan.len()];
+    let mut teardown_tasks = TeardownTasks::new();
 
-    let mut final_results = Vec::with_capacity(
+    let mut final_results = ResolvedDependencies::with_capacity(
         flat_plan
             .iter()
             .filter(|node| node.is_top_level && node.param_name.is_some())
@@ -691,17 +698,17 @@ pub async fn execute_dependencies(
 
 #[inline]
 fn register_result(
-    _py: Python<'_>,
+    py: Python<'_>,
     dep: &DependencyNode,
     result: SharedPyObject,
     results_registry: &mut [Option<SharedPyObject>],
-    final_results: &mut Vec<(String, SharedPyObject)>,
+    final_results: &mut ResolvedDependencies,
 ) {
     results_registry[dep.index] = Some(result.clone());
     if dep.is_top_level
         && let Some(name) = &dep.param_name
     {
-        final_results.push((name.clone(), result));
+        final_results.push((name.clone_ref(py), result));
     }
 }
 

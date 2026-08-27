@@ -25,7 +25,7 @@ def _serve(app: FastrAPI, port: int) -> None:
     deadline = time.time() + 10.0
     while time.time() < deadline:
         try:
-            httpx.get(f"http://127.0.0.1:{port}/api-docs/openapi.json", timeout=0.5)
+            httpx.get(f"http://127.0.0.1:{port}/openapi.json", timeout=0.5)
             return
         except Exception:
             time.sleep(0.05)
@@ -363,7 +363,7 @@ class TestOpenAPI:
         live_app.app.include_router(router)
         base = live_app.ready()
 
-        spec = httpx.get(f"{base}/api-docs/openapi.json").json()
+        spec = httpx.get(f"{base}/openapi.json").json()
         paths = spec["paths"]
         assert "/api/users" in paths
         assert "get" in paths["/api/users"]
@@ -380,7 +380,7 @@ class TestOpenAPI:
         live_app.app.include_router(router)
         base = live_app.ready()
 
-        spec = httpx.get(f"{base}/api-docs/openapi.json").json()
+        spec = httpx.get(f"{base}/openapi.json").json()
         op = spec["paths"]["/api/x"]["get"]
         assert "v1" in op["tags"]
         assert "users" in op["tags"]
@@ -398,7 +398,7 @@ class TestOpenAPI:
         live_app.app.include_router(outer)
         base = live_app.ready()
 
-        spec = httpx.get(f"{base}/api-docs/openapi.json").json()
+        spec = httpx.get(f"{base}/openapi.json").json()
         assert "/outer/leaf/x" in spec["paths"]
 
 

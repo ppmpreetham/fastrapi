@@ -6,6 +6,7 @@ use super::utils::{
     list_element_annotation,
 };
 use crate::ffi::pydantic;
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyString};
 
@@ -171,13 +172,11 @@ pub fn parse_parameter_spec(
                 None,
             )
         } else {
-            let required = is_path_param
-                || (matches!(initial_source, ParameterSource::Body) && !has_annotation);
             (
                 initial_source,
                 None,
                 false,
-                required,
+                true,
                 None,
                 ParameterConstraints::default(),
                 None,
@@ -195,6 +194,18 @@ pub fn parse_parameter_spec(
         .is_some_and(|name| name.to_string_lossy() == PARAM_CLASS_FILE);
     let is_file = is_upload_file || is_file_param;
 
+    let coercion = if !is_pydantic_model && let Some(ann) = &annotation {
+        pydantic::resolve_scalar_coercion(py, ann.bind(py))
+    } else {
+        pydantic::ScalarCoercion::Single(pydantic::ScalarKind::Other)
+    };
+
+    let embed = param_object
+        .as_ref()
+        .and_then(|obj| obj.bind(py).getattr(intern!(py, "embed")).ok())
+        .and_then(|value| value.extract::<bool>().ok())
+        .unwrap_or(false);
+
     Ok(ParsedParameter {
         name: param_name.to_string(),
         name_py: PyString::new(py, param_name).unbind(),
@@ -210,7 +221,8 @@ pub fn parse_parameter_spec(
         param_object,
         is_pydantic_model,
         is_file,
-        scalar_kind: pydantic::ScalarKind::Other,
+        embed,
+        coercion,
         validator_index: None,
     })
 }

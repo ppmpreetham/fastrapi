@@ -6,10 +6,55 @@ use std::{borrow::Cow, sync::Arc};
 #[derive(Clone, Debug)]
 pub struct RoutePattern(pub Arc<str>);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathConvertor {
+    Str,
+    Int,
+    Float,
+    Uuid,
+    Path,
+}
+
+impl PathConvertor {
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "str" => Self::Str,
+            "int" => Self::Int,
+            "float" => Self::Float,
+            "uuid" => Self::Uuid,
+            "path" => Self::Path,
+            _ => return None,
+        })
+    }
+
+    fn matches(&self, value: &str) -> bool {
+        match self {
+            Self::Str | Self::Path => true,
+            Self::Int => !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()),
+            Self::Float => match value.split_once('.') {
+                Some((int_part, frac_part)) => {
+                    !int_part.is_empty()
+                        && int_part.bytes().all(|b| b.is_ascii_digit())
+                        && !frac_part.is_empty()
+                        && frac_part.bytes().all(|b| b.is_ascii_digit())
+                }
+                None => false,
+            },
+            Self::Uuid => match value.split('-').map(str::len).collect::<Vec<_>>()[..] {
+                [8, 4, 4, 4, 12] | [32] => {
+                    value.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+                }
+                _ => false,
+            },
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RouteTarget {
     pub handler: Arc<RouteHandler>,
     pub pattern: Arc<str>,
+    pub convertors: Arc<[(String, PathConvertor)]>,
 }
 
 pub enum RouteMatch<'a> {
@@ -33,7 +78,12 @@ impl FrozenRouter {
             return Some(RouteMatch::Static(target.clone()));
         }
         let matched = self.param_routes[idx].as_ref()?.at(path).ok()?;
-        Some(RouteMatch::Params(matched.value.clone(), matched.params))
+        let target = matched.value.clone();
+        // rejects the match, the way starlette's regex would
+        if !convertors_match(&target.convertors, &matched.params) {
+            return None;
+        }
+        Some(RouteMatch::Params(target, matched.params))
     }
 
     pub fn resolve_ws(&self, path: &str) -> Option<Py<PyAny>> {
@@ -59,11 +109,12 @@ impl FrozenRouterBuilder {
 
     pub fn add_route(&mut self, method: HttpMethod, path: String, handler: Arc<RouteHandler>) {
         let idx = method as usize;
-        let (normalized, has_params) = normalize_register(&path);
+        let (normalized, has_params, convertors) = normalize_register(&path);
 
         let target = RouteTarget {
             handler,
             pattern: Arc::from(normalized.as_ref()),
+            convertors: convertors.into(),
         };
 
         if has_params {
@@ -74,7 +125,7 @@ impl FrozenRouterBuilder {
     }
 
     pub fn add_websocket(&mut self, path: String, handler: Py<PyAny>) {
-        let (normalized, _) = normalize_register(&path);
+        let (normalized, _, _) = normalize_register(&path);
         self.websocket_routes
             .insert(normalized.into_owned(), handler);
     }
@@ -117,7 +168,20 @@ fn normalize_lookup(input: &str) -> &str {
     }
 }
 
-fn normalize_register(input: &str) -> (Cow<'_, str>, bool) {
+/// checks every typed convertor against its captured value; untyped params pass.
+fn convertors_match(
+    convertors: &[(String, PathConvertor)],
+    params: &matchit::Params<'_, '_>,
+) -> bool {
+    convertors.iter().all(|(name, convertor)| {
+        params
+            .iter()
+            .find(|(param_name, _)| *param_name == name)
+            .is_none_or(|(_, value)| convertor.matches(value))
+    })
+}
+
+fn normalize_register(input: &str) -> (Cow<'_, str>, bool, Vec<(String, PathConvertor)>) {
     let normalized = normalize_lookup(input);
     let base = if normalized.starts_with('/') {
         Cow::Borrowed(normalized)
@@ -142,7 +206,7 @@ fn normalize_register(input: &str) -> (Cow<'_, str>, bool) {
                     continue;
                 }
                 if in_param {
-                    return (base, false);
+                    return (base, false, Vec::new());
                 }
                 in_param = true;
                 has_params = true;
@@ -153,7 +217,7 @@ fn normalize_register(input: &str) -> (Cow<'_, str>, bool) {
                     continue;
                 }
                 if !in_param {
-                    return (base, false);
+                    return (base, false, Vec::new());
                 }
                 in_param = false;
             }
@@ -163,8 +227,54 @@ fn normalize_register(input: &str) -> (Cow<'_, str>, bool) {
     }
 
     if in_param {
-        return (base, false);
+        return (base, false, Vec::new());
     }
 
-    (base, has_params)
+    if !base.contains(':') {
+        return (base, has_params, Vec::new());
+    }
+
+    let mut out = String::with_capacity(base.len());
+    let mut convertors: Vec<(String, PathConvertor)> = Vec::new();
+    let mut rest = base.as_ref();
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open..];
+        if let Some(close) = after[1..].find('}') {
+            let inner = &after[1..1 + close];
+            let (name, convertor) = match inner.split_once(':') {
+                Some((name, conv)) => (name, PathConvertor::from_name(conv)),
+                None => (inner, Some(PathConvertor::Str)),
+            };
+            match convertor {
+                Some(PathConvertor::Path) => {
+                    has_params = true;
+                    out.push('{');
+                    out.push('*');
+                    out.push_str(name);
+                    out.push('}');
+                    convertors.push((name.to_string(), PathConvertor::Path));
+                }
+                Some(convertor) => {
+                    has_params = true;
+                    out.push('{');
+                    out.push_str(name);
+                    out.push('}');
+                    convertors.push((name.to_string(), convertor));
+                }
+                None => out.push_str(&after[..close + 2]),
+            }
+            rest = &after[close + 2..];
+        } else {
+            out.push_str(after);
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+
+    (
+        if out == base { base } else { Cow::Owned(out) },
+        has_params,
+        convertors,
+    )
 }
