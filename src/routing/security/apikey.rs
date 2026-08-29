@@ -6,13 +6,13 @@ crate::define_api_key_security!(APIKeyCookie, "APIKeyCookie", cookie);
 macro_rules! define_api_key_security {
     ($struct_name:ident, $py_name:literal, $source:ident) => {
         #[pyo3::prelude::pyclass(
-                                    frozen,
-                                    name = $py_name,
-                                    module = "fastrapi.security",
-                                    get_all,
-                                    from_py_object,
-                                    eq
-                                )]
+                                                                    frozen,
+                                                                    name = $py_name,
+                                                                    module = "fastrapi.security",
+                                                                    get_all,
+                                                                    from_py_object,
+                                                                    eq
+                                                                )]
         #[derive(smart_default::SmartDefault, Clone, Debug, PartialEq, Eq)]
         pub struct $struct_name {
             pub name: String,

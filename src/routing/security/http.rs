@@ -58,6 +58,7 @@ impl HTTPBearer {
 #[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct HTTPBasic {
     pub scheme_name: Option<String>,
+    pub realm: Option<String>,
     pub description: Option<String>,
     #[default(true)]
     pub auto_error: bool,
@@ -66,17 +67,23 @@ pub struct HTTPBasic {
 #[pymethods]
 impl HTTPBasic {
     #[new]
-    #[pyo3(signature = (*, scheme_name=None, description=None, auto_error=true))]
-    fn new(scheme_name: Option<String>, description: Option<String>, auto_error: bool) -> Self {
+    #[pyo3(signature = (*, scheme_name=None, realm=None, description=None, auto_error=true))]
+    fn new(
+        scheme_name: Option<String>,
+        realm: Option<String>,
+        description: Option<String>,
+        auto_error: bool,
+    ) -> Self {
         Self {
             scheme_name,
+            realm,
             description,
             auto_error,
         }
     }
 
     fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<super::HTTPBasicCredentials> {
-        callable::http_basic_call(self.auto_error, request)
+        callable::http_basic_call(self.auto_error, self.realm.as_deref(), request)
     }
 }
 
@@ -118,7 +125,7 @@ impl HTTPDigest {
 
         match header {
             Some(header) => Ok(header),
-            None if self.auto_error => Err(callable::unauthorized(request.py())),
+            None if self.auto_error => Err(callable::unauthorized(request.py(), "Digest")),
             None => Ok(String::new()),
         }
     }

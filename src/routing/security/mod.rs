@@ -49,11 +49,11 @@ impl PySecurityScopes {
 pub struct SchemeSpec {
     pub name: String,
     pub description: Option<String>,
-    pub scopes: Option<sonic_rs::Value>,
+    pub scopes: Option<simd_json::OwnedValue>,
     pub kind: crate::types::route::SecurityKind,
 }
 
-fn scopes_json(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<sonic_rs::Value> {
+fn scopes_json(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<simd_json::OwnedValue> {
     let attr = obj.getattr("scopes").ok()?;
     let dict = attr.cast::<PyDict>().ok()?;
     Some(crate::utils::py_dict_to_json(py, dict))
@@ -71,7 +71,7 @@ macro_rules! try_scheme {
 /// Detects one of the security classes and extracts its OpenAPI descriptor
 pub fn describe_scheme(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<SchemeSpec> {
     use crate::types::route::SecurityKind;
-    let _ = py;
+    _ = py;
 
     try_scheme!(obj, OAuth2PasswordBearer => s, SchemeSpec {
         name: s.scheme_name.clone().unwrap_or_else(|| "OAuth2".into()),

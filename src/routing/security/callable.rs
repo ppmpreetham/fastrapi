@@ -1,36 +1,41 @@
 use base64::Engine as _;
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyString};
+use pyo3::types::{PyAny, PyDict, PyString};
 
 use crate::ffi::exceptions::PyHTTPException;
 
-/// fastrapi.HTTPException(status, detail)
-fn http_exc(py: Python<'_>, status: u16, detail: &str) -> PyErr {
-    let cls = py.get_type::<PyHTTPException>();
+/// rfc 9110 requires a 401 to carry `WWW-Authenticate`
+fn http_exc(py: Python<'_>, status: u16, detail: &str, challenge: Option<&str>) -> PyErr {
     let detail = PyString::new(py, detail);
-    match cls.call1((status, detail)) {
+    let raised = match challenge {
+        Some(value) => {
+            let headers = PyDict::new(py);
+            match headers.set_item(intern!(py, "WWW-Authenticate"), value) {
+                Ok(()) => py
+                    .get_type::<PyHTTPException>()
+                    .call1((status, detail, headers)),
+                Err(err) => return err,
+            }
+        }
+        None => py.get_type::<PyHTTPException>().call1((status, detail)),
+    };
+    match raised {
         Ok(value) => PyErr::from_value(value),
         Err(err) => err,
     }
 }
 
-/// 401 with the standard challenge semantics.
-pub(crate) fn unauthorized(py: Python<'_>) -> PyErr {
-    http_exc(py, 401, "Not authenticated")
+/// 401 carrying the challenge for the scheme that was expected.
+pub(crate) fn unauthorized(py: Python<'_>, challenge: &str) -> PyErr {
+    http_exc(py, 401, "Not authenticated", Some(challenge))
 }
 
-/// 403 for authenticated-but-invalid credentials.
-pub(crate) fn forbidden(py: Python<'_>) -> PyErr {
-    http_exc(py, 403, "Invalid authentication credentials")
-}
-
-pub(crate) fn not_authenticated_403(py: Python<'_>) -> PyErr {
-    http_exc(py, 403, "Not authenticated")
-}
-
-fn split_authorization(header: &str) -> Option<(String, String)> {
-    let (scheme, credentials) = header.split_once(' ')?;
-    Some((scheme.to_ascii_lowercase(), credentials.trim().to_owned()))
+fn split_authorization(header: &str) -> (&str, &str) {
+    match header.split_once(' ') {
+        Some((scheme, credentials)) => (scheme, credentials.trim()),
+        None => (header, ""),
+    }
 }
 
 fn auth_header(request: &Bound<'_, PyAny>) -> Option<String> {
@@ -44,20 +49,17 @@ fn auth_header(request: &Bound<'_, PyAny>) -> Option<String> {
 }
 
 pub(crate) fn bearer_token(request: &Bound<'_, PyAny>, auto_error: bool) -> Result<String, PyErr> {
-    let py = request.py();
-    let token = auth_header(request)
-        .as_deref()
-        .and_then(split_authorization)
-        .filter(|(scheme, _)| scheme == "bearer")
-        .map(|(_, credentials)| credentials);
+    let header = auth_header(request).unwrap_or_default();
+    let (scheme, credentials) = split_authorization(&header);
 
-    match token {
-        Some(token) if !token.is_empty() => Ok(token),
-        Some(_) if auto_error => Err(forbidden(py)),
-        Some(token) => Ok(token),
-        None if auto_error => Err(unauthorized(py)),
-        None => Ok(String::new()),
+    if header.is_empty() || !scheme.eq_ignore_ascii_case("bearer") {
+        return if auto_error {
+            Err(unauthorized(request.py(), "Bearer"))
+        } else {
+            Ok(String::new())
+        };
     }
+    Ok(credentials.to_owned())
 }
 
 pub(crate) fn source_value(request: &Bound<'_, PyAny>, source: &str, name: &str) -> Option<String> {
@@ -89,40 +91,54 @@ pub(crate) fn http_bearer_call(
     bearer_format: Option<&str>,
     request: &Bound<'_, PyAny>,
 ) -> PyResult<crate::routing::security::HTTPAuthorizationCredentials> {
-    let _ = bearer_format;
-    let header = auth_header(request);
-    let parts = header.as_deref().and_then(split_authorization);
+    _ = bearer_format;
+    let header = auth_header(request).unwrap_or_default();
+    let (scheme, credentials) = split_authorization(&header);
 
-    bearer_token(request, auto_error)?;
+    if header.is_empty() || !scheme.eq_ignore_ascii_case("bearer") || credentials.is_empty() {
+        return if auto_error {
+            Err(unauthorized(request.py(), "Bearer"))
+        } else {
+            Ok(empty_credentials())
+        };
+    }
 
-    match parts.filter(|(_, credentials)| !credentials.is_empty()) {
-        Some((scheme, credentials)) => Ok(crate::routing::security::HTTPAuthorizationCredentials {
-            scheme,
-            credentials,
-        }),
-        None if auto_error => Err(forbidden(request.py())),
-        None => Ok(crate::routing::security::HTTPAuthorizationCredentials {
-            scheme: String::new(),
-            credentials: String::new(),
-        }),
+    Ok(crate::routing::security::HTTPAuthorizationCredentials {
+        scheme: scheme.to_owned(),
+        credentials: credentials.to_owned(),
+    })
+}
+
+fn empty_credentials() -> crate::routing::security::HTTPAuthorizationCredentials {
+    crate::routing::security::HTTPAuthorizationCredentials {
+        scheme: String::new(),
+        credentials: String::new(),
     }
 }
 
 pub(crate) fn http_basic_call(
     auto_error: bool,
+    realm: Option<&str>,
     request: &Bound<'_, PyAny>,
 ) -> PyResult<crate::routing::security::HTTPBasicCredentials> {
-    let credentials = auth_header(request)
-        .as_deref()
-        .and_then(split_authorization)
-        .filter(|(scheme, _)| scheme == "basic")
-        .and_then(|(_, payload)| decode_basic(&payload));
+    let header = auth_header(request).unwrap_or_default();
+    let (scheme, payload) = split_authorization(&header);
+
+    let challenge = match realm {
+        Some(realm) => format!("Basic realm=\"{realm}\""),
+        None => "Basic".to_owned(),
+    };
+
+    let credentials = scheme
+        .eq_ignore_ascii_case("basic")
+        .then(|| decode_basic(payload))
+        .flatten();
 
     match credentials {
         Some((username, password)) => {
             Ok(crate::routing::security::HTTPBasicCredentials { username, password })
         }
-        None if auto_error => Err(unauthorized(request.py())),
+        None if auto_error => Err(unauthorized(request.py(), &challenge)),
         None => Ok(crate::routing::security::HTTPBasicCredentials {
             username: String::new(),
             password: String::new(),
@@ -138,7 +154,7 @@ pub(crate) fn api_key_call(
 ) -> PyResult<String> {
     match source_value(request, source, name).filter(|key| !key.is_empty()) {
         Some(key) => Ok(key),
-        None if auto_error => Err(not_authenticated_403(request.py())),
+        None if auto_error => Err(unauthorized(request.py(), "APIKey")),
         None => Ok(String::new()),
     }
 }
