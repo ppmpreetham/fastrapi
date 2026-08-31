@@ -34,20 +34,15 @@ pub struct MiddlewareContainer {
 
 impl MiddlewareContainer {
     pub(crate) fn record_layer(&mut self, class_name: &str) {
-        let layer = match class_name {
-            "CORSMiddleware" => DeclaredLayer::Cors,
-            "TrustedHostMiddleware" => DeclaredLayer::TrustedHost,
-            "HTTPSRedirectMiddleware" => DeclaredLayer::HttpsRedirect,
-            "GZipMiddleware" => DeclaredLayer::GZip,
-            "SessionMiddleware" => DeclaredLayer::Session,
-            _ => return,
-        };
-        self.order.push(layer);
+        if let Some(builder) = MIDDLEWARE_REGISTRY.get(class_name) {
+            self.order.push(builder.layer());
+        }
     }
 }
 
 pub trait MiddlewareBuilder: Send + Sync {
     fn name(&self) -> &'static str;
+    fn layer(&self) -> DeclaredLayer;
 
     fn try_from_instance(
         &self,
@@ -67,6 +62,10 @@ struct CorsMiddlewareBuilder;
 impl MiddlewareBuilder for CorsMiddlewareBuilder {
     fn name(&self) -> &'static str {
         "CORSMiddleware"
+    }
+
+    fn layer(&self) -> DeclaredLayer {
+        DeclaredLayer::Cors
     }
 
     fn try_from_instance(
@@ -99,6 +98,10 @@ impl MiddlewareBuilder for TrustedHostMiddlewareBuilder {
         "TrustedHostMiddleware"
     }
 
+    fn layer(&self) -> DeclaredLayer {
+        DeclaredLayer::TrustedHost
+    }
+
     fn try_from_instance(
         &self,
         item: &Bound<'_, PyAny>,
@@ -127,6 +130,10 @@ struct HttpsRedirectMiddlewareBuilder;
 impl MiddlewareBuilder for HttpsRedirectMiddlewareBuilder {
     fn name(&self) -> &'static str {
         "HTTPSRedirectMiddleware"
+    }
+
+    fn layer(&self) -> DeclaredLayer {
+        DeclaredLayer::HttpsRedirect
     }
 
     fn try_from_instance(
@@ -159,6 +166,10 @@ impl MiddlewareBuilder for GZipMiddlewareBuilder {
         "GZipMiddleware"
     }
 
+    fn layer(&self) -> DeclaredLayer {
+        DeclaredLayer::GZip
+    }
+
     fn try_from_instance(
         &self,
         item: &Bound<'_, PyAny>,
@@ -187,6 +198,10 @@ struct SessionMiddlewareBuilder;
 impl MiddlewareBuilder for SessionMiddlewareBuilder {
     fn name(&self) -> &'static str {
         "SessionMiddleware"
+    }
+
+    fn layer(&self) -> DeclaredLayer {
+        DeclaredLayer::Session
     }
 
     fn try_from_instance(

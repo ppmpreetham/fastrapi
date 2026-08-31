@@ -26,6 +26,7 @@ pub struct PyDownstreamResponse {
     pub headers: Py<PyDict>,
     #[pyo3(get)]
     pub body: Py<PyBytes>,
+    pub body_bytes: bytes::Bytes,
 }
 
 #[pymethods]
@@ -68,32 +69,41 @@ fn middleware_error() -> Response {
         .into_response()
 }
 
-fn response_to_py(py: Python<'_>, response: Response) -> PyResult<Bound<'_, PyAny>> {
-    let status = response.status().as_u16();
+struct DownstreamParts {
+    status: u16,
+    headers: axum::http::HeaderMap,
+}
 
-    let mut header_pairs: Vec<(String, String)> = Vec::with_capacity(response.headers().len());
-    for (key, value) in response.headers().iter() {
-        if let (Some(k), Some(v)) = (key.as_str().into(), value.to_str().ok()) {
-            header_pairs.push((k.to_owned(), v.to_owned()));
-        }
-    }
-    let body_bytes = crate::globals::PYTHON_RUNTIME.block_on(async move {
-        to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap_or_default()
-    });
+fn split_response(response: Response) -> (DownstreamParts, axum::body::Body) {
+    let (parts, body) = response.into_parts();
+    (
+        DownstreamParts {
+            status: parts.status.as_u16(),
+            headers: parts.headers,
+        },
+        body,
+    )
+}
 
+fn parts_to_py(
+    py: Python<'_>,
+    parts: DownstreamParts,
+    body: bytes::Bytes,
+) -> PyResult<Bound<'_, PyAny>> {
     let headers_dict = PyDict::new(py);
-    for (k, v) in header_pairs {
-        headers_dict.set_item(k, v)?;
+    for (name, value) in parts.headers.iter() {
+        if let Ok(value) = value.to_str() {
+            headers_dict.set_item(name.as_str(), value)?;
+        }
     }
 
     Bound::new(
         py,
         PyDownstreamResponse {
-            status_code: status,
+            status_code: parts.status,
             headers: headers_dict.unbind(),
-            body: PyBytes::new(py, &body_bytes).unbind(),
+            body: PyBytes::new(py, &body).unbind(),
+            body_bytes: body,
         },
     )
     .map(|bound| bound.into_any())
@@ -113,7 +123,7 @@ fn py_to_response(py: Python<'_>, value: &Bound<'_, PyAny>) -> Response {
             }
         }
         return builder
-            .body(Body::from(ds.body.bind(py).as_bytes().to_vec()))
+            .body(Body::from(ds.body_bytes.clone()))
             .unwrap_or_else(|_| middleware_error());
     }
 
@@ -126,17 +136,17 @@ enum Outcome {
 }
 
 pub(crate) async fn run_call_next_stack(
-    middlewares: &[Arc<super::PyMiddleware>],
+    middlewares: &Arc<Vec<Arc<super::PyMiddleware>>>,
     request: Request,
     next: Next,
     async_loop: Arc<Py<PyAny>>,
 ) -> Response {
-    drive(middlewares.to_vec(), 0, request, next, async_loop).await
+    drive(middlewares.clone(), 0, request, next, async_loop).await
 }
 
 #[allow(clippy::too_many_arguments)]
 fn drive(
-    middlewares: Vec<Arc<super::PyMiddleware>>,
+    middlewares: Arc<Vec<Arc<super::PyMiddleware>>>,
     idx: usize,
     request: Request,
     next: Next,
@@ -149,8 +159,7 @@ fn drive(
 
         let (parts, body) = request.into_parts();
         let method = parts.method.clone();
-        let path = parts.uri.path().to_owned();
-        let query = parts.uri.query().unwrap_or("").to_owned();
+        let uri = parts.uri.clone();
         let headers = Arc::new(parts.headers.clone());
         let downstream_request = Request::from_parts(parts, body);
 
@@ -158,10 +167,10 @@ fn drive(
         {
             let inner_mws = middlewares.clone();
             let inner_loop = async_loop.clone();
-            tokio::spawn(async move {
+            crate::globals::spawn(async move {
                 let response =
                     drive(inner_mws, idx + 1, downstream_request, next, inner_loop).await;
-                let _ = tx.send(response);
+                _ = tx.send(response);
             });
         }
 
@@ -171,8 +180,8 @@ fn drive(
                     py,
                     &mw,
                     method.as_str(),
-                    &path,
-                    &query,
+                    uri.path(),
+                    uri.query().unwrap_or(""),
                     headers,
                     rx,
                     &async_loop,
@@ -194,7 +203,7 @@ fn drive(
             }
             _ => Python::attach(|py| {
                 tracing::error!("call_next middleware returned no response");
-                let _ = py;
+                _ = py;
                 middleware_error()
             }),
         }
@@ -218,10 +227,10 @@ fn invoke(
     };
 
     let scope = PyDict::new(py);
-    let _ = scope.set_item(intern!(py, "type"), intern!(py, "http"));
-    let _ = scope.set_item(intern!(py, "method"), method);
-    let _ = scope.set_item(intern!(py, "path"), path);
-    let _ = scope.set_item(intern!(py, "query_string"), query);
+    _ = scope.set_item(intern!(py, "type"), intern!(py, "http"));
+    _ = scope.set_item(intern!(py, "method"), method);
+    _ = scope.set_item(intern!(py, "path"), path);
+    _ = scope.set_item(intern!(py, "query_string"), query);
 
     let req_obj = crate::http::request::PyRequest::create_bound(
         py,
@@ -238,7 +247,9 @@ fn invoke(
         let response = downstream.await.map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("call_next pipeline terminated")
         })?;
-        Python::attach(|py| Ok(response_to_py(py, response)?.unbind()))
+        let (parts, body) = split_response(response);
+        let body_bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
+        Python::attach(|py| Ok(parts_to_py(py, parts, body_bytes)?.unbind()))
     };
     let future = rsloop::rust_async::future_into_py_with_locals(py, locals.clone(), bridged)
         .map_err(fail)?
@@ -255,7 +266,7 @@ fn invoke(
         tracing::error!("call_next middleware returned None without awaiting call_next");
         return Err(middleware_error());
     }
-    if result.hasattr("__await__").unwrap_or(false) {
+    if mw.is_async {
         let fut = rsloop::rust_async::into_future_with_locals(&locals, result).map_err(fail)?;
         return Ok(Outcome::Await(Box::pin(fut)));
     }
