@@ -20,6 +20,7 @@ pub struct AppState {
     pub max_file_size: Option<usize>,
     pub reject_unknown_multipart_fields: bool,
     pub root_path: Arc<str>,
+    pub metrics_enabled: bool,
 }
 
 pub fn serve(
@@ -38,7 +39,9 @@ pub fn serve(
     let port = port.unwrap_or(8000);
     let rt_handle = PYTHON_RUNTIME.handle().clone();
     let async_loop = Arc::new(start_background_asyncio_loop(py)?);
+    crate::globals::set_async_loop((*async_loop).clone_ref(py));
     let async_loop_for_shutdown = async_loop.clone();
+    crate::globals::set_serve_app(app.clone_ref(py).into_any());
     let app_bound = app.bind(py);
     let app_config = app_bound.borrow();
     let app_state = AppState {
@@ -50,6 +53,7 @@ pub fn serve(
         max_file_size: app_config.max_file_size,
         reject_unknown_multipart_fields: app_config.reject_unknown_multipart_fields,
         root_path: app_config.root_path.trim_end_matches('/').into(),
+        metrics_enabled: app_config.prometheus_config.is_some(),
     };
 
     let docs_url = app_config.docs_url.clone();
@@ -106,7 +110,7 @@ pub fn serve(
             }
 
             let listener = listener.tap_io(|stream| {
-                let _ = stream.set_nodelay(true);
+                _ = stream.set_nodelay(true);
             });
 
             let service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();

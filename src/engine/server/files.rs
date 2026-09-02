@@ -25,7 +25,7 @@ pub(crate) async fn serve_frontend_mounts(
     }
 
     let (mount, relative_path) = frontend_match(&mounts, req.uri().path())?;
-    let file_path = frontend_safe_path(&mount.directory, &relative_path)?;
+    let file_path = frontend_safe_path(&mount.directory, relative_path)?;
     if tokio::fs::metadata(&file_path)
         .await
         .is_ok_and(|metadata| metadata.is_file())
@@ -34,7 +34,7 @@ pub(crate) async fn serve_frontend_mounts(
     }
 
     let fallback = mount.fallback.as_deref()?;
-    let navigation = frontend_navigation_request(&req, &relative_path);
+    let navigation = frontend_navigation_request(&req, relative_path);
     let (fallback_path, status) = frontend_fallback_path(mount, fallback, navigation).await?;
     serve_frontend_file(req, fallback_path, status).await
 }
@@ -148,22 +148,23 @@ async fn frontend_fallback_path(
     None
 }
 
-fn frontend_match<'a>(
+fn frontend_match<'a, 'p>(
     mounts: &'a [FrontendMount],
-    request_path: &str,
-) -> Option<(&'a FrontendMount, String)> {
+    request_path: &'p str,
+) -> Option<(&'a FrontendMount, &'p str)> {
     mounts
         .iter()
         .filter_map(|mount| {
             if mount.path == "/" {
-                return Some((mount, request_path.trim_start_matches('/').to_string()));
+                return Some((mount, request_path.trim_start_matches('/')));
             }
             if request_path == mount.path {
-                return Some((mount, String::new()));
+                return Some((mount, ""));
             }
             request_path
-                .strip_prefix(&format!("{}/", mount.path))
-                .map(|relative| (mount, relative.to_string()))
+                .strip_prefix(mount.path.as_str())
+                .and_then(|rest| rest.strip_prefix('/'))
+                .map(|relative| (mount, relative))
         })
         .max_by_key(|(mount, _)| mount.path.len())
 }

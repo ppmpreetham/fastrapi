@@ -1,41 +1,33 @@
 use super::dispatch::*;
 use super::files::*;
 use super::lifecycle::*;
+use super::middleware_stack;
 use super::serve::*;
 
 use crate::engine::types::FastrAPI;
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashMap;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
     extract::Request,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
-    middleware::{self as axum_middleware, Next},
+    middleware::Next,
     response::{Html, IntoResponse, Response},
     routing::{MethodRouter, *},
 };
+use bytes::Bytes;
 use pyo3::prelude::*;
+use simd_json::OwnedValue as JsonValue;
+use std::sync::Arc;
 use std::time::Instant;
-use std::{sync::Arc, time::Duration};
-use tower_http::{
-    catch_panic::CatchPanicLayer,
-    compression::{CompressionLayer, predicate::SizeAbove},
-    normalize_path::NormalizePathLayer,
-    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    set_header::SetResponseHeaderLayer,
-    timeout::TimeoutLayer,
-    trace::TraceLayer,
-};
-use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer, cookie::Key};
-use tracing::info;
 
 use crate::match_method_router;
 use crate::{
     engine::metrics::prometheus_handle,
     globals::PYTHON_RUNTIME,
     http::{
-        middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware, build_cors_layer},
-        websocket::ws_handler,
+        middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware},
+        websocket::{WsRouteState, ws_handler},
     },
     routing::{
         router::{FrozenRouter, FrozenRouterBuilder},
@@ -125,13 +117,20 @@ pub(crate) fn build_router(
     let mut frozen_router_builder = FrozenRouterBuilder::new();
     flat.0.iter().for_each(|route| {
         frozen_router_builder.add_route(route.method, route.path.clone(), route.handler.clone());
+        if route.method == HttpMethod::GET {
+            frozen_router_builder.add_route(
+                HttpMethod::HEAD,
+                route.path.clone(),
+                route.handler.clone(),
+            );
+        }
     });
     let frozen_router = Arc::new(frozen_router_builder.build());
 
     let app = Router::new();
     let app = register_routes(app, py, &app_state, app_config, &flat, frozen_router);
     let app = register_docs_endpoints(app, py, app_config, docs_url.as_deref(), &openapi_url);
-    apply_middleware_stack(app, app_config, &middlewares, app_state.async_loop)
+    middleware_stack::build_stack(app, app_config, &middlewares, app_state.async_loop)
 }
 
 fn register_routes(
@@ -181,28 +180,17 @@ fn register_routes(
     });
 
     app = flat.1.iter().fold(app, |current_app, ws| {
-        let path = ws.path.clone();
-        let handler = Arc::new(ws.handler.clone_ref(py));
-        let deps: Arc<Vec<crate::routing::dependencies::DependencyNode>> =
-            Arc::new(ws.deps.to_vec());
-        let template: Arc<str> = Arc::from(path.as_str());
-        let rt_handle = app_state.rt_handle.clone();
-        let async_loop = app_state.async_loop.clone();
-
-        current_app.route(
-            &path,
-            axum::routing::get(move |ws_upgrade, parts: axum::http::request::Parts| {
-                ws_handler(
-                    ws_upgrade,
-                    axum::Extension(handler.clone()),
-                    axum::Extension(deps.clone()),
-                    axum::Extension(template.clone()),
-                    axum::Extension(rt_handle.clone()),
-                    axum::Extension(async_loop.clone()),
-                    parts,
-                )
-            }),
-        )
+        let state = Arc::new(WsRouteState {
+            handler: Arc::new(ws.handler.clone_ref(py)),
+            deps: Arc::new(ws.deps.to_vec()),
+            template: Arc::from(ws.path.as_str()),
+            param_names: crate::http::websocket::ws_param_names(&ws.path),
+            async_loop: app_state.async_loop.clone(),
+        });
+        let route = Router::new()
+            .route(&ws.path, axum::routing::get(ws_handler))
+            .with_state(state);
+        current_app.merge(route)
     });
 
     app = app_config
@@ -213,6 +201,8 @@ fn register_routes(
             add_static_mount(current_app, mount)
         });
 
+    app = app.method_not_allowed_fallback(|| async { method_not_allowed_response() });
+
     app.fallback({
         let router = frozen_router;
         let state = app_state.clone();
@@ -220,8 +210,6 @@ fn register_routes(
             match dispatch_or_not_found(router.clone(), state.clone(), req).await {
                 Ok(resp) => resp,
                 Err(req) => {
-                    // `@app.exception_handler(404)` support: consult the
-                    // status-handler registry before the frontend fallback.
                     let handler_resp = Python::attach(|py| {
                         crate::engine::errors::dispatch_status_handler(py, 404)
                     });
@@ -229,12 +217,41 @@ fn register_routes(
                         Some(resp) => resp,
                         None => serve_frontend_mounts(frontend_mounts, req)
                             .await
-                            .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response()),
+                            .unwrap_or_else(not_found_response),
                     }
                 }
             }
         })
     })
+}
+
+/// 404
+fn not_found_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(simd_json::json!({"detail": "Not Found"})),
+    )
+        .into_response()
+}
+
+/// 405
+fn method_not_allowed_response() -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        axum::Json(simd_json::json!({"detail": "Method Not Allowed"})),
+    )
+        .into_response()
+}
+
+struct SharedSpec(Arc<JsonValue>);
+
+impl serde::Serialize for SharedSpec {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.as_ref().serialize(serializer)
+    }
 }
 
 pub(crate) fn register_docs_endpoints(
@@ -252,28 +269,28 @@ pub(crate) fn register_docs_endpoints(
             let json = openapi_json;
             move || {
                 let json = json.clone();
-                async move { Json(json.as_ref().clone()) }
+                async move { Json(SharedSpec(json)) }
             }
         }),
     );
 
     if let Some(docs) = docs_url {
         let swagger_html = if let Some(params) = &app_config.swagger_ui_parameters
-            && let Ok(json_str) = sonic_rs::to_string(&py_any_to_json(py, params.bind(py)))
+            && let Ok(json_str) = simd_json::to_string(&py_any_to_json(py, params.bind(py)))
         {
             include_str!("../../../static/swagger-ui.html")
                 .replace("/* SWAGGER_UI_PARAMS */ {}", &json_str)
         } else {
             include_str!("../../../static/swagger-ui.html").to_string()
         };
-        let swagger_html = Arc::new(swagger_html);
+        let swagger_html: Arc<[u8]> = Arc::from(swagger_html.into_bytes());
         app = app.route(
             docs,
             get({
                 let html = swagger_html;
                 move || {
                     let html = html.clone();
-                    async move { Html(html.as_ref().clone()) }
+                    async move { Html(Bytes::from_owner(html)) }
                 }
             }),
         );
@@ -311,198 +328,6 @@ pub(crate) fn register_docs_endpoints(
     app
 }
 
-fn apply_middleware_stack(
-    mut app: Router,
-    app_config: &FastrAPI,
-    middlewares: &MiddlewareContainer,
-    async_loop: Arc<Py<PyAny>>,
-) -> Router {
-    if !middlewares.order.is_empty() {
-        return super::middleware_stack::build_stack(app, app_config, middlewares, async_loop);
-    }
-    // L1: Sessions
-    if let Some(config) = &middlewares.session {
-        info!("🔑 Layer: Sessions");
-        let key = Key::from(config.secret_key.as_bytes());
-        let store = MemoryStore::default();
-
-        let layer = SessionManagerLayer::new(store)
-            .with_signed(key)
-            .with_name(config.session_cookie.clone())
-            .with_path(config.path.clone())
-            .with_secure(config.https_only);
-
-        let layer = if let Some(max_age) = config.max_age {
-            layer.with_expiry(Expiry::OnInactivity(
-                tower_sessions::cookie::time::Duration::seconds(max_age),
-            ))
-        } else {
-            layer
-        };
-
-        app = app.layer(layer);
-    }
-
-    // L2: GZip
-    if let Some(config) = &middlewares.gzip {
-        info!("🗜️ Layer: GZip (min: {} bytes)", config.minimum_size);
-        let predicate = SizeAbove::new(config.minimum_size as u16);
-        app = app.layer(CompressionLayer::new().compress_when(predicate));
-    }
-
-    if app_config.prometheus_config.is_some() {
-        app = app.layer(axum_middleware::from_fn(record_prometheus_metrics));
-    }
-
-    // L3: Python Middleware (sync + async)
-    if !middlewares.py_middlewares.is_empty() {
-        info!(
-            "Applying {} custom Python middleware(s)",
-            middlewares.py_middlewares.len()
-        );
-
-        let py_mws = Arc::new(middlewares.py_middlewares.clone());
-        app = app.layer(axum_middleware::from_fn(move |req, next| {
-            let py_mws = py_mws.clone();
-            let async_loop = async_loop.clone();
-            async move {
-                crate::http::middleware::execute_py_middlewares(py_mws, req, next, async_loop).await
-            }
-        }));
-    }
-
-    // L4: HTTPS Redirect
-    if let Some(_config) = &middlewares.https_redirect {
-        info!("🔗 Layer: HTTPSRedirect");
-        app = app.layer(axum_middleware::from_fn(
-            move |req: Request, next: Next| async move {
-                let uri = req.uri().clone();
-                let headers = req.headers().clone();
-
-                let mut is_https = false;
-                if let Some(scheme) = uri.scheme() {
-                    if scheme == &axum::http::uri::Scheme::HTTPS {
-                        is_https = true;
-                    }
-                } else if let Some(forwarded_proto) = headers.get("X-Forwarded-Proto")
-                    && forwarded_proto == "https"
-                {
-                    is_https = true;
-                }
-
-                if !is_https {
-                    let mut parts = uri.into_parts();
-                    parts.scheme = Some(axum::http::uri::Scheme::HTTPS);
-                    if let Some(host) = headers.get("host").and_then(|h| h.to_str().ok()) {
-                        parts.authority = host.parse().ok();
-                    }
-                    if let Ok(new_uri) = axum::http::Uri::from_parts(parts) {
-                        return (
-                            StatusCode::TEMPORARY_REDIRECT,
-                            [(axum::http::header::LOCATION, new_uri.to_string())],
-                            "Redirecting...",
-                        )
-                            .into_response();
-                    }
-                }
-
-                next.run(req).await
-            },
-        ));
-    }
-
-    // L5: Trusted Host
-    if let Some(config) = &middlewares.trusted_host {
-        info!("🛡️ Layer: TrustedHost");
-        let allow_all = config.allowed_hosts.iter().any(|host| host == "*");
-
-        if !allow_all {
-            let allowed: Arc<AHashSet<String>> =
-                Arc::new(config.allowed_hosts.iter().cloned().collect());
-            let redirect = config.www_redirect;
-
-            app = app.layer(axum_middleware::from_fn(move |req: Request, next: Next| {
-                let allowed = allowed.clone();
-                async move {
-                    let host_header = req
-                        .headers()
-                        .get("host")
-                        .and_then(|h| h.to_str().ok())
-                        .unwrap_or("")
-                        .split(':')
-                        .next()
-                        .unwrap_or("");
-
-                    if allowed.contains(host_header) {
-                        return next.run(req).await;
-                    }
-
-                    if redirect && host_header.starts_with("www.") {
-                        let root = host_header.strip_prefix("www.").unwrap_or(host_header);
-                        if allowed.contains(root) {
-                            return (StatusCode::MOVED_PERMANENTLY, "Redirecting...")
-                                .into_response();
-                        }
-                    }
-
-                    (StatusCode::BAD_REQUEST, "Invalid Host Header").into_response()
-                }
-            }));
-        }
-    }
-
-    // L6: CORS. apply last so preflight can terminate before other layers.
-    if let Some(config) = &middlewares.cors {
-        info!("Layer: CORS");
-        match build_cors_layer(config) {
-            Ok(layer) => app = app.layer(layer),
-            Err(e) => eprintln!("Error building CORS layer: {:?}", e),
-        }
-    }
-
-    if app_config.trace_requests {
-        app = app.layer(TraceLayer::new_for_http());
-    }
-
-    if let Some(header_name) = app_config
-        .request_id_header
-        .as_deref()
-        .and_then(parse_header_name)
-    {
-        app = app
-            .layer(SetRequestIdLayer::new(header_name.clone(), MakeRequestUuid))
-            .layer(PropagateRequestIdLayer::new(header_name));
-    }
-
-    if let Some(value) = app_config
-        .powered_by_header
-        .as_deref()
-        .and_then(parse_header_value)
-    {
-        app = app.layer(SetResponseHeaderLayer::if_not_present(
-            HeaderName::from_static("x-powered-by"),
-            value,
-        ));
-    }
-
-    if let Some(seconds) = app_config.request_timeout {
-        app = app.layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(seconds),
-        ));
-    }
-
-    if app_config.catch_panics {
-        app = app.layer(CatchPanicLayer::new());
-    }
-
-    if app_config.redirect_slashes {
-        app = app.layer(NormalizePathLayer::trim_trailing_slash());
-    }
-
-    app
-}
-
 fn merge_declared_middlewares(
     py: Python<'_>,
     app_config: &FastrAPI,
@@ -531,6 +356,7 @@ pub(crate) fn apply_declared_middleware(
 ) -> PyResult<()> {
     for builder in MIDDLEWARE_REGISTRY.builders() {
         if builder.try_from_instance(middleware_item, container)? {
+            container.order.push(builder.layer());
             return Ok(());
         }
     }
@@ -729,29 +555,43 @@ pub(crate) async fn record_prometheus_metrics(req: Request, next: Next) -> Respo
         axum::http::Method::HEAD => "HEAD",
         _ => "OTHER",
     };
-    let raw_path = req.uri().path().to_owned();
+    let raw_uri = req.uri().clone();
     let start = Instant::now();
     let response = next.run(req).await;
-    let status = match response.status().as_u16() {
-        200 => "200",
-        201 => "201",
-        204 => "204",
-        400 => "400",
-        401 => "401",
-        403 => "403",
-        404 => "404",
-        422 => "422",
-        500 => "500",
-        _ => "UNKNOWN",
+    let status: metrics::SharedString = match response.status().as_u16() {
+        200 => "200".into(),
+        201 => "201".into(),
+        204 => "204".into(),
+        301 => "301".into(),
+        302 => "302".into(),
+        304 => "304".into(),
+        307 => "307".into(),
+        308 => "308".into(),
+        400 => "400".into(),
+        401 => "401".into(),
+        403 => "403".into(),
+        404 => "404".into(),
+        405 => "405".into(),
+        409 => "409".into(),
+        413 => "413".into(),
+        422 => "422".into(),
+        429 => "429".into(),
+        500 => "500".into(),
+        502 => "502".into(),
+        503 => "503".into(),
+        504 => "504".into(),
+        other => metrics::SharedString::from(other.to_string()),
     };
 
-    let path = match response
+    let path: metrics::SharedString = match response
         .extensions()
         .get::<crate::routing::router::RoutePattern>()
     {
-        Some(pattern) => pattern.0.to_string(),
-        None if response.status() == StatusCode::NOT_FOUND => "unmatched".to_string(),
-        None => raw_path,
+        Some(pattern) => metrics::SharedString::from(pattern.0.clone()),
+        None if response.status() == StatusCode::NOT_FOUND => {
+            metrics::SharedString::from("unmatched")
+        }
+        None => metrics::SharedString::from(raw_uri.path().to_owned()),
     };
 
     let elapsed = start.elapsed().as_secs_f64();
@@ -760,7 +600,7 @@ pub(crate) async fn record_prometheus_metrics(req: Request, next: Next) -> Respo
         "fastrapi_requests_total",
         "method" => method,
         "path" => path.clone(),
-        "status" => status,
+        "status" => status.clone(),
     )
     .increment(1);
     metrics::histogram!(

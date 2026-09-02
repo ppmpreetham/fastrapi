@@ -1,6 +1,6 @@
 use super::serve::*;
 
-use crate::routing::types::{BodyField, BodyPayload, RouteHandler, UploadedFile};
+use crate::routing::types::{BodyField, BodyPayload, ParameterSource, RouteHandler, UploadedFile};
 use ahash::AHashMap;
 use axum::{
     body::{Body, to_bytes},
@@ -46,7 +46,8 @@ pub(crate) async fn extract_payload(
         }));
     }
 
-    let value = sonic_rs::from_slice(&body)
+    let mut json_buf = body.to_vec();
+    let value = simd_json::to_owned_value(&mut json_buf)
         .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response())?;
     Ok(Some(BodyPayload::Json {
         raw: body,
@@ -110,7 +111,7 @@ pub(crate) async fn parse_multipart_form(
             Some(filename) => BodyField::File(UploadedFile {
                 filename: Some(filename),
                 content_type,
-                content: bytes.to_vec(),
+                content: bytes,
             }),
             None => BodyField::Text(String::from_utf8_lossy(&bytes).into_owned()),
         };
@@ -151,25 +152,12 @@ pub(crate) fn multipart_constraints(
         size_limit = size_limit.per_field(limit as u64);
     }
 
-    let allowed: Vec<String> = handler
-        .payload
-        .parsed_params
-        .iter()
-        .filter(|p| matches!(p.source, crate::routing::types::ParameterSource::Body))
-        .flat_map(|param| {
-            if param.external_name != param.name {
-                vec![param.external_name.clone(), param.name.clone()]
-            } else {
-                vec![param.external_name.clone()]
-            }
-        })
-        .collect();
-
+    let mut allowed: Vec<String> = Vec::new();
     for param in handler
         .payload
         .parsed_params
         .iter()
-        .filter(|p| matches!(p.source, crate::routing::types::ParameterSource::Body))
+        .filter(|p| p.source == ParameterSource::Body)
     {
         let limit = if param.is_file {
             state.max_file_size
@@ -181,6 +169,13 @@ pub(crate) fn multipart_constraints(
             size_limit = size_limit.for_field(param.external_name.clone(), limit as u64);
             if param.external_name != param.name {
                 size_limit = size_limit.for_field(param.name.clone(), limit as u64);
+            }
+        }
+
+        if state.reject_unknown_multipart_fields {
+            allowed.push(param.external_name.clone());
+            if param.external_name != param.name {
+                allowed.push(param.name.clone());
             }
         }
     }

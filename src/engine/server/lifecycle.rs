@@ -15,16 +15,16 @@ pub(crate) fn start_background_asyncio_loop(py: Python<'_>) -> PyResult<Py<PyAny
 
     std::thread::spawn(move || {
         Python::attach(|py| {
-            let _ = py.import("rsloop");
+            _ = py.import("rsloop");
             let Ok(asyncio) = py.import("asyncio") else {
                 return;
             };
             let event_loop = loop_for_thread.bind(py);
-            let _ = asyncio.call_method1("set_event_loop", (event_loop,));
+            _ = asyncio.call_method1("set_event_loop", (event_loop,));
             if let Err(err) = event_loop.call_method0("run_forever") {
                 log_python_error("python async loop stopped with error", err);
             }
-            let _ = event_loop.call_method0("close");
+            _ = event_loop.call_method0("close");
         });
     });
 
@@ -34,7 +34,7 @@ pub(crate) fn start_background_asyncio_loop(py: Python<'_>) -> PyResult<Py<PyAny
 pub(crate) fn stop_background_asyncio_loop(py: Python<'_>, event_loop: &Arc<Py<PyAny>>) {
     let event_loop = event_loop.bind(py);
     if let Ok(stop) = event_loop.getattr("stop") {
-        let _ = event_loop.call_method1("call_soon_threadsafe", (stop,));
+        _ = event_loop.call_method1("call_soon_threadsafe", (stop,));
     }
 }
 
@@ -187,16 +187,16 @@ pub(crate) fn run_awaitable_in_loop(
 
 pub(crate) fn shutdown_async_generators(event_loop: &Bound<'_, PyAny>) {
     if let Ok(shutdown_asyncgens) = event_loop.call_method0("shutdown_asyncgens") {
-        let _ = event_loop.call_method1("run_until_complete", (shutdown_asyncgens,));
+        _ = event_loop.call_method1("run_until_complete", (shutdown_asyncgens,));
     }
 }
 
 pub(crate) fn close_event_loop(py: Python<'_>, event_loop: &Bound<'_, PyAny>) {
     if let Ok(asyncio) = py.import("asyncio") {
-        let _ = asyncio.call_method1("set_event_loop", (py.None(),));
+        _ = asyncio.call_method1("set_event_loop", (py.None(),));
     }
 
-    let _ = event_loop.call_method0("close");
+    _ = event_loop.call_method0("close");
 }
 
 pub(crate) fn log_python_error(context: &str, err: PyErr) {

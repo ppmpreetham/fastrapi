@@ -4,13 +4,18 @@ use crate::decorators::PyAPIRouter;
 use crate::http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware};
 use crate::http::staticfiles::PyStaticFiles;
 use crate::routing::types::HttpMethod;
+use ahash::AHasher;
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyCFunction, PyDict, PyList, PyString, PyTuple};
+use std::hash::Hasher;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tracing::info;
+
+crate::cached_py_import!(STARLETTE_STATE, "starlette.datastructures", "State");
 
 #[pymethods]
 impl FastrAPI {
@@ -19,11 +24,11 @@ impl FastrAPI {
         *,
         debug=false,
         routes=None,
-        title="FastrAPI".to_string(),
+        title="FastAPI".to_string(),
         summary=None,
         description="".to_string(),
         version="0.1.0".to_string(),
-        openapi_url="/api-docs/openapi.json".to_string(),
+        openapi_url="/openapi.json".to_string(),
         openapi_tags=None,
         servers=None,
         dependencies=None,
@@ -56,7 +61,7 @@ impl FastrAPI {
         generate_unique_id_function=None,
         separate_input_output_schemas=true,
         openapi_external_docs=None,
-        sync_to_threadpool=false,
+        sync_to_threadpool=true,
         max_body_size=Some(16 * 1024 * 1024),
         max_field_size=Some(1024 * 1024),
         max_file_size=Some(16 * 1024 * 1024),
@@ -127,16 +132,22 @@ impl FastrAPI {
                 .and_then(|r| r.getattr(intern!(py, "JSONResponse")))
                 .map(|obj| obj.unbind())?,
         };
-        let generate_unique_id_function = match generate_unique_id_function {
-            Some(func) => func,
-            None => py
-                .eval(c"lambda route: route.__name__", None, None)?
-                .unbind(),
-        };
+        let generate_unique_id_function = generate_unique_id_function;
         let base_router = Py::new(py, PyAPIRouter::new_())?;
+
+        let state = STARLETTE_STATE
+            .get(py)
+            .and_then(|cls| cls.call0().map(|obj| obj.unbind()))
+            .or_else(|_| {
+                py.import(pyo3::intern!(py, "types"))
+                    .and_then(|types| types.getattr(pyo3::intern!(py, "SimpleNamespace")))
+                    .and_then(|ns| ns.call0().map(|obj| obj.unbind()))
+            })
+            .unwrap_or_else(|_| py.None());
 
         Ok(Self {
             debug,
+            state,
             routes,
             title,
             summary,
@@ -190,6 +201,7 @@ impl FastrAPI {
             app_mounts: Vec::new(),
             prometheus_config: None,
             middlewares: MiddlewareContainer::default(),
+            openapi_cache: parking_lot::Mutex::new(None),
             router: base_router,
         })
     }
@@ -429,12 +441,28 @@ impl FastrAPI {
 
     #[pyo3(signature = ())]
     fn openapi(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let fingerprint = self.openapi_fingerprint(py);
+        if let Some(entry) = self.openapi_cache.lock().as_ref()
+            && entry.fingerprint == fingerprint
+            && entry.title == self.title
+            && entry.version == self.version
+            && entry.description == self.description
+        {
+            return Ok(entry.dict.clone_ref(py));
+        }
+
         let spec = crate::utils::openapi::build_openapi_spec(py, self);
-        let json_str = sonic_rs::to_string(&spec).unwrap_or_else(|_| "{}".to_string());
+        let json_str = simd_json::to_string(&spec).unwrap_or_else(|_| "{}".to_string());
         let json_module = py.import(pyo3::intern!(py, "json"))?;
-        json_module
-            .call_method1(pyo3::intern!(py, "loads"), (json_str,))
-            .map(|d| d.unbind())
+        let dict = json_module.call_method1(pyo3::intern!(py, "loads"), (json_str,))?;
+        *self.openapi_cache.lock() = Some(super::types::OpenApiCacheEntry {
+            fingerprint,
+            title: self.title.clone(),
+            version: self.version.clone(),
+            description: self.description.clone(),
+            dict: dict.clone().unbind(),
+        });
+        Ok(dict.unbind())
     }
 
     fn exception_handler(
@@ -473,6 +501,35 @@ impl FastrAPI {
         py: Python<'py>,
     ) -> pyo3::PyRef<'py, crate::ffi::decorators::PyAPIRouter> {
         self.router.bind(py).borrow()
+    }
+
+    fn openapi_fingerprint(&self, py: Python<'_>) -> u64 {
+        let mut h = AHasher::default();
+        self.hash_openapi_state(py, &mut h, 0);
+        h.finish()
+    }
+
+    fn hash_openapi_state(&self, py: Python<'_>, h: &mut AHasher, depth: u8) {
+        let router = self.router.bind(py);
+        let Ok(router) = router.try_borrow() else {
+            h.write_u8(0xFF);
+            return;
+        };
+        h.write_usize(router.route_entries.lock().len());
+        h.write_usize(router.websocket_entries.lock().len());
+        h.write_usize(router.sub_routers.lock().len());
+        h.write_u8(router.frozen.load(Ordering::Relaxed) as u8);
+        h.write_usize(self.static_mounts.len());
+        h.write_usize(self.frontend_mounts.len());
+        h.write_usize(self.app_mounts.len());
+
+        if depth < 8 {
+            for mount in &self.app_mounts {
+                if let Ok(sub) = mount.app.bind(py).try_borrow() {
+                    sub.hash_openapi_state(py, h, depth + 1);
+                }
+            }
+        }
     }
 
     fn inherit_sub_app_lifespan(

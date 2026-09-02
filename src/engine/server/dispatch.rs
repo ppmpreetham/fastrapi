@@ -40,9 +40,17 @@ pub(crate) async fn dispatch_or_not_found(
         RouteMatch::Static(target) => (target, None),
         RouteMatch::Params(target, params) => (target, Some(params)),
     };
-    let RouteTarget { handler, pattern } = target;
+    let RouteTarget {
+        handler, pattern, ..
+    } = target;
 
-    let tag = |resp: Response| tag_with_pattern(resp, &pattern);
+    let tag = |resp: Response| {
+        if state.metrics_enabled {
+            tag_with_pattern(resp, &pattern)
+        } else {
+            resp
+        }
+    };
 
     if let Some(limit) = handler.execution.rate_limit_per_second
         && is_rate_limited(&req, Arc::as_ptr(&handler) as usize, limit)
@@ -75,7 +83,7 @@ pub(crate) async fn dispatch_or_not_found(
                         "matchit returned a string outside the input path"
                     );
                     PathParamRange {
-                        key: handler.payload.path_param_names[i].clone(),
+                        name_index: i,
                         start,
                         end: start + v.len(),
                     }

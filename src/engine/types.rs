@@ -42,10 +42,20 @@ pub struct PrometheusConfig {
     pub metrics_path: String,
 }
 
+pub(crate) struct OpenApiCacheEntry {
+    pub fingerprint: u64,
+    pub title: String,
+    pub version: String,
+    pub description: String,
+    pub dict: Py<PyAny>,
+}
+
 #[pyclass(name = "FastrAPI")]
 pub struct FastrAPI {
     #[pyo3(get, set)]
     pub debug: bool,
+    #[pyo3(get)]
+    pub state: Py<PyAny>,
     #[pyo3(get, set)]
     pub routes: Option<Py<PyAny>>,
     #[pyo3(get, set)]
@@ -117,7 +127,7 @@ pub struct FastrAPI {
     #[pyo3(get, set)]
     pub swagger_ui_parameters: Option<Py<PyAny>>,
     #[pyo3(get, set)]
-    pub generate_unique_id_function: Py<PyAny>,
+    pub generate_unique_id_function: Option<Py<PyAny>>,
     #[pyo3(get, set)]
     pub separate_input_output_schemas: bool,
     #[pyo3(get, set)]
@@ -150,4 +160,5 @@ pub struct FastrAPI {
     pub(crate) app_mounts: Vec<SubAppMount>,
     pub(crate) prometheus_config: Option<PrometheusConfig>,
     pub(crate) middlewares: MiddlewareContainer,
+    pub(crate) openapi_cache: parking_lot::Mutex<Option<OpenApiCacheEntry>>,
 }

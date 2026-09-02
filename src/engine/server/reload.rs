@@ -25,7 +25,7 @@ pub(crate) fn run_reload_supervisor(
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = RecommendedWatcher::new(
         move |event| {
-            let _ = tx.send(event);
+            _ = tx.send(event);
         },
         NotifyConfig::default(),
     )
@@ -83,8 +83,8 @@ pub(crate) fn stop_child(child: &mut Child) {
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    _ = child.kill();
+    _ = child.wait();
 }
 
 pub(crate) fn reload_event_matches(
