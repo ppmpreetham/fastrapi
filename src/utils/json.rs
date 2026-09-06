@@ -11,12 +11,13 @@ use pyo3::{
     prelude::*,
     types::{
         PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet,
-        PyString, PyTuple,
+        PyString, PyTuple, PyType,
     },
 };
+use simd_json::OwnedValue as Value;
 use pythonize::pythonize;
-use sonic_rs::Value;
 use std::{
+    borrow::Cow,
     cell::RefCell,
     io::{self, Write},
 };
@@ -31,6 +32,27 @@ crate::cached_py_import!(DATACLASSES_ASDICT, "dataclasses", "asdict");
 #[inline]
 pub fn is_enum_instance(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     ENUM_TYPE.is_instance(py, value)
+}
+
+fn json_text<'a>(text: &'a Bound<'_, PyString>) -> PyResult<Cow<'a, str>> {
+    match text.to_cow() {
+        Ok(text) => Ok(text),
+        Err(_) => Err(text
+            .call_method1(intern!(text.py(), "encode"), ("utf-8",))
+            .err()
+            .unwrap_or_else(|| PyValueError::new_err("surrogates not allowed"))),
+    }
+}
+
+fn json_text_of(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    json_text(&value.str()?).map(Cow::into_owned)
+}
+
+fn lossy_text(text: &Bound<'_, PyString>) -> String {
+    json_text(text).map_or_else(
+        |_| text.to_string_lossy().into_owned(),
+        std::borrow::Cow::into_owned,
+    )
 }
 
 #[inline]
@@ -49,14 +71,14 @@ pub fn write_pydantic_model_json<W: Write>(
 
 #[inline]
 pub fn write_pydantic_model_json_opts<W: Write>(
-    _py: Python<'_>,
+    py: Python<'_>,
     value: &Bound<'_, PyAny>,
     writer: &mut W,
     options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<bool> {
     let json = match options {
-        Some(opts) => value.call_method("model_dump_json", (), Some(opts)),
-        None => value.call_method0("model_dump_json"),
+        Some(opts) => value.call_method(intern!(py, "model_dump_json"), (), Some(opts)),
+        None => value.call_method0(intern!(py, "model_dump_json")),
     };
 
     let Ok(json) = json else {
@@ -105,7 +127,7 @@ pub fn json_response_with_status(
     status: StatusCode,
     value: &Value,
 ) -> AxumResponse {
-    let json_bytes = py.detach(|| sonic_rs::to_vec(value).unwrap_or_default());
+    let json_bytes = py.detach(|| simd_json::to_vec(value).unwrap_or_default());
 
     AxumResponse::builder()
         .status(status)
@@ -123,7 +145,7 @@ pub fn json_io_error(err: io::Error) -> PyErr {
 }
 
 #[inline]
-pub fn json_ser_error(err: sonic_rs::Error) -> PyErr {
+pub fn json_ser_error(err: simd_json::Error) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
@@ -187,7 +209,7 @@ pub fn write_json_bytes<W: Write>(writer: &mut W, bytes: &[u8]) -> PyResult<()> 
                 if idx > 0 {
                     scratch.push(b',');
                 }
-                let _ = write!(scratch, "{byte}");
+                _ = write!(scratch, "{byte}");
             }
             scratch.push(b']');
             writer.write_all(&scratch).map_err(json_io_error)
@@ -253,21 +275,22 @@ enum ObjKind {
     FallbackStr,
 }
 
-static OBJ_KIND_CACHE: std::sync::LazyLock<papaya::HashMap<usize, ObjKind>> =
+static OBJ_KIND_CACHE: std::sync::LazyLock<papaya::HashMap<usize, (Py<PyType>, ObjKind)>> =
     std::sync::LazyLock::new(|| papaya::HashMap::with_capacity(256));
 
 #[inline]
 fn classify_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
-    let type_ptr = value.get_type().as_ptr() as usize;
+    let ty = value.get_type();
+    let type_ptr = ty.as_ptr() as usize;
 
     let guard = OBJ_KIND_CACHE.guard();
-    if let Some(kind) = OBJ_KIND_CACHE.get(&type_ptr, &guard) {
+    if let Some((_, kind)) = OBJ_KIND_CACHE.get(&type_ptr, &guard) {
         return *kind;
     }
     drop(guard);
 
     let kind = probe_object_kind(py, value);
-    OBJ_KIND_CACHE.pin().insert(type_ptr, kind);
+    OBJ_KIND_CACHE.pin().insert(type_ptr, (ty.unbind(), kind));
     kind
 }
 
@@ -278,19 +301,19 @@ fn probe_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
         return ObjKind::PydanticModel;
     }
 
-    if let Ok(has_dataclass) = value.hasattr("__dataclass_fields__")
+    if let Ok(has_dataclass) = value.hasattr(intern!(py, "__dataclass_fields__"))
         && has_dataclass
     {
         return ObjKind::Dataclass;
     }
 
-    if let Ok(has_isoformat) = value.hasattr("isoformat")
+    if let Ok(has_isoformat) = value.hasattr(intern!(py, "isoformat"))
         && has_isoformat
     {
         return ObjKind::HasIsoformat;
     }
 
-    if let Ok(total_seconds) = value.hasattr("total_seconds")
+    if let Ok(total_seconds) = value.hasattr(intern!(py, "total_seconds"))
         && total_seconds
     {
         return ObjKind::Timedelta;
@@ -337,16 +360,24 @@ pub fn classify_py_value<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyJ
     if let Ok(fs) = value.cast::<PyFrozenSet>() {
         return PyJsonKind::FrozenSet(fs.clone());
     }
-    if let Ok(s) = value.cast::<PyString>() {
+    if value.is_exact_instance_of::<PyString>()
+        && let Ok(s) = value.cast::<PyString>()
+    {
         return PyJsonKind::Str(s.clone());
     }
-    if let Ok(b) = value.cast::<PyBool>() {
+    if value.is_exact_instance_of::<PyBool>()
+        && let Ok(b) = value.cast::<PyBool>()
+    {
         return PyJsonKind::Bool(b.clone());
     }
-    if let Ok(i) = value.cast::<PyInt>() {
+    if value.is_exact_instance_of::<PyInt>()
+        && let Ok(i) = value.cast::<PyInt>()
+    {
         return PyJsonKind::Int(i.clone());
     }
-    if let Ok(f) = value.cast::<PyFloat>() {
+    if value.is_exact_instance_of::<PyFloat>()
+        && let Ok(f) = value.cast::<PyFloat>()
+    {
         return PyJsonKind::Float(f.clone());
     }
     if let Ok(b) = value.cast::<PyBytes>() {
@@ -408,7 +439,7 @@ pub fn write_py_json<W: Write>(
 
         PyJsonKind::FrozenSet(fset) => write_json_array(py, writer, fset.iter()),
 
-        PyJsonKind::Str(s) => write_json_string(writer, s.to_str().unwrap_or_default()),
+        PyJsonKind::Str(s) => write_json_string(writer, &json_text(&s)?),
 
         PyJsonKind::Bool(b) => {
             if b.is_true() {
@@ -421,27 +452,30 @@ pub fn write_py_json<W: Write>(
         PyJsonKind::Int(i) => {
             if let Ok(v) = i.extract::<i64>() {
                 write!(writer, "{v}").map_err(json_io_error)
-            } else if let Ok(s) = value.str().and_then(|s| s.to_str().map(str::to_owned)) {
+            } else if let Ok(s) = json_text_of(value) {
                 writer.write_all(s.as_bytes()).map_err(json_io_error)
             } else {
                 writer.write_all(b"0").map_err(json_io_error)
             }
         }
 
-        PyJsonKind::Float(f) => {
-            if let Ok(v) = f.extract::<f64>() {
-                write!(writer, "{v}").map_err(json_io_error)
-            } else {
-                writer.write_all(b"0.0").map_err(json_io_error)
-            }
-        }
+        PyJsonKind::Float(f) => match f.extract::<f64>() {
+            Ok(v) if v.is_finite() => write!(writer, "{v}").map_err(json_io_error),
+            Ok(_) => Err(PyValueError::new_err(
+                "Out of range float values are not JSON compliant",
+            )),
+            Err(_) => writer.write_all(b"0.0").map_err(json_io_error),
+        },
 
         PyJsonKind::Bytes(b) => write_json_bytes(writer, b.as_bytes()),
 
-        PyJsonKind::ByteArray(b) => write_json_bytes(writer, unsafe { b.as_bytes() }),
+        PyJsonKind::ByteArray(b) => {
+            let bytes = b.to_vec();
+            write_json_bytes(writer, &bytes)
+        }
 
         PyJsonKind::MemoryView => {
-            if let Ok(b) = value.call_method0("tobytes")
+            if let Ok(b) = value.call_method0(intern!(py, "tobytes"))
                 && let Ok(bytes) = b.cast::<PyBytes>()
             {
                 return write_json_bytes(writer, bytes.as_bytes());
@@ -454,7 +488,7 @@ pub fn write_py_json<W: Write>(
                 return Ok(());
             }
 
-            if let Ok(dumped) = value.call_method0("model_dump") {
+            if let Ok(dumped) = value.call_method0(intern!(py, "model_dump")) {
                 return write_py_json(py, &dumped, writer);
             }
 
@@ -470,23 +504,23 @@ pub fn write_py_json<W: Write>(
         }
 
         PyJsonKind::HasIsoformat => {
-            if let Ok(obj) = value.call_method0("isoformat")
+            if let Ok(obj) = value.call_method0(intern!(py, "isoformat"))
                 && let Ok(s) = obj.cast::<PyString>()
             {
-                return write_json_string(writer, s.to_str().unwrap_or_default());
+                return write_json_string(writer, &json_text(s)?);
             }
 
             writer.write_all(b"null").map_err(json_io_error)
         }
 
         PyJsonKind::Timedelta => {
-            if let Ok(total) = value.call_method0("total_seconds")
+            if let Ok(total) = value.call_method0(intern!(py, "total_seconds"))
                 && let Ok(f) = total.extract::<f64>()
             {
                 return write!(writer, "{f}").map_err(json_io_error);
             }
 
-            if let Ok(s) = value.str().and_then(|s| s.to_str().map(str::to_owned)) {
+            if let Ok(s) = json_text_of(value) {
                 write_json_string(writer, &s)
             } else {
                 writer.write_all(b"null").map_err(json_io_error)
@@ -494,7 +528,7 @@ pub fn write_py_json<W: Write>(
         }
 
         PyJsonKind::UuidOrDecimal | PyJsonKind::Path | PyJsonKind::IpAddress => {
-            if let Ok(s) = value.str().and_then(|s| s.to_str().map(str::to_owned)) {
+            if let Ok(s) = json_text_of(value) {
                 write_json_string(writer, &s)
             } else {
                 writer.write_all(b"null").map_err(json_io_error)
@@ -502,7 +536,7 @@ pub fn write_py_json<W: Write>(
         }
 
         PyJsonKind::Enum => {
-            if let Ok(inner) = value.getattr("value") {
+            if let Ok(inner) = value.getattr(intern!(py, "value")) {
                 write_py_json(py, &inner, writer)
             } else {
                 writer.write_all(b"null").map_err(json_io_error)
@@ -510,7 +544,7 @@ pub fn write_py_json<W: Write>(
         }
 
         PyJsonKind::FallbackStr => {
-            if let Ok(s) = value.str().and_then(|s| s.to_str().map(str::to_owned)) {
+            if let Ok(s) = json_text_of(value) {
                 write_json_string(writer, &s)
             } else {
                 writer.write_all(b"null").map_err(json_io_error)
@@ -638,14 +672,14 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>, status: StatusCode
 
 #[inline]
 pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
-    let mut map = std::collections::HashMap::with_capacity(dict.len());
+    let mut map = simd_json::owned::Object::new();
 
     dict.iter().for_each(|(key, value)| {
         let k = json_key_for(&key);
         map.insert(k, py_any_to_json(py, &value));
     });
 
-    sonic_rs::to_value(&map).unwrap_or_else(|_| sonic_rs::json!(null))
+    simd_json::owned::Value::Object(std::boxed::Box::new(map))
 }
 
 #[inline]
@@ -654,7 +688,7 @@ pub fn py_list_to_json(py: Python<'_>, list: &Bound<'_, PyList>) -> Value {
 
     vec.extend(list.iter().map(|item| py_any_to_json(py, &item)));
 
-    sonic_rs::to_value(&vec).unwrap_or_else(|_| sonic_rs::json!(null))
+    Value::Array(std::boxed::Box::new(vec))
 }
 
 #[inline]
@@ -675,71 +709,73 @@ fn py_dict_key_str<'k>(key: &'k Bound<'_, PyAny>) -> std::borrow::Cow<'k, str> {
         .unwrap_or_default()
 }
 
-/// walk a Python value into a sonic_rs::Value.
+/// walk a Python value into a simd_json::OwnedValue.
 #[inline]
 pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
     match classify_py_value(py, value) {
-        PyJsonKind::None => sonic_rs::json!(null),
+        PyJsonKind::None => simd_json::json!(null),
         PyJsonKind::Dict(dict) => py_dict_to_json(py, &dict),
         PyJsonKind::List(list) => py_list_to_json(py, &list),
-        PyJsonKind::Str(s) => sonic_rs::json!(s.to_str().unwrap_or_default().to_owned()),
-        PyJsonKind::Bool(b) => sonic_rs::json!(b.is_true()),
+        PyJsonKind::Str(s) => simd_json::json!(lossy_text(&s)),
+        PyJsonKind::Bool(b) => simd_json::json!(b.is_true()),
         PyJsonKind::Int(i) => {
             if let Ok(v) = i.extract::<i64>() {
-                sonic_rs::json!(v)
-            } else if let Ok(s) = value.str().and_then(|s| s.to_str().map(str::to_owned)) {
-                sonic_rs::json!(s)
+                simd_json::json!(v)
+            } else if let Ok(s) = value.str() {
+                simd_json::json!(lossy_text(&s))
             } else {
-                sonic_rs::json!(null)
+                simd_json::json!(null)
             }
         }
 
-        PyJsonKind::Float(f) => {
-            if let Ok(v) = f.extract::<f64>() {
-                sonic_rs::json!(v)
-            } else {
-                sonic_rs::json!(null)
-            }
-        }
+        PyJsonKind::Float(f) => match f.extract::<f64>() {
+            Ok(v) if v.is_finite() => simd_json::json!(v),
+            _ => simd_json::json!(null),
+        },
 
         PyJsonKind::Tuple(tuple) => {
             let mut vec = Vec::with_capacity(tuple.len());
             vec.extend(tuple.iter().map(|item| py_any_to_json(py, &item)));
-            sonic_rs::to_value(&vec).unwrap_or_else(|_| sonic_rs::json!(null))
+            Value::Array(std::boxed::Box::new(vec))
         }
         PyJsonKind::Set(set) => {
             let mut vec = Vec::with_capacity(set.len());
             vec.extend(set.iter().map(|item| py_any_to_json(py, &item)));
-            sonic_rs::to_value(&vec).unwrap_or_else(|_| sonic_rs::json!(null))
+            Value::Array(std::boxed::Box::new(vec))
         }
         PyJsonKind::FrozenSet(fset) => {
             let mut vec = Vec::with_capacity(fset.len());
             vec.extend(fset.iter().map(|item| py_any_to_json(py, &item)));
-            sonic_rs::to_value(&vec).unwrap_or_else(|_| sonic_rs::json!(null))
+            Value::Array(std::boxed::Box::new(vec))
         }
 
         PyJsonKind::Bytes(b) => bytes_to_json(b.as_bytes()),
-        PyJsonKind::ByteArray(b) => bytes_to_json(unsafe { b.as_bytes() }),
+        PyJsonKind::ByteArray(b) => {
+            let bytes = b.to_vec();
+            bytes_to_json(&bytes)
+        }
         PyJsonKind::MemoryView => {
-            if let Ok(b) = value.call_method0("tobytes")
+            if let Ok(b) = value.call_method0(intern!(py, "tobytes"))
                 && let Ok(bytes) = b.cast::<PyBytes>()
             {
                 return bytes_to_json(bytes.as_bytes());
             }
-            sonic_rs::json!(null)
+            simd_json::json!(null)
         }
 
         PyJsonKind::PydanticModel => {
             if let Ok(json) = value.call_method0(intern!(py, "model_dump_json"))
                 && let Ok(s) = json.cast::<PyString>()
-                && let Ok(parsed) = sonic_rs::from_str(s.to_str().unwrap_or_default())
             {
-                return parsed;
+                let mut json_buf = s.to_str().unwrap_or_default().as_bytes().to_vec();
+                if let Ok(parsed) = simd_json::to_owned_value(&mut json_buf) {
+                    return parsed;
+                }
             }
-            if let Ok(dumped) = value.call_method0("model_dump") {
+            if let Ok(dumped) = value.call_method0(intern!(py, "model_dump")) {
                 return py_any_to_json(py, &dumped);
             }
-            sonic_rs::json!(null)
+            simd_json::json!(null)
         }
 
         PyJsonKind::Dataclass => {
@@ -748,53 +784,53 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
             {
                 return py_any_to_json(py, &d);
             }
-            sonic_rs::json!(null)
+            simd_json::json!(null)
         }
 
         PyJsonKind::HasIsoformat => {
-            if let Ok(obj) = value.call_method0("isoformat")
+            if let Ok(obj) = value.call_method0(intern!(py, "isoformat"))
                 && let Ok(s) = obj.cast::<PyString>()
             {
-                return sonic_rs::json!(s.to_str().unwrap_or_default().to_owned());
+                return simd_json::json!(lossy_text(s));
             }
 
-            sonic_rs::json!(null)
+            simd_json::json!(null)
         }
 
         PyJsonKind::Timedelta => {
-            if let Ok(total) = value.call_method0("total_seconds")
+            if let Ok(total) = value.call_method0(intern!(py, "total_seconds"))
                 && let Ok(f) = total.extract::<f64>()
             {
-                return sonic_rs::json!(f);
+                return simd_json::json!(f);
             }
-            if let Ok(s) = value.str().and_then(|s| s.to_str().map(str::to_owned)) {
-                sonic_rs::json!(s)
+            if let Ok(s) = value.str() {
+                simd_json::json!(lossy_text(&s))
             } else {
-                sonic_rs::json!(null)
+                simd_json::json!(null)
             }
         }
 
         PyJsonKind::UuidOrDecimal | PyJsonKind::Path | PyJsonKind::IpAddress => {
-            if let Ok(s) = value.str().and_then(|s| s.to_str().map(str::to_owned)) {
-                sonic_rs::json!(s)
+            if let Ok(s) = value.str() {
+                simd_json::json!(lossy_text(&s))
             } else {
-                sonic_rs::json!(null)
+                simd_json::json!(null)
             }
         }
 
         PyJsonKind::Enum => {
-            if let Ok(inner) = value.getattr("value") {
+            if let Ok(inner) = value.getattr(intern!(py, "value")) {
                 py_any_to_json(py, &inner)
             } else {
-                sonic_rs::json!(null)
+                simd_json::json!(null)
             }
         }
 
         PyJsonKind::FallbackStr => {
-            if let Ok(s) = value.str().and_then(|s| s.to_str().map(str::to_owned)) {
-                sonic_rs::json!(s)
+            if let Ok(s) = value.str() {
+                simd_json::json!(lossy_text(&s))
             } else {
-                sonic_rs::json!(null)
+                simd_json::json!(null)
             }
         }
     }
@@ -803,8 +839,9 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
 #[inline]
 pub fn bytes_to_json(b: &[u8]) -> Value {
     match std::str::from_utf8(b) {
-        Ok(s) => sonic_rs::json!(s.to_owned()),
-        Err(_) => sonic_rs::to_value(&b.iter().map(|&x| sonic_rs::json!(x)).collect::<Vec<_>>())
-            .unwrap_or_else(|_| sonic_rs::json!(null)),
+        Ok(s) => simd_json::json!(s.to_owned()),
+        Err(_) => Value::Array(std::boxed::Box::new(
+            b.iter().map(|&x| simd_json::json!(x)).collect::<Vec<_>>(),
+        )),
     }
 }

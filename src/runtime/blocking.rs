@@ -25,7 +25,7 @@ impl BlockingTask {
 
     #[inline(always)]
     fn run(self, py: Python<'_>) {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (self.inner)(py);
         }));
     }
@@ -82,7 +82,7 @@ impl BlockingRunner {
         let idle = self.idle.clone();
         let timeout = self.idle_timeout;
 
-        let _ = thread::Builder::new()
+        _ = thread::Builder::new()
             .name("fastrapi-py-blocking".into())
             .spawn(move || {
                 blocking_worker_timeout(queue, timeout, idle);
@@ -165,7 +165,7 @@ where
 {
     let (tx, rx) = tokio::sync::oneshot::channel();
     dispatch(move |py| {
-        let _ = tx.send(task(py));
+        _ = tx.send(task(py));
     });
     rx
 }

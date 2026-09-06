@@ -19,6 +19,8 @@ use tracing::error;
 use super::blocking;
 use crate::http::request::create_py_request;
 
+crate::cached_py_import!(TRACEBACK_MODULE, "traceback");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
     SyncNoArgs,
@@ -74,8 +76,8 @@ pub(crate) fn python_error_to_response_in(
         return response;
     }
 
-    if let Ok(http_error) = err.value(py).extract::<PyRef<'_, PyHTTPException>>() {
-        return http_error.to_response(py);
+    if let Ok(http_error) = err.value(py).cast::<PyHTTPException>() {
+        return http_error.borrow().to_response(py);
     }
     log_python_error(py, &err);
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -83,7 +85,7 @@ pub(crate) fn python_error_to_response_in(
 
 fn log_python_error(py: Python<'_>, err: &PyErr) {
     let rendered = (|| -> PyResult<String> {
-        let traceback_bound = py.import(intern!(py, "traceback"))?;
+        let traceback_bound = TRACEBACK_MODULE.get(py)?;
 
         let traceback_obj = err
             .traceback(py)
@@ -107,17 +109,21 @@ fn log_python_error(py: Python<'_>, err: &PyErr) {
 
 pub(crate) fn build_request_input_from_parts<'a>(
     parts: &'a Parts,
-    param_ranges: &'a [PathParamRange],
+    param_ranges: &[PathParamRange],
+    names: &'a [Arc<str>],
 ) -> RequestInput<'a> {
     let path_str = parts.uri.path();
     let path_params = OnceLock::new();
 
     if !param_ranges.is_empty() {
-        let path_params_vec: SmallVec<[(Arc<str>, &'a str); 8]> = param_ranges
+        let path_params_vec: SmallVec<[(&'a str, &'a str); 8]> = param_ranges
             .iter()
-            .map(|r| (r.key.clone(), &path_str[r.start..r.end]))
+            .map(|r| {
+                let name = names.get(r.name_index).map(|n| &**n).unwrap_or("");
+                (name, &path_str[r.start..r.end])
+            })
             .collect();
-        let _ = path_params.set(path_params_vec);
+        _ = path_params.set(path_params_vec);
     }
 
     RequestInput {
@@ -138,7 +144,7 @@ fn spawn_background_tasks(
 ) {
     if let Some(tasks) = bg_tasks {
         let async_loop = async_loop.clone();
-        tokio::spawn(async move {
+        crate::globals::spawn(async move {
             for task in Python::attach(|py| match tasks.try_borrow(py) {
                 Ok(bg) => bg.execute_all(&async_loop),
                 Err(e) => {
@@ -178,7 +184,7 @@ fn resolve_sync_deps<'py>(
     request_input: &RequestInput<'_>,
     request_object: Option<Py<PyAny>>,
     kwargs: &Bound<'py, PyDict>,
-) -> Result<Vec<crate::routing::dependencies::TeardownTask>, Response> {
+) -> Result<crate::routing::dependencies::TeardownTasks, Response> {
     let (dep_results, teardowns) = dependencies::execute_dependencies_sync(
         py,
         &handler.payload.dependencies,
@@ -192,17 +198,14 @@ fn resolve_sync_deps<'py>(
 
     dep_results.into_iter().try_for_each(|(name, value)| {
         kwargs
-            .set_item(pyo3::types::PyString::intern(py, &name), value.bind(py))
+            .set_item(name, value.bind(py))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     })?;
     Ok(teardowns)
 }
 
 #[inline(always)]
-fn execute_teardowns_sync(
-    py: Python<'_>,
-    teardowns: Vec<crate::routing::dependencies::TeardownTask>,
-) {
+fn execute_teardowns_sync(py: Python<'_>, teardowns: crate::routing::dependencies::TeardownTasks) {
     for task in teardowns.into_iter().rev() {
         if task.is_async {
             tracing::error!("Async generator dependency found in sync route!");
@@ -225,10 +228,13 @@ fn execute_teardowns_sync(
 
 pub(crate) async fn execute_teardowns_async(
     async_loop: &Arc<Py<PyAny>>,
-    teardowns: Vec<crate::routing::dependencies::TeardownTask>,
+    teardowns: crate::routing::dependencies::TeardownTasks,
 ) {
+    let mut sync_batch: Vec<Py<PyAny>> = Vec::new();
+
     for task in teardowns.into_iter().rev() {
         if task.is_async {
+            flush_sync_teardowns(&mut sync_batch).await;
             let future_anext = Python::attach(|py| -> PyResult<_> {
                 let anext_coroutine = task
                     .generator
@@ -239,33 +245,40 @@ pub(crate) async fn execute_teardowns_async(
             });
             match future_anext {
                 Ok(fut) => {
-                    let _ = fut.await;
+                    _ = fut.await;
                 }
                 Err(e) => {
                     tracing::error!("Failed to tear down async generator dependency: {}", e);
                 }
             }
         } else {
-            let task_gen = task.generator;
-            let _ = blocking::run_python(move |py| {
-                match task_gen
-                    .bind(py)
-                    .call_method0(pyo3::intern!(py, "__next__"))
-                {
-                    Ok(_) => tracing::error!("Sync generator dependency yielded twice!"),
-                    Err(e) => {
-                        if !e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
-                            tracing::error!(
-                                "Error during sync generator dependency teardown: {}",
-                                e
-                            );
-                        }
-                    }
-                }
-            })
-            .await;
+            sync_batch.push(task.generator);
         }
     }
+    flush_sync_teardowns(&mut sync_batch).await;
+}
+
+async fn flush_sync_teardowns(batch: &mut Vec<Py<PyAny>>) {
+    if batch.is_empty() {
+        return;
+    }
+    let generators = std::mem::take(batch);
+    _ = blocking::run_python(move |py| {
+        for task_gen in generators {
+            match task_gen
+                .bind(py)
+                .call_method0(pyo3::intern!(py, "__next__"))
+            {
+                Ok(_) => tracing::error!("Sync generator dependency yielded twice!"),
+                Err(e) => {
+                    if !e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                        tracing::error!("Error during sync generator dependency teardown: {}", e);
+                    }
+                }
+            }
+        }
+    })
+    .await;
 }
 
 #[inline(always)]
@@ -333,7 +346,7 @@ pub(crate) fn render_no_request_json_response(py: Python<'_>, handler: &RouteHan
 
 #[inline(always)]
 async fn await_python_future<'a, F>(
-    handler: Arc<RouteHandler>,
+    handler: &RouteHandler,
     request_input: Option<&RequestInput<'a>>,
     future_result: Result<F, Response>,
 ) -> Result<Response, Response>
@@ -347,7 +360,7 @@ where
 
     let result = future.await;
     Python::attach(|py| match result {
-        Ok(res) => Ok(specialized_response_conversion(py, res.bind(py), &handler)),
+        Ok(res) => Ok(specialized_response_conversion(py, res.bind(py), handler)),
         Err(err) => Err(python_error_to_response_in(py, err, request_input)),
     })
 }
@@ -401,7 +414,7 @@ async fn core_async_no_args(async_loop: Arc<Py<PyAny>>, handler: Arc<RouteHandle
             .map_err(|err| python_error_to_response(py, err))?;
         into_asyncio_future(py, &async_loop, coroutine)
     });
-    match await_python_future(handler, None, future_res).await {
+    match await_python_future(&handler, None, future_res).await {
         Ok(res) => res,
         Err(err) => err,
     }
@@ -468,7 +481,11 @@ async fn core_sync_no_deps(
     sync_to_threadpool: bool,
 ) -> Response {
     if !sync_to_threadpool {
-        let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+        let request_input = build_request_input_from_parts(
+            &request_parts,
+            &param_ranges,
+            &handler.payload.path_param_names,
+        );
         return Python::attach(|py| -> Result<Response, Response> {
             let (response, bg_tasks) = run_sync_gil_section(
                 py,
@@ -486,7 +503,11 @@ async fn core_sync_no_deps(
     }
 
     blocking::run_python(move |py| {
-        let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+        let request_input = build_request_input_from_parts(
+            &request_parts,
+            &param_ranges,
+            &handler.payload.path_param_names,
+        );
         let result = run_sync_gil_section(
             py,
             &GilSection {
@@ -517,7 +538,11 @@ async fn core_sync_deps<const NEEDS_REQ: bool>(
     sync_to_threadpool: bool,
 ) -> Response {
     if !sync_to_threadpool {
-        let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+        let request_input = build_request_input_from_parts(
+            &request_parts,
+            &param_ranges,
+            &handler.payload.path_param_names,
+        );
         return Python::attach(|py| -> Result<Response, Response> {
             let (response, bg_tasks) = run_sync_gil_section(
                 py,
@@ -535,7 +560,11 @@ async fn core_sync_deps<const NEEDS_REQ: bool>(
     }
 
     blocking::run_python(move |py| {
-        let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+        let request_input = build_request_input_from_parts(
+            &request_parts,
+            &param_ranges,
+            &handler.payload.path_param_names,
+        );
         let result = run_sync_gil_section(
             py,
             &GilSection {
@@ -564,7 +593,11 @@ async fn core_async_no_deps(
     param_ranges: SmallVec<[PathParamRange; 4]>,
     payload: Option<Arc<BodyPayload>>,
 ) -> Response {
-    let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+    let request_input = build_request_input_from_parts(
+        &request_parts,
+        &param_ranges,
+        &handler.payload.path_param_names,
+    );
     let future_res = Python::attach(|py| -> Result<_, Response> {
         let (kwargs, bg_tasks) =
             prepare_kwargs_and_payload(py, &handler, &request_input, payload.as_deref())?;
@@ -585,7 +618,7 @@ async fn core_async_no_deps(
         Err(resp) => return resp,
     };
 
-    match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
+    match await_python_future(&handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
             spawn_background_tasks(&async_loop, bg_tasks);
             response
@@ -601,7 +634,11 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
     param_ranges: SmallVec<[PathParamRange; 4]>,
     payload: Option<Arc<BodyPayload>>,
 ) -> Response {
-    let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+    let request_input = build_request_input_from_parts(
+        &request_parts,
+        &param_ranges,
+        &handler.payload.path_param_names,
+    );
     let setup = Python::attach(
         |py| -> Result<
             (
@@ -641,7 +678,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
         Err(resp) => return resp,
     };
 
-    match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
+    match await_python_future(&handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
             spawn_background_tasks(&async_loop, bg_tasks);
             response
@@ -657,7 +694,11 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
     param_ranges: SmallVec<[PathParamRange; 4]>,
     payload: Option<Arc<BodyPayload>>,
 ) -> Response {
-    let request_input = build_request_input_from_parts(&request_parts, &param_ranges);
+    let request_input = build_request_input_from_parts(
+        &request_parts,
+        &param_ranges,
+        &handler.payload.path_param_names,
+    );
     let prep = Python::attach(
         |py| -> Result<
             (
@@ -711,7 +752,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
             .into_iter()
             .try_for_each(|(name, value)| {
                 kwargs
-                    .set_item(PyString::intern(py, &name), value.bind(py))
+                    .set_item(name, value.bind(py))
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
             })?;
 
@@ -730,7 +771,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
         Err(resp) => return resp,
     };
 
-    let response = match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
+    let response = match await_python_future(&handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
             spawn_background_tasks(&async_loop, bg_tasks);
             response
