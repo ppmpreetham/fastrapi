@@ -142,7 +142,7 @@ def run_tests():
     ].count(True) == 2)
     
     test("OpenAPI spec", lambda: [
-        r := client.get("/api-docs/openapi.json"),
+        r := client.get("/openapi.json"),
         r.status_code == 200,
         spec := r.json(),
         spec["openapi"] == "3.0.0",

@@ -484,12 +484,12 @@ class TestOpenAPISpec:
     """Test OpenAPI specification generation"""
     
     def test_openapi_endpoint(self, client):
-        response = client.get("/api-docs/openapi.json")
+        response = client.get("/openapi.json")
         assert response.status_code == 200
         spec = response.json()
         
         # Check basic structure
-        assert spec["openapi"] == "3.0.0"
+        assert spec["openapi"] == "3.1.0"
         assert spec["info"]["title"] == "Test API"
         assert spec["info"]["version"] == "1.0.0"
         

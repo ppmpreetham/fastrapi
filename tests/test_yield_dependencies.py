@@ -1,7 +1,47 @@
-import pytest
 import asyncio
-from fastrapi import FastrAPI, Request
-from fastrapi.testclient import TestClient
+import socket
+import threading
+import time
+
+import httpx
+
+from fastrapi import Depends, FastrAPI
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _wait_for_port(port: int, timeout: float = 10.0) -> None:
+    """Block until something is listening, without issuing an HTTP request.
+
+    A readiness ping would re-run the dependency under test and pollute the
+    event log these tests assert on, so only probe the socket.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with socket.socket() as s:
+            s.settimeout(0.5)
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                return
+        time.sleep(0.05)
+    raise RuntimeError(f"server on port {port} never became ready")
+
+
+def _get(app: FastrAPI, path: str) -> httpx.Response:
+    """Serve `app` on an ephemeral port in a daemon thread and GET `path`."""
+    port = _free_port()
+    threading.Thread(
+        target=lambda: app.serve(host="127.0.0.1", port=port),
+        daemon=True,
+    ).start()
+    _wait_for_port(port)
+    return httpx.get(f"http://127.0.0.1:{port}{path}", timeout=5.0)
+
 
 def test_sync_yield_dependency():
     app = FastrAPI()
@@ -13,12 +53,11 @@ def test_sync_yield_dependency():
         events.append("sync db closed")
 
     @app.get("/sync-yield")
-    def sync_yield_route(db_session: str = get_sync_db):
+    def sync_yield_route(db_session: str = Depends(get_sync_db)):
         events.append(f"sync route executing with {db_session}")
         return {"msg": db_session}
 
-    client = TestClient(app)
-    response = client.get("/sync-yield")
+    response = _get(app, "/sync-yield")
     assert response.status_code == 200
     assert response.json() == {"msg": "sync_db_session"}
     assert events == [
@@ -40,12 +79,11 @@ def test_async_yield_dependency():
         events.append("async db closed")
 
     @app.get("/async-yield")
-    async def async_yield_route(db_session: str = get_async_db):
+    async def async_yield_route(db_session: str = Depends(get_async_db)):
         events.append(f"async route executing with {db_session}")
         return {"msg": db_session}
 
-    client = TestClient(app)
-    response = client.get("/async-yield")
+    response = _get(app, "/async-yield")
     assert response.status_code == 200
     assert response.json() == {"msg": "async_db_session"}
     assert events == [
@@ -70,15 +108,14 @@ def test_mixed_yield_dependencies():
         events.append("async closed")
 
     @app.get("/mixed")
-    async def mixed_route(s: str = sync_dep, a: str = async_dep):
+    async def mixed_route(s: str = Depends(sync_dep), a: str = Depends(async_dep)):
         events.append(f"route {s} {a}")
         return {"s": s, "a": a}
 
-    client = TestClient(app)
-    response = client.get("/mixed")
+    response = _get(app, "/mixed")
     assert response.status_code == 200
     assert response.json() == {"s": "sync_val", "a": "async_val"}
-    
+
     # FastrAPI executes dependencies left to right, but teardowns should be reversed (LIFO)
     assert events == [
         "sync open",
