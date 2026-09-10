@@ -43,7 +43,11 @@ macro_rules! generate_http_methods {
 macro_rules! match_method_router {
     ($method:expr, $handler:expr) => {
         match $method {
-            HttpMethod::GET => get($handler),
+            // this is for starlette parity: a GET route also serves HEAD (hyper strips the body)
+            HttpMethod::GET => {
+                let head_handler = $handler;
+                get(head_handler.clone()).head(head_handler)
+            }
             HttpMethod::POST => post($handler),
             HttpMethod::PUT => put($handler),
             HttpMethod::DELETE => delete($handler),

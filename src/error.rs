@@ -17,7 +17,7 @@ pub enum FastRapiError {
     MutexPoisoned,
 
     #[error("JSON Serialization Error: {0}")]
-    JsonError(#[from] sonic_rs::Error),
+    JsonError(#[from] simd_json::Error),
 
     #[error("IO Error: {0}")]
     IoError(#[from] std::io::Error),

@@ -72,8 +72,6 @@ fn register_submodules_in_sys_modules(m: &Bound<'_, PyModule>) -> PyResult<()> {
         qualified_name: &str,
         visited: &mut std::collections::HashSet<usize>,
     ) -> PyResult<()> {
-        // Modules can reference each other cyclically (the compiled core
-        // re-exports itself), so guard traversal by object identity.
         if !visited.insert(module.as_ptr() as usize) {
             return Ok(());
         }
@@ -299,6 +297,10 @@ mod fastrapi {
         super::register_rsloop_asyncio_alias(m)?;
         // fastrapi.jsonable_encoder + fastrapi.encoders.jsonable_encoder
         crate::ffi::encoders::register(m)?;
+        m.add_function(wrap_pyfunction!(
+            crate::ffi::kernel_validation::kernel_validation_count,
+            m
+        )?)?;
         let encoders = PyModule::new(py, "encoders")?;
         crate::ffi::encoders::register(&encoders)?;
         m.add("encoders", encoders)?;

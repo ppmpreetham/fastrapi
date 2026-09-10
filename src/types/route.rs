@@ -3,6 +3,7 @@ use crate::routing::dependencies::DependencyNode;
 use crate::types::response::ResponseType;
 use ahash::{AHashMap, AHashSet};
 use axum::http::Method;
+use bytes::Bytes;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{Py, PyAny};
 use regex::Regex;
@@ -80,13 +81,14 @@ pub struct ParsedParameter {
     pub param_object: Option<Py<PyAny>>,
     pub is_pydantic_model: bool,
     pub is_file: bool,
-    pub scalar_kind: crate::ffi::pydantic::ScalarKind,
+    pub embed: bool,
+    pub coercion: crate::ffi::pydantic::ScalarCoercion,
     pub validator_index: Option<usize>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct PathParamRange {
-    pub key: Arc<str>,
+    pub name_index: usize,
     pub start: usize,
     pub end: usize,
 }
@@ -95,7 +97,7 @@ pub struct PathParamRange {
 pub struct UploadedFile {
     pub filename: Option<String>,
     pub content_type: Option<String>,
-    pub content: Vec<u8>,
+    pub content: Bytes,
 }
 
 #[derive(Clone, Debug)]
@@ -108,7 +110,7 @@ pub enum BodyField {
 pub enum BodyPayload {
     Json {
         raw: bytes::Bytes,
-        value: Option<sonic_rs::Value>,
+        value: Option<simd_json::OwnedValue>,
     },
     Form(AHashMap<String, SmallVec<[BodyField; 2]>>),
 }
@@ -177,7 +179,7 @@ pub struct CompiledSecurityScheme {
     pub id: u32,
     pub name: String,
     pub description: Option<String>,
-    pub scopes: Option<sonic_rs::Value>,
+    pub scopes: Option<simd_json::OwnedValue>,
     pub kind: SecurityKind,
 }
 
@@ -247,9 +249,9 @@ pub struct RouteEntry {
     pub description: Option<String>,
     pub response_description: Option<String>,
     pub operation_id: Option<String>,
-    pub openapi_extra: Option<sonic_rs::Value>,
-    pub responses: Option<sonic_rs::Value>,
-    pub callbacks: Option<sonic_rs::Value>,
+    pub openapi_extra: Option<simd_json::OwnedValue>,
+    pub responses: Option<simd_json::OwnedValue>,
+    pub callbacks: Option<simd_json::OwnedValue>,
     pub deprecated: Option<bool>,
     pub include_in_schema: bool,
     pub security: Vec<RouteSecurityRequirement>,
