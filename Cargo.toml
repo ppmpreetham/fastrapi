@@ -9,17 +9,14 @@ name = "fastrapi"
 crate-type = ["cdylib"]
 
 [dependencies]
+# Pure-Rust decoupling of pydantic-core: Rust-native request validation
+pydantic-core-kernel = { git = "https://github.com/ppmpreetham/pydantic", branch = "main" }
 pyo3 = { version = "0.29.0", features = [
   "extension-module",
   "py-clone",
   "multiple-pymethods",
-  "anyhow",
   "bytes",
-  "experimental-async",
-  "experimental-inspect",
   "parking_lot",
-  "anyhow",
-  "serde",
 ] }
 axum = { version = "0.8.8", features = ["ws"] }
 crossbeam-channel = "0.5"
@@ -47,7 +44,8 @@ tower-http = { version = "0.6.8", features = [
 ] }
 tower-sessions = { version = "0.15.0", features = ["signed"] } # for sessions
 tower = "0.5.3"
-cookie = { version = "0.18.1", features = ["private", "signed"] }
+cookie = { version = "0.18.1", features = ["private", "signed", "key-expansion"] }
+sha2 = "0.10"
 form_urlencoded = "1.2.2"
 globset = "0.4"
 notify = "8"
@@ -66,13 +64,14 @@ base64 = "0.22.1"
 uuid = { version = "1.23.4", features = ["v4"] }
 async-stream = "0.3.6"
 rsloop = { git = "https://github.com/RustedBytes/rsloop" }
-sonic-rs = "0.5.8"
+simd-json = "0.18.1"
 metrics-exporter-prometheus = "0.18.3"
 metrics = "0.24.6"
 axum-governor = "2.0.3"
 arc-swap = "1.9.2"
 strum = { version = "0.28.0", features = ["derive"] }
 pythonize = "0.29.0"
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "2.0.19"
 smart-default = "0.7.1"
 

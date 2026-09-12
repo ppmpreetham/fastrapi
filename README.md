@@ -331,14 +331,14 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 | Startup-time error detection                        | Almost everything deferred to runtime                          | Full signature + dependency analysis at decorator time                             | 🟢                                |
 | Deployment footprint                                | Heavy (uvicorn + many deps)                                    | tiny Rust binary                                                                   | 🟢                                |
 | Scaling to 10,000+ routes                           | Noticeable slowdown                                            | Stays fast thanks to hashmap lookup                                                | 🟢                                |
-| JSON serialization speed                            | slow                                                           | fast thanks to `sonic-rs`                                                          | 🟢                                |
+| JSON serialization speed                            | slow                                                           | fast thanks to `simd-json`                                                         | 🟢                                |
 | Prometheus metrics endpoint                         | No                                                             | Yes                                                                                | 🟢                                |
 | `app.mount()` / `StaticFiles`                       | Yes                                                            | Full support                                                                       | 🟢                                |
 | Exception Handlers (`@app.exception_handler`)       | Yes, global error catching                                     | Full support (MRO dispatch + status handlers, plus Axum `.fallback()` alias)       | 🟢                                |
-| `APIRouter` + `include_router()`                    | Yes, mature ecosystem                                          | Full support                                                                       | 🟡                                |
-| `StreamingResponse` / SSE                           | Yes, chunked streaming                                         | Full support (async & sync generators)                                             | 🟡                                |
-| Frontend serving support (React, Vue, Svelte, etc.) | Yes                                                            | Yes                                                                                | 🟡                                |
-| Global State (`request.app.state`)                  | Yes                                                            | Full support                                                                       | 🟡                                |
+| `APIRouter` + `include_router()`                    | Yes, mature ecosystem                                          | Full support                                                                       | 🟢                                |
+| `StreamingResponse` / SSE                           | Yes, chunked streaming                                         | Full support (async & sync generators)                                             | 🟢                                |
+| Frontend serving support (React, Vue, Svelte, etc.) | Yes                                                            | Yes                                                                                | 🟢                                |
+| Global State (`request.app.state`)                  | Yes                                                            | Full support                                                                       | 🟢                                |
 | `response_model=None` + raw Response return         | Fully supported                                                | serialization                                                                      | 🔴 (for now)                      |
 | Concurrency & resource safety                       | asyncio + threadpool                                           | Native Tokio + Rust memory & thread safety                                         | 🔴 (slow due to context switches) |
 
@@ -346,7 +346,6 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 
 Some advanced features are still in development like:
 
-- [ ] Support `yield`-based dependencies (setup/teardown, e.g. `def get_db(): yield db; db.close()`)
 - [ ] Add Jinja2Templates equivalent
 - [ ] Support arbitrary Starlette-style ASGI middleware classes
 - [ ] Logging middlewares
@@ -358,15 +357,6 @@ Some advanced features are still in development like:
 - [ ] Advanced dependency scopes (request vs function)
 - [ ] Rust to Python FFI helpers
 - [ ] FastAPI CLI equivalents (`fastapi dev` and `fastapi run`)
-- [ ] Per-parameter OpenAPI metadata completeness (per-param `deprecated`, `examples`, `include_in_schema`)
-- [ ] `UploadFile` with async `read`/`write`/`seek` and spooled-to-disk storage for large uploads
-- [ ] Background tasks attachable directly to every response class (`JSONResponse(..., background=task)`)
-- [ ] Automatic `HEAD` handling for `GET` routes (Starlette parity)
-- [ ] Starlette path convertors in route templates (`{p:path}`, typed convertors)
-- [ ] Persist `app.state` across requests
-- [ ] Support raw ASGI-protocol middleware
-- [ ] Broaden scalar coercion for `Union`/`Optional`/nested generics
-- [ ] Fix `response_model_by_alias` default
 
 ## Contributing
 
