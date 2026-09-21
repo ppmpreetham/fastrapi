@@ -1,3 +1,4 @@
+use crate::runtime::py_bridge;
 use crate::ffi::exceptions::PyHTTPException;
 use crate::http::form;
 use crate::routing::types::RequestInput;
@@ -606,7 +607,7 @@ impl PyRequest {
     ) -> PyResult<Bound<'py, PyAny>> {
         if let Some(bytes) = self._body.get() {
             let payload = PyBytes::new(py, bytes).into_any().unbind();
-            return rsloop::rust_async::future_into_py(py, async move { Ok(payload) });
+            return py_bridge::future_into_py(py, async move { Ok(payload) });
         }
 
         let scope_any: &Bound<'py, PyAny> = conn.scope.bind(py).as_any();
@@ -628,9 +629,9 @@ impl PyRequest {
         let content_length = extract_content_length(scope_any);
         let receive = conn.receive.clone();
         let body_cell = self._body.clone();
-        let locals = rsloop::rust_async::get_current_locals(py)?;
+        let locals = py_bridge::get_current_locals(py)?;
 
-        rsloop::rust_async::future_into_py_with_locals(py, locals.clone(), async move {
+        py_bridge::future_into_py_with_locals(py, locals.clone(), async move {
             let body: Arc<[u8]> = body_cell
                 .get_or_try_init(|| async {
                     let mut full_body = content_length.map_or_else(Vec::new, Vec::with_capacity);
@@ -638,7 +639,7 @@ impl PyRequest {
                     loop {
                         let fut = Python::attach(|py| -> PyResult<_> {
                             let awaitable = receive.bind(py).call0()?;
-                            rsloop::rust_async::into_future_with_locals(&locals, awaitable)
+                            py_bridge::into_future_with_locals(&locals, awaitable)
                         })?;
 
                         let message = fut.await?;
@@ -726,9 +727,9 @@ impl PyRequest {
         let conn_borrow = conn.borrow();
         let req_borrow = self_.borrow();
         let body_awaitable = req_borrow.read_body(py, &conn_borrow)?;
-        let locals = rsloop::rust_async::get_current_locals(py)?;
-        let body_fut = rsloop::rust_async::into_future_with_locals(&locals, body_awaitable)?;
-        rsloop::rust_async::future_into_py_with_locals(py, locals, async move {
+        let locals = py_bridge::get_current_locals(py)?;
+        let body_fut = py_bridge::into_future_with_locals(&locals, body_awaitable)?;
+        py_bridge::future_into_py_with_locals(py, locals, async move {
             let body_bytes: Py<PyAny> = body_fut.await?;
 
             Python::attach(|py| {
@@ -745,11 +746,11 @@ impl PyRequest {
         let req_borrow = self_.borrow();
         let body_awaitable = req_borrow.read_body(py, &conn_borrow)?;
         let content_type = form::content_type_of(py, conn_borrow.scope.bind(py));
-        let locals = rsloop::rust_async::get_current_locals(py)?;
-        let body_fut = rsloop::rust_async::into_future_with_locals(&locals, body_awaitable)?;
+        let locals = py_bridge::get_current_locals(py)?;
+        let body_fut = py_bridge::into_future_with_locals(&locals, body_awaitable)?;
         let body_cell = req_borrow._body.clone();
 
-        rsloop::rust_async::future_into_py_with_locals(py, locals, async move {
+        py_bridge::future_into_py_with_locals(py, locals, async move {
             let body_bytes: Py<PyAny> = body_fut.await?;
 
             let raw: Arc<[u8]> = body_cell.get().cloned().unwrap_or_else(|| {
@@ -774,11 +775,11 @@ impl PyRequest {
     }
 
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        rsloop::rust_async::future_into_py(py, async move { Ok(()) })
+        py_bridge::future_into_py(py, async move { Ok(()) })
     }
 
     fn is_disconnected<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        rsloop::rust_async::future_into_py(py, async move { Ok(false) })
+        py_bridge::future_into_py(py, async move { Ok(false) })
     }
 
     fn __repr__(self_: &Bound<'_, Self>) -> PyResult<String> {

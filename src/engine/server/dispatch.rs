@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use crate::{
     ffi::py_handlers::{ExecutionMode, run_py_handler, run_py_handler_no_request},
+    runtime::py_bridge,
     routing::{
         router::{FrozenRouter, RouteMatch, RoutePattern, RouteTarget},
         types::{HttpMethod, PathParamRange},
@@ -44,8 +45,9 @@ pub(crate) async fn dispatch_or_not_found(
         handler, pattern, ..
     } = target;
 
-    let tag = |resp: Response| {
-        if state.metrics_enabled {
+    let metrics_enabled = state.metrics_enabled;
+    let tag = move |resp: Response| {
+        if metrics_enabled {
             tag_with_pattern(resp, &pattern)
         } else {
             resp
@@ -58,17 +60,7 @@ pub(crate) async fn dispatch_or_not_found(
         return Ok(tag(StatusCode::TOO_MANY_REQUESTS.into_response()));
     }
 
-    if matches!(
-        handler.execution.execution_mode,
-        ExecutionMode::SyncNoArgs | ExecutionMode::AsyncNoArgs
-    ) {
-        return Ok(tag(run_py_handler_no_request(
-            state.async_loop,
-            state.sync_to_threadpool,
-            handler,
-        )
-        .await));
-    }
+    let async_loop = state.pick_loop();
 
     let path_base = path_str.as_ptr() as usize;
     let param_ranges: SmallVec<[PathParamRange; 4]> = params_iter
@@ -92,29 +84,46 @@ pub(crate) async fn dispatch_or_not_found(
         })
         .unwrap_or_default();
 
-    let (request_parts, body) = req.into_parts();
+    py_bridge::scoped_request_loop(
+        async_loop.clone(),
+        async move {
+            if matches!(
+                handler.execution.execution_mode,
+                ExecutionMode::SyncNoArgs | ExecutionMode::AsyncNoArgs
+            ) {
+                return Ok(tag(
+                    run_py_handler_no_request(async_loop, state.sync_to_threadpool, handler).await,
+                ));
+            }
 
-    let needs_body =
-        !handler.payload.body_param_indices.is_empty() || handler.payload.request_param.is_some();
+            let (request_parts, body) = req.into_parts();
 
-    let payload = if !needs_body {
-        None
-    } else {
-        match extract_payload(&request_parts.headers, body, &handler, &state).await {
-            Ok(p) => p.map(Arc::new),
-            Err(resp) => return Ok(resp),
-        }
-    };
+            let needs_body = !handler.payload.body_param_indices.is_empty()
+                || handler.payload.request_param.is_some();
 
-    Ok(tag(run_py_handler(
-        state.async_loop,
-        state.sync_to_threadpool,
-        handler,
-        request_parts,
-        param_ranges,
-        payload,
+            let payload = if !needs_body {
+                None
+            } else {
+                match extract_payload(&request_parts.headers, body, &handler, &state).await {
+                    Ok(p) => p.map(Arc::new),
+                    Err(resp) => return Ok(resp),
+                }
+            };
+
+            Ok(tag(
+                run_py_handler(
+                    async_loop,
+                    state.sync_to_threadpool,
+                    handler,
+                    request_parts,
+                    param_ranges,
+                    payload,
+                )
+                .await,
+            ))
+        },
     )
-    .await))
+    .await
 }
 
 #[inline]

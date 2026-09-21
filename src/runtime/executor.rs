@@ -1,3 +1,4 @@
+use crate::runtime::py_bridge;
 use crate::ffi::exceptions::PyHTTPException;
 use crate::ffi::pydantic;
 use crate::routing::dependencies::{self, DependencyExecutionError};
@@ -11,9 +12,7 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use smallvec::SmallVec;
-use std::future::Future;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tracing::error;
 
 use super::blocking;
@@ -235,18 +234,27 @@ pub(crate) async fn execute_teardowns_async(
     for task in teardowns.into_iter().rev() {
         if task.is_async {
             flush_sync_teardowns(&mut sync_batch).await;
-            let future_anext = Python::attach(|py| -> PyResult<_> {
-                let anext_coroutine = task
+            // Resume past the yield so post-yield cleanup runs; a clean generator
+            // ends with StopAsyncIteration (same protocol FastAPI's exit stack uses).
+            let resume = Python::attach(|py| -> PyResult<_> {
+                let coroutine = task
                     .generator
                     .bind(py)
                     .call_method0(pyo3::intern!(py, "__anext__"))?;
-                let locals = rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
-                rsloop::rust_async::into_future_with_locals(&locals, anext_coroutine)
+                py_bridge::schedule_task(py, async_loop, coroutine)
             });
-            match future_anext {
-                Ok(fut) => {
-                    _ = fut.await;
-                }
+            match resume {
+                Ok(fut) => match fut.await {
+                    Ok(_) => tracing::error!("Async generator dependency yielded twice!"),
+                    Err(e) => Python::attach(|py| {
+                        if !e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py) {
+                            tracing::error!(
+                                "Error during async generator dependency teardown: {}",
+                                e
+                            );
+                        }
+                    }),
+                },
                 Err(e) => {
                     tracing::error!("Failed to tear down async generator dependency: {}", e);
                 }
@@ -344,15 +352,14 @@ pub(crate) fn render_no_request_json_response(py: Python<'_>, handler: &RouteHan
     .unwrap_or_else(|err| python_error_to_response(py, err))
 }
 
+type PyTaskFuture = py_bridge::PyTaskFuture;
+
 #[inline(always)]
-async fn await_python_future<'a, F>(
+async fn await_python_future<'a>(
     handler: &RouteHandler,
     request_input: Option<&RequestInput<'a>>,
-    future_result: Result<F, Response>,
-) -> Result<Response, Response>
-where
-    F: Future<Output = PyResult<Py<PyAny>>> + Send + 'static,
-{
+    future_result: Result<PyTaskFuture, Response>,
+) -> Result<Response, Response> {
     let future = match future_result {
         Ok(f) => f,
         Err(r) => return Err(r),
@@ -370,17 +377,15 @@ pub(crate) fn schedule_python_coroutine(
     py: Python<'_>,
     async_loop: &Arc<Py<PyAny>>,
     coroutine: Bound<'_, PyAny>,
-) -> PyResult<std::pin::Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>>> {
-    let locals = rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
-    let future = rsloop::rust_async::into_future_with_locals(&locals, coroutine)?;
-    Ok(Box::pin(future))
+) -> PyResult<PyTaskFuture> {
+    py_bridge::schedule_task(py, async_loop, coroutine)
 }
 #[inline(always)]
 fn into_asyncio_future(
     py: Python<'_>,
     async_loop: &Arc<Py<PyAny>>,
     coroutine: Bound<'_, PyAny>,
-) -> Result<std::pin::Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>>, Response> {
+) -> Result<PyTaskFuture, Response> {
     schedule_python_coroutine(py, async_loop, coroutine)
         .map_err(|err| python_error_to_response(py, err))
 }
@@ -642,7 +647,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
     let setup = Python::attach(
         |py| -> Result<
             (
-                std::pin::Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>>,
+                PyTaskFuture,
                 Option<Py<crate::engine::background::PyBackgroundTasks>>,
             ),
             Response,

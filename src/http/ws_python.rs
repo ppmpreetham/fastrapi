@@ -1,3 +1,4 @@
+use crate::runtime::py_bridge;
 use bytes::{BufMut, Bytes};
 use parking_lot::Mutex as PlMutex;
 use pyo3::prelude::*;
@@ -70,12 +71,12 @@ pub struct PyWebSocket {
 #[pymethods]
 impl PyWebSocket {
     fn accept<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        rsloop::rust_async::future_into_py(py, async move { Ok(()) })
+        py_bridge::future_into_py(py, async move { Ok(()) })
     }
 
     fn send_text<'py>(&self, py: Python<'py>, data: String) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.tx.clone();
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             tx.send(WSMessage::Text(Bytes::from(data)))
                 .await
                 .map_err(|_| closed())?;
@@ -85,7 +86,7 @@ impl PyWebSocket {
 
     fn send_bytes<'py>(&self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.tx.clone();
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             tx.send(WSMessage::Binary(Bytes::from(data)))
                 .await
                 .map_err(|_| closed())?;
@@ -103,7 +104,7 @@ impl PyWebSocket {
         write_py_json(py, data, &mut writer)?;
         let payload = buf.freeze();
         let tx = self.tx.clone();
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             tx.send(WSMessage::Text(payload))
                 .await
                 .map_err(|_| closed())?;
@@ -113,7 +114,7 @@ impl PyWebSocket {
 
     fn receive_text<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let rx = self.rx.clone();
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             match next_message(rx).await? {
                 WSMessage::Text(bytes) => String::from_utf8(bytes.to_vec())
                     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string())),
@@ -125,7 +126,7 @@ impl PyWebSocket {
 
     fn receive_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let rx = self.rx.clone();
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             match next_message(rx).await? {
                 WSMessage::Binary(data) => Ok(data.to_vec()),
                 WSMessage::Text(_) => Err(expected("binary", "text")),
@@ -136,7 +137,7 @@ impl PyWebSocket {
 
     fn receive_json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let rx = self.rx.clone();
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             match next_message(rx).await? {
                 WSMessage::Text(bytes) => parse_json_bytes(&bytes),
                 WSMessage::Binary(_) => Err(expected("text", "binary")),
@@ -148,7 +149,7 @@ impl PyWebSocket {
     #[pyo3(signature = (code = 1000))]
     fn close<'py>(&self, py: Python<'py>, code: u16) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.tx.clone();
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             tx.send(WSMessage::Close(code))
                 .await
                 .map_err(|_| closed())?;
@@ -250,7 +251,7 @@ impl WSIterator {
         let ws = self.ws.clone();
         let json = self.json;
 
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             let rx = Python::attach(|py| ws.borrow(py).rx.clone());
             match next_message(rx).await {
                 Ok(WSMessage::Text(bytes)) if !json => {

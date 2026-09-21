@@ -342,6 +342,7 @@ If you benchmark a debug build, Rust-side overhead will be much higher and the n
 | `response_model=None` + raw Response return         | Fully supported                                                | serialization                                                                      | 🔴 (for now)                      |
 | Concurrency & resource safety                       | asyncio + threadpool                                           | Native Tokio + Rust memory & thread safety                                         | 🔴 (slow due to context switches) |
 
+
 ## Current Limitations
 
 Some advanced features are still in development like:

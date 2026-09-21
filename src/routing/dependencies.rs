@@ -1,3 +1,4 @@
+use crate::runtime::py_bridge;
 use super::params;
 use super::security::PySecurityScopes;
 use super::types::{ParsedParameter, RequestInput};
@@ -631,11 +632,8 @@ pub async fn execute_dependencies(
 
                 let anext_coroutine = generator.call_method0(intern!(py, "__anext__"))?;
 
-                let locals = rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
-                Ok((
-                    generator.unbind(),
-                    rsloop::rust_async::into_future_with_locals(&locals, anext_coroutine)?,
-                ))
+                let future = py_bridge::schedule_task(py, async_loop, anext_coroutine)?;
+                Ok((generator.unbind(), future))
             })?;
 
             let (generator, future_anext) = future;
@@ -676,10 +674,7 @@ pub async fn execute_dependencies(
                 let bound_func = dep.func.bind(py);
                 let bound_kwargs = py_kwargs.bind(py);
                 let coroutine = bound_func.call((), Some(bound_kwargs))?;
-                let locals = rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
-                Ok(rsloop::rust_async::into_future_with_locals(
-                    &locals, coroutine,
-                )?)
+                Ok(py_bridge::schedule_task(py, async_loop, coroutine)?)
             })?;
             let outcome = future.await;
 

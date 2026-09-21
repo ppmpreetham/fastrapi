@@ -1,4 +1,4 @@
-# benchmarks/compare_rsloop_bridge.py
+# benchmarks/async bridge sanity check
 from fastrapi import FastrAPI
 import fastrapi.asyncio as asyncio
 

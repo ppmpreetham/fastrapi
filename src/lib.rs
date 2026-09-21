@@ -53,16 +53,16 @@ pub use routing::security::{
 pub use staticfiles::PyStaticFiles;
 pub use websocket::PyWebSocket;
 
-fn register_rsloop_asyncio_alias(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn register_asyncio_alias(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
-    let rsloop_module = py.import("rsloop")?;
-    m.add("asyncio", &rsloop_module)?;
+    let asyncio = py.import("asyncio")?;
+    m.add("asyncio", &asyncio)?;
 
     let sys_modules = py
         .import("sys")?
         .getattr("modules")?
         .cast_into::<PyDict>()?;
-    sys_modules.set_item("fastrapi.asyncio", rsloop_module)?;
+    sys_modules.set_item("fastrapi.asyncio", asyncio)?;
     Ok(())
 }
 
@@ -294,7 +294,7 @@ mod fastrapi {
 
         crate::status::create_status_submodule(m)?;
         crate::pydantic::register_pydantic_integration(m)?;
-        super::register_rsloop_asyncio_alias(m)?;
+        super::register_asyncio_alias(m)?;
         // fastrapi.jsonable_encoder + fastrapi.encoders.jsonable_encoder
         crate::ffi::encoders::register(m)?;
         m.add_function(wrap_pyfunction!(

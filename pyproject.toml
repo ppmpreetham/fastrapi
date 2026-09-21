@@ -33,7 +33,6 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.9.0",
-    "rsloop>=0.1.15",
 ]
 
 # If you have optional dependencies, uncomment and adjust this section
@@ -52,6 +51,10 @@ repository = "https://github.com/ppmpreetham/fastrapi.git"
 # If you have CLI scripts, add them here
 # [project.scripts]
 # fastrapi-cli = "fastrapi:main_cli"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
 
 [tool.maturin]
 bindings = "pyo3"

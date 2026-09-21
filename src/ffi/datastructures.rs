@@ -1,3 +1,4 @@
+use crate::runtime::py_bridge;
 use bytes::{BufMut, Bytes, BytesMut};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes};
@@ -86,7 +87,7 @@ impl PyUploadFile {
         let size = size.unwrap_or(-1);
         if let Some(file) = &self.file_obj {
             let file = file.clone_ref(py);
-            return rsloop::rust_async::future_into_py(py, async move {
+            return py_bridge::future_into_py(py, async move {
                 Python::attach(|py| {
                     file.bind(py)
                         .call_method1(pyo3::intern!(py, "read"), (size,))
@@ -104,7 +105,7 @@ impl PyUploadFile {
         let data = self.file_content.slice(start..end);
         self.cursor = end;
 
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             Python::attach(|py| Ok(PyBytes::new(py, &data).unbind()))
         })
     }
@@ -112,7 +113,7 @@ impl PyUploadFile {
     fn write<'py>(&mut self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
         if let Some(file) = &self.file_obj {
             let file = file.clone_ref(py);
-            return rsloop::rust_async::future_into_py(py, async move {
+            return py_bridge::future_into_py(py, async move {
                 Python::attach(|py| {
                     file.bind(py)
                         .call_method1(pyo3::intern!(py, "write"), (data,))
@@ -131,7 +132,7 @@ impl PyUploadFile {
                     self.size = Some(combined.len() as u64);
                     self.file_content = Bytes::new();
                     self.file_obj = Some(file);
-                    return rsloop::rust_async::future_into_py(py, async move { Ok(()) });
+                    return py_bridge::future_into_py(py, async move { Ok(()) });
                 }
                 Err(err) => {
                     err.print(py);
@@ -145,13 +146,13 @@ impl PyUploadFile {
         self.file_content = buf.freeze();
         self.size = Some(self.file_content.len() as u64);
 
-        rsloop::rust_async::future_into_py(py, async move { Ok(()) })
+        py_bridge::future_into_py(py, async move { Ok(()) })
     }
 
     fn seek<'py>(&mut self, py: Python<'py>, offset: i64) -> PyResult<Bound<'py, PyAny>> {
         if let Some(file) = &self.file_obj {
             let file = file.clone_ref(py);
-            return rsloop::rust_async::future_into_py(py, async move {
+            return py_bridge::future_into_py(py, async move {
                 Python::attach(|py| {
                     file.bind(py)
                         .call_method1(pyo3::intern!(py, "seek"), (offset,))
@@ -160,13 +161,13 @@ impl PyUploadFile {
             });
         }
         self.cursor = offset as usize;
-        rsloop::rust_async::future_into_py(py, async move { Ok(()) })
+        py_bridge::future_into_py(py, async move { Ok(()) })
     }
 
     fn close<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if let Some(file) = &self.file_obj {
             let file = file.clone_ref(py);
-            return rsloop::rust_async::future_into_py(py, async move {
+            return py_bridge::future_into_py(py, async move {
                 Python::attach(|py| {
                     file.bind(py)
                         .call_method0(pyo3::intern!(py, "close"))
@@ -174,6 +175,6 @@ impl PyUploadFile {
                 })
             });
         }
-        rsloop::rust_async::future_into_py(py, async move { Ok(()) })
+        py_bridge::future_into_py(py, async move { Ok(()) })
     }
 }

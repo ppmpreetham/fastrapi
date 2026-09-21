@@ -37,6 +37,7 @@ use crate::{
         ExecutionMode, render_no_request_json_response, render_no_request_response,
         run_py_handler_no_request,
     },
+    runtime::py_bridge,
     utils::{openapi::build_openapi_spec, py_any_to_json},
 };
 
@@ -130,7 +131,7 @@ pub(crate) fn build_router(
     let app = Router::new();
     let app = register_routes(app, py, &app_state, app_config, &flat, frozen_router);
     let app = register_docs_endpoints(app, py, app_config, docs_url.as_deref(), &openapi_url);
-    middleware_stack::build_stack(app, app_config, &middlewares, app_state.async_loop)
+    middleware_stack::build_stack(app, app_config, &middlewares, app_state.pick_loop())
 }
 
 fn register_routes(
@@ -185,7 +186,7 @@ fn register_routes(
             deps: Arc::new(ws.deps.to_vec()),
             template: Arc::from(ws.path.as_str()),
             param_names: crate::http::websocket::ws_param_names(&ws.path),
-            async_loop: app_state.async_loop.clone(),
+            async_loop: app_state.pick_loop(),
         });
         let route = Router::new()
             .route(&ws.path, axum::routing::get(ws_handler))
@@ -414,7 +415,11 @@ fn no_request_method_router(
             let handler = handler.clone();
             let state = state.clone();
             async move {
-                run_py_handler_no_request(state.async_loop, state.sync_to_threadpool, handler).await
+                let async_loop = state.pick_loop();
+                py_bridge::scoped_request_loop(async_loop.clone(), async move {
+                    run_py_handler_no_request(async_loop, state.sync_to_threadpool, handler).await
+                })
+                .await
             }
         }
     })

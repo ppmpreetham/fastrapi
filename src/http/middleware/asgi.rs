@@ -1,3 +1,4 @@
+use crate::runtime::py_bridge;
 use axum::{
     body::{Body, to_bytes},
     extract::Request,
@@ -24,7 +25,7 @@ const DOWNSTREAM_KEY: &str = "_fastrapi_downstream";
 pub struct PyDownstreamASGI {
     next: Next,
     head: Parts,
-    locals: rsloop::rust_async::TaskLocals,
+    locals: py_bridge::TaskLocals,
 }
 
 #[pyclass(
@@ -71,7 +72,7 @@ impl PyScopeDownstream {
             .and_then(|item| item.cast::<PyDownstreamASGI>().ok().cloned());
 
         let Some(handle) = handle else {
-            return rsloop::rust_async::future_into_py(py, async move {
+            return py_bridge::future_into_py(py, async move {
                 Err::<Py<PyAny>, _>(PyRuntimeError::new_err(
                     "asgi middleware called the downstream app with a scope that has no request attached",
                 ))
@@ -87,7 +88,7 @@ impl PyScopeDownstream {
         let receive = receive.clone().unbind();
         let send = send.clone().unbind();
 
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             run_downstream(downstream, receive, send).await
         })
     }
@@ -110,7 +111,7 @@ async fn run_downstream(
 
 /// drives the middleware-supplied `receive` callable and reassembles the body.
 async fn drain_receive(
-    locals: &rsloop::rust_async::TaskLocals,
+    locals: &py_bridge::TaskLocals,
     receive: &Py<PyAny>,
 ) -> PyResult<bytes::Bytes> {
     let mut buf = bytes::BytesMut::new();
@@ -118,7 +119,7 @@ async fn drain_receive(
         let msg: Py<PyAny> = {
             let fut = Python::attach(|py| -> PyResult<_> {
                 let awaitable = receive.bind(py).call0()?;
-                rsloop::rust_async::into_future_with_locals(locals, awaitable)
+                py_bridge::into_future_with_locals(locals, awaitable)
             })?;
             fut.await?
         };
@@ -173,7 +174,7 @@ fn python_bytes(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<bytes::Bytes> 
 
 /// emits `http.response.start` + `http.response.body` through the middleware's send.
 async fn send_response(
-    locals: &rsloop::rust_async::TaskLocals,
+    locals: &py_bridge::TaskLocals,
     send: &Py<PyAny>,
     resp: Response,
 ) -> PyResult<()> {
@@ -208,13 +209,13 @@ async fn send_response(
 
 /// awaits one `send(message)` call on the python loop.
 async fn asgi_call(
-    locals: &rsloop::rust_async::TaskLocals,
+    locals: &py_bridge::TaskLocals,
     target: &Py<PyAny>,
     message: Py<PyAny>,
 ) -> PyResult<()> {
     let fut = Python::attach(|py| -> PyResult<_> {
         let awaitable = target.bind(py).call1((message.bind(py),))?;
-        rsloop::rust_async::into_future_with_locals(locals, awaitable)
+        py_bridge::into_future_with_locals(locals, awaitable)
     })?;
     fut.await?;
     Ok(())
@@ -224,7 +225,7 @@ async fn asgi_call(
 impl PyAsgiReceive {
     fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let body = self.body.clone();
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             let mut guard = body.lock().await;
             Python::attach(|py| {
                 let msg = PyDict::new(py);
@@ -253,7 +254,7 @@ impl PyAsgiSend {
     ) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.tx.clone();
         let message = message.clone().unbind();
-        rsloop::rust_async::future_into_py(py, async move {
+        py_bridge::future_into_py(py, async move {
             tx.send(message)
                 .await
                 .map_err(|_| PyRuntimeError::new_err("asgi send channel closed"))
@@ -281,14 +282,14 @@ pub(crate) async fn run_asgi_request(
     let close_tx = send_tx.clone();
 
     let outcome = Python::attach(|py| -> PyResult<_> {
-        let locals = rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
+        let locals = py_bridge::TaskLocals::new(async_loop.bind(py).clone());
         let scope = build_scope(py, &parts)?;
         let handle = Py::new(
             py,
             PyDownstreamASGI {
                 next,
                 head: parts,
-                locals: locals.clone(),
+                locals,
             },
         )?
         .into_any();
@@ -308,7 +309,7 @@ pub(crate) async fn run_asgi_request(
         let coro = instance
             .bind(py)
             .call1((scope.bind(py), receive.bind(py), send.bind(py)))?;
-        rsloop::rust_async::into_future_with_locals(&locals, coro)
+        py_bridge::schedule_task(py, &async_loop, coro)
     });
 
     match outcome {

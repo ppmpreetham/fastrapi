@@ -1,7 +1,7 @@
-use crate::ffi::py_handlers::schedule_python_coroutine;
+use crate::runtime::py_bridge;
 use crate::routing::dependencies::{self, DependencyExecutionError};
 use crate::routing::types::PathParamRange;
-use crate::runtime::executor::build_request_input_from_parts;
+use crate::runtime::executor::{build_request_input_from_parts, schedule_python_coroutine};
 use axum::{extract::State, response::IntoResponse};
 use bytes::Bytes;
 use fastwebsockets::{FragmentCollector, Frame, OpCode, Payload, upgrade};
@@ -9,8 +9,6 @@ use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::error;
@@ -93,7 +91,7 @@ async fn handle_connection(
             .bind(py)
             .call((py_ws_obj.clone_ref(py),), Some(&kwargs))?;
 
-        let fut: Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>> =
+        let fut: py_bridge::PyTaskFuture =
             schedule_python_coroutine(py, &route.async_loop, coroutine)?;
 
         Ok::<_, PyErr>((py_ws_obj, fut))

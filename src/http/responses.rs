@@ -1,3 +1,4 @@
+use crate::runtime::py_bridge;
 use crate::utils::{py_json_response_with_status, py_to_response};
 use axum::{
     body::Body,
@@ -515,10 +516,10 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         };
 
-    let locals = match rsloop::rust_async::get_current_locals(py) {
-        Ok(l) => l,
-        Err(e) => {
-            e.print(py);
+    let request_loop = match py_bridge::request_loop() {
+        Some(l) => l,
+        None => {
+            error!("StreamingResponse scheduled outside a request: no request loop");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
@@ -532,17 +533,21 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
         if is_async {
             loop {
                 let fut = Python::attach(|py| {
-                    match content.bind(py).call_method0(intern!(py, "__anext__")) {
-                        Ok(awaitable) => {
-                            rsloop::rust_async::into_future_with_locals(&locals, awaitable).ok()
-                        }
+                    let awaitable = match content.bind(py).call_method0(intern!(py, "__anext__")) {
+                        Ok(a) => Some(a),
                         Err(e) => {
-                            if !e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py) {
+                            if !e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py)
+                                && !e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py)
+                            {
                                 error!("StreamingResponse async error: {:?}", e);
                             }
                             None
                         }
-                    }
+                    };
+                    awaitable.and_then(|a| {
+                        let locals = pyo3_async_runtimes::TaskLocals::new(request_loop.bind(py).clone());
+                        py_bridge::into_future_with_locals(&locals, a).ok()
+                    })
                 });
                 let Some(fut) = fut else { break; };
                 match fut.await {

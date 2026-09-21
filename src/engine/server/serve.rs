@@ -6,14 +6,47 @@ use crate::engine::types::FastrAPI;
 use axum::serve::ListenerExt;
 use pyo3::{exceptions::PyRuntimeError, intern, prelude::*};
 use std::{path::PathBuf, sync::Arc};
-use tracing::{Level, error, info};
+use tracing::{error, info};
 
-use crate::globals::PYTHON_RUNTIME;
+use crate::globals::{AsyncLoopPool, PYTHON_RUNTIME, set_async_loop_pool, set_serve_app};
+use crate::runtime::py_bridge;
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigint = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
+        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+        tokio::select! {
+            _ = sigint.recv() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_c, ctrl_break};
+        let mut ctrl_c = ctrl_c().expect("Failed to install Ctrl+C handler");
+        let mut ctrl_break = ctrl_break().expect("Failed to install Ctrl+Break handler");
+        tokio::select! {
+            _ = ctrl_c.recv() => {}
+            _ = ctrl_break.recv() => {}
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    }
+
+    info!("Shutting down...");
+}
 
 #[derive(Clone)]
 pub struct AppState {
     pub rt_handle: tokio::runtime::Handle,
     pub async_loop: Arc<Py<PyAny>>,
+    pub pool: Option<Arc<AsyncLoopPool>>,
     pub sync_to_threadpool: bool,
     pub max_body_size: Option<usize>,
     pub max_field_size: Option<usize>,
@@ -23,30 +56,45 @@ pub struct AppState {
     pub metrics_enabled: bool,
 }
 
+impl AppState {
+    #[inline]
+    pub fn pick_loop(&self) -> Arc<Py<PyAny>> {
+        match &self.pool {
+            Some(pool) => Python::attach(|py| Arc::new(pool.pick(py))),
+            None => self.async_loop.clone(),
+        }
+    }
+}
+
 pub fn serve(
     py: Python<'_>,
     host: Option<String>,
     port: Option<u16>,
     app: Py<FastrAPI>,
 ) -> PyResult<()> {
+    let default_filter = "info";
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
     tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)
+        .with_env_filter(tracing_subscriber::EnvFilter::try_new(filter).unwrap_or_default())
         .with_target(false)
         .try_init()
         .ok();
 
     let host: String = host.unwrap_or_else(|| "127.0.0.1".to_string());
     let port = port.unwrap_or(8000);
+    py_bridge::init_with_fastrapi_runtime();
     let rt_handle = PYTHON_RUNTIME.handle().clone();
-    let async_loop = Arc::new(start_background_asyncio_loop(py)?);
-    crate::globals::set_async_loop((*async_loop).clone_ref(py));
-    let async_loop_for_shutdown = async_loop.clone();
-    crate::globals::set_serve_app(app.clone_ref(py).into_any());
+    let pool = Arc::new(start_background_asyncio_loop(py)?);
+    set_async_loop_pool(pool.clone());
+    let async_loop = Python::attach(|py| Arc::new(pool.pick(py)));
+    let pool_for_shutdown = pool.clone();
+    set_serve_app(app.clone_ref(py).into_any());
     let app_bound = app.bind(py);
     let app_config = app_bound.borrow();
     let app_state = AppState {
         rt_handle,
         async_loop,
+        pool: Some(pool),
         sync_to_threadpool: app_config.sync_to_threadpool,
         max_body_size: app_config.max_body_size,
         max_field_size: app_config.max_field_size,
@@ -117,13 +165,7 @@ pub fn serve(
             let server = axum::serve(listener, service);
 
             server
-                .with_graceful_shutdown(async {
-                    tokio::signal::ctrl_c()
-                        .await
-                        .expect("Failed to install Ctrl+C handler");
-
-                    info!("Shutting down...");
-                })
+                .with_graceful_shutdown(wait_for_shutdown_signal())
                 .await
                 .map_err(|err| err.to_string())
         });
@@ -132,7 +174,7 @@ pub fn serve(
             error!("Server error: {}", err);
         }
 
-        Python::attach(|py| stop_background_asyncio_loop(py, &async_loop_for_shutdown));
+        Python::attach(|py| stop_background_asyncio_loop(py, &pool_for_shutdown));
 
         Python::attach(|py| {
             if let Err(err) = run_shutdown_phase(py, entered_lifespan, on_shutdown) {

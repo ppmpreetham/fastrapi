@@ -1,5 +1,4 @@
-use std::future::Future;
-use std::pin::Pin;
+use crate::runtime::py_bridge;
 use std::sync::Arc;
 
 use axum::{
@@ -132,7 +131,7 @@ fn py_to_response(py: Python<'_>, value: &Bound<'_, PyAny>) -> Response {
 
 enum Outcome {
     Respond(Response),
-    Await(Pin<Box<dyn Future<Output = Result<Py<PyAny>, PyErr>> + Send>>),
+    Await(py_bridge::PyTaskFuture),
 }
 
 pub(crate) async fn run_call_next_stack(
@@ -242,7 +241,6 @@ fn invoke(
     .into_any()
     .unbind();
 
-    let locals = rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
     let bridged = async move {
         let response = downstream.await.map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("call_next pipeline terminated")
@@ -251,7 +249,8 @@ fn invoke(
         let body_bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
         Python::attach(|py| Ok(parts_to_py(py, parts, body_bytes)?.unbind()))
     };
-    let future = rsloop::rust_async::future_into_py_with_locals(py, locals.clone(), bridged)
+    let locals = pyo3_async_runtimes::TaskLocals::new(async_loop.bind(py).clone());
+    let future = py_bridge::future_into_py_with_locals(py, locals, bridged)
         .map_err(fail)?
         .unbind();
 
@@ -267,8 +266,8 @@ fn invoke(
         return Err(middleware_error());
     }
     if mw.is_async {
-        let fut = rsloop::rust_async::into_future_with_locals(&locals, result).map_err(fail)?;
-        return Ok(Outcome::Await(Box::pin(fut)));
+        let fut = py_bridge::schedule_task(py, async_loop, result).map_err(fail)?;
+        return Ok(Outcome::Await(fut));
     }
 
     Ok(Outcome::Respond(py_to_response(py, &result)))

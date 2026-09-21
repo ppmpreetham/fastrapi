@@ -281,7 +281,7 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> Option<Py<PyAny>> {
             }
             dict.unbind().into_any()
         }
-        Value::Date(d) => PyDate::new(py, d.year as i32, d.month as u8, d.day as u8)
+        Value::Date(d) => PyDate::new(py, d.year as i32, d.month, d.day)
             .ok()?
             .unbind()
             .into_any(),
@@ -293,12 +293,12 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> Option<Py<PyAny>> {
             PyDateTime::new(
                 py,
                 dt.date.year as i32,
-                dt.date.month as u8,
-                dt.date.day as u8,
-                dt.time.hour as u8,
-                dt.time.minute as u8,
-                dt.time.second as u8,
-                dt.time.microsecond as u32,
+                dt.date.month,
+                dt.date.day,
+                dt.time.hour,
+                dt.time.minute,
+                dt.time.second,
+                dt.time.microsecond,
                 tz.as_ref(),
             )
             .ok()?
@@ -312,10 +312,10 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> Option<Py<PyAny>> {
             };
             PyTime::new(
                 py,
-                t.hour as u8,
-                t.minute as u8,
-                t.second as u8,
-                t.microsecond as u32,
+                t.hour,
+                t.minute,
+                t.second,
+                t.microsecond,
                 tz.as_ref(),
             )
             .ok()?

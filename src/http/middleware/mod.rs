@@ -1,3 +1,4 @@
+use crate::runtime::py_bridge;
 use crate::http::responses::convert_auto_response;
 use crate::runtime::blocking::run_python;
 use axum::{
@@ -12,8 +13,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyIterator, PyList, PyString, PyType};
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::future::Future;
-use std::pin::Pin;
 use std::str;
 use std::sync::Arc;
 use tracing::error;
@@ -354,7 +353,7 @@ impl PyLazyHeaders {
 enum Step {
     Continue,
     Respond(Response),
-    Await(Pin<Box<dyn Future<Output = Result<Py<PyAny>, PyErr>> + Send>>),
+    Await(py_bridge::PyTaskFuture),
 }
 
 pub struct PreparedMiddlewares {
@@ -454,10 +453,8 @@ pub async fn execute_py_middlewares(
                         return Ok(Step::Continue);
                     }
                     if mw.is_async {
-                        let locals =
-                            rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
-                        let fut = rsloop::rust_async::into_future_with_locals(&locals, result)?;
-                        return Ok(Step::Await(Box::pin(fut)));
+                        let fut = py_bridge::schedule_task(py, &async_loop, result)?;
+                        return Ok(Step::Await(fut));
                     }
                     Ok(Step::Respond(convert_auto_response(py, &result)))
                 });

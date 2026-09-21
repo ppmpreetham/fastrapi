@@ -1,4 +1,5 @@
-use crate::runtime::blocking;
+use crate::globals::{async_loop_pool, spawn};
+use crate::runtime::py_bridge;
 use parking_lot::Mutex;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -52,8 +53,7 @@ fn spawn_tasks(async_loop: &Arc<Py<PyAny>>, tasks: Vec<Task>) -> Vec<TaskFuture>
     }
     let async_loop = async_loop.clone();
     vec![Box::pin(async move {
-        let coroutine_futs: Vec<TaskFuture> = blocking::run_python(move |py| {
-            let locals = rsloop::rust_async::TaskLocals::new(async_loop.bind(py).clone());
+        let coroutine_futs: Vec<TaskFuture> = Python::attach(move |py| {
             let mut futs: Vec<TaskFuture> = Vec::new();
             for (func, args, kwargs) in tasks {
                 let Ok(args_tuple) = PyTuple::new(py, &args) else {
@@ -69,13 +69,10 @@ fn spawn_tasks(async_loop: &Arc<Py<PyAny>>, tasks: Vec<Task>) -> Vec<TaskFuture>
                 };
                 match call_result {
                     Ok(result) => {
-                        if !result.bind(py).hasattr("__await__").unwrap_or(false) {
+                        if !result.bind(py).hasattr(intern!(py, "__await__")).unwrap_or(false) {
                             continue;
                         }
-                        match rsloop::rust_async::into_future_with_locals(
-                            &locals,
-                            result.into_bound(py),
-                        ) {
+                        match py_bridge::schedule_task(py, &async_loop, result.into_bound(py)) {
                             Ok(fut) => futs.push(Box::pin(async move {
                                 if let Err(e) = fut.await {
                                     error!("Async background task error: {}", e);
@@ -93,9 +90,7 @@ fn spawn_tasks(async_loop: &Arc<Py<PyAny>>, tasks: Vec<Task>) -> Vec<TaskFuture>
                 }
             }
             futs
-        })
-        .await
-        .unwrap_or_default();
+        });
 
         for fut in coroutine_futs {
             fut.await;
@@ -117,13 +112,13 @@ pub fn spawn_response_background(py: Python<'_>, result: &Bound<'_, PyAny>) {
     if background.is_none() {
         return;
     }
-    let Some(loop_) = crate::globals::async_loop() else {
+    let Some(pool) = async_loop_pool() else {
         return;
     };
 
     let background = background.unbind();
-    let async_loop = Arc::new(loop_.clone_ref(py));
-    crate::globals::spawn(async move {
+    let async_loop = Python::attach(|py| Arc::new(pool.pick(py)));
+    spawn(async move {
         let futures = Python::attach(|py| match background.bind(py).cast::<PyBackgroundTasks>() {
             Ok(tasks) => tasks.borrow().execute_all(&async_loop),
             Err(_) => spawn_tasks(

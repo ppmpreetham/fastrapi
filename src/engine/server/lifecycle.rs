@@ -1,40 +1,61 @@
 use crate::engine::types::FastrAPI;
+use crate::globals::AsyncLoopPool;
 use pyo3::{exceptions::PyTypeError, prelude::*};
-use std::sync::Arc;
 use tracing::error;
+
+crate::cached_py_import!(ASYNCIO_MODULE, "asyncio");
 
 pub(crate) struct EnteredLifespan {
     manager: Py<PyAny>,
     event_loop: Py<PyAny>,
 }
 
-pub(crate) fn start_background_asyncio_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let loop_module = py.import("rsloop").or_else(|_| py.import("asyncio"))?;
-    let event_loop = loop_module.call_method0("new_event_loop")?.unbind();
-    let loop_for_thread = event_loop.clone_ref(py);
-
-    std::thread::spawn(move || {
-        Python::attach(|py| {
-            _ = py.import("rsloop");
-            let Ok(asyncio) = py.import("asyncio") else {
-                return;
-            };
-            let event_loop = loop_for_thread.bind(py);
-            _ = asyncio.call_method1("set_event_loop", (event_loop,));
-            if let Err(err) = event_loop.call_method0("run_forever") {
-                log_python_error("python async loop stopped with error", err);
-            }
-            _ = event_loop.call_method0("close");
-        });
-    });
-
-    Ok(event_loop)
+pub(crate) fn start_background_asyncio_loop(py: Python<'_>) -> PyResult<AsyncLoopPool> {
+    let count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let mut loops = Vec::with_capacity(count);
+    for _ in 0..count {
+        let event_loop = create_event_loop(py)?;
+        spawn_loop_thread(py, &event_loop)?;
+        loops.push(event_loop);
+    }
+    Ok(AsyncLoopPool::new(loops))
 }
 
-pub(crate) fn stop_background_asyncio_loop(py: Python<'_>, event_loop: &Arc<Py<PyAny>>) {
-    let event_loop = event_loop.bind(py);
-    if let Ok(stop) = event_loop.getattr("stop") {
-        _ = event_loop.call_method1("call_soon_threadsafe", (stop,));
+pub(crate) fn create_event_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let asyncio = ASYNCIO_MODULE.get(py)?;
+    let event_loop = asyncio.call_method0("new_event_loop")?;
+    asyncio.call_method1("set_event_loop", (&event_loop,))?;
+    Ok(event_loop.unbind())
+}
+
+fn spawn_loop_thread(py: Python<'_>, event_loop: &Py<PyAny>) -> PyResult<()> {
+    let event_loop = event_loop.clone_ref(py);
+    std::thread::Builder::new()
+        .name("async-loop".into())
+        .spawn(move || {
+            Python::attach(|py| {
+                let event_loop = event_loop.bind(py).clone();
+                if let Ok(asyncio) = ASYNCIO_MODULE.get(py) {
+                    _ = asyncio.call_method1("set_event_loop", (&event_loop,));
+                }
+                if let Err(err) = event_loop.call_method0("run_forever") {
+                    log_python_error("python async loop stopped with error", err);
+                }
+                _ = event_loop.call_method0("close");
+            });
+        })?;
+    Ok(())
+}
+
+pub(crate) fn stop_background_asyncio_loop(py: Python<'_>, pool: &AsyncLoopPool) {
+    for event_loop in pool.loops() {
+        if let Ok(stop) = event_loop.bind(py).getattr("stop") {
+            _ = event_loop
+                .bind(py)
+                .call_method1("call_soon_threadsafe", (stop,));
+        }
     }
 }
 
@@ -155,13 +176,6 @@ pub(crate) fn exit_lifespan(py: Python<'_>, entered_lifespan: EnteredLifespan) -
     result
 }
 
-pub(crate) fn create_event_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let loop_module = py.import("rsloop").or_else(|_| py.import("asyncio"))?;
-    let event_loop = loop_module.call_method0("new_event_loop")?;
-    py.import("asyncio")?
-        .call_method1("set_event_loop", (&event_loop,))?;
-    Ok(event_loop.unbind())
-}
 pub(crate) fn run_awaitable_in_new_loop(
     py: Python<'_>,
     awaitable: Bound<'_, PyAny>,
@@ -174,14 +188,11 @@ pub(crate) fn run_awaitable_in_new_loop(
 }
 
 pub(crate) fn run_awaitable_in_loop(
-    py: Python<'_>,
+    _py: Python<'_>,
     event_loop: &Bound<'_, PyAny>,
     awaitable: Bound<'_, PyAny>,
 ) -> PyResult<()> {
-    let asyncio = py.import("asyncio")?;
-    asyncio.call_method1("set_event_loop", (event_loop,))?;
     event_loop.call_method1("run_until_complete", (awaitable,))?;
-
     Ok(())
 }
 
@@ -192,7 +203,7 @@ pub(crate) fn shutdown_async_generators(event_loop: &Bound<'_, PyAny>) {
 }
 
 pub(crate) fn close_event_loop(py: Python<'_>, event_loop: &Bound<'_, PyAny>) {
-    if let Ok(asyncio) = py.import("asyncio") {
+    if let Ok(asyncio) = ASYNCIO_MODULE.get(py) {
         _ = asyncio.call_method1("set_event_loop", (py.None(),));
     }
 
