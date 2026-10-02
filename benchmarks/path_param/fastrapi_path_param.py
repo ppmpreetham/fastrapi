@@ -1,3 +1,5 @@
+import os
+
 from fastrapi import FastrAPI
 
 app = FastrAPI()
@@ -9,4 +11,4 @@ def hello(name: str):
 
 
 if __name__ == "__main__":
-    app.serve("127.0.0.1", 8000)
+    app.serve(os.getenv("BENCHMARK_HOST", "127.0.0.1"), int(os.getenv("BENCHMARK_PORT", "8000")))

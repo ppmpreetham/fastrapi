@@ -1,3 +1,5 @@
+import os
+
 from pydantic import BaseModel
 
 from fastrapi import FastrAPI
@@ -18,4 +20,4 @@ def create(payload: Payload) -> Payload:
 
 
 if __name__ == "__main__":
-    app.serve("127.0.0.1", 8000)
+    app.serve(os.getenv("BENCHMARK_HOST", "127.0.0.1"), int(os.getenv("BENCHMARK_PORT", "8000")))
