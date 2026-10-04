@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyModule;
+use pyo3::Bound;
 
 pub struct LazyPyModule {
     module_name: &'static str,
@@ -8,6 +9,7 @@ pub struct LazyPyModule {
 }
 
 impl LazyPyModule {
+    #[must_use]
     pub const fn new(module_name: &'static str) -> Self {
         Self {
             module_name,
@@ -19,7 +21,7 @@ impl LazyPyModule {
     pub fn get<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyModule>> {
         let module_ref = self
             .cell
-            .get_or_try_init(py, || py.import(self.module_name).map(|m| m.unbind()))?;
+            .get_or_try_init(py, || py.import(self.module_name).map(Bound::unbind))?;
         Ok(module_ref.bind(py).clone())
     }
 }
@@ -31,6 +33,7 @@ pub struct LazyPyAttr {
 }
 
 impl LazyPyAttr {
+    #[must_use]
     pub const fn new(module_name: &'static str, attr_name: &'static str) -> Self {
         Self {
             module_name,
@@ -43,7 +46,7 @@ impl LazyPyAttr {
     pub fn get<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let attr_ref = self.cell.get_or_try_init(py, || {
             let module = py.import(self.module_name)?;
-            module.getattr(self.attr_name).map(|a| a.unbind())
+            module.getattr(self.attr_name).map(Bound::unbind)
         })?;
         Ok(attr_ref.bind(py).clone())
     }
@@ -57,9 +60,7 @@ impl LazyPyAttr {
 
     #[inline]
     pub fn is(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
-        self.get(py)
-            .map(|target| value.is(&target))
-            .unwrap_or(false)
+        self.get(py).is_ok_and(|target| value.is(&target))
     }
 }
 
@@ -71,6 +72,7 @@ pub struct LazyPyNestedAttr {
 }
 
 impl LazyPyNestedAttr {
+    #[must_use]
     pub const fn new(
         module_name: &'static str,
         parent_attr: &'static str,
@@ -89,15 +91,13 @@ impl LazyPyNestedAttr {
         let attr_ref = self.cell.get_or_try_init(py, || {
             let module = py.import(self.module_name)?;
             let parent = module.getattr(self.parent_attr)?;
-            parent.getattr(self.child_attr).map(|a| a.unbind())
+            parent.getattr(self.child_attr).map(Bound::unbind)
         })?;
         Ok(attr_ref.bind(py).clone())
     }
 
     #[inline]
     pub fn is(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
-        self.get(py)
-            .map(|target| value.is(&target))
-            .unwrap_or(false)
+        self.get(py).is_ok_and(|target| value.is(&target))
     }
 }

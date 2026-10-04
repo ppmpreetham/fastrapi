@@ -1,8 +1,11 @@
 use crate::decorators::PyAPIRouter;
+use crate::ffi::pydantic::ScalarCoercion;
 use crate::routing::dependencies::DependencyNode;
+use crate::runtime::executor::ExecutionMode;
 use crate::types::response::ResponseType;
 use ahash::{AHashMap, AHashSet};
 use axum::http::Method;
+use axum::http::StatusCode;
 use bytes::Bytes;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{Py, PyAny};
@@ -82,7 +85,7 @@ pub struct ParsedParameter {
     pub is_pydantic_model: bool,
     pub is_file: bool,
     pub embed: bool,
-    pub coercion: crate::ffi::pydantic::ScalarCoercion,
+    pub coercion: ScalarCoercion,
     pub validator_index: Option<usize>,
 }
 
@@ -112,7 +115,10 @@ pub enum BodyPayload {
         raw: bytes::Bytes,
         value: Option<simd_json::OwnedValue>,
     },
-    Form(AHashMap<String, SmallVec<[BodyField; 2]>>),
+    Form {
+        fields: AHashMap<String, SmallVec<[BodyField; 2]>>,
+        raw: bytes::Bytes,
+    },
 }
 
 #[derive(Clone)]
@@ -194,7 +200,7 @@ pub struct ExecutionPlan {
     pub func: Py<PyAny>,
     pub is_async: bool,
     pub is_fast_path: bool,
-    pub execution_mode: crate::runtime::executor::ExecutionMode,
+    pub execution_mode: ExecutionMode,
     pub cache_response: bool,
     pub rate_limit_per_second: Option<u32>,
 }
@@ -204,7 +210,12 @@ pub struct PayloadSpec {
     pub dependency_needs_request: bool,
     pub all_deps_sync: bool,
     pub needs_kwargs: bool,
+    pub dependency_needs_response: bool,
+    pub has_generators: bool,
+    pub has_async_dependencies: bool,
     pub request_param: Option<Py<PyString>>,
+    pub response_param: Option<Py<PyString>>,
+    pub dependency_overrides: Option<Py<PyAny>>,
     pub body_param_names: Vec<Py<PyString>>,
     pub body_param_name_set: AHashSet<String>,
     pub body_param_indices: SmallVec<[usize; 4]>,
@@ -225,7 +236,7 @@ pub struct ValidationRules {
 pub struct ResponseFormatter {
     pub response_type: ResponseType,
     pub serialization_hint: SerializationHint,
-    pub default_status: Option<axum::http::StatusCode>,
+    pub default_status: Option<StatusCode>,
     pub response_model: Option<Py<PyAny>>,
     pub response_class: Option<Py<PyAny>>,
     pub dump_options: Option<Py<PyDict>>,
@@ -244,6 +255,7 @@ pub struct RouteEntry {
     pub method: HttpMethod,
     pub path: String,
     pub handler: Arc<RouteHandler>,
+    pub route_instance: Option<Py<PyAny>>,
     pub tags: Vec<String>,
     pub summary: Option<String>,
     pub description: Option<String>,
@@ -255,6 +267,7 @@ pub struct RouteEntry {
     pub deprecated: Option<bool>,
     pub include_in_schema: bool,
     pub security: Vec<RouteSecurityRequirement>,
+    pub host: Option<String>,
 }
 
 #[derive(Clone)]
@@ -262,6 +275,7 @@ pub struct WebSocketEntry {
     pub path: String,
     pub handler: Py<PyAny>,
     pub deps: SmallVec<[DependencyNode; 4]>,
+    pub dependency_overrides: Option<Py<PyAny>>,
 }
 
 #[derive(Clone)]

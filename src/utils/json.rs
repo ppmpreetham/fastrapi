@@ -14,13 +14,21 @@ use pyo3::{
         PyString, PyTuple, PyType,
     },
 };
-use simd_json::OwnedValue as Value;
 use pythonize::pythonize;
+use simd_json::OwnedValue as Value;
 use std::{
     borrow::Cow,
     cell::RefCell,
     io::{self, Write},
 };
+use papaya::HashMap;
+use pyo3::Bound;
+use pyo3::types::PyMemoryView;
+use simd_json::owned;
+use simd_json::owned::Object;
+use std::boxed::Box;
+use std::str::from_utf8;
+use std::sync::LazyLock;
 
 thread_local! {
     static RESPONSE_BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(1024));
@@ -51,7 +59,7 @@ fn json_text_of(value: &Bound<'_, PyAny>) -> PyResult<String> {
 fn lossy_text(text: &Bound<'_, PyString>) -> String {
     json_text(text).map_or_else(
         |_| text.to_string_lossy().into_owned(),
-        std::borrow::Cow::into_owned,
+        Cow::into_owned,
     )
 }
 
@@ -117,6 +125,7 @@ pub fn write_dataclass_json<W: Write>(
 }
 
 #[inline]
+#[must_use]
 pub fn json_response(py: Python<'_>, value: &Value) -> AxumResponse {
     json_response_with_status(py, StatusCode::OK, value)
 }
@@ -140,11 +149,13 @@ pub fn json_response_with_status(
 }
 
 #[inline]
+#[must_use]
 pub fn json_io_error(err: io::Error) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
 #[inline]
+#[must_use]
 pub fn json_ser_error(err: simd_json::Error) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
@@ -177,7 +188,7 @@ pub fn write_json_string<W: Write>(writer: &mut W, value: &str) -> PyResult<()> 
                 ];
                 writer
                     .write_all(&bytes[start..i])
-                    .and_then(|_| writer.write_all(&buf))
+                    .and_then(|()| writer.write_all(&buf))
                     .map_err(json_io_error)?;
                 start = i + 1;
                 continue;
@@ -187,33 +198,30 @@ pub fn write_json_string<W: Write>(writer: &mut W, value: &str) -> PyResult<()> 
 
         writer
             .write_all(&bytes[start..i])
-            .and_then(|_| writer.write_all(escape))
+            .and_then(|()| writer.write_all(escape))
             .map_err(json_io_error)?;
         start = i + 1;
     }
 
     writer
         .write_all(&bytes[start..])
-        .and_then(|_| writer.write_all(b"\""))
+        .and_then(|()| writer.write_all(b"\""))
         .map_err(json_io_error)
 }
 
 #[inline]
 pub fn write_json_bytes<W: Write>(writer: &mut W, bytes: &[u8]) -> PyResult<()> {
-    match std::str::from_utf8(bytes) {
-        Ok(s) => write_json_string(writer, s),
-        Err(_) => {
-            let mut scratch = Vec::with_capacity(bytes.len() * 4 + 2);
-            scratch.push(b'[');
-            for (idx, byte) in bytes.iter().enumerate() {
-                if idx > 0 {
-                    scratch.push(b',');
-                }
-                _ = write!(scratch, "{byte}");
+    if let Ok(s) = from_utf8(bytes) { write_json_string(writer, s) } else {
+        let mut scratch = Vec::with_capacity(bytes.len() * 4 + 2);
+        scratch.push(b'[');
+        for (idx, byte) in bytes.iter().enumerate() {
+            if idx > 0 {
+                scratch.push(b',');
             }
-            scratch.push(b']');
-            writer.write_all(&scratch).map_err(json_io_error)
+            _ = write!(scratch, "{byte}");
         }
+        scratch.push(b']');
+        writer.write_all(&scratch).map_err(json_io_error)
     }
 }
 
@@ -275,8 +283,8 @@ enum ObjKind {
     FallbackStr,
 }
 
-static OBJ_KIND_CACHE: std::sync::LazyLock<papaya::HashMap<usize, (Py<PyType>, ObjKind)>> =
-    std::sync::LazyLock::new(|| papaya::HashMap::with_capacity(256));
+static OBJ_KIND_CACHE: LazyLock<papaya::HashMap<usize, (Py<PyType>, ObjKind)>> =
+    LazyLock::new(|| HashMap::with_capacity(256));
 
 #[inline]
 fn classify_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
@@ -340,6 +348,7 @@ fn probe_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
 }
 
 #[inline]
+#[must_use]
 pub fn classify_py_value<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyJsonKind<'py> {
     if value.is_none() {
         return PyJsonKind::None;
@@ -387,7 +396,7 @@ pub fn classify_py_value<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyJ
         return PyJsonKind::ByteArray(b.clone());
     }
 
-    if value.is_instance_of::<pyo3::types::PyMemoryView>() {
+    if value.is_instance_of::<PyMemoryView>() {
         return PyJsonKind::MemoryView;
     }
 
@@ -647,13 +656,13 @@ pub fn owned_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::OwnedGuar
 
 /// Fast JSON to Python conversion
 #[inline]
+#[must_use]
 pub fn json_to_py_object(py: Python<'_>, value: &Value) -> Py<PyAny> {
-    pythonize(py, value)
-        .map(|obj| obj.unbind())
-        .unwrap_or_else(|_| py.None())
+    pythonize(py, value).map_or_else(|_| py.None(), Bound::unbind)
 }
 
 #[inline]
+#[must_use]
 pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>, status: StatusCode) -> AxumResponse {
     if obj.is_none() {
         let final_status = if status == StatusCode::OK {
@@ -671,45 +680,47 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>, status: StatusCode
 }
 
 #[inline]
+#[must_use]
 pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
-    let mut map = simd_json::owned::Object::new();
+    let mut map = Object::new();
 
     dict.iter().for_each(|(key, value)| {
         let k = json_key_for(&key);
         map.insert(k, py_any_to_json(py, &value));
     });
 
-    simd_json::owned::Value::Object(std::boxed::Box::new(map))
+    owned::Value::Object(Box::new(map))
 }
 
 #[inline]
+#[must_use]
 pub fn py_list_to_json(py: Python<'_>, list: &Bound<'_, PyList>) -> Value {
     let mut vec = Vec::with_capacity(list.len());
 
     vec.extend(list.iter().map(|item| py_any_to_json(py, &item)));
 
-    Value::Array(std::boxed::Box::new(vec))
+    Value::Array(Box::new(vec))
 }
 
 #[inline]
+#[must_use]
 pub fn json_key_for(key: &Bound<'_, PyAny>) -> String {
     py_dict_key_str(key).into_owned()
 }
 
 #[inline]
-fn py_dict_key_str<'k>(key: &'k Bound<'_, PyAny>) -> std::borrow::Cow<'k, str> {
+fn py_dict_key_str<'k>(key: &'k Bound<'_, PyAny>) -> Cow<'k, str> {
     if let Ok(s) = key.cast::<PyString>() {
         return match s.to_str() {
-            Ok(s) => std::borrow::Cow::Borrowed(s),
-            Err(_) => std::borrow::Cow::Owned(String::new()),
+            Ok(s) => Cow::Borrowed(s),
+            Err(_) => Cow::Owned(String::new()),
         };
     }
     key.str()
-        .map(|s| std::borrow::Cow::Owned(s.to_string_lossy().into_owned()))
+        .map(|s| Cow::Owned(s.to_string_lossy().into_owned()))
         .unwrap_or_default()
 }
 
-/// walk a Python value into a simd_json::OwnedValue.
 #[inline]
 pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
     match classify_py_value(py, value) {
@@ -736,17 +747,17 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         PyJsonKind::Tuple(tuple) => {
             let mut vec = Vec::with_capacity(tuple.len());
             vec.extend(tuple.iter().map(|item| py_any_to_json(py, &item)));
-            Value::Array(std::boxed::Box::new(vec))
+            Value::Array(Box::new(vec))
         }
         PyJsonKind::Set(set) => {
             let mut vec = Vec::with_capacity(set.len());
             vec.extend(set.iter().map(|item| py_any_to_json(py, &item)));
-            Value::Array(std::boxed::Box::new(vec))
+            Value::Array(Box::new(vec))
         }
         PyJsonKind::FrozenSet(fset) => {
             let mut vec = Vec::with_capacity(fset.len());
             vec.extend(fset.iter().map(|item| py_any_to_json(py, &item)));
-            Value::Array(std::boxed::Box::new(vec))
+            Value::Array(Box::new(vec))
         }
 
         PyJsonKind::Bytes(b) => bytes_to_json(b.as_bytes()),
@@ -837,10 +848,11 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
 }
 
 #[inline]
+#[must_use]
 pub fn bytes_to_json(b: &[u8]) -> Value {
-    match std::str::from_utf8(b) {
+    match from_utf8(b) {
         Ok(s) => simd_json::json!(s.to_owned()),
-        Err(_) => Value::Array(std::boxed::Box::new(
+        Err(_) => Value::Array(Box::new(
             b.iter().map(|&x| simd_json::json!(x)).collect::<Vec<_>>(),
         )),
     }
