@@ -1,15 +1,19 @@
 use parking_lot::RwLock;
+use pyo3::types::PyDict;
 use std::future::Future;
+use std::num::NonZero;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
+use std::thread::available_parallelism;
+use tokio::runtime::Builder;
+use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
 crate::cached_py_import!(pub BASEMODEL_TYPE, "pydantic", "BaseModel");
 
-pub static PYTHON_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+pub static PYTHON_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+    let cpus = available_parallelism().map_or(4, NonZero::get);
 
-    tokio::runtime::Builder::new_multi_thread()
+    Builder::new_multi_thread()
         .worker_threads(cpus)
         .max_blocking_threads(config().sync_threads.max(cpus))
         .thread_name("python-handler")
@@ -19,7 +23,7 @@ pub static PYTHON_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| 
 });
 
 #[inline]
-pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
@@ -35,9 +39,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
+        let cpus = available_parallelism().map_or(4, NonZero::get);
         Self {
             sync_threads: cpus * 4,
         }
@@ -47,18 +49,6 @@ impl Default for Config {
 pub fn config() -> &'static Config {
     static CONFIG: LazyLock<Config> = LazyLock::new(Config::default);
     &CONFIG
-}
-
-static DEPENDENCY_OVERRIDES: RwLock<Option<ahash::AHashMap<u64, pyo3::Py<pyo3::PyAny>>>> =
-    RwLock::new(None);
-
-pub(crate) fn set_dependency_overrides(map: ahash::AHashMap<u64, pyo3::Py<pyo3::PyAny>>) {
-    *DEPENDENCY_OVERRIDES.write() = Some(map);
-}
-
-#[allow(clippy::implicit_hasher)]
-pub(crate) fn take_dependency_overrides() -> ahash::AHashMap<u64, pyo3::Py<pyo3::PyAny>> {
-    DEPENDENCY_OVERRIDES.read().clone().unwrap_or_default()
 }
 
 pub struct AsyncLoopPool {
@@ -96,6 +86,7 @@ pub(crate) fn async_loop_pool() -> Option<&'static Arc<AsyncLoopPool>> {
 }
 
 static SERVE_APP: OnceLock<pyo3::Py<pyo3::PyAny>> = OnceLock::new();
+static LIFESPAN_STATE: RwLock<Option<pyo3::Py<pyo3::PyAny>>> = RwLock::new(None);
 
 pub fn set_serve_app(app: pyo3::Py<pyo3::PyAny>) {
     _ = SERVE_APP.set(app);
@@ -105,12 +96,27 @@ pub fn serve_app() -> Option<&'static pyo3::Py<pyo3::PyAny>> {
     SERVE_APP.get()
 }
 
-static EXCEPTION_HANDLERS: RwLock<Option<pyo3::Py<pyo3::types::PyDict>>> = RwLock::new(None);
+pub(crate) fn set_lifespan_state(state: pyo3::Py<pyo3::PyAny>) {
+    *LIFESPAN_STATE.write() = Some(state);
+}
 
-pub(crate) fn set_exception_handlers(registry: pyo3::Py<pyo3::types::PyDict>) {
+pub(crate) fn clear_lifespan_state() {
+    *LIFESPAN_STATE.write() = None;
+}
+
+pub(crate) fn lifespan_state(py: pyo3::Python<'_>) -> Option<pyo3::Py<pyo3::PyAny>> {
+    LIFESPAN_STATE
+        .read()
+        .as_ref()
+        .map(|state| state.clone_ref(py))
+}
+
+static EXCEPTION_HANDLERS: RwLock<Option<pyo3::Py<PyDict>>> = RwLock::new(None);
+
+pub(crate) fn set_exception_handlers(registry: pyo3::Py<PyDict>) {
     *EXCEPTION_HANDLERS.write() = Some(registry);
 }
 
-pub(crate) fn exception_handlers() -> Option<pyo3::Py<pyo3::types::PyDict>> {
+pub(crate) fn exception_handlers() -> Option<pyo3::Py<PyDict>> {
     EXCEPTION_HANDLERS.read().clone()
 }

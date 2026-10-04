@@ -1,5 +1,6 @@
-use pyo3::PyErr;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::PyErr;
+use std::io;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -20,7 +21,7 @@ pub enum FastRapiError {
     JsonError(#[from] simd_json::Error),
 
     #[error("IO Error: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(#[from] io::Error),
 }
 
 impl From<FastRapiError> for PyErr {
