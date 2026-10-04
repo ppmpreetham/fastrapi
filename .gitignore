@@ -1,7 +1,11 @@
 /target
 **/target
+compat/
 NUL.*
 benchsrc/
+benchrun/
+benchset/
+benchdist/
 src/components/
 others/
 .zed/debug.json
@@ -22,6 +26,7 @@ bin/
 build/
 develop-eggs/
 dist/
+stubs/
 eggs/
 lib/
 lib64/

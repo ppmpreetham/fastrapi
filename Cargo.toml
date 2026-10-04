@@ -50,6 +50,8 @@ tower = "0.5.3"
 cookie = { version = "0.18.1", features = ["private", "signed", "key-expansion"] }
 sha2 = "0.10"
 form_urlencoded = "1.2.2"
+http-range-header = "0.4.2"
+httpdate = "1.0"
 globset = "0.4"
 notify = "8"
 papaya = { version = "0.2.3" }
@@ -76,6 +78,7 @@ pythonize = "0.29.0"
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "2.0.19"
 smart-default = "0.7.1"
+url = "2.5.8"
 
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -104,6 +107,15 @@ nonstandard-style = "warn"
 [lints.clippy]
 all = "warn"
 redundant_clone = "warn"
+pedantic = "warn"
+inline_always = "allow"
+unseparated_literal_suffix = "allow"
+similar_names = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+absolute_paths = "deny"
+perf = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
 
 [package.metadata.maturin]
 generate-stubs = true
