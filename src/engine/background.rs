@@ -8,6 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tracing::error;
+use std::mem::take;
 
 type TaskFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -26,6 +27,7 @@ impl Default for PyBackgroundTasks {
 #[pymethods]
 impl PyBackgroundTasks {
     #[new]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             tasks: Arc::new(Mutex::new(Vec::new())),
@@ -69,7 +71,11 @@ fn spawn_tasks(async_loop: &Arc<Py<PyAny>>, tasks: Vec<Task>) -> Vec<TaskFuture>
                 };
                 match call_result {
                     Ok(result) => {
-                        if !result.bind(py).hasattr(intern!(py, "__await__")).unwrap_or(false) {
+                        if !result
+                            .bind(py)
+                            .hasattr(intern!(py, "__await__"))
+                            .unwrap_or(false)
+                        {
                             continue;
                         }
                         match py_bridge::schedule_task(py, &async_loop, result.into_bound(py)) {
@@ -99,8 +105,9 @@ fn spawn_tasks(async_loop: &Arc<Py<PyAny>>, tasks: Vec<Task>) -> Vec<TaskFuture>
 }
 
 impl PyBackgroundTasks {
+    #[must_use]
     pub fn execute_all(&self, async_loop: &Arc<Py<PyAny>>) -> Vec<TaskFuture> {
-        let tasks = std::mem::take(&mut *self.tasks.lock());
+        let tasks = take(&mut *self.tasks.lock());
         spawn_tasks(async_loop, tasks)
     }
 }
@@ -112,11 +119,13 @@ pub fn spawn_response_background(py: Python<'_>, result: &Bound<'_, PyAny>) {
     if background.is_none() {
         return;
     }
+    spawn_response_background_value(background.unbind());
+}
+
+pub fn spawn_response_background_value(background: Py<PyAny>) {
     let Some(pool) = async_loop_pool() else {
         return;
     };
-
-    let background = background.unbind();
     let async_loop = Python::attach(|py| Arc::new(pool.pick(py)));
     spawn(async move {
         let futures = Python::attach(|py| match background.bind(py).cast::<PyBackgroundTasks>() {
