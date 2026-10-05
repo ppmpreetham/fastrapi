@@ -1,8 +1,7 @@
-
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use pyo3::intern;
@@ -10,7 +9,11 @@ use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio as par;
 use tokio::sync::oneshot;
 
-pub use pyo3_async_runtimes::{into_future_with_locals, TaskLocals};
+pub use pyo3_async_runtimes::{TaskLocals, into_future_with_locals};
+use crate::globals::PYTHON_RUNTIME;
+use parking_lot::Mutex;
+use pyo3::exceptions::PyRuntimeError;
+use std::clone::Clone;
 
 tokio::task_local! {
     static REQUEST_LOOP: Arc<Py<PyAny>>;
@@ -20,17 +23,22 @@ pub async fn scoped_request_loop<F: Future>(loop_: Arc<Py<PyAny>>, fut: F) -> F:
     REQUEST_LOOP.scope(loop_, fut).await
 }
 
+#[must_use]
 pub fn request_loop() -> Option<Arc<Py<PyAny>>> {
-    REQUEST_LOOP.try_with(|l| l.clone()).ok()
+    REQUEST_LOOP.try_with(Clone::clone).ok()
 }
 
 pub fn init_with_fastrapi_runtime() {
-    let _ = par::init_with_runtime(&crate::globals::PYTHON_RUNTIME);
+    let _ = par::init_with_runtime(&PYTHON_RUNTIME);
 }
 
 #[inline]
 pub fn get_current_locals(py: Python<'_>) -> PyResult<TaskLocals> {
-    par::get_current_locals(py)
+    par::get_current_locals(py).or_else(|_| {
+        request_loop()
+            .map(|loop_| TaskLocals::new(loop_.bind(py).clone()))
+            .ok_or_else(|| PyRuntimeError::new_err("no running event loop"))
+    })
 }
 
 #[inline]
@@ -88,10 +96,8 @@ impl PyTaskSpawner {
 impl PyTaskSpawner {
     fn spawn(&mut self, py: Python<'_>) -> PyResult<()> {
         let asyncio = py.import(intern!(py, "asyncio"))?;
-        let task = asyncio.call_method1(
-            intern!(py, "ensure_future"),
-            (self.awaitable.bind(py),),
-        )?;
+        let task =
+            asyncio.call_method1(intern!(py, "ensure_future"), (self.awaitable.bind(py),))?;
 
         if self.handle.cancelled.load(Ordering::Relaxed) {
             _ = task.call_method0(intern!(py, "cancel"));
@@ -130,9 +136,7 @@ impl PyTaskCompleter {
         self.handle.completed.store(true, Ordering::Relaxed);
         *self.handle.task.lock() = None;
 
-        let result = task
-            .call_method0(intern!(py, "result"))
-            .map(Bound::unbind);
+        let result = task.call_method0(intern!(py, "result")).map(Bound::unbind);
         if let Some(tx) = self.tx.take() {
             _ = tx.send(result);
         }
@@ -151,7 +155,7 @@ impl Future for PyTaskFuture {
         Pin::new(&mut self.rx).poll(cx).map(|result| {
             result.unwrap_or_else(|_| {
                 Python::attach(|_py| {
-                    Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    Err(PyRuntimeError::new_err(
                         "python task was dropped before completing",
                     ))
                 })
@@ -191,7 +195,7 @@ pub fn schedule_task(
     let (tx, rx) = oneshot::channel();
     let handle = Arc::new(TaskHandle {
         loop_: loop_.clone(),
-        task: parking_lot::Mutex::new(None),
+        task: Mutex::new(None),
         cancelled: AtomicBool::new(false),
         completed: AtomicBool::new(false),
     });
