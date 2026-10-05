@@ -1,8 +1,8 @@
-use crate::runtime::py_bridge;
 use crate::ffi::exceptions::PyHTTPException;
 use crate::ffi::pydantic;
 use crate::routing::dependencies::{self, DependencyExecutionError};
 use crate::routing::types::{BodyPayload, PathParamRange, RequestInput, RouteHandler};
+use crate::runtime::py_bridge;
 use crate::types::response::ResponseType;
 use axum::{
     http::{StatusCode, request::Parts},
@@ -17,8 +17,29 @@ use tracing::error;
 
 use super::blocking;
 use crate::http::request::create_py_request;
+use axum::http::HeaderMap;
+use axum::http::HeaderName;
+use axum::http::HeaderValue;
+use crate::engine::background::PyBackgroundTasks;
+use crate::engine::errors::dispatch_exception_handler;
+use crate::globals::spawn;
+use crate::http::responses::PyResponse;
+use crate::http::responses::convert_response_by_type;
+use crate::routing::dependencies::TeardownTasks;
+use crate::utils::py_json_response_with_dump_options;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::exceptions::PyStopIteration;
+use pyo3::exceptions::PyValueError;
+use pyo3::types::PyBool;
+use pyo3::types::PyFloat;
+use pyo3::types::PyInt;
+use pyo3::types::PyList;
+use pyo3::types::PySet;
+use std::mem::take;
 
 crate::cached_py_import!(TRACEBACK_MODULE, "traceback");
+crate::cached_py_import!(ASYNC_EXIT_STACK, "contextlib", "AsyncExitStack");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
@@ -34,11 +55,20 @@ pub enum ExecutionMode {
     AsyncAsyncDepsReq,
 }
 
+// TODO
+// pub struct ExecutionStruct{
+//   sync: bool,
+//   args: bool,
+//   deps: bool,
+//   requirements: bool,
+// }
+
 #[inline(always)]
 fn specialized_response_conversion(
     py: Python<'_>,
     result: &Bound<'_, PyAny>,
     handler: &RouteHandler,
+    request_headers: Option<&HeaderMap>,
 ) -> Response {
     match handler.response.response_type {
         ResponseType::PlainText => {
@@ -46,13 +76,23 @@ fn specialized_response_conversion(
                 return s.to_string_lossy().into_owned().into_response();
             }
 
-            match crate::http::responses::convert_response_by_type(py, result, handler) {
+            match convert_response_by_type(
+                py,
+                result,
+                handler,
+                request_headers,
+            ) {
                 Ok(resp) => resp,
                 Err(err) => python_error_to_response(py, err),
             }
         }
 
-        _ => match crate::http::responses::convert_response_by_type(py, result, handler) {
+        _ => match convert_response_by_type(
+            py,
+            result,
+            handler,
+            request_headers,
+        ) {
             Ok(resp) => resp,
             Err(err) => python_error_to_response(py, err),
         },
@@ -63,14 +103,14 @@ fn python_error_to_response(py: Python<'_>, err: PyErr) -> Response {
     python_error_to_response_in(py, err, None)
 }
 
-/// @app.exception_handler registry
+/// @`app.exception_handler` registry
 pub(crate) fn python_error_to_response_in(
     py: Python<'_>,
     err: PyErr,
     request_input: Option<&RequestInput<'_>>,
 ) -> Response {
     if let Some(response) =
-        crate::engine::errors::dispatch_exception_handler(py, &err, request_input)
+        dispatch_exception_handler(py, &err, request_input)
     {
         return response;
     }
@@ -87,9 +127,7 @@ fn log_python_error(py: Python<'_>, err: &PyErr) {
         let traceback_bound = TRACEBACK_MODULE.get(py)?;
 
         let traceback_obj = err
-            .traceback(py)
-            .map(|tb| tb.into_any().unbind())
-            .unwrap_or_else(|| py.None());
+            .traceback(py).map_or_else(|| py.None(), |tb| tb.into_any().unbind());
         let lines = traceback_bound.call_method1(
             intern!(py, "format_exception"),
             (err.get_type(py), err.value(py), traceback_obj.bind(py)),
@@ -118,7 +156,7 @@ pub(crate) fn build_request_input_from_parts<'a>(
         let path_params_vec: SmallVec<[(&'a str, &'a str); 8]> = param_ranges
             .iter()
             .map(|r| {
-                let name = names.get(r.name_index).map(|n| &**n).unwrap_or("");
+                let name = names.get(r.name_index).map_or("", |n| &**n);
                 (name, &path_str[r.start..r.end])
             })
             .collect();
@@ -139,11 +177,11 @@ pub(crate) fn build_request_input_from_parts<'a>(
 #[inline(always)]
 fn spawn_background_tasks(
     async_loop: &Arc<Py<PyAny>>,
-    bg_tasks: Option<Py<crate::engine::background::PyBackgroundTasks>>,
+    bg_tasks: Option<Py<PyBackgroundTasks>>,
 ) {
     if let Some(tasks) = bg_tasks {
         let async_loop = async_loop.clone();
-        crate::globals::spawn(async move {
+        spawn(async move {
             for task in Python::attach(|py| match tasks.try_borrow(py) {
                 Ok(bg) => bg.execute_all(&async_loop),
                 Err(e) => {
@@ -166,7 +204,7 @@ fn prepare_kwargs_and_payload<'py>(
 ) -> Result<
     (
         Bound<'py, PyDict>,
-        Option<Py<crate::engine::background::PyBackgroundTasks>>,
+        Option<Py<PyBackgroundTasks>>,
     ),
     Response,
 > {
@@ -183,7 +221,7 @@ fn resolve_sync_deps<'py>(
     request_input: &RequestInput<'_>,
     request_object: Option<Py<PyAny>>,
     kwargs: &Bound<'py, PyDict>,
-) -> Result<crate::routing::dependencies::TeardownTasks, Response> {
+) -> Result<TeardownTasks, Response> {
     let (dep_results, teardowns) = dependencies::execute_dependencies_sync(
         py,
         &handler.payload.dependencies,
@@ -204,19 +242,31 @@ fn resolve_sync_deps<'py>(
 }
 
 #[inline(always)]
-fn execute_teardowns_sync(py: Python<'_>, teardowns: crate::routing::dependencies::TeardownTasks) {
+fn execute_teardowns_sync(
+    py: Python<'_>,
+    teardowns: TeardownTasks,
+    error: Option<&PyErr>,
+) {
     for task in teardowns.into_iter().rev() {
         if task.is_async {
             tracing::error!("Async generator dependency found in sync route!");
         } else {
-            match task
-                .generator
-                .bind(py)
-                .call_method0(pyo3::intern!(py, "__next__"))
-            {
+            let result = if let Some(error) = error {
+                let traceback = error
+                    .traceback(py).map_or_else(|| py.None(), |value| value.into_any().unbind());
+                task.generator.bind(py).call_method1(
+                    pyo3::intern!(py, "throw"),
+                    (error.get_type(py), error.value(py), traceback),
+                )
+            } else {
+                task.generator
+                    .bind(py)
+                    .call_method0(pyo3::intern!(py, "__next__"))
+            };
+            match result {
                 Ok(_) => tracing::error!("Sync generator dependency yielded twice!"),
                 Err(e) => {
-                    if !e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                    if !e.is_instance_of::<PyStopIteration>(py) {
                         tracing::error!("Error during sync generator dependency teardown: {}", e);
                     }
                 }
@@ -227,7 +277,7 @@ fn execute_teardowns_sync(py: Python<'_>, teardowns: crate::routing::dependencie
 
 pub(crate) async fn execute_teardowns_async(
     async_loop: &Arc<Py<PyAny>>,
-    teardowns: crate::routing::dependencies::TeardownTasks,
+    teardowns: TeardownTasks,
 ) {
     let mut sync_batch: Vec<Py<PyAny>> = Vec::new();
 
@@ -247,7 +297,7 @@ pub(crate) async fn execute_teardowns_async(
                 Ok(fut) => match fut.await {
                     Ok(_) => tracing::error!("Async generator dependency yielded twice!"),
                     Err(e) => Python::attach(|py| {
-                        if !e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py) {
+                        if !e.is_instance_of::<PyStopAsyncIteration>(py) {
                             tracing::error!(
                                 "Error during async generator dependency teardown: {}",
                                 e
@@ -270,7 +320,7 @@ async fn flush_sync_teardowns(batch: &mut Vec<Py<PyAny>>) {
     if batch.is_empty() {
         return;
     }
-    let generators = std::mem::take(batch);
+    let generators = take(batch);
     _ = blocking::run_python(move |py| {
         for task_gen in generators {
             match task_gen
@@ -279,7 +329,7 @@ async fn flush_sync_teardowns(batch: &mut Vec<Py<PyAny>>) {
             {
                 Ok(_) => tracing::error!("Sync generator dependency yielded twice!"),
                 Err(e) => {
-                    if !e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                    if !e.is_instance_of::<PyStopIteration>(py) {
                         tracing::error!("Error during sync generator dependency teardown: {}", e);
                     }
                 }
@@ -294,6 +344,7 @@ fn call_handler_and_convert(
     py: Python<'_>,
     handler: &RouteHandler,
     kwargs: Option<&Bound<'_, PyDict>>,
+    request_headers: Option<&HeaderMap>,
 ) -> Result<Response, PyErr> {
     let py_func = handler.execution.func.bind(py);
     let result = match kwargs {
@@ -301,13 +352,18 @@ fn call_handler_and_convert(
         None => py_func.call0(),
     };
     match result {
-        Ok(res) => Ok(specialized_response_conversion(py, &res, handler)),
+        Ok(res) => Ok(specialized_response_conversion(
+            py,
+            &res,
+            handler,
+            request_headers,
+        )),
         Err(err) => Err(err),
     }
 }
 
 pub(crate) fn render_no_request_response(py: Python<'_>, handler: &RouteHandler) -> Response {
-    match call_handler_and_convert(py, handler, None) {
+    match call_handler_and_convert(py, handler, None, None) {
         Ok(res) => res,
         Err(err) => python_error_to_response(py, err),
     }
@@ -327,22 +383,22 @@ pub(crate) fn render_no_request_json_response(py: Python<'_>, handler: &RouteHan
             .into_response();
     }
 
-    let is_plain_value = result.is_instance_of::<pyo3::types::PyDict>()
-        || result.is_instance_of::<pyo3::types::PyList>()
-        || result.is_instance_of::<pyo3::types::PySet>()
+    let is_plain_value = result.is_instance_of::<PyDict>()
+        || result.is_instance_of::<PyList>()
+        || result.is_instance_of::<PySet>()
         || result.is_instance_of::<PyString>()
-        || result.is_instance_of::<pyo3::types::PyBool>()
-        || result.is_instance_of::<pyo3::types::PyInt>()
-        || result.is_instance_of::<pyo3::types::PyFloat>();
+        || result.is_instance_of::<PyBool>()
+        || result.is_instance_of::<PyInt>()
+        || result.is_instance_of::<PyFloat>();
 
     if !is_plain_value {
-        return match crate::http::responses::convert_response_by_type(py, &result, handler) {
+        return match convert_response_by_type(py, &result, handler, None) {
             Ok(resp) => resp,
             Err(err) => python_error_to_response(py, err),
         };
     }
 
-    crate::utils::py_json_response_with_dump_options(
+    py_json_response_with_dump_options(
         py,
         handler.response.default_status.unwrap_or(StatusCode::OK),
         &result,
@@ -367,7 +423,12 @@ async fn await_python_future<'a>(
 
     let result = future.await;
     Python::attach(|py| match result {
-        Ok(res) => Ok(specialized_response_conversion(py, res.bind(py), handler)),
+        Ok(res) => Ok(specialized_response_conversion(
+            py,
+            res.bind(py),
+            handler,
+            request_input.map(|input| input.headers),
+        )),
         Err(err) => Err(python_error_to_response_in(py, err, request_input)),
     })
 }
@@ -390,25 +451,52 @@ fn into_asyncio_future(
         .map_err(|err| python_error_to_response(py, err))
 }
 
-async fn core_sync_no_args(handler: Arc<RouteHandler>, sync_to_threadpool: bool) -> Response {
+async fn core_sync_no_args(
+    handler: Arc<RouteHandler>,
+    request_parts: Option<Parts>,
+    sync_to_threadpool: bool,
+) -> Response {
     if !sync_to_threadpool {
-        return Python::attach(|py| match call_handler_and_convert(py, &handler, None) {
-            Ok(res) => res,
-            Err(err) => python_error_to_response(py, err),
+        return Python::attach(|py| {
+            match call_handler_and_convert(
+                py,
+                &handler,
+                None,
+                request_parts.as_ref().map(|parts| &parts.headers),
+            ) {
+                Ok(res) => res,
+                Err(err) => python_error_to_response(py, err),
+            }
         });
     }
 
-    blocking::run_python(
-        move |py| match call_handler_and_convert(py, &handler, None) {
+    blocking::run_python(move |py| {
+        match call_handler_and_convert(
+            py,
+            &handler,
+            None,
+            request_parts.as_ref().map(|parts| &parts.headers),
+        ) {
             Ok(res) => res,
             Err(err) => python_error_to_response(py, err),
-        },
-    )
+        }
+    })
     .await
     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-async fn core_async_no_args(async_loop: Arc<Py<PyAny>>, handler: Arc<RouteHandler>) -> Response {
+async fn core_async_no_args(
+    async_loop: Arc<Py<PyAny>>,
+    handler: Arc<RouteHandler>,
+    request_parts: Option<Parts>,
+    param_ranges: Option<SmallVec<[PathParamRange; 4]>>,
+) -> Response {
+    let request_input = request_parts
+        .as_ref()
+        .zip(param_ranges.as_ref())
+        .map(|(parts, ranges)| {
+            build_request_input_from_parts(parts, ranges, &handler.payload.path_param_names)
+        });
     let handler_clone = handler.clone();
     let future_res = Python::attach(|py| -> Result<_, Response> {
         let coroutine = handler_clone
@@ -419,7 +507,7 @@ async fn core_async_no_args(async_loop: Arc<Py<PyAny>>, handler: Arc<RouteHandle
             .map_err(|err| python_error_to_response(py, err))?;
         into_asyncio_future(py, &async_loop, coroutine)
     });
-    match await_python_future(&handler, None, future_res).await {
+    match await_python_future(&handler, request_input.as_ref(), future_res).await {
         Ok(res) => res,
         Err(err) => err,
     }
@@ -428,6 +516,7 @@ async fn core_async_no_args(async_loop: Arc<Py<PyAny>>, handler: Arc<RouteHandle
 fn payload_raw_bytes(payload: Option<&BodyPayload>) -> Option<&[u8]> {
     match payload {
         Some(BodyPayload::Json { raw, .. }) => Some(raw),
+        Some(BodyPayload::Form { raw, .. }) => Some(raw),
         _ => None,
     }
 }
@@ -439,7 +528,7 @@ fn run_sync_gil_section(
 ) -> Result<
     (
         Response,
-        Option<Py<crate::engine::background::PyBackgroundTasks>>,
+        Option<Py<PyBackgroundTasks>>,
     ),
     Response,
 > {
@@ -463,11 +552,18 @@ fn run_sync_gil_section(
 
     let teardowns = resolve_sync_deps(py, handler, request_input, req_obj, &kwargs)?;
 
-    let response = call_handler_and_convert(py, handler, Some(&kwargs))
-        .map_err(|err| python_error_to_response(py, err))?;
-
-    execute_teardowns_sync(py, teardowns);
-    Ok((response, bg_tasks))
+    let response =
+        call_handler_and_convert(py, handler, Some(&kwargs), Some(request_input.headers));
+    match response {
+        Ok(response) => {
+            execute_teardowns_sync(py, teardowns, None);
+            Ok((response, bg_tasks))
+        }
+        Err(err) => {
+            execute_teardowns_sync(py, teardowns, Some(&err));
+            Err(python_error_to_response(py, err))
+        }
+    }
 }
 
 struct GilSection<'a, 'b, 'c> {
@@ -648,7 +744,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
         |py| -> Result<
             (
                 PyTaskFuture,
-                Option<Py<crate::engine::background::PyBackgroundTasks>>,
+                Option<Py<PyBackgroundTasks>>,
             ),
             Response,
         > {
@@ -709,7 +805,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
             (
                 Option<Py<PyAny>>,
                 Py<PyDict>,
-                Option<Py<crate::engine::background::PyBackgroundTasks>>,
+                Option<Py<PyBackgroundTasks>>,
             ),
             Response,
         > {
@@ -792,7 +888,8 @@ pub fn assign_execution_mode(handler: &mut RouteHandler) {
     let deps_empty = handler.payload.dependencies.is_empty();
     let all_sync = handler.payload.all_deps_sync;
     let needs_req = handler.payload.dependency_needs_request;
-    let needs_kwargs = handler.payload.needs_kwargs;
+    let needs_kwargs =
+        handler.payload.needs_kwargs || handler.payload.response_param.is_some() || !deps_empty;
 
     handler.execution.execution_mode =
         match (needs_kwargs, is_async, deps_empty, all_sync, needs_req) {
@@ -819,9 +916,34 @@ pub async fn run_py_handler(
     param_ranges: SmallVec<[PathParamRange; 4]>,
     payload: Option<Arc<BodyPayload>>,
 ) -> Response {
+    let has_live_overrides = handler.payload.dependency_overrides.is_some();
+    if handler.payload.response_param.is_some()
+        || handler.payload.dependency_needs_response
+        || has_live_overrides
+        || (handler.execution.is_async && handler.payload.has_generators)
+        || handler
+            .payload
+            .dependencies
+            .iter()
+            .any(|node| node.is_generator || node.is_async_generator || node.is_async)
+    {
+        return run_managed_handler(
+            async_loop,
+            handler,
+            request_parts,
+            param_ranges,
+            payload,
+            sync_to_threadpool,
+        )
+        .await;
+    }
     match handler.execution.execution_mode {
-        ExecutionMode::SyncNoArgs => core_sync_no_args(handler, sync_to_threadpool).await,
-        ExecutionMode::AsyncNoArgs => core_async_no_args(async_loop, handler).await,
+        ExecutionMode::SyncNoArgs => {
+            core_sync_no_args(handler, Some(request_parts), sync_to_threadpool).await
+        }
+        ExecutionMode::AsyncNoArgs => {
+            core_async_no_args(async_loop, handler, Some(request_parts), Some(param_ranges)).await
+        }
 
         ExecutionMode::SyncNoDeps => {
             core_sync_no_deps(
@@ -884,15 +1006,217 @@ pub async fn run_py_handler(
     }
 }
 
+async fn run_managed_handler(
+    async_loop: Arc<Py<PyAny>>,
+    handler: Arc<RouteHandler>,
+    parts: Parts,
+    ranges: SmallVec<[PathParamRange; 4]>,
+    payload: Option<Arc<BodyPayload>>,
+    sync_to_threadpool: bool,
+) -> Response {
+    let input = build_request_input_from_parts(&parts, &ranges, &handler.payload.path_param_names);
+    let setup = Python::attach(|py| -> Result<_, Response> {
+        let (kwargs, background) =
+            prepare_kwargs_and_payload(py, &handler, &input, payload.as_deref())?;
+        let objects = (|| -> PyResult<_> {
+            let response = py
+                .get_type::<PyResponse>()
+                .call0()?;
+            response.setattr("status_code", 0u16)?;
+            response.setattr("raw_headers", PyList::empty(py))?;
+            if let Some(name) = &handler.payload.response_param {
+                kwargs.set_item(name.bind(py), &response)?;
+            }
+            let request = create_py_request(py, &input, payload_raw_bytes(payload.as_deref()))?;
+            let stack = ASYNC_EXIT_STACK.get(py)?.call0()?.unbind();
+            let plan = dependencies::request_plan(
+                py,
+                &handler.payload.dependencies,
+                handler.payload.dependency_overrides.as_ref(),
+                &handler.payload.path_param_names,
+            )?;
+            Ok((
+                kwargs.unbind(),
+                background,
+                request,
+                response.unbind(),
+                stack,
+                plan,
+            ))
+        })();
+        objects.map_err(|err| python_error_to_response_in(py, err, Some(&input)))
+    });
+    let (kwargs, background, request, metadata, stack, plan) = match setup {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let stack_enter = Python::attach(|py| -> PyResult<_> {
+        let coroutine = stack.bind(py).call_method0("__aenter__")?;
+        py_bridge::schedule_task(py, &async_loop, coroutine)
+    });
+    let entered = match stack_enter {
+        Ok(future) => future.await,
+        Err(err) => Err(err),
+    };
+    if let Err(err) = entered {
+        return Python::attach(|py| python_error_to_response_in(py, err, Some(&input)));
+    }
+    let outcome = async {
+        let values = dependencies::execute_request_dependencies(
+            &async_loop,
+            &plan,
+            &input,
+            &request,
+            &metadata,
+            &stack,
+            sync_to_threadpool,
+        )
+        .await?;
+        Python::attach(|py| -> PyResult<()> {
+            for (name, value) in values {
+                kwargs.bind(py).set_item(name.bind(py), value.bind(py))?;
+            }
+            Ok(())
+        })?;
+        let value = if !handler.execution.is_async && sync_to_threadpool {
+            let (func, kwargs) =
+                Python::attach(|py| (handler.execution.func.clone_ref(py), kwargs.clone_ref(py)));
+            blocking::run_python(move |py| {
+                func.bind(py)
+                    .call((), Some(kwargs.bind(py)))
+                    .map(Bound::unbind)
+            })
+            .await
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))??
+        } else {
+            let result = Python::attach(|py| -> PyResult<_> {
+                let result = handler
+                    .execution
+                    .func
+                    .bind(py)
+                    .call((), Some(kwargs.bind(py)))?;
+                if handler.execution.is_async {
+                    Ok((
+                        None,
+                        Some(py_bridge::schedule_task(py, &async_loop, result)?),
+                    ))
+                } else {
+                    Ok((Some(result.unbind()), None))
+                }
+            })?;
+            match result {
+                (Some(value), _) => value,
+                (_, Some(future)) => future.await?,
+                _ => unreachable!(),
+            }
+        };
+        Python::attach(|py| -> Result<_, DependencyExecutionError> {
+            let value = value.bind(py);
+            let explicit = value.hasattr("status_code")? && value.hasattr("raw_headers")?;
+            let response = convert_response_by_type(
+                py,
+                value,
+                &handler,
+                Some(input.headers),
+            )?;
+            Ok((response, explicit))
+        })
+    }
+    .await;
+    let exit = Python::attach(|py| -> PyResult<_> {
+        let args = match &outcome {
+            Err(DependencyExecutionError::Python(err)) => (
+                err.get_type(py).into_any().unbind(),
+                err.value(py).clone().into_any().unbind(),
+                err.traceback(py).map_or_else(|| py.None(), |tb| tb.into_any().unbind()),
+            ),
+            Err(DependencyExecutionError::Response(_)) => {
+                let err = PyValueError::new_err("Request validation failed");
+                (
+                    err.get_type(py).into_any().unbind(),
+                    err.value(py).clone().into_any().unbind(),
+                    py.None(),
+                )
+            }
+            Ok(_) => (py.None(), py.None(), py.None()),
+        };
+        let coroutine = stack.bind(py).call_method1("__aexit__", args)?;
+        py_bridge::schedule_task(py, &async_loop, coroutine)
+    });
+    let exit = match exit {
+        Ok(future) => future.await,
+        Err(err) => Err(err),
+    };
+    Python::attach(|py| {
+        match exit {
+            Err(err) => return python_error_to_response_in(py, err, Some(&input)),
+            Ok(value) if outcome.is_err() && value.bind(py).is_truthy().unwrap_or(false) => {
+                return python_error_to_response_in(
+                    py,
+                    PyRuntimeError::new_err(
+                        "A dependency suppressed an exception before a response was produced",
+                    ),
+                    Some(&input),
+                );
+            }
+            _ => {}
+        }
+        match outcome {
+            Err(DependencyExecutionError::Python(err)) => {
+                python_error_to_response_in(py, err, Some(&input))
+            }
+            Err(DependencyExecutionError::Response(response)) => *response,
+            Ok((mut response, explicit)) => {
+                if !explicit {
+                    let applied = (|| -> PyResult<()> {
+                        let metadata = metadata.bind(py);
+                        if let Ok(status) = metadata.getattr("status_code")?.extract::<u16>()
+                            && status != 0
+                        {
+                            *response.status_mut() =
+                                StatusCode::from_u16(status).map_err(|err| {
+                                    PyValueError::new_err(err.to_string())
+                                })?;
+                        }
+                        for item in metadata.getattr("raw_headers")?.try_iter()? {
+                            let (name, value): (Vec<u8>, Vec<u8>) = item?.extract()?;
+                            let name =
+                                HeaderName::from_bytes(&name).map_err(|err| {
+                                    PyValueError::new_err(err.to_string())
+                                })?;
+                            let value =
+                                HeaderValue::from_bytes(&value).map_err(|err| {
+                                    PyValueError::new_err(err.to_string())
+                                })?;
+                            response.headers_mut().append(name, value);
+                        }
+                        Ok(())
+                    })();
+                    if let Err(err) = applied {
+                        return python_error_to_response_in(py, err, Some(&input));
+                    }
+                }
+                spawn_background_tasks(&async_loop, background);
+                response
+            }
+        }
+    })
+}
+
 #[inline(always)]
 pub async fn run_py_handler_no_request(
     async_loop: Arc<Py<PyAny>>,
     sync_to_threadpool: bool,
     handler: Arc<RouteHandler>,
+    request_parts: Option<Parts>,
 ) -> Response {
     match handler.execution.execution_mode {
-        ExecutionMode::SyncNoArgs => core_sync_no_args(handler, sync_to_threadpool).await,
-        ExecutionMode::AsyncNoArgs => core_async_no_args(async_loop, handler).await,
+        ExecutionMode::SyncNoArgs => {
+            core_sync_no_args(handler, request_parts, sync_to_threadpool).await
+        }
+        ExecutionMode::AsyncNoArgs => {
+            core_async_no_args(async_loop, handler, request_parts, None).await
+        }
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
