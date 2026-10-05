@@ -11,11 +11,18 @@ pub struct SubAppMount {
     pub app: Py<FastrAPI>,
 }
 
+/// `starlette.routing.Host`
+pub struct HostMount {
+    pub host: String,
+    pub app: Py<FastrAPI>,
+}
+
 #[pyclass(frozen, new = "from_fields", get_all, from_py_object, eq)]
 #[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct StaticMount {
     pub path: String,
     pub directory: String,
+    pub directories: Vec<String>,
     #[default(false)]
     pub html: bool,
     #[default(false)]
@@ -67,7 +74,7 @@ pub struct FastrAPI {
     #[pyo3(get, set)]
     pub version: String,
     #[pyo3(get, set)]
-    pub openapi_url: String,
+    pub openapi_url: Option<String>,
     #[pyo3(get, set)]
     pub openapi_tags: Option<Py<PyAny>>,
     #[pyo3(get, set)]
@@ -158,6 +165,7 @@ pub struct FastrAPI {
     pub(crate) static_mounts: Vec<StaticMount>,
     pub(crate) frontend_mounts: Vec<FrontendMount>,
     pub(crate) app_mounts: Vec<SubAppMount>,
+    pub(crate) host_mounts: Vec<HostMount>,
     pub(crate) prometheus_config: Option<PrometheusConfig>,
     pub(crate) middlewares: MiddlewareContainer,
     pub(crate) openapi_cache: parking_lot::Mutex<Option<OpenApiCacheEntry>>,

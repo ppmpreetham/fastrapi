@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use std::sync::{Arc, OnceLock};
 
 use crate::engine::types::{FastrAPI, PrometheusConfig};
+use pyo3::exceptions::PyValueError;
 
 static PROMETHEUS_HANDLE: OnceLock<Arc<PrometheusHandle>> = OnceLock::new();
 
@@ -50,7 +51,7 @@ impl PyInstrumentator {
     #[pyo3(signature = (app, endpoint = "/metrics"))]
     fn expose(slf: Py<Self>, app: Bound<'_, FastrAPI>, endpoint: &str) -> PyResult<Py<Self>> {
         if !endpoint.starts_with('/') {
-            return Err(pyo3::exceptions::PyValueError::new_err(
+            return Err(PyValueError::new_err(
                 "Prometheus metrics endpoint must start with '/'",
             ));
         }
