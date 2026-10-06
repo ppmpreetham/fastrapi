@@ -5,6 +5,10 @@ use std::{
     process::{Child, Command, Stdio},
     time::Duration,
 };
+use std::env::current_dir;
+use std::io;
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::channel;
 
 #[derive(Clone)]
 pub(crate) struct ReloadConfig {
@@ -22,7 +26,7 @@ pub(crate) fn run_reload_supervisor(
     config: ReloadConfig,
 ) -> Result<(), String> {
     let ignore_globs = build_reload_ignore_globs(&config)?;
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = channel();
     let mut watcher = RecommendedWatcher::new(
         move |event| {
             _ = tx.send(event);
@@ -61,14 +65,14 @@ pub(crate) fn run_reload_supervisor(
                 while rx.try_recv().is_ok() {}
             }
             Ok(Err(err)) => return Err(err.to_string()),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
                 return Err("reload watcher stopped".to_string());
             }
         }
     }
 }
-pub(crate) fn spawn_reload_child(executable: &str, argv: &[String]) -> std::io::Result<Child> {
+pub(crate) fn spawn_reload_child(executable: &str, argv: &[String]) -> io::Result<Child> {
     let mut command = Command::new(executable);
     command
         .args(argv)
@@ -180,7 +184,5 @@ pub(crate) fn resolve_reload_dirs(
         return vec![parent.to_path_buf()];
     }
 
-    std::env::current_dir()
-        .map(|dir| vec![dir])
-        .unwrap_or_else(|_| vec![PathBuf::from(".")])
+    current_dir().map_or_else(|_| vec![PathBuf::from(".")], |dir| vec![dir])
 }

@@ -1,5 +1,5 @@
 use super::server;
-pub use super::types::{FastrAPI, FrontendMount, StaticMount, SubAppMount};
+pub use super::types::{FastrAPI, FrontendMount, HostMount, StaticMount, SubAppMount};
 use crate::decorators::PyAPIRouter;
 use crate::http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware};
 use crate::http::staticfiles::PyStaticFiles;
@@ -14,6 +14,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tracing::info;
+use crate::ffi::decorators;
+use crate::http::middleware::DeclaredLayer;
+use crate::utils::openapi::build_openapi_spec;
+use parking_lot::Mutex;
+use pyo3::Bound;
+use std::convert::Into;
+use std::env::var_os;
 
 crate::cached_py_import!(STARLETTE_STATE, "starlette.datastructures", "State");
 
@@ -26,9 +33,9 @@ impl FastrAPI {
         routes=None,
         title="FastAPI".to_string(),
         summary=None,
-        description="".to_string(),
+        description=String::new(),
         version="0.1.0".to_string(),
-        openapi_url="/openapi.json".to_string(),
+        openapi_url=Some("/openapi.json".to_string()),
         openapi_tags=None,
         servers=None,
         dependencies=None,
@@ -49,8 +56,8 @@ impl FastrAPI {
         terms_of_service=None,
         contact=None,
         license_info=None,
-        openapi_prefix="".to_string(),
-        root_path="".to_string(),
+        openapi_prefix=String::new(),
+        root_path=String::new(),
         root_path_in_servers=true,
         responses=None,
         callbacks=None,
@@ -80,7 +87,7 @@ impl FastrAPI {
         summary: Option<String>,
         description: String,
         version: String,
-        openapi_url: String,
+        openapi_url: Option<String>,
         openapi_tags: Option<Py<PyAny>>,
         servers: Option<Py<PyAny>>,
         dependencies: Option<Py<PyAny>>,
@@ -130,18 +137,18 @@ impl FastrAPI {
                 .import(intern!(py, "fastrapi"))
                 .and_then(|m| m.getattr(intern!(py, "responses")))
                 .and_then(|r| r.getattr(intern!(py, "JSONResponse")))
-                .map(|obj| obj.unbind())?,
+                .map(Bound::unbind)?,
         };
         let generate_unique_id_function = generate_unique_id_function;
         let base_router = Py::new(py, PyAPIRouter::new_())?;
 
         let state = STARLETTE_STATE
             .get(py)
-            .and_then(|cls| cls.call0().map(|obj| obj.unbind()))
+            .and_then(|cls| cls.call0().map(Bound::unbind))
             .or_else(|_| {
                 py.import(pyo3::intern!(py, "types"))
                     .and_then(|types| types.getattr(pyo3::intern!(py, "SimpleNamespace")))
-                    .and_then(|ns| ns.call0().map(|obj| obj.unbind()))
+                    .and_then(|ns| ns.call0().map(Bound::unbind))
             })
             .unwrap_or_else(|_| py.None());
 
@@ -199,9 +206,10 @@ impl FastrAPI {
             static_mounts: Vec::new(),
             frontend_mounts: Vec::new(),
             app_mounts: Vec::new(),
+            host_mounts: Vec::new(),
             prometheus_config: None,
             middlewares: MiddlewareContainer::default(),
-            openapi_cache: parking_lot::Mutex::new(None),
+            openapi_cache: Mutex::new(None),
             router: base_router,
         })
     }
@@ -217,12 +225,9 @@ impl FastrAPI {
         let class_name = class_name.cast::<PyString>()?.to_str()?;
 
         let empty_dict;
-        let opts = match kwargs {
-            Some(dict) => dict,
-            None => {
-                empty_dict = PyDict::new(middleware_class.py());
-                &empty_dict
-            }
+        let opts = if let Some(dict) = kwargs { dict } else {
+            empty_dict = PyDict::new(middleware_class.py());
+            &empty_dict
         };
 
         if let Some(builder) = MIDDLEWARE_REGISTRY.get(class_name) {
@@ -235,7 +240,7 @@ impl FastrAPI {
             info!("Enabled custom {:?} middleware", mw.kind);
             self.middlewares
                 .order
-                .push(crate::http::middleware::DeclaredLayer::Custom(Arc::new(mw)));
+                .push(DeclaredLayer::Custom(Arc::new(mw)));
         }
         Ok(())
     }
@@ -262,7 +267,7 @@ impl FastrAPI {
         name: Option<String>,
     ) -> PyResult<()> {
         if !path.starts_with('/') {
-            return Err(pyo3::exceptions::PyValueError::new_err(
+            return Err(PyValueError::new_err(
                 "Mount path must start with '/'",
             ));
         }
@@ -293,11 +298,135 @@ impl FastrAPI {
         self.static_mounts.push(StaticMount {
             path: normalized_path,
             directory: static_files.directory.clone(),
+            directories: static_files.directories.clone(),
             html: static_files.html,
             follow_symlink: static_files.follow_symlink,
             name,
         });
         Ok(())
+    }
+
+    fn on_event(slf: Py<Self>, py: Python<'_>, event_type: String) -> PyResult<Py<PyAny>> {
+        let startup = match event_type.as_str() {
+            "startup" => true,
+            "shutdown" => false,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "event_type must be 'startup' or 'shutdown'",
+                ));
+            }
+        };
+        let decorator = move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| {
+            let func = args.get_item(0)?.unbind();
+            Python::attach(|py| -> PyResult<Py<PyAny>> {
+                let mut app = slf.borrow_mut(py);
+                let target = if startup {
+                    &mut app.on_startup
+                } else {
+                    &mut app.on_shutdown
+                };
+                let list = match target.as_ref() {
+                    Some(value) => value.bind(py).cast::<PyList>()?.clone(),
+                    None => PyList::empty(py),
+                };
+                list.append(func.bind(py))?;
+                *target = Some(list.unbind().into_any());
+                Ok(func)
+            })
+        };
+        PyCFunction::new_closure(py, Some(c"on_event"), None, decorator).map(Into::into)
+    }
+
+    /// `starlette.applications.host`
+    #[pyo3(signature = (host, app, *, name=None))]
+    fn host(
+        &mut self,
+        py: Python<'_>,
+        host: String,
+        app: Py<PyAny>,
+        name: Option<String>,
+    ) -> PyResult<()> {
+        if host.starts_with('/') {
+            return Err(PyValueError::new_err("Host must not start with '/'"));
+        }
+        let _ = name;
+        let owned = app
+            .bind(py)
+            .clone()
+            .into_any()
+            .cast_into::<FastrAPI>()
+            .map_err(PyErr::from)?
+            .unbind();
+        self.host_mounts.push(HostMount { host, app: owned });
+        Ok(())
+    }
+
+    /// `fastapi.FastAPI.add_exception_handler`
+    fn add_exception_handler(
+        &self,
+        py: Python<'_>,
+        exc_class_or_status_code: Py<PyAny>,
+        handler: Py<PyAny>,
+    ) -> PyResult<()> {
+        if let Some(handlers) = &self.exception_handlers {
+            handlers
+                .bind(py)
+                .set_item(exc_class_or_status_code, handler)?;
+        }
+        Ok(())
+    }
+
+    /// `fastapi.FastAPI.add_api_route`
+    #[pyo3(signature = (path, endpoint, *, methods=None, **kwargs))]
+    fn add_api_route(
+        &self,
+        py: Python<'_>,
+        path: String,
+        endpoint: Bound<'_, PyAny>,
+        methods: Option<Vec<String>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let pick = |key: &str| -> Option<Py<PyAny>> {
+            kwargs
+                .and_then(|kw| kw.get_item(key).ok())
+                .flatten()
+                .filter(|v| !v.is_none())
+                .map(Py::from)
+        };
+        let get_bool = |key: &str, default: bool| -> bool {
+            kwargs
+                .and_then(|kw| kw.get_item(key).ok())
+                .flatten()
+                .filter(|v| !v.is_none())
+                .and_then(|v| v.extract::<bool>().ok())
+                .unwrap_or(default)
+        };
+        let route_kwargs = PyAPIRouter::api_route_kwargs(
+            py,
+            pick("response_model"),
+            pick("status_code").and_then(|v| v.bind(py).extract().ok()),
+            pick("tags"),
+            pick("dependencies"),
+            pick("summary").and_then(|v| v.bind(py).extract().ok()),
+            pick("description").and_then(|v| v.bind(py).extract().ok()),
+            pick("response_description").and_then(|v| v.bind(py).extract().ok()),
+            pick("responses"),
+            pick("deprecated").and_then(|v| v.bind(py).extract().ok()),
+            pick("operation_id").and_then(|v| v.bind(py).extract().ok()),
+            get_bool("include_in_schema", true),
+            pick("response_class"),
+            pick("name").and_then(|v| v.bind(py).extract().ok()),
+            pick("callbacks"),
+            pick("openapi_extra"),
+            pick("generate_unique_id_function"),
+        );
+        self.router.bind(py).borrow().add_api_route_impl(
+            py,
+            path,
+            &endpoint,
+            methods,
+            &route_kwargs,
+        )
     }
 
     #[pyo3(signature = (path, *, directory, fallback=Some("auto".to_string()), check_dir=true))]
@@ -352,7 +481,7 @@ impl FastrAPI {
             Some(c"Registers middleware of given type"),
             decorator,
         )
-        .map(|f| f.into())
+        .map(Into::into)
     }
 
     #[pyo3(signature = (host=None, port=None, *, reload=false, reload_dirs=None, reload_ignore_dirs=None, reload_ignore_patterns=None, reload_ignore_paths=None, reload_tick=750, reload_ignore_worker_failure=false))]
@@ -370,9 +499,9 @@ impl FastrAPI {
         reload_ignore_worker_failure: bool,
     ) -> PyResult<()> {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
-        println!("running on FastRAPI v{}", VERSION);
+        println!("running on FastRAPI v{VERSION}");
 
-        if reload && std::env::var_os("FASTRAPI_RELOAD_CHILD").is_none() {
+        if reload && var_os("FASTRAPI_RELOAD_CHILD").is_none() {
             server::serve_with_reload(
                 py,
                 reload_dirs,
@@ -451,7 +580,7 @@ impl FastrAPI {
             return Ok(entry.dict.clone_ref(py));
         }
 
-        let spec = crate::utils::openapi::build_openapi_spec(py, self);
+        let spec = build_openapi_spec(py, self);
         let json_str = simd_json::to_string(&spec).unwrap_or_else(|_| "{}".to_string());
         let json_module = py.import(pyo3::intern!(py, "json"))?;
         let dict = json_module.call_method1(pyo3::intern!(py, "loads"), (json_str,))?;
@@ -483,7 +612,7 @@ impl FastrAPI {
             }
             Ok(func)
         };
-        PyCFunction::new_closure(py, Some(c"exception_handler"), None, decorator).map(|f| f.into())
+        PyCFunction::new_closure(py, Some(c"exception_handler"), None, decorator).map(Into::into)
     }
 
     fn fallback(&self, py: Python, handler: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -499,7 +628,7 @@ impl FastrAPI {
     fn _router<'py>(
         &self,
         py: Python<'py>,
-    ) -> pyo3::PyRef<'py, crate::ffi::decorators::PyAPIRouter> {
+    ) -> pyo3::PyRef<'py, decorators::PyAPIRouter> {
         self.router.bind(py).borrow()
     }
 
@@ -518,7 +647,7 @@ impl FastrAPI {
         h.write_usize(router.route_entries.lock().len());
         h.write_usize(router.websocket_entries.lock().len());
         h.write_usize(router.sub_routers.lock().len());
-        h.write_u8(router.frozen.load(Ordering::Relaxed) as u8);
+        h.write_u8(u8::from(router.frozen.load(Ordering::Relaxed)));
         h.write_usize(self.static_mounts.len());
         h.write_usize(self.frontend_mounts.len());
         h.write_usize(self.app_mounts.len());
