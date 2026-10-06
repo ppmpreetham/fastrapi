@@ -1,23 +1,26 @@
-use super::payload::*;
-use super::rate_limit::*;
-use super::serve::*;
+use super::payload::extract_payload;
+use super::rate_limit::is_rate_limited;
+use super::serve::AppState;
 
 use axum::{
     extract::Request,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header::ALLOW},
     response::{IntoResponse, Response},
 };
+use pyo3::prelude::Python;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
 use crate::{
     ffi::py_handlers::{ExecutionMode, run_py_handler, run_py_handler_no_request},
-    runtime::py_bridge,
     routing::{
         router::{FrozenRouter, RouteMatch, RoutePattern, RouteTarget},
         types::{HttpMethod, PathParamRange},
     },
+    runtime::py_bridge,
 };
+use axum::http::header::HOST;
+use crate::engine::errors::dispatch_validation_handler;
 
 /// dispatches requests to the route handler
 pub(crate) async fn dispatch_or_not_found(
@@ -33,7 +36,25 @@ pub(crate) async fn dispatch_or_not_found(
         return Err(req);
     };
 
-    let Some(route_match) = router.resolve(method, path_str) else {
+    let request_host = req
+        .headers()
+        .get(HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(|h| h.split(':').next().unwrap_or(h));
+    let Some(route_match) = router.resolve(method, path_str, request_host) else {
+        let allowed = router.allowed_methods(path_str, request_host);
+        if !allowed.is_empty() {
+            let value = allowed
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
+            if let Ok(value) = HeaderValue::from_str(&value) {
+                response.headers_mut().insert(ALLOW, value);
+            }
+            return Ok(response);
+        }
         return Err(req);
     };
 
@@ -84,45 +105,51 @@ pub(crate) async fn dispatch_or_not_found(
         })
         .unwrap_or_default();
 
-    py_bridge::scoped_request_loop(
-        async_loop.clone(),
-        async move {
-            if matches!(
-                handler.execution.execution_mode,
-                ExecutionMode::SyncNoArgs | ExecutionMode::AsyncNoArgs
-            ) {
-                return Ok(tag(
-                    run_py_handler_no_request(async_loop, state.sync_to_threadpool, handler).await,
-                ));
-            }
+    py_bridge::scoped_request_loop(async_loop.clone(), async move {
+        let (request_parts, body) = req.into_parts();
+        if matches!(
+            handler.execution.execution_mode,
+            ExecutionMode::SyncNoArgs | ExecutionMode::AsyncNoArgs
+        ) {
+            return Ok(tag(run_py_handler_no_request(
+                async_loop,
+                state.sync_to_threadpool,
+                handler,
+                Some(request_parts),
+            )
+            .await));
+        }
 
-            let (request_parts, body) = req.into_parts();
+        let needs_body = !handler.payload.body_param_indices.is_empty()
+            || handler.payload.request_param.is_some()
+            || handler.payload.dependency_needs_request;
 
-            let needs_body = !handler.payload.body_param_indices.is_empty()
-                || handler.payload.request_param.is_some();
-
-            let payload = if !needs_body {
-                None
-            } else {
-                match extract_payload(&request_parts.headers, body, &handler, &state).await {
-                    Ok(p) => p.map(Arc::new),
-                    Err(resp) => return Ok(resp),
+        let payload = if needs_body {
+            match extract_payload(&request_parts.headers, body, &handler, &state).await {
+                Ok(p) => p.map(Arc::new),
+                Err(resp) => {
+                    return Ok(Python::attach(|py| {
+                        dispatch_validation_handler(py, resp, None)
+                    }));
                 }
-            };
+            }
+        } else {
+            None
+        };
 
-            Ok(tag(
-                run_py_handler(
-                    async_loop,
-                    state.sync_to_threadpool,
-                    handler,
-                    request_parts,
-                    param_ranges,
-                    payload,
-                )
-                .await,
-            ))
-        },
-    )
+        let response = run_py_handler(
+            async_loop,
+            state.sync_to_threadpool,
+            handler,
+            request_parts,
+            param_ranges,
+            payload,
+        )
+        .await;
+        Ok(tag(Python::attach(|py| {
+            dispatch_validation_handler(py, response, None)
+        })))
+    })
     .await
 }
 
@@ -133,7 +160,10 @@ fn tag_with_pattern(mut resp: Response, pattern: &Arc<str>) -> Response {
 }
 
 pub(crate) fn dispatch_path<'a>(state: &AppState, original_path: &'a str) -> Option<&'a str> {
-    let root = state.root_path.as_ref();
+    dispatch_path_with_root(state.root_path.as_ref(), original_path)
+}
+
+pub(crate) fn dispatch_path_with_root<'a>(root: &str, original_path: &'a str) -> Option<&'a str> {
     if root.is_empty() {
         Some(original_path)
     } else if original_path == root {

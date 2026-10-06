@@ -1,4 +1,4 @@
-use super::serve::*;
+use super::serve::AppState;
 
 use crate::routing::types::{BodyField, BodyPayload, ParameterSource, RouteHandler, UploadedFile};
 use ahash::AHashMap;
@@ -9,6 +9,12 @@ use axum::{
 };
 use futures_util::StreamExt;
 use smallvec::SmallVec;
+use crate::ffi::pydantic::ValidationErrorDetails;
+use multer::Constraints;
+use multer::Error;
+use multer::Multipart;
+use multer::SizeLimit;
+use std::str::from_utf8;
 
 pub(crate) async fn extract_payload(
     headers: &HeaderMap,
@@ -22,9 +28,14 @@ pub(crate) async fn extract_payload(
         .unwrap_or("");
 
     if content_type.starts_with("multipart/form-data") {
-        return parse_multipart_form(body, content_type, handler, state)
+        let raw = to_bytes(body, state.max_body_size.unwrap_or(usize::MAX))
             .await
-            .map(|form| Some(BodyPayload::Form(form)));
+            .map_err(|_| {
+                (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response()
+            })?;
+        return parse_multipart_form(Body::from(raw.clone()), content_type, handler, state)
+            .await
+            .map(|fields| Some(BodyPayload::Form { fields, raw }));
     }
 
     let body = to_bytes(body, state.max_body_size.unwrap_or(usize::MAX))
@@ -36,7 +47,7 @@ pub(crate) async fn extract_payload(
 
     if content_type.starts_with("application/x-www-form-urlencoded") {
         return parse_urlencoded_form(&body, state.max_field_size)
-            .map(|form| Some(BodyPayload::Form(form)));
+            .map(|fields| Some(BodyPayload::Form { fields, raw: body }));
     }
 
     if handler.validation.defer_json_parse {
@@ -47,8 +58,22 @@ pub(crate) async fn extract_payload(
     }
 
     let mut json_buf = body.to_vec();
-    let value = simd_json::to_owned_value(&mut json_buf)
-        .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response())?;
+    let value = simd_json::to_owned_value(&mut json_buf).map_err(|err| {
+        let detail = simd_json::json!({
+            "detail": [{
+                "type": "json_invalid",
+                "loc": ["body", err.to_string()],
+                "msg": "JSON decode error",
+                "input": null,
+            }]
+        });
+        let mut response =
+            (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(detail.clone())).into_response();
+        response
+            .extensions_mut()
+            .insert(ValidationErrorDetails(detail));
+        response
+    })?;
     Ok(Some(BodyPayload::Json {
         raw: body,
         value: Some(value),
@@ -59,7 +84,7 @@ pub(crate) fn parse_urlencoded_form(
     body: &[u8],
     max_field_size: Option<usize>,
 ) -> Result<AHashMap<String, SmallVec<[BodyField; 2]>>, Response> {
-    let raw = std::str::from_utf8(body)
+    let raw = from_utf8(body)
         .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid form body").into_response())?;
     let mut form: AHashMap<String, SmallVec<[BodyField; 2]>> = AHashMap::new();
 
@@ -92,7 +117,7 @@ pub(crate) async fn parse_multipart_form(
         .into_data_stream()
         .map(|res| res.map_err(|e| e.to_string()));
     let constraints = multipart_constraints(handler, state);
-    let mut multipart = multer::Multipart::with_constraints(stream, boundary, constraints);
+    let mut multipart = Multipart::with_constraints(stream, boundary, constraints);
     let mut form: AHashMap<String, SmallVec<[BodyField; 2]>> = AHashMap::new();
 
     while let Some(field) = multipart
@@ -123,10 +148,10 @@ pub(crate) async fn parse_multipart_form(
 
 pub(crate) fn multipart_error_response(err: multer::Error) -> Response {
     match err {
-        multer::Error::FieldSizeExceeded { .. } | multer::Error::StreamSizeExceeded { .. } => {
+        Error::FieldSizeExceeded { .. } | Error::StreamSizeExceeded { .. } => {
             (StatusCode::PAYLOAD_TOO_LARGE, err.to_string()).into_response()
         }
-        multer::Error::UnknownField { .. } => {
+        Error::UnknownField { .. } => {
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
         _ => (StatusCode::BAD_REQUEST, "Invalid multipart body").into_response(),
@@ -137,7 +162,7 @@ pub(crate) fn multipart_constraints(
     handler: &RouteHandler,
     state: &AppState,
 ) -> multer::Constraints {
-    let mut size_limit = multer::SizeLimit::new();
+    let mut size_limit = SizeLimit::new();
 
     if let Some(limit) = state.max_body_size {
         size_limit = size_limit.whole_stream(limit as u64);
@@ -180,7 +205,7 @@ pub(crate) fn multipart_constraints(
         }
     }
 
-    let mut constraints = multer::Constraints::new().size_limit(size_limit);
+    let mut constraints = Constraints::new().size_limit(size_limit);
     if state.reject_unknown_multipart_fields && !allowed.is_empty() {
         constraints = constraints.allowed_fields(allowed);
     }
