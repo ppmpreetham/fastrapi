@@ -1,6 +1,6 @@
-use super::lifecycle::*;
-use super::reload::*;
-use super::routes::*;
+use super::lifecycle::{start_background_asyncio_loop, run_startup_phase, log_python_error, stop_background_asyncio_loop, run_shutdown_phase};
+use super::reload::{resolve_reload_dirs, ReloadConfig, run_reload_supervisor};
+use super::routes::build_router;
 
 use crate::engine::types::FastrAPI;
 use axum::serve::ListenerExt;
@@ -10,13 +10,20 @@ use tracing::{error, info};
 
 use crate::globals::{AsyncLoopPool, PYTHON_RUNTIME, set_async_loop_pool, set_serve_app};
 use crate::runtime::py_bridge;
+use std::env::var;
+use std::net::SocketAddr;
+use std::thread::spawn;
+use tokio::net::TcpListener;
+use tokio::runtime::Handle;
+use tracing_subscriber::EnvFilter;
 
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
         let mut sigint = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
-        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
         tokio::select! {
             _ = sigint.recv() => {}
             _ = sigterm.recv() => {}
@@ -24,7 +31,7 @@ async fn wait_for_shutdown_signal() {
     }
     #[cfg(windows)]
     {
-        use tokio::signal::windows::{ctrl_c, ctrl_break};
+        use tokio::signal::windows::{ctrl_break, ctrl_c};
         let mut ctrl_c = ctrl_c().expect("Failed to install Ctrl+C handler");
         let mut ctrl_break = ctrl_break().expect("Failed to install Ctrl+Break handler");
         tokio::select! {
@@ -44,7 +51,7 @@ async fn wait_for_shutdown_signal() {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub rt_handle: tokio::runtime::Handle,
+    pub rt_handle: Handle,
     pub async_loop: Arc<Py<PyAny>>,
     pub pool: Option<Arc<AsyncLoopPool>>,
     pub sync_to_threadpool: bool,
@@ -58,11 +65,9 @@ pub struct AppState {
 
 impl AppState {
     #[inline]
+    #[must_use]
     pub fn pick_loop(&self) -> Arc<Py<PyAny>> {
-        match &self.pool {
-            Some(pool) => Python::attach(|py| Arc::new(pool.pick(py))),
-            None => self.async_loop.clone(),
-        }
+        self.async_loop.clone()
     }
 }
 
@@ -73,9 +78,9 @@ pub fn serve(
     app: Py<FastrAPI>,
 ) -> PyResult<()> {
     let default_filter = "info";
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
+    let filter = var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_new(filter).unwrap_or_default())
+        .with_env_filter(EnvFilter::try_new(filter).unwrap_or_default())
         .with_target(false)
         .try_init()
         .ok();
@@ -120,28 +125,31 @@ pub fn serve(
         .as_ref()
         .map(|handler| handler.clone_ref(py));
     let app = app.clone_ref(py);
+    let app_loop = app_state.async_loop.clone();
     let redoc_url = app_config.redoc_url.clone();
     let scalar_url = app_config.scalar_url.clone();
     let elements_url = app_config.elements_url.clone();
     let router = build_router(py, app_state, docs_url, openapi_url, &app_config);
     drop(app_config);
 
-    let server_thread = std::thread::spawn(move || {
-        let entered_lifespan =
-            Python::attach(|py| run_startup_phase(py, app, lifespan, on_startup));
+    let server_thread = spawn(move || {
+        let entered_lifespan = Python::attach(|py| {
+            run_startup_phase(py, app, lifespan, on_startup, app_loop.as_ref())
+        });
 
         let entered_lifespan = match entered_lifespan {
             Ok(entered) => entered,
             Err(err) => {
                 log_python_error("startup failed", err);
+                Python::attach(|py| stop_background_asyncio_loop(py, &pool_for_shutdown));
                 return;
             }
         };
-        let addr = format!("{}:{}", host, port);
+        let addr = format!("{host}:{port}");
         let server_result = PYTHON_RUNTIME.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(&addr)
+            let listener = TcpListener::bind(&addr)
                 .await
-                .unwrap_or_else(|err| panic!("Failed to bind to {}: {}", addr, err));
+                .unwrap_or_else(|err| panic!("Failed to bind to {addr}: {err}"));
 
             info!("🚀 FastrAPI running at http://{}", addr);
             if let Some(docs) = &docs_url_for_log {
@@ -161,7 +169,7 @@ pub fn serve(
                 _ = stream.set_nodelay(true);
             });
 
-            let service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let service = router.into_make_service_with_connect_info::<SocketAddr>();
             let server = axum::serve(listener, service);
 
             server
@@ -174,13 +182,14 @@ pub fn serve(
             error!("Server error: {}", err);
         }
 
-        Python::attach(|py| stop_background_asyncio_loop(py, &pool_for_shutdown));
-
         Python::attach(|py| {
-            if let Err(err) = run_shutdown_phase(py, entered_lifespan, on_shutdown) {
+            if let Err(err) =
+                run_shutdown_phase(py, entered_lifespan, on_shutdown, app_loop.as_ref())
+            {
                 log_python_error("shutdown failed", err);
             }
         });
+        Python::attach(|py| stop_background_asyncio_loop(py, &pool_for_shutdown));
     });
 
     py.detach(move || server_thread.join())
