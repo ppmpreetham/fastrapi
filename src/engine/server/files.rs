@@ -12,6 +12,12 @@ use std::{
 };
 use tower::{ServiceExt, service_fn};
 use tower_http::services::{ServeDir, ServeFile};
+use axum::body::Body;
+use axum::http::Method;
+use axum::http::header::ACCEPT;
+use std::convert::Infallible;
+use tokio::fs;
+use tokio::fs::symlink_metadata;
 
 pub(crate) async fn serve_frontend_mounts(
     mounts: Arc<Vec<FrontendMount>>,
@@ -19,14 +25,14 @@ pub(crate) async fn serve_frontend_mounts(
 ) -> Option<Response> {
     if !matches!(
         *req.method(),
-        axum::http::Method::GET | axum::http::Method::HEAD
+        Method::GET | Method::HEAD
     ) {
         return None;
     }
 
     let (mount, relative_path) = frontend_match(&mounts, req.uri().path())?;
     let file_path = frontend_safe_path(&mount.directory, relative_path)?;
-    if tokio::fs::metadata(&file_path)
+    if fs::metadata(&file_path)
         .await
         .is_ok_and(|metadata| metadata.is_file())
     {
@@ -56,6 +62,37 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
         mount.path.trim_end_matches('/').to_string()
     };
 
+    if mount.directories.len() > 1 {
+        let services = Arc::new(
+            mount
+                .directories
+                .iter()
+                .map(|directory| {
+                    ServeDir::new(directory).append_index_html_on_directories(mount.html)
+                })
+                .collect::<Vec<_>>(),
+        );
+        let service = service_fn(move |req: Request| {
+            let services = services.clone();
+            async move {
+                let (parts, _) = req.into_parts();
+                for service in services.iter() {
+                    let candidate = Request::from_parts(parts.clone(), Body::empty());
+                    let response = service
+                        .clone()
+                        .oneshot(candidate)
+                        .await
+                        .map(IntoResponse::into_response)?;
+                    if response.status() != StatusCode::NOT_FOUND {
+                        return Ok::<_, Infallible>(response);
+                    }
+                }
+                Ok(StatusCode::NOT_FOUND.into_response())
+            }
+        });
+        return app.nest_service(&mount_path, service);
+    }
+
     let serve_dir = ServeDir::new(&mount.directory).append_index_html_on_directories(mount.html);
     if mount.follow_symlink {
         return app.nest_service(&mount_path, serve_dir);
@@ -68,7 +105,7 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
         let serve_dir = serve_dir.clone();
         async move {
             if static_request_hits_symlink(&directory, req.uri().path(), html).await {
-                return Ok::<_, std::convert::Infallible>(StatusCode::FORBIDDEN.into_response());
+                return Ok::<_, Infallible>(StatusCode::FORBIDDEN.into_response());
             }
 
             serve_dir
@@ -109,7 +146,7 @@ fn frontend_navigation_request(req: &Request, relative_path: &str) -> bool {
         .is_none_or(|last| !last.contains('.'))
         && req
             .headers()
-            .get(axum::http::header::ACCEPT)
+            .get(ACCEPT)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|accept| accept.contains("text/html") || accept.contains("*/*"))
 }
@@ -137,7 +174,7 @@ async fn frontend_fallback_path(
         if status == StatusCode::OK && !navigation {
             continue;
         }
-        if tokio::fs::metadata(&path)
+        if fs::metadata(&path)
             .await
             .is_ok_and(|metadata| metadata.is_file())
         {
@@ -174,7 +211,7 @@ async fn static_request_hits_symlink(directory: &Path, request_path: &str, html:
         Ok(decoded) => decoded,
         Err(_) => return false,
     };
-    if tokio::fs::symlink_metadata(directory)
+    if symlink_metadata(directory)
         .await
         .is_ok_and(|metadata| metadata.file_type().is_symlink())
     {
@@ -190,7 +227,7 @@ async fn static_request_hits_symlink(directory: &Path, request_path: &str, html:
             Component::Prefix(_) | Component::RootDir | Component::ParentDir => return false,
         }
 
-        if tokio::fs::symlink_metadata(&file_path)
+        if symlink_metadata(&file_path)
             .await
             .is_ok_and(|metadata| metadata.file_type().is_symlink())
         {
@@ -199,11 +236,11 @@ async fn static_request_hits_symlink(directory: &Path, request_path: &str, html:
     }
 
     if html
-        && let Ok(metadata) = tokio::fs::metadata(&file_path).await
+        && let Ok(metadata) = fs::metadata(&file_path).await
         && metadata.is_dir()
     {
         file_path.push("index.html");
-        return tokio::fs::symlink_metadata(&file_path)
+        return symlink_metadata(&file_path)
             .await
             .is_ok_and(|m| m.file_type().is_symlink());
     }
