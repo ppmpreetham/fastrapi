@@ -1,3 +1,5 @@
+use axum::http::header::COOKIE;
+use axum::http::HeaderMap;
 use cookie::Cookie;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -13,7 +15,7 @@ pub struct RequestInput<'a> {
 
     pub path_params: PathParams<'a>,
     pub query_params: QueryParams<'a>,
-    pub headers: &'a axum::http::HeaderMap,
+    pub headers: &'a HeaderMap,
     pub cookies: OnceLock<SmallVec<[(&'a str, &'a str); 8]>>,
 }
 
@@ -41,7 +43,7 @@ impl<'a> RequestInput<'a> {
     pub fn get_all_cookies(&self) -> &SmallVec<[(&'a str, &'a str); 8]> {
         self.cookies.get_or_init(|| {
             self.headers
-                .get_all(axum::http::header::COOKIE)
+                .get_all(COOKIE)
                 .iter()
                 .filter_map(|header_value| header_value.to_str().ok())
                 .flat_map(Cookie::split_parse)

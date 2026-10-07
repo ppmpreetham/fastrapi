@@ -1,9 +1,10 @@
-use crate::ffi::datastructures::PyUploadFile;
+use crate::ffi::datastructures::{PyFormData, PyUploadFile};
 use bytes::Bytes;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList, PyString, PyTuple};
-
-crate::cached_py_import!(STARLETTE_FORM_DATA, "starlette.datastructures", "FormData");
+use pyo3::types::{PyBytes, PyString};
+use futures_util::stream::once;
+use multer::Multipart;
+use pyo3::Py;
 
 const MULTIPART: &str = "multipart/form-data";
 const URLENCODED: &str = "application/x-www-form-urlencoded";
@@ -28,6 +29,10 @@ pub(crate) async fn parse_form(content_type: &str, raw: &[u8]) -> Result<Vec<For
     Ok(Vec::new())
 }
 
+pub(crate) fn parse_urlencoded_form_data(py: Python<'_>, raw: &[u8]) -> PyResult<Py<PyAny>> {
+    to_form_data(py, parse_urlencoded(raw))
+}
+
 fn parse_urlencoded(raw: &[u8]) -> Vec<FormEntry> {
     form_urlencoded::parse(raw)
         .map(|(key, value)| FormEntry::Text(key.into_owned(), value.into_owned()))
@@ -36,9 +41,9 @@ fn parse_urlencoded(raw: &[u8]) -> Vec<FormEntry> {
 
 async fn parse_multipart(content_type: &str, raw: &[u8]) -> Result<Vec<FormEntry>, String> {
     let boundary = multer::parse_boundary(content_type).map_err(|e| e.to_string())?;
-    let chunk = bytes::Bytes::copy_from_slice(raw);
-    let stream = futures_util::stream::once(async move { Ok::<_, String>(chunk) });
-    let mut multipart = multer::Multipart::new(stream, boundary);
+    let chunk = Bytes::copy_from_slice(raw);
+    let stream = once(async move { Ok::<_, String>(chunk) });
+    let mut multipart = Multipart::new(stream, boundary);
     let mut entries = Vec::new();
 
     loop {
@@ -65,8 +70,8 @@ async fn parse_multipart(content_type: &str, raw: &[u8]) -> Result<Vec<FormEntry
 }
 
 impl FormEntry {
-    fn into_pair(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let (name, value) = match self {
+    fn into_pair(self, py: Python<'_>) -> PyResult<(String, Py<PyAny>)> {
+        Ok(match self {
             Self::Text(name, value) => (name, PyString::new(py, &value).into_any().unbind()),
             Self::File {
                 name,
@@ -80,20 +85,17 @@ impl FormEntry {
                 )?;
                 (name, file.into_any())
             }
-        };
-        let pair = [name.into_pyobject(py)?.unbind().into_any(), value];
-        Ok(PyTuple::new(py, pair)?.unbind().into_any())
+        })
     }
 }
 
-/// starlette hands the pairs to `FormData`, an immutable multidict that keeps duplicates.
+/// Native `FormData` multidict keeps the duplicate-key order.
 pub(crate) fn to_form_data(py: Python<'_>, entries: Vec<FormEntry>) -> PyResult<Py<PyAny>> {
     let pairs = entries
         .into_iter()
         .map(|entry| entry.into_pair(py))
         .collect::<PyResult<Vec<_>>>()?;
-    let list = PyList::new(py, pairs)?;
-    Ok(STARLETTE_FORM_DATA.get(py)?.call1((list,))?.unbind())
+    Py::new(py, PyFormData::from_pairs(py, pairs)?).map(Py::into_any)
 }
 
 pub(crate) fn content_type_of(py: Python<'_>, scope: &Bound<'_, PyAny>) -> String {

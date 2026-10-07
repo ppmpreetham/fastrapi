@@ -1,7 +1,7 @@
-use crate::runtime::py_bridge;
 use crate::ffi::exceptions::PyHTTPException;
 use crate::http::form;
 use crate::routing::types::RequestInput;
+use crate::runtime::py_bridge;
 use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyAssertionError, PyRuntimeError, PyValueError};
 use pyo3::intern;
@@ -9,8 +9,19 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyString, PyTuple};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+use axum::http::HeaderMap;
+use axum::http::header::COOKIE;
+use cookie::Cookie;
+use crate::ffi::datastructures::PyURL;
+use crate::globals::PYTHON_RUNTIME;
+use crate::globals::lifespan_state;
+use crate::globals::serve_app;
+use pyo3::Py;
+use pyo3::types::PyList;
+use std::str::from_utf8;
+use tokio::runtime::Handle;
+use tokio::task::block_in_place;
 
-crate::cached_py_import!(STARLETTE_URL, "starlette.datastructures", "URL");
 crate::cached_py_import!(STARLETTE_HEADERS, "starlette.datastructures", "Headers");
 crate::cached_py_import!(
     STARLETTE_QUERY_PARAMS,
@@ -115,16 +126,12 @@ impl PyHTTPConnection {
 
     #[getter]
     pub fn url(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let url_class = STARLETTE_URL.get(py)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "scope"), &self.scope)?;
-        let url = url_class.call((), Some(&kwargs))?;
-        Ok(url.into())
+        let url = PyURL::from_scope(self.scope.bind(py))?;
+        Py::new(py, url).map(Py::into_any)
     }
 
     #[getter]
     pub fn base_url(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let url_class = STARLETTE_URL.get(py)?;
         let scope = self.scope.bind(py);
 
         if let Ok(base_scope) = scope.call_method0(intern!(py, "copy")) {
@@ -134,15 +141,11 @@ impl PyHTTPConnection {
                 .get_item(intern!(py, "root_path"))
                 .unwrap_or_else(|_| PyString::new(py, "").into_any());
             _ = base_scope.set_item(intern!(py, "root_path"), root_path);
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "scope"), base_scope)?;
-            let url = url_class.call((), Some(&kwargs))?;
-            Ok(url.into())
+            let url = PyURL::from_scope(&base_scope)?;
+            Py::new(py, url).map(Py::into_any)
         } else {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "scope"), &self.scope)?;
-            let url = url_class.call((), Some(&kwargs))?;
-            Ok(url.into())
+            let url = PyURL::from_scope(scope)?;
+            Py::new(py, url).map(Py::into_any)
         }
     }
 
@@ -176,9 +179,7 @@ impl PyHTTPConnection {
             let query_string = scope
                 .get_item(intern!(py, "query_string"))
                 .unwrap_or_else(|_| PyBytes::new(py, b"").into_any());
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "query_string"), query_string)?;
-            if let Ok(qp) = qp_cls.call((), Some(&kwargs)) {
+            if let Ok(qp) = qp_cls.call1((query_string,)) {
                 _ = scope.set_item(intern!(py, "_query_params"), &qp);
                 return Ok(qp.into());
             }
@@ -193,9 +194,7 @@ impl PyHTTPConnection {
     pub fn path_params(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
         Ok(scope
-            .get_item(intern!(py, "path_params"))
-            .map(Into::into)
-            .unwrap_or_else(|_| PyDict::new(py).into()))
+            .get_item(intern!(py, "path_params")).map_or_else(|_| PyDict::new(py).into(), Into::into))
     }
 
     #[getter]
@@ -238,15 +237,13 @@ impl PyHTTPConnection {
     pub fn client(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
         scope
-            .get_item(intern!(py, "client"))
-            .map(|client| {
+            .get_item(intern!(py, "client")).map_or_else(|_| Ok(py.None()), |client| {
                 if let Ok((host, port)) = client.extract::<(String, u16)>() {
                     let client_info = PyClientInfo { host, port };
                     return Ok(Bound::new(py, client_info)?.into_any().unbind());
                 }
                 Ok(client.into())
             })
-            .unwrap_or_else(|_| Ok(py.None()))
     }
 
     #[getter]
@@ -427,13 +424,11 @@ impl PyHTTPConnection {
 
         if method_str.is_empty() {
             Ok(format!(
-                "HTTPConnection(type={:?}, path={:?})",
-                type_str, path_str
+                "HTTPConnection(type={type_str:?}, path={path_str:?})"
             ))
         } else {
             Ok(format!(
-                "HTTPConnection(type={:?}, method={:?}, path={:?})",
-                type_str, method_str, path_str
+                "HTTPConnection(type={type_str:?}, method={method_str:?}, path={path_str:?})"
             ))
         }
     }
@@ -459,7 +454,7 @@ fn extract_content_length(scope: &Bound<'_, PyAny>) -> Option<usize> {
             if key.eq_ignore_ascii_case(b"content-length") {
                 let val_item = tuple.get_item(1).ok()?;
                 let val: &[u8] = val_item.extract().ok()?;
-                std::str::from_utf8(val).ok()?.parse::<usize>().ok()
+                from_utf8(val).ok()?.parse::<usize>().ok()
             } else {
                 None
             }
@@ -502,8 +497,16 @@ pub(crate) fn create_py_request<'a>(
     scope.set_item(intern!(py, "method"), input.method)?;
     scope.set_item(intern!(py, "path"), input.path)?;
     scope.set_item(intern!(py, "query_string"), input.query_string)?;
-    if let Some(app) = crate::globals::serve_app() {
+    let headers = PyDict::new(py);
+    for (name, value) in input.headers {
+        headers.set_item(name.as_str().as_bytes(), value.as_bytes())?;
+    }
+    scope.set_item(intern!(py, "headers"), headers)?;
+    if let Some(app) = serve_app() {
         scope.set_item(intern!(py, "app"), app.bind(py))?;
+    }
+    if let Some(state) = lifespan_state(py) {
+        scope.set_item(intern!(py, "state"), state.bind(py))?;
     }
 
     let path_params = PyDict::new(py);
@@ -541,14 +544,14 @@ pub struct PyRequest {
     #[pyo3(get, set)]
     pub send: Py<PyAny>,
     pub(crate) _body: Arc<OnceCell<Arc<[u8]>>>,
-    pub(crate) raw_headers: Option<Arc<axum::http::HeaderMap>>,
+    pub(crate) raw_headers: Option<Arc<HeaderMap>>,
 }
 
 impl PyRequest {
     pub fn create_bound<'a>(
         py: Python<'_>,
         scope: Py<PyAny>,
-        headers: Option<Arc<axum::http::HeaderMap>>,
+        headers: Option<Arc<HeaderMap>>,
         raw_body: impl Into<Option<&'a [u8]>>,
     ) -> PyResult<Bound<'_, PyRequest>> {
         let conn = PyHTTPConnection {
@@ -580,16 +583,16 @@ impl PyRequest {
 
         let raw_list = match &self.raw_headers {
             Some(headers) => {
-                let list = pyo3::types::PyList::empty(py);
+                let list = PyList::empty(py);
                 for (key, value) in headers.iter() {
                     list.append((
-                        pyo3::types::PyBytes::new(py, key.as_str().as_bytes()),
-                        pyo3::types::PyBytes::new(py, value.as_bytes()),
+                        PyBytes::new(py, key.as_str().as_bytes()),
+                        PyBytes::new(py, value.as_bytes()),
                     ))?;
                 }
                 list
             }
-            None => pyo3::types::PyList::empty(py),
+            None => PyList::empty(py),
         };
 
         let headers_cls = STARLETTE_HEADERS.get(py)?;
@@ -698,11 +701,11 @@ impl PyRequest {
 
         let dict = PyDict::new(py);
         if let Some(headers) = &self_.borrow().raw_headers {
-            for header_value in headers.get_all(axum::http::header::COOKIE) {
+            for header_value in headers.get_all(COOKIE) {
                 let Ok(raw) = header_value.to_str() else {
                     continue;
                 };
-                for parsed in cookie::Cookie::split_parse(raw) {
+                for parsed in Cookie::split_parse(raw) {
                     let Ok(cookie) = parsed else { continue };
                     if let (Some(name), Some(value)) = (cookie.name_raw(), cookie.value_raw()) {
                         dict.set_item(name, value)?;
@@ -774,6 +777,25 @@ impl PyRequest {
         })
     }
 
+    fn form_sync<'py>(self_: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let conn: &Bound<'py, PyHTTPConnection> = self_.as_super();
+        let request = self_.borrow();
+        let raw = request._body.get().cloned().unwrap_or_default();
+        let content_type = form::content_type_of(py, conn.borrow().scope.bind(py));
+        if content_type.starts_with("multipart/form-data") {
+            let parsed = if let Ok(handle) = Handle::try_current() {
+                block_in_place(|| {
+                    handle.block_on(form::parse_form(&content_type, &raw))
+                })
+            } else {
+                PYTHON_RUNTIME.block_on(form::parse_form(&content_type, &raw))
+            }
+            .map_err(|message| PyHTTPException::bad_request(py, &message))?;
+            return form::to_form_data(py, parsed).map(|value| value.bind(py).clone());
+        }
+        Ok(form::parse_urlencoded_form_data(py, &raw)?.into_bound(py))
+    }
+
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         py_bridge::future_into_py(py, async move { Ok(()) })
     }
@@ -782,17 +804,44 @@ impl PyRequest {
         py_bridge::future_into_py(py, async move { Ok(false) })
     }
 
+    fn stream<'py>(self_: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let conn = self_.as_super();
+        let request = py.import("starlette.requests")?.getattr("Request")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("receive", conn.borrow().receive.clone_ref(py))?;
+        kwargs.set_item("send", self_.borrow().send.clone_ref(py))?;
+        let starlette = request.call((conn.borrow().scope.clone_ref(py),), Some(&kwargs))?;
+        if let Some(body) = self_.borrow()._body.get() {
+            starlette.setattr("_body", PyBytes::new(py, body.as_ref()))?;
+        }
+        starlette.call_method0("stream")
+    }
+
+    fn send_push_promise<'py>(
+        self_: &Bound<'py, Self>,
+        py: Python<'py>,
+        path: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let conn = self_.as_super();
+        let request = py.import("starlette.requests")?.getattr("Request")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("receive", conn.borrow().receive.clone_ref(py))?;
+        kwargs.set_item("send", self_.borrow().send.clone_ref(py))?;
+        let starlette = request.call((conn.borrow().scope.clone_ref(py),), Some(&kwargs))?;
+        starlette.call_method1("send_push_promise", (path,))
+    }
+
     fn __repr__(self_: &Bound<'_, Self>) -> PyResult<String> {
         let conn: &Bound<'_, PyHTTPConnection> = self_.as_super();
         let scope = conn.borrow().scope.bind(self_.py()).clone();
         let method: String = scope
             .get_item(intern!(self_.py(), "method"))
             .and_then(|m| m.extract())
-            .unwrap_or_else(|_| "".to_string());
+            .unwrap_or_else(|_| String::new());
         let path: String = scope
             .get_item(intern!(self_.py(), "path"))
             .and_then(|p| p.extract())
-            .unwrap_or_else(|_| "".to_string());
-        Ok(format!("Request(method={:?}, path={:?})", method, path))
+            .unwrap_or_else(|_| String::new());
+        Ok(format!("Request(method={method:?}, path={path:?})"))
     }
 }
