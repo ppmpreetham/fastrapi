@@ -220,7 +220,7 @@ pub fn create_status_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     } else {
         parent_name
     };
-    let full_name = format!("{}.status", base_name);
+    let full_name = format!("{base_name}.status");
     status_module.setattr("__name__", &full_name)?;
     py.import("sys")?
         .getattr("modules")?
