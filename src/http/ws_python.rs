@@ -5,8 +5,18 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use crate::utils::{json_to_py_object, write_py_json};
+use bytes::BytesMut;
+use crate::exceptions::PyWebSocketDisconnect;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::PyValueError;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering;
 
 crate::cached_py_import!(WS_STARLETTE_HEADERS, "starlette.datastructures", "Headers");
 crate::cached_py_import!(
@@ -25,17 +35,31 @@ pub(crate) enum WSMessage {
 type SharedRx = Arc<PlMutex<Option<mpsc::Receiver<WSMessage>>>>;
 
 fn disconnected() -> PyErr {
-    pyo3::exceptions::PyConnectionError::new_err("WebSocket closed")
+    disconnected_with_code(1000)
+}
+
+pub(crate) enum WSDecision {
+    Accept,
+    Reject(u16),
+}
+
+fn disconnected_with_code(code: u16) -> PyErr {
+    Python::attach(|py| {
+        PyErr::from_type(
+            py.get_type::<PyWebSocketDisconnect>(),
+            (code, Option::<String>::None),
+        )
+    })
 }
 
 fn expected(expected: &str, got: &str) -> PyErr {
-    pyo3::exceptions::PyTypeError::new_err(format!("Expected {expected}, got {got}"))
+    PyTypeError::new_err(format!("Expected {expected}, got {got}"))
 }
 
 fn parse_json_bytes(bytes: &Bytes) -> PyResult<Py<PyAny>> {
     let mut json_buf = bytes.to_vec();
     let value = simd_json::to_owned_value(&mut json_buf)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(Python::attach(|py| json_to_py_object(py, &value)))
 }
 
@@ -43,7 +67,7 @@ async fn next_message(rx_arc: SharedRx) -> PyResult<WSMessage> {
     let mut rx = {
         let mut guard = rx_arc.lock();
         guard.take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(
+            PyRuntimeError::new_err(
                 "Concurrent receive operations are not supported",
             )
         })?
@@ -64,14 +88,32 @@ async fn next_message(rx_arc: SharedRx) -> PyResult<WSMessage> {
 pub struct PyWebSocket {
     pub(crate) tx: mpsc::Sender<WSMessage>,
     pub(crate) rx: SharedRx,
-    pub(crate) is_connected: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) is_connected: Arc<AtomicBool>,
     pub(crate) scope: Option<Py<PyDict>>,
+    pub(crate) decision: Arc<PlMutex<Option<oneshot::Sender<WSDecision>>>>,
+    pub(crate) handshake_state: Arc<AtomicU8>,
 }
 
 #[pymethods]
 impl PyWebSocket {
     fn accept<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        py_bridge::future_into_py(py, async move { Ok(()) })
+        let decision = self.decision.clone();
+        let state = self.handshake_state.clone();
+        py_bridge::future_into_py(py, async move {
+            if state
+                .compare_exchange(
+                    0,
+                    1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+                && let Some(sender) = decision.lock().take()
+            {
+                let _ = sender.send(WSDecision::Accept);
+            }
+            Ok(())
+        })
     }
 
     fn send_text<'py>(&self, py: Python<'py>, data: String) -> PyResult<Bound<'py, PyAny>> {
@@ -99,7 +141,7 @@ impl PyWebSocket {
         py: Python<'py>,
         data: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let mut buf = bytes::BytesMut::new();
+        let mut buf = BytesMut::new();
         let mut writer = (&mut buf).writer();
         write_py_json(py, data, &mut writer)?;
         let payload = buf.freeze();
@@ -117,9 +159,9 @@ impl PyWebSocket {
         py_bridge::future_into_py(py, async move {
             match next_message(rx).await? {
                 WSMessage::Text(bytes) => String::from_utf8(bytes.to_vec())
-                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string())),
+                    .map_err(|e| PyValueError::new_err(e.to_string())),
                 WSMessage::Binary(_) => Err(expected("text", "binary")),
-                WSMessage::Close(_) => Err(disconnected()),
+                WSMessage::Close(code) => Err(disconnected_with_code(code)),
             }
         })
     }
@@ -130,7 +172,7 @@ impl PyWebSocket {
             match next_message(rx).await? {
                 WSMessage::Binary(data) => Ok(data.to_vec()),
                 WSMessage::Text(_) => Err(expected("binary", "text")),
-                WSMessage::Close(_) => Err(disconnected()),
+                WSMessage::Close(code) => Err(disconnected_with_code(code)),
             }
         })
     }
@@ -141,7 +183,7 @@ impl PyWebSocket {
             match next_message(rx).await? {
                 WSMessage::Text(bytes) => parse_json_bytes(&bytes),
                 WSMessage::Binary(_) => Err(expected("text", "binary")),
-                WSMessage::Close(_) => Err(disconnected()),
+                WSMessage::Close(code) => Err(disconnected_with_code(code)),
             }
         })
     }
@@ -149,7 +191,22 @@ impl PyWebSocket {
     #[pyo3(signature = (code = 1000))]
     fn close<'py>(&self, py: Python<'py>, code: u16) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.tx.clone();
+        let decision = self.decision.clone();
+        let state = self.handshake_state.clone();
         py_bridge::future_into_py(py, async move {
+            if state
+                .compare_exchange(
+                    0,
+                    2,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+                && let Some(sender) = decision.lock().take()
+            {
+                let _ = sender.send(WSDecision::Reject(code));
+                return Ok(());
+            }
             tx.send(WSMessage::Close(code))
                 .await
                 .map_err(|_| closed())?;
@@ -159,7 +216,7 @@ impl PyWebSocket {
 
     #[getter]
     fn client_state(&self) -> u8 {
-        if self.is_connected.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.is_connected.load(Ordering::Relaxed) {
             1 // Connected
         } else {
             3 // Disconnected
@@ -196,6 +253,12 @@ impl PyWebSocket {
         Err(closed())
     }
 
+    #[getter]
+    fn scope(&self, py: Python<'_>) -> Py<PyAny> {
+        self.scope
+            .as_ref().map_or_else(|| py.None(), |scope| scope.clone_ref(py).into_any())
+    }
+
     fn iter_text(self_: Py<Self>) -> PyResult<Py<WSIterator>> {
         iterator(self_, false)
     }
@@ -206,7 +269,7 @@ impl PyWebSocket {
 }
 
 fn closed() -> PyErr {
-    pyo3::exceptions::PyRuntimeError::new_err("WebSocket closed")
+    PyRuntimeError::new_err("WebSocket closed")
 }
 
 fn iterator(ws: Py<PyWebSocket>, json: bool) -> PyResult<Py<WSIterator>> {
@@ -229,9 +292,7 @@ fn scope_value(scope: &Option<Py<PyDict>>, py: Python<'_>, key: &str) -> Py<PyAn
     scope
         .as_ref()
         .and_then(|s| s.bind(py).get_item(key).ok())
-        .flatten()
-        .map(Bound::unbind)
-        .unwrap_or_else(|| py.None())
+        .flatten().map_or_else(|| py.None(), Bound::unbind)
 }
 
 /// Async iterator powering `iter_text()` / `iter_json()`.
@@ -256,7 +317,7 @@ impl WSIterator {
             match next_message(rx).await {
                 Ok(WSMessage::Text(bytes)) if !json => {
                     let text = String::from_utf8(bytes.to_vec())
-                        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+                        .map_err(|e| PyValueError::new_err(e.to_string()))?;
                     Ok(Python::attach(|py| {
                         text.into_pyobject(py).unwrap().into_any().unbind()
                     }))
@@ -264,7 +325,7 @@ impl WSIterator {
                 Ok(WSMessage::Text(bytes)) => parse_json_bytes(&bytes),
                 Ok(WSMessage::Binary(_)) => Err(expected("text", "binary")),
                 Ok(WSMessage::Close(_)) | Err(_) => {
-                    Err(pyo3::exceptions::PyStopAsyncIteration::new_err(()))
+                    Err(PyStopAsyncIteration::new_err(()))
                 }
             }
         })
