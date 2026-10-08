@@ -46,12 +46,12 @@ pub(crate) fn is_rate_limited(req: &Request, handler: usize, limit: u32) -> bool
     let now_secs = Instant::now().duration_since(*start_time).as_secs() as u32;
 
     let pinned = limits.pin();
-    if LAST_SWEEP.swap(now_secs as u64, SeqCst) != now_secs as u64 {
+    if LAST_SWEEP.swap(u64::from(now_secs), SeqCst) != u64::from(now_secs) {
         pinned.retain(|_, window| window.is_live(now_secs));
     }
 
     let bucket = pinned.get_or_insert_with(key, || RateLimitWindow {
-        data: AtomicU64::new((now_secs as u64) << 32),
+        data: AtomicU64::new(u64::from(now_secs) << 32),
     });
 
     let result = bucket.data.fetch_update(SeqCst, SeqCst, |val| {
@@ -59,11 +59,11 @@ pub(crate) fn is_rate_limited(req: &Request, handler: usize, limit: u32) -> bool
         let count = (val & 0xFFFFFFFF) as u32;
 
         if now_secs != window_time {
-            Some(((now_secs as u64) << 32) | 1)
+            Some((u64::from(now_secs) << 32) | 1)
         } else if count >= limit {
             None // rate limited
         } else {
-            Some(((now_secs as u64) << 32) | (count + 1) as u64)
+            Some((u64::from(now_secs) << 32) | u64::from(count + 1))
         }
     });
 

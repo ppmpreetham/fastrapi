@@ -4,6 +4,7 @@ use std::net::IpAddr;
 use std::num::NonZeroU32;
 
 // TODO: add this layer to middlewares (.layer(rate_limit(param));)
+#[must_use]
 pub fn rate_limit(rps: u32) -> GovernorLayer<IpAddr> {
     GovernorLayer::new(
         GovernorConfigBuilder::default()

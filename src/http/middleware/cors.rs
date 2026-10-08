@@ -7,6 +7,7 @@ use std::str::FromStr;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use smart_default::SmartDefault;
+use std::time::Duration;
 
 fn default_methods() -> Vec<String> {
     vec![
@@ -165,6 +166,6 @@ pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
         layer = layer.expose_headers(expose_headers);
     }
 
-    layer = layer.max_age(std::time::Duration::from_secs(config.max_age));
+    layer = layer.max_age(Duration::from_secs(config.max_age));
     Ok(layer)
 }

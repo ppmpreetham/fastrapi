@@ -33,6 +33,15 @@ use crate::http::middleware::{
     DeclaredLayer, MiddlewareContainer, PreparedMiddlewares, PyMiddleware, asgi, build_cors_layer,
     execute_py_middlewares,
 };
+use axum::http::HeaderName;
+use crate::engine::server::routes::parse_header_name;
+use crate::engine::server::routes::parse_header_value;
+use crate::engine::server::routes::record_prometheus_metrics;
+use crate::http::middleware::PyMiddlewareKind;
+use pyo3::Bound;
+use std::time;
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_sessions::MemoryStore;
 
 pub(crate) fn build_stack(
     app: Router,
@@ -59,7 +68,7 @@ fn apply_declared(
     // axum's `.layer()` makes each successive call OUTERMOST, so applying
     // in declaration order yields Starlette semantics: the last-declared
     // middleware runs first.
-    for layer in container.order.iter() {
+    for layer in &container.order {
         app = match layer {
             DeclaredLayer::Session => session_layer(app, container),
             DeclaredLayer::GZip => gzip_layer(app, container),
@@ -67,7 +76,7 @@ fn apply_declared(
             DeclaredLayer::TrustedHost => trusted_host_layer(app, container),
             DeclaredLayer::HttpsRedirect => https_redirect_layer(app),
             DeclaredLayer::Custom(mw) => {
-                if mw.kind == crate::http::middleware::PyMiddlewareKind::Asgi {
+                if mw.kind == PyMiddlewareKind::Asgi {
                     asgi_layer(app, mw.clone(), async_loop.clone(), max_body_size)
                 } else {
                     custom_layer(app, mw.clone(), async_loop.clone())
@@ -112,7 +121,7 @@ fn apply_legacy(
         info!("Layer: CORS");
         match build_cors_layer(config) {
             Ok(layer) => app = app.layer(layer),
-            Err(e) => eprintln!("Error building CORS layer: {:?}", e),
+            Err(e) => eprintln!("Error building CORS layer: {e:?}"),
         }
     }
 
@@ -122,7 +131,7 @@ fn apply_legacy(
 fn apply_config_layers(mut app: Router, app_config: &FastrAPI) -> Router {
     if app_config.prometheus_config.is_some() {
         app = app.layer(axum_middleware::from_fn(
-            crate::engine::server::routes::record_prometheus_metrics,
+            record_prometheus_metrics,
         ));
     }
 
@@ -133,7 +142,7 @@ fn apply_config_layers(mut app: Router, app_config: &FastrAPI) -> Router {
     if let Some(header_name) = app_config
         .request_id_header
         .as_deref()
-        .and_then(crate::engine::server::routes::parse_header_name)
+        .and_then(parse_header_name)
     {
         app = app
             .layer(SetRequestIdLayer::new(header_name.clone(), MakeRequestUuid))
@@ -143,10 +152,10 @@ fn apply_config_layers(mut app: Router, app_config: &FastrAPI) -> Router {
     if let Some(value) = app_config
         .powered_by_header
         .as_deref()
-        .and_then(crate::engine::server::routes::parse_header_value)
+        .and_then(parse_header_value)
     {
         app = app.layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::HeaderName::from_static("x-powered-by"),
+            HeaderName::from_static("x-powered-by"),
             value,
         ));
     }
@@ -154,12 +163,12 @@ fn apply_config_layers(mut app: Router, app_config: &FastrAPI) -> Router {
     if let Some(seconds) = app_config.request_timeout {
         app = app.layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            std::time::Duration::from_secs(seconds),
+            time::Duration::from_secs(seconds),
         ));
     }
 
     if app_config.catch_panics {
-        app = app.layer(tower_http::catch_panic::CatchPanicLayer::new());
+        app = app.layer(CatchPanicLayer::new());
     }
 
     if app_config.redirect_slashes {
@@ -188,7 +197,7 @@ fn session_layer(app: Router, container: &MiddlewareContainer) -> Router {
         return app;
     };
 
-    let layer = SessionManagerLayer::new(tower_sessions::MemoryStore::default())
+    let layer = SessionManagerLayer::new(MemoryStore::default())
         .with_signed(session_key(&config.secret_key))
         .with_name(config.session_cookie.clone())
         .with_path(config.path.clone())
@@ -283,8 +292,12 @@ fn trusted_host_layer(app: Router, container: &MiddlewareContainer) -> Router {
                 return next.run(req).await;
             }
 
-            if redirect && host_matches(&allowed, &format!("www.{host}")) {
-                return redirect_to(&req, &format!("www.{authority}"));
+            if redirect
+                && let Some(base) = host.strip_prefix("www.")
+                && host_matches(&allowed, base)
+            {
+                let port = authority.strip_prefix(host).unwrap_or_default();
+                return redirect_to(&req, &format!("{base}{port}"));
             }
 
             (StatusCode::BAD_REQUEST, "Invalid host header").into_response()
@@ -363,13 +376,13 @@ fn asgi_layer(
             Some(kwargs) => cls.call((downstream,), Some(kwargs.bind(py))),
             None => cls.call1((downstream,)),
         }
-        .map(|obj| obj.unbind())
+        .map(Bound::unbind)
     });
 
     match instance {
         Ok(instance) => {
             info!("Applying raw ASGI middleware");
-            let instance = std::sync::Arc::new(instance);
+            let instance = Arc::new(instance);
             app.layer(axum_middleware::from_fn(move |req, next| {
                 let instance = instance.clone();
                 let async_loop = async_loop.clone();

@@ -233,6 +233,7 @@ pub struct MiddlewareRegistry {
 }
 
 impl MiddlewareRegistry {
+    #[must_use]
     pub fn new() -> Self {
         let mut registry = Self {
             builders: Vec::new(),
@@ -253,16 +254,19 @@ impl MiddlewareRegistry {
         self.name_map.insert(name, idx);
     }
 
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&dyn MiddlewareBuilder> {
         self.name_map
             .get(name)
             .map(|&idx| self.builders[idx].as_ref())
     }
 
+    #[must_use]
     pub fn builders(&self) -> &[Box<dyn MiddlewareBuilder>] {
         &self.builders
     }
 
+    #[must_use]
     pub fn supported_names(&self) -> Vec<&'static str> {
         self.builders.iter().map(|b| b.name()).collect()
     }
