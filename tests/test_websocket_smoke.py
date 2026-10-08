@@ -105,3 +105,27 @@ def test_websocket_echo_smoke():
         opcode, payload = _recv_frame(sock)
         assert opcode == 0x1
         assert payload.decode() == "echo:ping"
+
+
+def test_websocket_rejects_before_upgrade():
+    app = FastrAPI()
+
+    @app.websocket("/reject")
+    async def ws_endpoint(ws):
+        await ws.close(1008)
+
+    port = _free_port()
+    _serve(app, port)
+    key = base64.b64encode(os.urandom(16)).decode()
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(
+            (
+                "GET /reject HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{port}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode()
+        )
+        assert b" 403 " in sock.recv(4096)
