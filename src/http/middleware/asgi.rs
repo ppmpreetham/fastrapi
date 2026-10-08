@@ -13,6 +13,14 @@ use pyo3::{
     types::{PyAny, PyByteArray, PyBytes, PyDict, PyList},
 };
 use tracing::error;
+use axum::http::HeaderMap;
+use bytes::Bytes;
+use bytes::BytesMut;
+use crate::globals::serve_app;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::channel;
 
 const DOWNSTREAM_KEY: &str = "_fastrapi_downstream";
 
@@ -44,7 +52,7 @@ pub struct PyScopeDownstream;
     skip_from_py_object
 )]
 pub struct PyAsgiReceive {
-    body: std::sync::Arc<tokio::sync::Mutex<Option<bytes::Bytes>>>,
+    body: Arc<Mutex<Option<bytes::Bytes>>>,
 }
 
 /// collects the `http.response.*` messages the middleware chain sends.
@@ -55,7 +63,7 @@ pub struct PyAsgiReceive {
     skip_from_py_object
 )]
 pub struct PyAsgiSend {
-    tx: tokio::sync::mpsc::Sender<Py<PyAny>>,
+    tx: Sender<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -114,7 +122,7 @@ async fn drain_receive(
     locals: &py_bridge::TaskLocals,
     receive: &Py<PyAny>,
 ) -> PyResult<bytes::Bytes> {
-    let mut buf = bytes::BytesMut::new();
+    let mut buf = BytesMut::new();
     loop {
         let msg: Py<PyAny> = {
             let fut = Python::attach(|py| -> PyResult<_> {
@@ -162,14 +170,14 @@ fn parse_request_message(py: Python<'_>, msg: &Bound<'_, PyAny>) -> (Option<byte
 
 fn python_bytes(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<bytes::Bytes> {
     if let Ok(bytes) = obj.cast::<PyBytes>() {
-        return Some(bytes::Bytes::copy_from_slice(bytes.as_bytes()));
+        return Some(Bytes::copy_from_slice(bytes.as_bytes()));
     }
     if let Ok(bytearray) = obj.cast::<PyByteArray>() {
-        return Some(bytes::Bytes::from(bytearray.to_vec()));
+        return Some(Bytes::from(bytearray.to_vec()));
     }
     let as_bytes = obj.call_method0(intern!(py, "__bytes__")).ok()?;
     let bytes = as_bytes.cast::<PyBytes>().ok()?;
-    Some(bytes::Bytes::copy_from_slice(bytes.as_bytes()))
+    Some(Bytes::copy_from_slice(bytes.as_bytes()))
 }
 
 /// emits `http.response.start` + `http.response.body` through the middleware's send.
@@ -186,7 +194,7 @@ async fn send_response(
         msg.set_item(intern!(py, "type"), intern!(py, "http.response.start"))?;
         msg.set_item(intern!(py, "status"), parts.status.as_u16())?;
         let headers = PyList::empty(py);
-        for (name, value) in parts.headers.iter() {
+        for (name, value) in &parts.headers {
             headers.append((
                 PyBytes::new(py, name.as_str().as_bytes()),
                 PyBytes::new(py, value.as_bytes()),
@@ -270,15 +278,15 @@ enum ResponseMessage {
 }
 
 pub(crate) async fn run_asgi_request(
-    instance: std::sync::Arc<Py<PyAny>>,
+    instance: Arc<Py<PyAny>>,
     req: Request,
     next: Next,
-    async_loop: std::sync::Arc<Py<PyAny>>,
+    async_loop: Arc<Py<PyAny>>,
     max_body_size: usize,
 ) -> Response {
     let (parts, body) = req.into_parts();
     let body_bytes = to_bytes(body, max_body_size).await.unwrap_or_default();
-    let (send_tx, mut send_rx) = tokio::sync::mpsc::channel::<Py<PyAny>>(16);
+    let (send_tx, mut send_rx) = channel::<Py<PyAny>>(16);
     let close_tx = send_tx.clone();
 
     let outcome = Python::attach(|py| -> PyResult<_> {
@@ -300,7 +308,7 @@ pub(crate) async fn run_asgi_request(
         let receive = Py::new(
             py,
             PyAsgiReceive {
-                body: std::sync::Arc::new(tokio::sync::Mutex::new(Some(body_bytes))),
+                body: Arc::new(Mutex::new(Some(body_bytes))),
             },
         )?
         .into_any();
@@ -354,7 +362,7 @@ fn parse_response_message(py: Python<'_>, msg: &Bound<'_, PyAny>) -> ResponseMes
                 .and_then(|value| value.extract::<Vec<(Vec<u8>, Vec<u8>)>>().ok())
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(name, value)| (bytes::Bytes::from(name), bytes::Bytes::from(value)))
+                .map(|(name, value)| (Bytes::from(name), Bytes::from(value)))
                 .collect();
             ResponseMessage::Start(status, headers)
         }
@@ -372,23 +380,20 @@ fn parse_response_message(py: Python<'_>, msg: &Bound<'_, PyAny>) -> ResponseMes
 
 fn collect_response(messages: Vec<ResponseMessage>) -> Response {
     let mut status = None;
-    let mut headers = axum::http::HeaderMap::new();
-    let mut body = bytes::BytesMut::new();
+    let mut headers = HeaderMap::new();
+    let mut body = BytesMut::new();
 
     for message in messages {
         match message {
             ResponseMessage::Start(msg_status, msg_headers) => {
                 status.get_or_insert(msg_status);
                 for (name, value) in msg_headers {
-                    match (
+                    if let (Ok(name), Ok(value)) = (
                         HeaderName::try_from(name.as_ref()),
                         HeaderValue::try_from(value.as_ref()),
                     ) {
-                        (Ok(name), Ok(value)) => {
-                            headers.append(name, value);
-                        }
-                        _ => error!("asgi middleware sent an invalid response header"),
-                    }
+                        headers.append(name, value);
+                    } else { error!("asgi middleware sent an invalid response header") }
                 }
             }
             ResponseMessage::Body(chunk) => body.extend(chunk),
@@ -440,7 +445,7 @@ fn build_scope(py: Python<'_>, parts: &Parts) -> PyResult<Py<PyDict>> {
     )?;
     scope.set_item(intern!(py, "root_path"), "")?;
     let headers = PyList::empty(py);
-    for (name, value) in parts.headers.iter() {
+    for (name, value) in &parts.headers {
         headers.append((
             PyBytes::new(py, name.as_str().as_bytes()),
             PyBytes::new(py, value.as_bytes()),
@@ -449,7 +454,7 @@ fn build_scope(py: Python<'_>, parts: &Parts) -> PyResult<Py<PyDict>> {
     scope.set_item(intern!(py, "headers"), headers)?;
     scope.set_item(intern!(py, "client"), py.None())?;
     scope.set_item(intern!(py, "server"), py.None())?;
-    if let Some(app) = crate::globals::serve_app() {
+    if let Some(app) = serve_app() {
         scope.set_item(intern!(py, "app"), app.bind(py))?;
     }
     scope.set_item(intern!(py, "state"), PyDict::new(py))?;

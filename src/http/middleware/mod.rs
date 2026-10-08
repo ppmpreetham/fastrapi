@@ -1,6 +1,6 @@
-use crate::runtime::py_bridge;
 use crate::http::responses::convert_auto_response;
 use crate::runtime::blocking::run_python;
+use crate::runtime::py_bridge;
 use axum::{
     extract::Request,
     http::StatusCode,
@@ -16,6 +16,8 @@ use std::borrow::Cow;
 use std::str;
 use std::sync::Arc;
 use tracing::error;
+use axum::http::HeaderValue;
+use pyo3::Bound;
 
 pub mod asgi;
 pub mod call_next;
@@ -111,7 +113,7 @@ impl PyMiddleware {
         obj: &Bound<'_, PyAny>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        if obj.is_instance_of::<pyo3::types::PyType>() && Self::call_param_count(py, obj) == Some(3)
+        if obj.is_instance_of::<PyType>() && Self::call_param_count(py, obj) == Some(3)
         {
             let is_async = obj
                 .getattr(intern!(py, "__call__"))
@@ -128,7 +130,7 @@ impl PyMiddleware {
             });
         }
 
-        let instance: Bound<'_, PyAny> = if obj.is_instance_of::<pyo3::types::PyType>() {
+        let instance: Bound<'_, PyAny> = if obj.is_instance_of::<PyType>() {
             match obj.call((), kwargs) {
                 Ok(instance) => instance,
                 Err(_) => obj.call0()?,
@@ -204,7 +206,7 @@ fn build_request_context(
     Ok(ctx.unbind())
 }
 
-fn header_key_bytes<'a, 'py>(key: &'a Bound<'py, PyAny>) -> PyResult<Cow<'a, [u8]>> {
+fn header_key_bytes<'a>(key: &'a Bound<'_, PyAny>) -> PyResult<Cow<'a, [u8]>> {
     if let Ok(s) = key.cast::<PyString>() {
         Ok(Cow::Borrowed(s.to_str()?.as_bytes()))
     } else if let Ok(b) = key.cast::<PyBytes>() {
@@ -225,8 +227,8 @@ pub struct PyLazyHeaders {
 }
 
 impl PyLazyHeaders {
-    fn unique_entries(&self) -> SmallVec<[(&str, &axum::http::HeaderValue); 16]> {
-        let mut out: SmallVec<[(&str, &axum::http::HeaderValue); 16]> = SmallVec::new();
+    fn unique_entries(&self) -> SmallVec<[(&str, &HeaderValue); 16]> {
+        let mut out: SmallVec<[(&str, &HeaderValue); 16]> = SmallVec::new();
         for (name, value) in self.headers.iter() {
             let name = name.as_str();
             let found = match out.last() {
@@ -247,7 +249,7 @@ impl PyLazyHeaders {
             .get_all(key)
             .into_iter()
             .next_back()
-            .map(axum::http::HeaderValue::as_bytes)
+            .map(HeaderValue::as_bytes)
     }
 }
 
@@ -313,7 +315,7 @@ impl PyLazyHeaders {
         let key = header_key_bytes(key)?;
         match self.last_value(&key) {
             Some(v) => Ok(PyBytes::new(py, v).into_any().unbind()),
-            None => Ok(default.map(|d| d.unbind()).unwrap_or_else(|| py.None())),
+            None => Ok(default.map_or_else(|| py.None(), Bound::unbind)),
         }
     }
 
@@ -363,6 +365,7 @@ pub struct PreparedMiddlewares {
 }
 
 impl PreparedMiddlewares {
+    #[must_use]
     pub fn new(middlewares: Arc<Vec<Arc<PyMiddleware>>>) -> Self {
         let (context, call_next): (Vec<Arc<PyMiddleware>>, Vec<Arc<PyMiddleware>>) = middlewares
             .iter()

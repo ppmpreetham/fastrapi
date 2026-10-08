@@ -11,6 +11,17 @@ use axum::{
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
+use axum::http::HeaderMap;
+use crate::globals::spawn;
+use crate::http::request::PyRequest;
+use crate::http::responses::convert_auto_response;
+use crate::runtime::blocking::run_python;
+use futures_util::future::BoxFuture;
+use pyo3::Bound;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3_async_runtimes::TaskLocals;
+use tokio::sync::oneshot::Receiver;
+use tokio::sync::oneshot::channel;
 
 #[pyclass(
     frozen,
@@ -70,10 +81,10 @@ fn middleware_error() -> Response {
 
 struct DownstreamParts {
     status: u16,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
 }
 
-fn split_response(response: Response) -> (DownstreamParts, axum::body::Body) {
+fn split_response(response: Response) -> (DownstreamParts, Body) {
     let (parts, body) = response.into_parts();
     (
         DownstreamParts {
@@ -90,7 +101,7 @@ fn parts_to_py(
     body: bytes::Bytes,
 ) -> PyResult<Bound<'_, PyAny>> {
     let headers_dict = PyDict::new(py);
-    for (name, value) in parts.headers.iter() {
+    for (name, value) in &parts.headers {
         if let Ok(value) = value.to_str() {
             headers_dict.set_item(name.as_str(), value)?;
         }
@@ -105,7 +116,7 @@ fn parts_to_py(
             body_bytes: body,
         },
     )
-    .map(|bound| bound.into_any())
+    .map(Bound::into_any)
 }
 
 fn py_to_response(py: Python<'_>, value: &Bound<'_, PyAny>) -> Response {
@@ -126,7 +137,7 @@ fn py_to_response(py: Python<'_>, value: &Bound<'_, PyAny>) -> Response {
             .unwrap_or_else(|_| middleware_error());
     }
 
-    crate::http::responses::convert_auto_response(py, value)
+    convert_auto_response(py, value)
 }
 
 enum Outcome {
@@ -150,7 +161,7 @@ fn drive(
     request: Request,
     next: Next,
     async_loop: Arc<Py<PyAny>>,
-) -> futures_util::future::BoxFuture<'static, Response> {
+) -> BoxFuture<'static, Response> {
     Box::pin(async move {
         let Some(mw) = middlewares.get(idx).cloned() else {
             return next.run(request).await;
@@ -162,11 +173,11 @@ fn drive(
         let headers = Arc::new(parts.headers.clone());
         let downstream_request = Request::from_parts(parts, body);
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<Response>();
+        let (tx, rx) = channel::<Response>();
         {
             let inner_mws = middlewares.clone();
             let inner_loop = async_loop.clone();
-            crate::globals::spawn(async move {
+            spawn(async move {
                 let response =
                     drive(inner_mws, idx + 1, downstream_request, next, inner_loop).await;
                 _ = tx.send(response);
@@ -174,7 +185,7 @@ fn drive(
         }
 
         let outcome =
-            crate::runtime::blocking::run_python(move |py| -> Result<Outcome, Response> {
+            run_python(move |py| -> Result<Outcome, Response> {
                 invoke(
                     py,
                     &mw,
@@ -216,8 +227,8 @@ fn invoke(
     method: &str,
     path: &str,
     query: &str,
-    headers: Arc<axum::http::HeaderMap>,
-    downstream: tokio::sync::oneshot::Receiver<Response>,
+    headers: Arc<HeaderMap>,
+    downstream: Receiver<Response>,
     async_loop: &Arc<Py<PyAny>>,
 ) -> Result<Outcome, Response> {
     let fail = |err: PyErr| -> Response {
@@ -231,7 +242,7 @@ fn invoke(
     _ = scope.set_item(intern!(py, "path"), path);
     _ = scope.set_item(intern!(py, "query_string"), query);
 
-    let req_obj = crate::http::request::PyRequest::create_bound(
+    let req_obj = PyRequest::create_bound(
         py,
         scope.into_any().unbind(),
         Some(headers),
@@ -243,13 +254,13 @@ fn invoke(
 
     let bridged = async move {
         let response = downstream.await.map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("call_next pipeline terminated")
+            PyRuntimeError::new_err("call_next pipeline terminated")
         })?;
         let (parts, body) = split_response(response);
         let body_bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
         Python::attach(|py| Ok(parts_to_py(py, parts, body_bytes)?.unbind()))
     };
-    let locals = pyo3_async_runtimes::TaskLocals::new(async_loop.bind(py).clone());
+    let locals = TaskLocals::new(async_loop.bind(py).clone());
     let future = py_bridge::future_into_py_with_locals(py, locals, bridged)
         .map_err(fail)?
         .unbind();
