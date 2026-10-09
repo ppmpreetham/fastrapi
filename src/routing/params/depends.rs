@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::PyClassInitializer;
 
 #[pyclass(name = "Depends", subclass, get_all, from_py_object)]
 #[derive(Clone)]
@@ -11,6 +12,7 @@ pub struct PyDepends {
 impl PyDepends {
     #[new]
     #[pyo3(signature = (dependency=None, *, use_cache=true))]
+    #[must_use]
     pub fn new(dependency: Option<Py<PyAny>>, use_cache: bool) -> Self {
         Self {
             dependency,
@@ -34,7 +36,7 @@ impl PySecurity {
         scopes: Option<Vec<String>>,
         use_cache: bool,
     ) -> pyo3::PyClassInitializer<Self> {
-        pyo3::PyClassInitializer::from(PyDepends::new(dependency, use_cache)).add_subclass(Self {
+        PyClassInitializer::from(PyDepends::new(dependency, use_cache)).add_subclass(Self {
             scopes: scopes.unwrap_or_default(),
         })
     }

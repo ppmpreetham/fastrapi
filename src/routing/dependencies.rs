@@ -1,20 +1,32 @@
-use crate::runtime::py_bridge;
 use super::params;
 use super::security::PySecurityScopes;
 use super::types::{ParsedParameter, RequestInput};
 use crate::ffi::pydantic;
+use crate::runtime::py_bridge;
 
 use axum::response::Response;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple};
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
+use crate::routing::security::OAuth2PasswordRequestForm;
+use crate::routing::security::OAuth2PasswordRequestFormStrict;
+use crate::routing::security::describe_scheme;
+use crate::runtime::executor::execute_teardowns_async;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::exceptions::PyStopIteration;
+use pyo3::types::PyType;
 
 type SharedPyObject = Py<PyAny>;
 
 crate::cached_py_import!(INSPECT_MODULE, "inspect");
+crate::cached_py_import!(ASYNCIO_MODULE, "asyncio");
+crate::cached_py_import!(CONTEXTLIB_MODULE, "contextlib");
+crate::cached_py_import!(FUNCTOOLS_MODULE, "functools");
 
 fn get_inspect(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     INSPECT_MODULE.get(py)
@@ -49,6 +61,7 @@ pub enum InjectionType {
     Dependency(usize),
     Parameter(Box<ParsedParameter>),
     Request,
+    Response,
     SecurityScopes,
 }
 
@@ -71,6 +84,7 @@ pub struct DependencyNode {
 
 impl DependencyNode {
     #[inline]
+    #[must_use]
     pub fn is_sync_callable(&self) -> bool {
         !self.is_async && !self.is_async_generator
     }
@@ -85,6 +99,201 @@ pub type TeardownTasks = SmallVec<[TeardownTask; 4]>;
 pub type ResolvedDependency = (Py<PyString>, SharedPyObject);
 pub type ResolvedDependencies = SmallVec<[ResolvedDependency; 4]>;
 pub type ResultRegistry = SmallVec<[Option<SharedPyObject>; 8]>;
+
+pub(crate) fn request_plan<'a>(
+    py: Python<'_>,
+    plan: &'a [DependencyNode],
+    overrides: Option<&Py<PyAny>>,
+    path_names: &[Arc<str>],
+) -> PyResult<Cow<'a, [DependencyNode]>> {
+    let Some(overrides) = overrides else {
+        return Ok(Cow::Borrowed(plan));
+    };
+    let overrides = overrides.bind(py).cast::<PyDict>()?;
+    if overrides.is_empty() {
+        return Ok(Cow::Borrowed(plan));
+    }
+    fn visit(
+        py: Python<'_>,
+        index: usize,
+        source: &[DependencyNode],
+        overrides: &Bound<'_, PyDict>,
+        paths: &[String],
+        output: &mut Vec<DependencyNode>,
+        visited: &mut HashMap<usize, usize>,
+    ) -> PyResult<usize> {
+        if let Some(index) = visited.get(&index) {
+            return Ok(*index);
+        }
+        let original = &source[index];
+        let mut node = original.clone();
+        if let Some(replacement) = overrides.get_item(original.func.bind(py))? {
+            let mut replacement_plan =
+                parse_external_dependencies(py, &[replacement.unbind()], paths)?;
+            let mut local = HashMap::new();
+            let mut replacement_root = replacement_plan.pop().ok_or_else(|| {
+                PyRuntimeError::new_err("Empty dependency replacement")
+            })?;
+            for child in &mut replacement_plan {
+                child.is_top_level = false;
+            }
+            for (_, injection) in &mut replacement_root.injection_plan {
+                if let InjectionType::Dependency(child) = injection {
+                    *child = visit(
+                        py,
+                        *child,
+                        &replacement_plan,
+                        overrides,
+                        paths,
+                        output,
+                        &mut local,
+                    )?;
+                }
+            }
+            let root = output.len();
+            replacement_root.index = root;
+            replacement_root.func_id = original.func_id;
+            replacement_root.param_name = original.param_name.clone();
+            replacement_root.is_top_level = original.is_top_level;
+            replacement_root.use_cache = original.use_cache;
+            output.push(replacement_root);
+            visited.insert(index, root);
+            return Ok(root);
+        }
+        for (_, injection) in &mut node.injection_plan {
+            if let InjectionType::Dependency(child) = injection {
+                *child = visit(py, *child, source, overrides, paths, output, visited)?;
+            }
+        }
+        node.index = output.len();
+        visited.insert(index, node.index);
+        output.push(node);
+        Ok(output.len() - 1)
+    }
+    let paths = path_names
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let mut output = Vec::new();
+    let mut visited = HashMap::new();
+    for node in plan.iter().filter(|node| node.is_top_level) {
+        visit(
+            py,
+            node.index,
+            plan,
+            overrides,
+            &paths,
+            &mut output,
+            &mut visited,
+        )?;
+    }
+    Ok(Cow::Owned(output))
+}
+
+pub(crate) async fn execute_request_dependencies(
+    async_loop: &Arc<Py<PyAny>>,
+    plan: &[DependencyNode],
+    input: &RequestInput<'_>,
+    request: &Py<PyAny>,
+    response: &Py<PyAny>,
+    stack: &Py<PyAny>,
+    sync_to_threadpool: bool,
+) -> Result<ResolvedDependencies, DependencyExecutionError> {
+    let mut registry: ResultRegistry = smallvec::smallvec![None; plan.len()];
+    let mut results = ResolvedDependencies::new();
+    for node in plan {
+        let (value, future, exit) = Python::attach(|py| -> Result<_, DependencyExecutionError> {
+            let kwargs = build_dependency_kwargs(py, node, &registry, input, Some(request))?;
+            for (name, injection) in &node.injection_plan {
+                if matches!(injection, InjectionType::Response) {
+                    kwargs.bind(py).set_item(name.bind(py), response.bind(py))?;
+                }
+            }
+            let func = node.func.bind(py);
+            if node.is_generator || node.is_async_generator {
+                let contextlib = CONTEXTLIB_MODULE.get(py)?;
+                let decorator = if node.is_async_generator {
+                    "asynccontextmanager"
+                } else {
+                    "contextmanager"
+                };
+                let manager = contextlib
+                    .getattr(decorator)?
+                    .call1((func,))?
+                    .call((), Some(kwargs.bind(py)))?;
+                if node.is_generator && sync_to_threadpool {
+                    let to_thread = ASYNCIO_MODULE.get(py)?.getattr("to_thread")?;
+                    let coroutine = to_thread.call1((manager.getattr("__enter__")?,))?;
+                    let exit = FUNCTOOLS_MODULE
+                        .get(py)?
+                        .getattr("partial")?
+                        .call1((to_thread, manager.getattr("__exit__")?))?;
+                    return Ok((
+                        None,
+                        Some(py_bridge::schedule_task(py, async_loop, coroutine)?),
+                        Some(exit.unbind()),
+                    ));
+                }
+                let method = if node.is_async_generator {
+                    "enter_async_context"
+                } else {
+                    "enter_context"
+                };
+                let value = stack.bind(py).call_method1(method, (manager,))?;
+                if node.is_async_generator {
+                    Ok((
+                        None,
+                        Some(py_bridge::schedule_task(py, async_loop, value)?),
+                        None,
+                    ))
+                } else {
+                    Ok((Some(value.unbind()), None, None))
+                }
+            } else {
+                if !node.is_async && sync_to_threadpool {
+                    let call = FUNCTOOLS_MODULE
+                        .get(py)?
+                        .getattr("partial")?
+                        .call((func,), Some(kwargs.bind(py)))?;
+                    let coroutine = ASYNCIO_MODULE
+                        .get(py)?
+                        .getattr("to_thread")?
+                        .call1((call,))?;
+                    return Ok((
+                        None,
+                        Some(py_bridge::schedule_task(py, async_loop, coroutine)?),
+                        None,
+                    ));
+                }
+                let value = func.call((), Some(kwargs.bind(py)))?;
+                if node.is_async {
+                    Ok((
+                        None,
+                        Some(py_bridge::schedule_task(py, async_loop, value)?),
+                        None,
+                    ))
+                } else {
+                    Ok((Some(value.unbind()), None, None))
+                }
+            }
+        })?;
+        let value = match (value, future) {
+            (Some(value), _) => value,
+            (_, Some(future)) => future.await?,
+            _ => unreachable!(),
+        };
+        if let Some(exit) = exit {
+            Python::attach(|py| {
+                stack
+                    .bind(py)
+                    .call_method1("push_async_exit", (exit,))
+                    .map(|_| ())
+            })?;
+        }
+        Python::attach(|py| register_result(py, node, value, &mut registry, &mut results));
+    }
+    Ok(results)
+}
 
 pub enum DependencyExecutionError {
     Python(PyErr),
@@ -179,6 +388,12 @@ fn annotation_display_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Opt
         })
 }
 
+pub(crate) fn is_response_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
+    let annotation = params::base_annotation(py, annotation);
+    annotation_display_name(py, &annotation)
+        .is_some_and(|name| name == "Response" || name == "PyResponse")
+}
+
 fn extract_string_list(value: &Bound<'_, PyAny>) -> Option<Vec<String>> {
     value.try_iter().ok().map(|iter| {
         iter.filter_map(|item| item.ok()?.extract::<String>().ok())
@@ -216,7 +431,32 @@ pub fn parse_dependencies(
 }
 fn adapt_security_schemes(py: Python<'_>, nodes: &mut [DependencyNode]) {
     for node in nodes.iter_mut() {
-        if crate::routing::security::describe_scheme(py, node.func.bind(py)).is_some() {
+        let is_form_type = node
+            .func
+            .bind(py)
+            .cast::<PyType>()
+            .is_ok_and(|ty| {
+                ty.is_subclass_of::<OAuth2PasswordRequestForm>()
+                    .unwrap_or(false)
+                    || ty
+                        .is_subclass_of::<OAuth2PasswordRequestFormStrict>()
+                        .unwrap_or(false)
+            });
+        let is_form = node
+            .func
+            .bind(py)
+            .is_instance_of::<OAuth2PasswordRequestForm>()
+            || node
+                .func
+                .bind(py)
+                .is_instance_of::<OAuth2PasswordRequestFormStrict>();
+        if is_form_type && let Ok(instance) = node.func.bind(py).call0() {
+            node.func = instance.unbind();
+        }
+        if describe_scheme(py, node.func.bind(py)).is_some()
+            || is_form
+            || is_form_type
+        {
             node.injection_plan = vec![(
                 PyString::intern(py, "request").unbind(),
                 InjectionType::Request,
@@ -260,7 +500,7 @@ pub fn parse_external_dependencies(
 pub fn shift_dependency_indices(nodes: &mut [DependencyNode], offset: usize) {
     for node in nodes.iter_mut() {
         node.index += offset;
-        for (_, injection) in node.injection_plan.iter_mut() {
+        for (_, injection) in &mut node.injection_plan {
             if let InjectionType::Dependency(target) = injection {
                 *target += offset;
             }
@@ -268,27 +508,24 @@ pub fn shift_dependency_indices(nodes: &mut [DependencyNode], offset: usize) {
     }
 }
 
-pub(crate) fn override_node_callable(
-    py: Python<'_>,
-    node: &mut DependencyNode,
-    replacement: &Py<PyAny>,
-) {
-    node.func = replacement.clone_ref(py);
-    if let Ok(inspect) = INSPECT_MODULE.get(py) {
-        let bound = node.func.bind(py);
-        node.is_async = is_async_callable(py, &inspect, bound);
-        node.is_generator = is_generator_callable(py, &inspect, bound);
-        node.is_async_generator = is_async_generator_callable(py, &inspect, bound);
-    }
-}
-
+#[must_use]
 pub fn collect_dependency_callables(
     py: Python<'_>,
     dependencies: Option<&Py<PyAny>>,
 ) -> Vec<Py<PyAny>> {
     dependencies
         .and_then(|deps| deps.bind(py).try_iter().ok())
-        .map(|iter| iter.flatten().map(Bound::unbind).collect())
+        .map(|iter| {
+            iter.flatten()
+                .filter_map(|item| {
+                    item.getattr(intern!(py, "dependency"))
+                        .ok()
+                        .filter(|dependency| !dependency.is_none())
+                        .map(Bound::unbind)
+                        .or_else(|| Some(item.unbind()))
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -463,7 +700,9 @@ fn build_injection_plan(
             .ok()
             .and_then(|ann| annotation_display_name(py, &ann))
             .and_then(|ann_name| {
-                if ann_name.contains("Request")
+                if ann_name == "Response" || ann_name == "PyResponse" {
+                    Some(InjectionType::Response)
+                } else if ann_name.contains("Request")
                     || ann_name.contains("HTTPConnection")
                     || ann_name.contains("WebSocket")
                 {
@@ -527,6 +766,7 @@ fn build_dependency_kwargs(
                 let py_scopes = Py::new(py, PySecurityScopes::new(Some(dep.scopes.clone())))?;
                 final_kwargs.set_item(py_arg_name, py_scopes)?;
             }
+            InjectionType::Response => {}
         }
     }
 
@@ -575,9 +815,32 @@ pub async fn execute_dependencies(
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
 ) -> Result<(ResolvedDependencies, TeardownTasks), DependencyExecutionError> {
-    let mut results_registry: ResultRegistry = smallvec::smallvec![None; flat_plan.len()];
-    let mut teardown_tasks = TeardownTasks::new();
+    let mut teardowns = TeardownTasks::new();
+    match execute_dependencies_inner(
+        async_loop,
+        flat_plan,
+        request_input,
+        request,
+        &mut teardowns,
+    )
+    .await
+    {
+        Ok(results) => Ok((results, teardowns)),
+        Err(error) => {
+            execute_teardowns_async(async_loop, teardowns).await;
+            Err(error)
+        }
+    }
+}
 
+async fn execute_dependencies_inner(
+    async_loop: &Arc<Py<PyAny>>,
+    flat_plan: &[DependencyNode],
+    request_input: &RequestInput<'_>,
+    request: Option<Py<PyAny>>,
+    teardown_tasks: &mut TeardownTasks,
+) -> Result<ResolvedDependencies, DependencyExecutionError> {
+    let mut results_registry: ResultRegistry = smallvec::smallvec![None; flat_plan.len()];
     let mut final_results = ResolvedDependencies::with_capacity(
         flat_plan
             .iter()
@@ -643,9 +906,9 @@ pub async fn execute_dependencies(
                     Ok(v) => v,
                     Err(e) => {
                         return Err(
-                            if e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py) {
+                            if e.is_instance_of::<PyStopAsyncIteration>(py) {
                                 DependencyExecutionError::Python(
-                                    pyo3::exceptions::PyRuntimeError::new_err(
+                                    PyRuntimeError::new_err(
                                         "Async generator dependency exited before yielding",
                                     ),
                                 )
@@ -688,7 +951,7 @@ pub async fn execute_dependencies(
         idx += 1;
     }
 
-    Ok((final_results, teardown_tasks))
+    Ok(final_results)
 }
 
 #[inline]
@@ -725,8 +988,8 @@ fn execute_sync_node(
             Ok(v) => v.unbind(),
             Err(e) => {
                 return Err(
-                    if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
-                        DependencyExecutionError::Python(pyo3::exceptions::PyRuntimeError::new_err(
+                    if e.is_instance_of::<PyStopIteration>(py) {
+                        DependencyExecutionError::Python(PyRuntimeError::new_err(
                             "Generator dependency exited before yielding",
                         ))
                     } else {
