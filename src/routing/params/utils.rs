@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyString};
+use crate::ffi::pydantic::strip_optional;
 
 crate::cached_py_import!(INSPECT_PARAMETER_EMPTY, "inspect", "Parameter", "empty");
 
@@ -11,8 +12,7 @@ pub fn is_ellipsis(value: &Bound<'_, PyAny>) -> bool {
     value
         .get_type()
         .name()
-        .map(|name| name == "ellipsis")
-        .unwrap_or(false)
+        .is_ok_and(|name| name == "ellipsis")
 }
 
 pub fn annotation_name(py: Python<'_>, annotation: &Py<PyAny>) -> Option<String> {
@@ -45,6 +45,7 @@ pub fn is_background_tasks_type(name: &str) -> bool {
     name == "BackgroundTasks" || name.ends_with(".BackgroundTasks")
 }
 
+#[must_use]
 pub fn base_annotation<'py>(_py: Python<'py>, annotation: &Bound<'py, PyAny>) -> Bound<'py, PyAny> {
     if annotation.hasattr("__metadata__").unwrap_or(false)
         && let Ok(args) = annotation.getattr("__args__")
@@ -55,13 +56,14 @@ pub fn base_annotation<'py>(_py: Python<'py>, annotation: &Bound<'py, PyAny>) ->
     annotation.clone()
 }
 
+#[must_use]
 pub fn list_element_annotation<'py>(
     py: Python<'py>,
     annotation: &Bound<'py, PyAny>,
 ) -> (bool, Option<Bound<'py, PyAny>>) {
     // `Optional[List[int]]` and `Union[List[int], None]` behave as list params.
     let annotation =
-        crate::ffi::pydantic::strip_optional(py, annotation).unwrap_or_else(|| annotation.clone());
+        strip_optional(py, annotation).unwrap_or_else(|| annotation.clone());
     let is_type_named = |obj: &Bound<'py, PyAny>, name: &str| {
         obj.get_type()
             .name()
@@ -98,13 +100,7 @@ pub(crate) fn is_param_marker(marker: &Bound<'_, PyAny>) -> bool {
         .map(|n| n.to_string_lossy().into_owned());
     matches!(
         name.as_deref(),
-        Some("Query")
-            | Some("Path")
-            | Some("Body")
-            | Some("Form")
-            | Some("File")
-            | Some("Header")
-            | Some("Cookie")
+        Some("Query" | "Path" | "Body" | "Form" | "File" | "Header" | "Cookie")
     )
 }
 #[inline]
@@ -125,6 +121,7 @@ pub fn find_annotated_marker<'py>(param_obj: &Bound<'py, PyAny>) -> Option<Bound
     None
 }
 
+#[must_use]
 pub fn find_annotated_dependency_marker<'py>(
     param_obj: &Bound<'py, PyAny>,
 ) -> Option<Bound<'py, PyAny>> {

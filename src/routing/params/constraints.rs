@@ -1,6 +1,7 @@
 use super::super::types::ParameterConstraints;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
+use regex::Regex;
 use std::sync::Arc;
 
 pub fn extract_constraints(param_obj: &Bound<'_, PyAny>) -> ParameterConstraints {
@@ -18,7 +19,7 @@ pub fn extract_constraints(param_obj: &Bound<'_, PyAny>) -> ParameterConstraints
         .ok()
         .and_then(|value| value.extract::<Option<String>>().ok())
         .flatten()
-        .and_then(|pattern| regex::Regex::new(&format!("^(?:{pattern})$")).ok())
+        .and_then(|pattern| Regex::new(&format!("^(?:{pattern})$")).ok())
         .map(Arc::new);
 
     ParameterConstraints {
