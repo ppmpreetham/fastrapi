@@ -1,9 +1,17 @@
 use crate::ffi::decorators::PyAPIRouter;
+use crate::ffi::py_handlers::assign_execution_mode;
+use crate::routing::dependencies::collect_dependency_callables;
+use crate::routing::dependencies::parse_external_dependencies;
+use crate::routing::dependencies::shift_dependency_indices;
+use crate::routing::dependencies::DependencyNode;
+use crate::routing::dependencies::InjectionType;
+use crate::routing::types::RouteHandler;
 use crate::routing::types::{RouteEntry, WebSocketEntry};
-use pyo3::Py;
 use pyo3::prelude::Python;
-use std::sync::Arc;
+use pyo3::Py;
+use std::string::ToString;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 impl PyAPIRouter {
     pub fn mark_frozen(&self) {
@@ -18,6 +26,7 @@ impl PyAPIRouter {
         self.mark_frozen();
     }
 
+    #[must_use]
     pub fn flatten(&self, py: Python<'_>) -> Arc<(Vec<RouteEntry>, Vec<WebSocketEntry>)> {
         if self.frozen.load(Ordering::Acquire) {
             if let Some(cached) = self.cached_flat.lock().as_ref() {
@@ -32,6 +41,7 @@ impl PyAPIRouter {
 
 type ChainDependencies = Vec<Py<pyo3::PyAny>>;
 
+#[must_use]
 pub fn flatten_router(
     py: Python<'_>,
     root: &PyAPIRouter,
@@ -40,7 +50,6 @@ pub fn flatten_router(
     let mut ws_routes = Vec::new();
 
     let mut stack = Vec::with_capacity(16);
-    let overrides = crate::globals::take_dependency_overrides();
     stack.push((
         root.clone(),
         String::new(),
@@ -61,7 +70,7 @@ pub fn flatten_router(
         });
 
         let mut chain_deps = inherited_deps;
-        chain_deps.extend(crate::routing::dependencies::collect_dependency_callables(
+        chain_deps.extend(collect_dependency_callables(
             py,
             router.dependencies.as_ref(),
         ));
@@ -83,20 +92,17 @@ pub fn flatten_router(
             if !chain_deps.is_empty() {
                 entry.handler = prepend_chain_dependencies(py, &entry.handler, &chain_deps);
             }
-            entry.handler = apply_dependency_overrides(py, &entry.handler, &overrides);
-
             entry
         }));
 
         let ws_entries = router.websocket_entries.lock().clone();
         ws_routes.extend(ws_entries.into_iter().map(|mut ws| {
             ws.path = join_path(&full_prefix, &ws.path);
-            if !chain_deps.is_empty() || !overrides.is_empty() {
+            if !chain_deps.is_empty() {
                 let mut plan = ws.deps.to_vec();
                 if !chain_deps.is_empty() {
                     plan = prepend_nodes(py, plan, &parse_chain_nodes(py, &chain_deps, &[]));
                 }
-                apply_overrides_to_plan(py, &mut plan, &overrides);
                 ws.deps = plan.into();
             }
             ws
@@ -118,10 +124,7 @@ pub fn flatten_router(
 
             let mut sub_deps = chain_deps.clone();
             if let Some(deps) = sub.dependencies.as_ref() {
-                sub_deps.extend(crate::routing::dependencies::collect_dependency_callables(
-                    py,
-                    Some(deps),
-                ));
+                sub_deps.extend(collect_dependency_callables(py, Some(deps)));
             }
 
             (
@@ -140,51 +143,38 @@ fn parse_chain_nodes(
     py: Python<'_>,
     chain: &[Py<pyo3::PyAny>],
     path_param_names: &[String],
-) -> Vec<crate::routing::dependencies::DependencyNode> {
-    crate::routing::dependencies::parse_external_dependencies(py, chain, path_param_names)
-        .unwrap_or_else(|err| {
-            tracing::error!("Failed to parse router-level dependencies: {}", err);
-            Vec::new()
-        })
+) -> Vec<DependencyNode> {
+    parse_external_dependencies(py, chain, path_param_names).unwrap_or_else(|err| {
+        tracing::error!("Failed to parse router-level dependencies: {}", err);
+        Vec::new()
+    })
 }
 
 fn prepend_nodes(
     _py: Python<'_>,
-    mut base: Vec<crate::routing::dependencies::DependencyNode>,
-    externals: &[crate::routing::dependencies::DependencyNode],
-) -> Vec<crate::routing::dependencies::DependencyNode> {
+    mut base: Vec<DependencyNode>,
+    externals: &[DependencyNode],
+) -> Vec<DependencyNode> {
     let offset = externals.len();
     if offset == 0 {
         return base;
     }
-    crate::routing::dependencies::shift_dependency_indices(&mut base, offset);
+    shift_dependency_indices(&mut base, offset);
     let mut merged = externals.to_vec();
     merged.append(&mut base);
     merged
 }
 
-fn apply_overrides_to_plan(
-    py: Python<'_>,
-    nodes: &mut [crate::routing::dependencies::DependencyNode],
-    overrides: &ahash::AHashMap<u64, Py<pyo3::PyAny>>,
-) {
-    for node in nodes.iter_mut() {
-        if let Some(replacement) = overrides.get(&node.func_id) {
-            crate::routing::dependencies::override_node_callable(py, node, replacement);
-        }
-    }
-}
-
 fn prepend_chain_dependencies(
     py: Python<'_>,
-    handler: &Arc<crate::routing::types::RouteHandler>,
+    handler: &Arc<RouteHandler>,
     chain: &[Py<pyo3::PyAny>],
-) -> Arc<crate::routing::types::RouteHandler> {
+) -> Arc<RouteHandler> {
     let path_param_names: Vec<String> = handler
         .payload
         .path_param_names
         .iter()
-        .map(|n| n.to_string())
+        .map(ToString::to_string)
         .collect();
 
     let externals = parse_chain_nodes(py, chain, &path_param_names);
@@ -192,7 +182,7 @@ fn prepend_chain_dependencies(
         return handler.clone();
     }
 
-    let mut merged = <crate::routing::types::RouteHandler>::clone(handler);
+    let mut merged = <RouteHandler>::clone(handler);
     merged.payload.dependencies = prepend_nodes(py, merged.payload.dependencies, &externals);
 
     merged.payload.needs_kwargs = true;
@@ -201,54 +191,33 @@ fn prepend_chain_dependencies(
         .dependencies
         .iter()
         .any(|node| node.needs_request_object);
-    merged.payload.all_deps_sync = merged
-        .payload
-        .dependencies
-        .iter()
-        .all(|node| node.is_sync_callable());
-
-    crate::ffi::py_handlers::assign_execution_mode(&mut merged);
-
-    Arc::new(merged)
-}
-
-fn apply_dependency_overrides(
-    py: Python<'_>,
-    handler: &Arc<crate::routing::types::RouteHandler>,
-    overrides: &ahash::AHashMap<u64, Py<pyo3::PyAny>>,
-) -> Arc<crate::routing::types::RouteHandler> {
-    if overrides.is_empty()
-        || !handler
-            .payload
-            .dependencies
+    merged.payload.dependency_needs_response = merged.payload.dependencies.iter().any(|node| {
+        node.injection_plan
             .iter()
-            .any(|node| overrides.contains_key(&node.func_id))
-    {
-        return handler.clone();
-    }
-
-    let mut merged = <crate::routing::types::RouteHandler>::clone(handler);
-    for node in merged.payload.dependencies.iter_mut() {
-        if let Some(replacement) = overrides.get(&node.func_id) {
-            crate::routing::dependencies::override_node_callable(py, node, replacement);
-        }
-    }
-
-    merged.payload.dependency_needs_request = merged
+            .any(|(_, injection)| matches!(injection, InjectionType::Response))
+    });
+    merged.payload.has_generators = merged
         .payload
         .dependencies
         .iter()
-        .any(|node| node.needs_request_object);
+        .any(|node| node.is_generator || node.is_async_generator);
+    merged.payload.has_async_dependencies = merged
+        .payload
+        .dependencies
+        .iter()
+        .any(|node| node.is_async || node.is_async_generator);
     merged.payload.all_deps_sync = merged
         .payload
         .dependencies
         .iter()
-        .all(|node| node.is_sync_callable());
+        .all(super::dependencies::DependencyNode::is_sync_callable);
 
-    crate::ffi::py_handlers::assign_execution_mode(&mut merged);
+    assign_execution_mode(&mut merged);
+
     Arc::new(merged)
 }
 
+#[must_use]
 pub fn join_path(a: &str, b: &str) -> String {
     let a_ends = a.ends_with('/');
     let b_starts = b.starts_with('/');

@@ -1,7 +1,10 @@
-use crate::routing::types::{HTTP_METHOD_COUNT, HttpMethod, RouteHandler};
+use crate::routing::types::{HttpMethod, RouteHandler, HTTP_METHOD_COUNT};
 use ahash::AHashMap;
+use matchit::Router;
 use pyo3::{Py, PyAny};
+use std::array::from_fn;
 use std::{borrow::Cow, sync::Arc};
+use strum::IntoEnumIterator;
 
 #[derive(Clone, Debug)]
 pub struct RoutePattern(pub Arc<str>);
@@ -55,6 +58,7 @@ pub struct RouteTarget {
     pub handler: Arc<RouteHandler>,
     pub pattern: Arc<str>,
     pub convertors: Arc<[(String, PathConvertor)]>,
+    pub host: Option<Arc<str>>,
 }
 
 pub enum RouteMatch<'a> {
@@ -71,16 +75,30 @@ pub struct FrozenRouter {
 
 impl FrozenRouter {
     #[inline(always)]
-    pub fn resolve<'a>(&'a self, method: HttpMethod, path: &'a str) -> Option<RouteMatch<'a>> {
+    pub fn resolve<'a>(
+        &'a self,
+        method: HttpMethod,
+        path: &'a str,
+        host: Option<&str>,
+    ) -> Option<RouteMatch<'a>> {
         let idx = method as usize;
         let normalized = normalize_lookup(path);
-        if let Some(target) = self.static_routes[idx].get(normalized) {
+        let host_allowed = |target: &RouteTarget| {
+            target
+                .host
+                .as_deref()
+                .is_none_or(|pattern| host.is_some_and(|h| h == pattern))
+        };
+        if let Some(target) = self.static_routes[idx]
+            .get(normalized)
+            .filter(|target| host_allowed(target))
+        {
             return Some(RouteMatch::Static(target.clone()));
         }
         let matched = self.param_routes[idx].as_ref()?.at(path).ok()?;
         let target = matched.value.clone();
         // rejects the match, the way starlette's regex would
-        if !convertors_match(&target.convertors, &matched.params) {
+        if !convertors_match(&target.convertors, &matched.params) || !host_allowed(&target) {
             return None;
         }
         Some(RouteMatch::Params(target, matched.params))
@@ -89,6 +107,12 @@ impl FrozenRouter {
     pub fn resolve_ws(&self, path: &str) -> Option<Py<PyAny>> {
         let normalized = normalize_lookup(path);
         self.websocket_routes.get(normalized).cloned()
+    }
+
+    pub fn allowed_methods(&self, path: &str, host: Option<&str>) -> Vec<HttpMethod> {
+        HttpMethod::iter()
+            .filter(|method| self.resolve(*method, path, host).is_some())
+            .collect()
     }
 }
 
@@ -99,15 +123,22 @@ pub struct FrozenRouterBuilder {
 }
 
 impl FrozenRouterBuilder {
+    #[must_use]
     pub fn new() -> Self {
         Self {
-            static_routes: std::array::from_fn(|_| AHashMap::new()),
-            param_entries: std::array::from_fn(|_| Vec::new()),
+            static_routes: from_fn(|_| AHashMap::new()),
+            param_entries: from_fn(|_| Vec::new()),
             websocket_routes: AHashMap::new(),
         }
     }
 
-    pub fn add_route(&mut self, method: HttpMethod, path: String, handler: Arc<RouteHandler>) {
+    pub fn add_route(
+        &mut self,
+        method: HttpMethod,
+        path: String,
+        handler: Arc<RouteHandler>,
+        host: Option<Arc<str>>,
+    ) {
         let idx = method as usize;
         let (normalized, has_params, convertors) = normalize_register(&path);
 
@@ -115,6 +146,7 @@ impl FrozenRouterBuilder {
             handler,
             pattern: Arc::from(normalized.as_ref()),
             convertors: convertors.into(),
+            host,
         };
 
         if has_params {
@@ -130,13 +162,14 @@ impl FrozenRouterBuilder {
             .insert(normalized.into_owned(), handler);
     }
 
+    #[must_use]
     pub fn build(self) -> FrozenRouter {
-        let param_routes = std::array::from_fn(|idx| {
+        let param_routes = from_fn(|idx| {
             let entries = &self.param_entries[idx];
             if entries.is_empty() {
                 return None;
             }
-            let mut router = matchit::Router::new();
+            let mut router = Router::new();
             entries.iter().for_each(|(path, target)| {
                 if let Err(e) = router.insert(path, target.clone()) {
                     tracing::warn!("Failed to insert parameterized route '{}': {}", path, e);
@@ -241,7 +274,7 @@ fn normalize_register(input: &str) -> (Cow<'_, str>, bool, Vec<(String, PathConv
         out.push_str(&rest[..open]);
         let after = &rest[open..];
         if let Some(close) = after[1..].find('}') {
-            let inner = &after[1..1 + close];
+            let inner = &after[1..=close];
             let (name, convertor) = match inner.split_once(':') {
                 Some((name, conv)) => (name, PathConvertor::from_name(conv)),
                 None => (inner, Some(PathConvertor::Str)),
