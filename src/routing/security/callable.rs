@@ -4,6 +4,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString};
 
 use crate::ffi::exceptions::PyHTTPException;
+use crate::routing::security::HTTPAuthorizationCredentials;
+use crate::routing::security::HTTPBasicCredentials;
+use base64::engine::general_purpose::STANDARD;
 
 /// rfc 9110 requires a 401 to carry `WWW-Authenticate`
 fn http_exc(py: Python<'_>, status: u16, detail: &str, challenge: Option<&str>) -> PyErr {
@@ -78,9 +81,7 @@ pub(crate) fn source_value(request: &Bound<'_, PyAny>, source: &str, name: &str)
 
 /// Decodes an RFC 7617 `Basic` credential payload into `(user, password)`.
 fn decode_basic(payload: &str) -> Option<(String, String)> {
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(payload)
-        .ok()?;
+    let decoded = STANDARD.decode(payload).ok()?;
     let text = String::from_utf8(decoded).ok()?;
     let colon = text.find(':')?;
     Some((text[..colon].to_owned(), text[colon + 1..].to_owned()))
@@ -90,7 +91,7 @@ pub(crate) fn http_bearer_call(
     auto_error: bool,
     bearer_format: Option<&str>,
     request: &Bound<'_, PyAny>,
-) -> PyResult<crate::routing::security::HTTPAuthorizationCredentials> {
+) -> PyResult<HTTPAuthorizationCredentials> {
     _ = bearer_format;
     let header = auth_header(request).unwrap_or_default();
     let (scheme, credentials) = split_authorization(&header);
@@ -103,14 +104,14 @@ pub(crate) fn http_bearer_call(
         };
     }
 
-    Ok(crate::routing::security::HTTPAuthorizationCredentials {
+    Ok(HTTPAuthorizationCredentials {
         scheme: scheme.to_owned(),
         credentials: credentials.to_owned(),
     })
 }
 
-fn empty_credentials() -> crate::routing::security::HTTPAuthorizationCredentials {
-    crate::routing::security::HTTPAuthorizationCredentials {
+fn empty_credentials() -> HTTPAuthorizationCredentials {
+    HTTPAuthorizationCredentials {
         scheme: String::new(),
         credentials: String::new(),
     }
@@ -120,7 +121,7 @@ pub(crate) fn http_basic_call(
     auto_error: bool,
     realm: Option<&str>,
     request: &Bound<'_, PyAny>,
-) -> PyResult<crate::routing::security::HTTPBasicCredentials> {
+) -> PyResult<HTTPBasicCredentials> {
     let header = auth_header(request).unwrap_or_default();
     let (scheme, payload) = split_authorization(&header);
 
@@ -135,11 +136,9 @@ pub(crate) fn http_basic_call(
         .flatten();
 
     match credentials {
-        Some((username, password)) => {
-            Ok(crate::routing::security::HTTPBasicCredentials { username, password })
-        }
+        Some((username, password)) => Ok(HTTPBasicCredentials { username, password }),
         None if auto_error => Err(unauthorized(request.py(), &challenge)),
-        None => Ok(crate::routing::security::HTTPBasicCredentials {
+        None => Ok(HTTPBasicCredentials {
             username: String::new(),
             password: String::new(),
         }),

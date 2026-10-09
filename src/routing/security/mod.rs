@@ -1,18 +1,34 @@
+use crate::types::route::SecurityKind;
+use crate::utils::py_dict_to_json;
 pub mod callable;
+pub mod forms;
+pub mod utils;
 
 mod apikey;
 mod http;
 mod oauth2;
 
 pub use apikey::{APIKeyCookie, APIKeyHeader, APIKeyQuery};
+pub use forms::{OAuth2PasswordRequestForm, OAuth2PasswordRequestFormStrict};
 pub use http::{
     HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPDigest,
 };
-pub use oauth2::{OAuth2AuthorizationCodeBearer, OAuth2PasswordBearer, OpenIdConnect};
+pub use oauth2::{OAuth2, OAuth2AuthorizationCodeBearer, OAuth2PasswordBearer, OpenIdConnect};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{PyAny, PyDict, PyModule};
 use std::sync::Arc;
+
+/// `utils` submodule
+pub(crate) fn register_utils_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
+    let utils = PyModule::new(parent.py(), "utils")?;
+    utils.add_function(pyo3::wrap_pyfunction!(
+        utils::get_authorization_scheme_param,
+        &utils
+    )?)?;
+    parent.add_submodule(&utils)?;
+    Ok(())
+}
 
 #[pyclass(
     name = "SecurityScopes",
@@ -28,6 +44,7 @@ pub struct PySecurityScopes {
 impl PySecurityScopes {
     #[new]
     #[pyo3(signature = (scopes=None))]
+    #[must_use]
     pub fn new(scopes: Option<Vec<String>>) -> Self {
         Self {
             scopes: scopes.unwrap_or_default().into(),
@@ -50,13 +67,13 @@ pub struct SchemeSpec {
     pub name: String,
     pub description: Option<String>,
     pub scopes: Option<simd_json::OwnedValue>,
-    pub kind: crate::types::route::SecurityKind,
+    pub kind: SecurityKind,
 }
 
 fn scopes_json(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<simd_json::OwnedValue> {
     let attr = obj.getattr("scopes").ok()?;
     let dict = attr.cast::<PyDict>().ok()?;
-    Some(crate::utils::py_dict_to_json(py, dict))
+    Some(py_dict_to_json(py, dict))
 }
 
 macro_rules! try_scheme {
@@ -68,7 +85,7 @@ macro_rules! try_scheme {
     };
 }
 
-/// Detects one of the security classes and extracts its OpenAPI descriptor
+#[must_use]
 pub fn describe_scheme(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<SchemeSpec> {
     use crate::types::route::SecurityKind;
     _ = py;

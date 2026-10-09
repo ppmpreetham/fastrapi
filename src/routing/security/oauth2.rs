@@ -6,6 +6,45 @@ use super::callable;
 
 #[pyclass(
     frozen,
+    name = "OAuth2",
+    module = "fastrapi.security",
+    get_all,
+    from_py_object
+)]
+#[derive(Clone, Debug)]
+pub struct OAuth2 {
+    pub flows: Py<PyAny>,
+    pub scheme_name: Option<String>,
+    pub description: Option<String>,
+    pub auto_error: bool,
+}
+
+#[pymethods]
+impl OAuth2 {
+    #[new]
+    #[pyo3(signature = (flows=None, scheme_name=None, description=None, auto_error=true))]
+    fn new(
+        py: Python<'_>,
+        flows: Option<Py<PyAny>>,
+        scheme_name: Option<String>,
+        description: Option<String>,
+        auto_error: bool,
+    ) -> Self {
+        Self {
+            flows: flows.unwrap_or_else(|| PyDict::new(py).into()),
+            scheme_name,
+            description,
+            auto_error,
+        }
+    }
+
+    fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
+        callable::bearer_token(request, self.auto_error)
+    }
+}
+
+#[pyclass(
+    frozen,
     name = "OAuth2PasswordBearer",
     module = "fastrapi.security",
     get_all,
@@ -129,7 +168,7 @@ impl OpenIdConnect {
         }
     }
 
-    /// OpenID Connect carries the identity token as a bearer token
+    /// `OpenID` Connect carries the identity token as a bearer token
     fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
         callable::bearer_token(request, self.auto_error)
     }
