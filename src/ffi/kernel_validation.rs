@@ -17,21 +17,34 @@ use pyo3::types::{
 
 use crate::types::route::PydanticValidator;
 use crate::utils::json::py_json_response_with_status;
+use pydantic_core_kernel::json::parse_json;
+use pydantic_core_kernel::json::serde_to_value;
+use pydantic_core_kernel::json::value_to_serde;
+use pydantic_core_kernel::ExtraBehavior;
+use pydantic_core_kernel::Int;
+use pydantic_core_kernel::LocItem;
+use serde_json::Map;
+use serde_json::Number;
+use serde_json::Value as SerdeJsonValue;
+use std::convert::Into;
+use std::env::var;
+use std::iter::once;
+use std::str::from_utf8;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 const ENV_FLAG: &str = "FASTRAPI_KERNEL_VALIDATION";
 
 fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var(ENV_FLAG).as_deref(),
-            Ok("0") | Ok("false") | Ok("False")
-        )
-    })
+    *ENABLED.get_or_init(|| !matches!(var(ENV_FLAG).as_deref(), Ok("0" | "false" | "False")))
 }
 
 pub struct KernelFastPath {
     schema: CompiledSchema,
+    /// pre compilation core schema
+    schema_core: CoreSchema,
+    has_aliases: bool,
     model_class: Py<PyAny>,
     construct_safe: bool,
 }
@@ -43,26 +56,26 @@ fn cache() -> &'static Cache {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(crate) static KERNEL_VALIDATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static KERNEL_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
 
 pub fn validation_count() -> usize {
-    KERNEL_VALIDATIONS.load(std::sync::atomic::Ordering::Relaxed)
+    KERNEL_VALIDATIONS.load(Ordering::Relaxed)
 }
 
 #[pyo3::pyfunction]
+#[must_use]
 pub fn kernel_validation_count() -> usize {
     validation_count()
 }
 
-pub fn maybe_validate_with_kernel<'py>(
-    py: Python<'py>,
+pub fn maybe_validate_with_kernel(
+    py: Python<'_>,
     validator: &PydanticValidator,
     raw_payload: &[u8],
 ) -> Option<Result<Py<PyAny>, Response>> {
-    std::str::from_utf8(raw_payload).ok()?;
+    from_utf8(raw_payload).ok()?;
     let fast = fast_path_for(py, validator.model_class.bind(py), &validator.name)?;
-    KERNEL_VALIDATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    KERNEL_VALIDATIONS.fetch_add(1, Ordering::Relaxed);
     validate_body(py, &fast, raw_payload)
 }
 
@@ -92,7 +105,7 @@ fn py_schema_to_json(obj: &Bound<'_, PyAny>) -> Option<serde_json::Value> {
     use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
     if obj.is_none() {
-        return Some(serde_json::Value::Null);
+        return Some(SerdeJsonValue::Null);
     }
     if let Ok(b) = obj.cast::<PyBool>() {
         return Some(b.is_true().into());
@@ -102,11 +115,8 @@ fn py_schema_to_json(obj: &Bound<'_, PyAny>) -> Option<serde_json::Value> {
             Ok(v) => Some(v.into()),
             Err(_) => i
                 .extract::<u64>()
-                .map(|v| v.into())
-                .or_else(|_| {
-                    i.extract::<i128>()
-                        .map(|v| serde_json::Number::from_i128(v).into())
-                })
+                .map(Into::into)
+                .or_else(|_| i.extract::<i128>().map(|v| Number::from_i128(v).into()))
                 .ok(),
         };
     }
@@ -121,25 +131,25 @@ fn py_schema_to_json(obj: &Bound<'_, PyAny>) -> Option<serde_json::Value> {
         for item in list.iter() {
             out.push(py_schema_to_json(&item)?);
         }
-        return Some(serde_json::Value::Array(out));
+        return Some(SerdeJsonValue::Array(out));
     }
     if let Ok(tuple) = obj.cast::<PyTuple>() {
         let mut out = Vec::with_capacity(tuple.len());
         for item in tuple.iter() {
             out.push(py_schema_to_json(&item)?);
         }
-        return Some(serde_json::Value::Array(out));
+        return Some(SerdeJsonValue::Array(out));
     }
     if let Ok(dict) = obj.cast::<PyDict>() {
-        let mut map = serde_json::Map::new();
+        let mut map = Map::new();
         for (key, value) in dict.iter() {
             let key: String = key.cast::<PyString>().ok()?.to_string();
             map.insert(
                 key,
-                py_schema_to_json(&value).unwrap_or(serde_json::Value::Null),
+                py_schema_to_json(&value).unwrap_or(SerdeJsonValue::Null),
             );
         }
-        return Some(serde_json::Value::Object(map));
+        return Some(SerdeJsonValue::Object(map));
     }
     None
 }
@@ -156,17 +166,190 @@ fn compile_model<'py>(
     let compiled = CompiledSchema::with_title(&schema, None, name).ok()?;
     let extra_allowed = match &schema {
         CoreSchema::Model { config, .. } => {
-            config.as_ref().and_then(|c| c.extra_behavior)
-                == Some(pydantic_core_kernel::ExtraBehavior::Allow)
+            config.as_ref().and_then(|c| c.extra_behavior) == Some(ExtraBehavior::Allow)
         }
         _ => false,
     };
 
     Some(KernelFastPath {
         schema: compiled,
+        schema_core: schema.clone(),
+        has_aliases: schema_has_aliases(&schema),
         model_class: model_class.clone().unbind(),
         construct_safe: !schema_has_nested_models(&schema) && !extra_allowed,
     })
+}
+
+#[derive(Clone, Copy)]
+struct AliasRules {
+    validate_by_alias: bool,
+    validate_by_name: bool,
+}
+
+impl Default for AliasRules {
+    fn default() -> Self {
+        Self {
+            validate_by_alias: true,
+            validate_by_name: false,
+        }
+    }
+}
+
+fn overridden_rules(
+    rules: AliasRules,
+    config: Option<&pydantic_core_kernel::CoreConfig>,
+) -> AliasRules {
+    let Some(config) = config else {
+        return rules;
+    };
+    AliasRules {
+        validate_by_alias: config.validate_by_alias.unwrap_or(rules.validate_by_alias),
+        validate_by_name: config.validate_by_name.unwrap_or(rules.validate_by_name),
+    }
+}
+
+/// does any field in the schema carry a validation alias?
+fn schema_has_aliases(schema: &CoreSchema) -> bool {
+    match schema {
+        CoreSchema::Model { schema, .. }
+        | CoreSchema::ModelField { schema, .. }
+        | CoreSchema::Nullable { schema, .. }
+        | CoreSchema::Json { schema } => schema_has_aliases(schema),
+        CoreSchema::Default { schema, .. } | CoreSchema::WithDefault { schema, .. } => {
+            schema.as_ref().is_some_and(|s| schema_has_aliases(s))
+        }
+        CoreSchema::ModelFields { fields, .. } => fields.iter().any(|(_, field_schema)| {
+            matches!(
+                field_schema,
+                CoreSchema::ModelField {
+                    validation_alias: Some(_),
+                    ..
+                }
+            ) || schema_has_aliases(field_schema)
+        }),
+        CoreSchema::TypedDict { fields, .. } => fields
+            .iter()
+            .any(|field| field.validation_alias.is_some() || schema_has_aliases(&field.schema)),
+        CoreSchema::List { items_schema, .. } | CoreSchema::Set { items_schema, .. } => {
+            items_schema.as_ref().is_some_and(|s| schema_has_aliases(s))
+        }
+        CoreSchema::Dict { values_schema, .. } => values_schema
+            .as_ref()
+            .is_some_and(|s| schema_has_aliases(s)),
+        CoreSchema::Union { choices, .. } => choices.iter().any(schema_has_aliases),
+        CoreSchema::TaggedUnion { choices, .. } => {
+            choices.iter().any(|(_, s)| schema_has_aliases(s))
+        }
+        CoreSchema::LaxOrStrict {
+            lax_schema,
+            strict_schema,
+        }
+        | CoreSchema::JsonOrPython {
+            json: lax_schema,
+            python: strict_schema,
+        } => schema_has_aliases(lax_schema) || schema_has_aliases(strict_schema),
+        CoreSchema::Definitions { schema, .. } => schema_has_aliases(schema),
+        _ => false,
+    }
+}
+
+fn strip_shadowed_name_keys(schema: &CoreSchema, value: &mut Value, rules: AliasRules) {
+    match schema {
+        CoreSchema::Model { config, schema, .. } => {
+            strip_shadowed_name_keys(schema, value, overridden_rules(rules, config.as_ref()));
+        }
+        CoreSchema::ModelFields { fields, .. } => {
+            let specs: Vec<(String, Option<String>, &CoreSchema)> = fields
+                .iter()
+                .map(|(name, field_schema)| match field_schema {
+                    CoreSchema::ModelField {
+                        schema,
+                        validation_alias,
+                    } => (name.clone(), validation_alias.clone(), schema.as_ref()),
+                    other => (name.clone(), None, other),
+                })
+                .collect();
+            strip_struct_level(value, &specs, rules);
+        }
+        CoreSchema::TypedDict { config, fields, .. } => {
+            let specs: Vec<(String, Option<String>, &CoreSchema)> = fields
+                .iter()
+                .map(|field| {
+                    (
+                        field.name.clone(),
+                        field.validation_alias.clone(),
+                        field.schema.as_ref(),
+                    )
+                })
+                .collect();
+            strip_struct_level(value, &specs, overridden_rules(rules, config.as_ref()));
+        }
+        CoreSchema::ModelField { schema, .. }
+        | CoreSchema::Nullable { schema, .. }
+        | CoreSchema::Json { schema } => strip_shadowed_name_keys(schema, value, rules),
+        CoreSchema::Default { schema, .. } | CoreSchema::WithDefault { schema, .. } => {
+            if let Some(schema) = schema.as_ref() {
+                strip_shadowed_name_keys(schema, value, rules);
+            }
+        }
+        CoreSchema::List { items_schema, .. } | CoreSchema::Set { items_schema, .. } => {
+            if let (Some(items_schema), Value::Array(items)) = (items_schema.as_ref(), value) {
+                for item in items {
+                    strip_shadowed_name_keys(items_schema, item, rules);
+                }
+            }
+        }
+        CoreSchema::Dict { values_schema, .. } => {
+            if let (Some(values_schema), Value::Object(entries)) = (values_schema.as_ref(), value) {
+                for (_, entry) in entries {
+                    strip_shadowed_name_keys(values_schema, entry, rules);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn strip_struct_level(
+    value: &mut Value,
+    fields: &[(String, Option<String>, &CoreSchema)],
+    rules: AliasRules,
+) {
+    let Value::Object(entries) = value else {
+        return;
+    };
+    let has_key = |entries: &[(String, Value)], key: &str| entries.iter().any(|(k, _)| k == key);
+
+    let shadowed: Vec<&str> = fields
+        .iter()
+        .filter_map(|(name, alias, _)| {
+            let alias = alias.as_deref()?;
+            let name_present = has_key(entries, name);
+            let alias_present = has_key(entries, alias);
+            if name_present
+                && ((alias_present && rules.validate_by_alias) || !rules.validate_by_name)
+            {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if !shadowed.is_empty() {
+        entries.retain(|(k, _)| !shadowed.contains(&k.as_str()));
+    }
+
+    for (name, alias, inner) in fields {
+        let consumed = match alias.as_deref() {
+            Some(alias) if rules.validate_by_alias && has_key(entries, alias) => alias,
+            Some(_) if rules.validate_by_name && has_key(entries, name) => name.as_str(),
+            None if has_key(entries, name) => name.as_str(),
+            _ => continue,
+        };
+        if let Some((_, entry)) = entries.iter_mut().find(|(k, _)| k == consumed) {
+            strip_shadowed_name_keys(inner, entry, rules);
+        }
+    }
 }
 
 fn schema_has_nested_models(schema: &CoreSchema) -> bool {
@@ -213,25 +396,37 @@ fn schema_has_nested_models(schema: &CoreSchema) -> bool {
     }
     walk(schema, false)
 }
-
-fn validate_body<'py>(
-    py: Python<'py>,
+fn validate_body(
+    py: Python<'_>,
     fast: &KernelFastPath,
     raw_payload: &[u8],
 ) -> Option<Result<Py<PyAny>, Response>> {
-    match fast.schema.validate_json(raw_payload) {
-        Ok(value) => {
-            if !fast.construct_safe {
-                return None;
-            }
-            construct_model(py, fast, &value)
+    let value = if fast.has_aliases {
+        let mut parsed = parse_json(raw_payload).ok()?;
+        strip_shadowed_name_keys(&fast.schema_core, &mut parsed, AliasRules::default());
+        let serde_value = value_to_serde(&parsed);
+        let normalized = match serde_json::to_vec(&serde_value) {
+            Ok(bytes) => bytes,
+            Err(_) => return None,
+        };
+        match fast.schema.validate_json(&normalized) {
+            Ok(value) => value,
+            Err(err) => return Some(Err(kernel_error_response(py, &err))),
         }
-        Err(err) => Some(Err(kernel_error_response(py, &err))),
+    } else {
+        match fast.schema.validate_json(raw_payload) {
+            Ok(value) => value,
+            Err(err) => return Some(Err(kernel_error_response(py, &err))),
+        }
+    };
+    if !fast.construct_safe {
+        return None;
     }
+    construct_model(py, fast, &value)
 }
 
-fn construct_model<'py>(
-    py: Python<'py>,
+fn construct_model(
+    py: Python<'_>,
     fast: &KernelFastPath,
     value: &Value,
 ) -> Option<Result<Py<PyAny>, Response>> {
@@ -251,13 +446,13 @@ fn construct_model<'py>(
     }
 }
 
-fn value_to_py<'py>(py: Python<'py>, value: &Value) -> Option<Py<PyAny>> {
+fn value_to_py(py: Python<'_>, value: &Value) -> Option<Py<PyAny>> {
     Some(match value {
         Value::Null => py.None(),
         Value::Bool(b) => PyBool::new(py, *b).to_owned().unbind().into_any(),
         Value::Int(i) => match i {
-            pydantic_core_kernel::Int::I64(v) => PyInt::new(py, *v).unbind().into_any(),
-            pydantic_core_kernel::Int::Big(big) => py
+            Int::I64(v) => PyInt::new(py, *v).unbind().into_any(),
+            Int::Big(big) => py
                 .import("builtins")
                 .ok()?
                 .call_method1("int", (big.to_string(),))
@@ -281,7 +476,7 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> Option<Py<PyAny>> {
             }
             dict.unbind().into_any()
         }
-        Value::Date(d) => PyDate::new(py, d.year as i32, d.month, d.day)
+        Value::Date(d) => PyDate::new(py, i32::from(d.year), d.month, d.day)
             .ok()?
             .unbind()
             .into_any(),
@@ -292,7 +487,7 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> Option<Py<PyAny>> {
             };
             PyDateTime::new(
                 py,
-                dt.date.year as i32,
+                i32::from(dt.date.year),
                 dt.date.month,
                 dt.date.day,
                 dt.time.hour,
@@ -310,20 +505,13 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> Option<Py<PyAny>> {
                 None => None,
                 Some(offset) => Some(py_tz(py, offset)?),
             };
-            PyTime::new(
-                py,
-                t.hour,
-                t.minute,
-                t.second,
-                t.microsecond,
-                tz.as_ref(),
-            )
-            .ok()?
-            .unbind()
-            .into_any()
+            PyTime::new(py, t.hour, t.minute, t.second, t.microsecond, tz.as_ref())
+                .ok()?
+                .unbind()
+                .into_any()
         }
         Value::Duration(d) => {
-            let total_seconds = d.day as i64 * 86_400 + d.second as i64;
+            let total_seconds = i64::from(d.day) * 86_400 + i64::from(d.second);
             let signed = if d.positive {
                 total_seconds
             } else {
@@ -333,14 +521,14 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> Option<Py<PyAny>> {
                 .ok()?
                 .getattr("timedelta")
                 .ok()?
-                .call1((0i64, signed, d.microsecond as i64))
+                .call1((0i64, signed, i64::from(d.microsecond)))
                 .ok()?
                 .unbind()
         }
     })
 }
 
-fn py_tz<'py>(py: Python<'py>, offset_seconds: i32) -> Option<Bound<'py, PyTzInfo>> {
+fn py_tz(py: Python<'_>, offset_seconds: i32) -> Option<Bound<'_, PyTzInfo>> {
     let datetime = py.import("datetime").ok()?;
     let tz = if offset_seconds == 0 {
         datetime.getattr("timezone").ok()?.getattr("utc").ok()?
@@ -370,14 +558,10 @@ fn kernel_error_response(py: Python<'_>, err: &ValidationError) -> Response {
                 .set_item(
                     // fastapi roots body errors at `["body", ...]`
                     "loc",
-                    std::iter::once(PyString::new(py, "body").unbind().into_any())
+                    once(PyString::new(py, "body").unbind().into_any())
                         .chain(detail.loc.iter().map(|loc_item| match loc_item {
-                            pydantic_core_kernel::LocItem::S(s) => {
-                                PyString::new(py, s).unbind().into_any()
-                            }
-                            pydantic_core_kernel::LocItem::I(i) => {
-                                PyInt::new(py, *i).unbind().into_any()
-                            }
+                            LocItem::S(s) => PyString::new(py, s).unbind().into_any(),
+                            LocItem::I(i) => PyInt::new(py, *i).unbind().into_any(),
                         }))
                         .collect::<Vec<_>>(),
                 )
@@ -399,7 +583,7 @@ fn kernel_error_response(py: Python<'_>, err: &ValidationError) -> Response {
         if let Some(ctx) = &detail.ctx {
             let ctx_dict = PyDict::new(py);
             for (key, ctx_value) in ctx {
-                let v = value_to_py(py, &pydantic_core_kernel::json::serde_to_value(ctx_value));
+                let v = value_to_py(py, &serde_to_value(ctx_value));
                 match v {
                     Some(v) => {
                         if ctx_dict.set_item(key, v).is_err() {

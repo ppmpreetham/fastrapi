@@ -1,3 +1,5 @@
+use pyo3::exceptions::PyTypeError;
+use pyo3::types::PyType;
 mod init;
 mod requests;
 
@@ -6,11 +8,11 @@ pub use crate::routing::tree::*;
 use crate::routing::types::{HttpMethod, RouteEntry, SubRouterMount, WebSocketEntry};
 
 use parking_lot::Mutex;
-use pyo3::Bound;
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::prelude::{Py, PyAny, PyAnyMethods, PyResult, Python, pyclass, pymethods};
-use std::sync::Arc;
+use pyo3::prelude::{pyclass, pymethods, Py, PyAny, PyAnyMethods, PyResult, Python};
+use pyo3::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[pyclass(name = "APIRouter", skip_from_py_object)]
 #[derive(Clone)]
@@ -42,6 +44,7 @@ pub struct PyAPIRouter {
 }
 
 impl PyAPIRouter {
+    #[must_use]
     pub fn new_() -> Self {
         Self {
             prefix: String::new(),
@@ -66,7 +69,7 @@ impl PyAPIRouter {
 #[pymethods]
 impl PyAPIRouter {
     #[new]
-    #[pyo3(signature = (*, prefix="".to_string(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None, route_class=None))]
+    #[pyo3(signature = (*, prefix=String::new(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None, route_class=None))]
     fn new(
         prefix: String,
         tags: Option<Py<PyAny>>,
@@ -89,9 +92,9 @@ impl PyAPIRouter {
         });
 
         if let Some(rc) = &route_class {
-            let is_type = Python::attach(|py| rc.bind(py).is_instance_of::<pyo3::types::PyType>());
+            let is_type = Python::attach(|py| rc.bind(py).is_instance_of::<PyType>());
             if !is_type {
-                return Err(pyo3::exceptions::PyTypeError::new_err(
+                return Err(PyTypeError::new_err(
                     "route_class must be a class (subclass of APIRoute)",
                 ));
             }
@@ -118,6 +121,57 @@ impl PyAPIRouter {
     #[pyo3(signature = (path))]
     fn const_get(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
         self.create_method_decorator_kw(py, HttpMethod::GET, path, None)
+    }
+
+    #[pyo3(signature = (path, endpoint, *, response_model=None, status_code=None, tags=None,
+        dependencies=None, summary=None, description=None, response_description=None,
+        responses=None, deprecated=None, methods=None, operation_id=None,
+        include_in_schema=true, response_class=None, name=None, callbacks=None,
+        openapi_extra=None, generate_unique_id_function=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_api_route(
+        &self,
+        py: Python<'_>,
+        path: String,
+        endpoint: Bound<'_, PyAny>,
+        response_model: Option<Py<PyAny>>,
+        status_code: Option<u16>,
+        tags: Option<Py<PyAny>>,
+        dependencies: Option<Py<PyAny>>,
+        summary: Option<String>,
+        description: Option<String>,
+        response_description: Option<String>,
+        responses: Option<Py<PyAny>>,
+        deprecated: Option<bool>,
+        methods: Option<Vec<String>>,
+        operation_id: Option<String>,
+        include_in_schema: bool,
+        response_class: Option<Py<PyAny>>,
+        name: Option<String>,
+        callbacks: Option<Py<PyAny>>,
+        openapi_extra: Option<Py<PyAny>>,
+        generate_unique_id_function: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let kwargs = Self::api_route_kwargs(
+            py,
+            response_model,
+            status_code,
+            tags,
+            dependencies,
+            summary,
+            description,
+            response_description,
+            responses,
+            deprecated,
+            operation_id,
+            include_in_schema,
+            response_class,
+            name,
+            callbacks,
+            openapi_extra,
+            generate_unique_id_function,
+        );
+        self.add_api_route_impl(py, path, &endpoint, methods, &kwargs)
     }
 
     #[pyo3(signature = (path))]
