@@ -21,6 +21,16 @@ use simd_json::prelude::*;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::HashSet;
+use crate::engine::background::PyBackgroundTasks;
+use crate::ffi::kernel_validation::maybe_validate_with_kernel;
+use crate::http::request::PyRequest;
+use crate::http::request::create_py_request;
+use pyo3::Bound;
+use pyo3::Py;
+use pyo3::types::PyBytes;
+use pyo3::types::PyList;
+use std::fmt;
+use std::str::from_utf8;
 
 crate::cached_py_import!(INSPECT_MODULE, "inspect");
 
@@ -38,6 +48,7 @@ pub enum ScalarKind {
     Other,
 }
 
+#[must_use]
 pub fn resolve_scalar_kind(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> ScalarKind {
     if let Ok(py_type) = annotation.cast::<PyType>() {
         if py_type.is(py.get_type::<PyBool>()) {
@@ -73,6 +84,7 @@ pub enum ScalarCoercion {
     Union(SmallVec<[ScalarKind; 4]>),
 }
 
+#[must_use]
 pub fn resolve_scalar_coercion(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> ScalarCoercion {
     let mut kinds = SmallVec::new();
     collect_scalar_kinds(py, annotation, &mut kinds);
@@ -153,6 +165,7 @@ pub fn is_none_type(obj: &Bound<'_, PyAny>) -> bool {
         .is_ok_and(|name| name == "NoneType")
 }
 
+#[must_use]
 pub fn strip_optional<'py>(
     py: Python<'py>,
     annotation: &Bound<'py, PyAny>,
@@ -171,7 +184,7 @@ pub fn load_module(py: Python<'_>, module: &str, class_name: &str) -> PyResult<P
     Ok(cls.into())
 }
 
-pub fn pydantic_error_to_response(py: Python<'_>, err: &pyo3::PyErr) -> axum::response::Response {
+pub fn pydantic_error_to_response(py: Python<'_>, err: &pyo3::PyErr) -> Response {
     use crate::utils::py_json_response_with_status;
     use axum::response::IntoResponse;
     use pyo3::types::{PyDict, PyList};
@@ -238,19 +251,19 @@ fn validate_python_with_pydantic<'py>(
     }
 }
 
-pub fn validate_json_with_pydantic<'py>(
-    py: Python<'py>,
+pub fn validate_json_with_pydantic(
+    py: Python<'_>,
     validator: &PydanticValidator,
     raw_payload: &[u8],
 ) -> Result<Py<PyAny>, Response> {
     if let Some(handled) =
-        crate::ffi::kernel_validation::maybe_validate_with_kernel(py, validator, raw_payload)
+        maybe_validate_with_kernel(py, validator, raw_payload)
     {
         return handled;
     }
 
     if let Some(validate_json_method) = &validator.validate_json_method {
-        let raw_str = std::str::from_utf8(raw_payload).map_err(|_| {
+        let raw_str = from_utf8(raw_payload).map_err(|_| {
             (StatusCode::UNPROCESSABLE_ENTITY, "Invalid UTF-8 payload").into_response()
         })?;
 
@@ -261,7 +274,7 @@ pub fn validate_json_with_pydantic<'py>(
     }
 
     if let Some(validate_json) = &validator.validate_json {
-        let raw = pyo3::types::PyBytes::new(py, raw_payload);
+        let raw = PyBytes::new(py, raw_payload);
         return match validate_json.bind(py).call1((raw,)) {
             Ok(obj) => Ok(obj.into()),
             Err(e) => Err(pydantic_error_to_response(py, &e)),
@@ -321,6 +334,7 @@ pub struct ParsedRouteMetadata {
     pub serialization_hint: SerializationHint,
     pub body_param_names: Vec<Py<PyString>>,
     pub request_param: Option<Py<PyString>>,
+    pub response_param: Option<Py<PyString>>,
     pub dependencies: Vec<DependencyNode>,
     pub dependency_needs_request: bool,
     pub all_deps_sync: bool,
@@ -329,6 +343,7 @@ pub struct ParsedRouteMetadata {
     pub is_fast_path: bool,
 }
 
+#[must_use]
 pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> ParsedRouteMetadata {
     let response_type = get_response_type(py, func);
     let serialization_hint = get_serialization_hint(py, func);
@@ -344,7 +359,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         dependencies::parse_dependencies(py, func, &path_param_names).unwrap_or_default();
 
     let dependency_needs_request = dependencies.iter().any(|dep| dep.needs_request_object);
-    let all_deps_sync = dependencies.iter().all(|dep| dep.is_sync_callable());
+    let all_deps_sync = dependencies.iter().all(super::super::routing::dependencies::DependencyNode::is_sync_callable);
     let dep_param_names: HashSet<String> = dependencies
         .iter()
         .filter_map(|d| d.param_name.as_ref().map(|n| n.bind(py).to_string()))
@@ -354,9 +369,10 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     let mut body_param_names = Vec::new();
     let mut parsed_params = Vec::new();
     let mut request_param: Option<Py<PyString>> = None;
+    let mut response_param = None;
 
     let request_cls: Py<PyAny> = py
-        .get_type::<crate::http::request::PyRequest>()
+        .get_type::<PyRequest>()
         .into_any()
         .unbind();
 
@@ -384,9 +400,13 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                 .ok()
                 .filter(|a| !params::is_inspect_empty(py, a));
             if let Some(ann) = &raw_ann {
+                if dependencies::is_response_annotation(py, ann) {
+                    response_param = Some(PyString::new(py, &param_name).unbind());
+                    continue;
+                }
                 let ann_ref: &Bound<'_, PyAny> = ann;
                 if ann_ref.is(request_cls.bind(py)) {
-                    request_param = Some(pyo3::types::PyString::new(py, &param_name).unbind());
+                    request_param = Some(PyString::new(py, &param_name).unbind());
                     continue;
                 }
             }
@@ -406,15 +426,13 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                     let core_validator = ann_bound
                         .getattr(intern!(py, "__pydantic_validator__"))
                         .ok()
-                        .map(|v| v.unbind());
+                        .map(Bound::unbind);
                     let validate_json = ann_bound
                         .getattr(intern!(py, "model_validate_json"))
                         .ok()
                         .map(Bound::unbind);
                     let validate_python = ann_bound
-                        .getattr(intern!(py, "model_validate"))
-                        .map(Bound::unbind)
-                        .unwrap_or_else(|_| ann.clone_ref(py));
+                        .getattr(intern!(py, "model_validate")).map_or_else(|_| ann.clone_ref(py), Bound::unbind);
                     let validate_json_method = core_validator.as_ref().and_then(|core| {
                         core.bind(py)
                             .getattr(intern!(py, "validate_json"))
@@ -453,6 +471,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         serialization_hint,
         body_param_names,
         request_param,
+        response_param,
         dependencies,
         dependency_needs_request,
         all_deps_sync,
@@ -464,7 +483,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
 
 fn validation_error(
     loc: &[String],
-    msg: impl std::fmt::Display,
+    msg: impl fmt::Display,
     kind: &str,
     input: simd_json::OwnedValue,
 ) -> Response {
@@ -476,8 +495,15 @@ fn validation_error(
             "input": input,
         }]
     });
-    (StatusCode::UNPROCESSABLE_ENTITY, Json(detail)).into_response()
+    let mut response = (StatusCode::UNPROCESSABLE_ENTITY, Json(detail.clone())).into_response();
+    response
+        .extensions_mut()
+        .insert(ValidationErrorDetails(detail));
+    response
 }
+
+#[derive(Clone)]
+pub(crate) struct ValidationErrorDetails(pub(crate) simd_json::OwnedValue);
 
 fn validation_error_response(detail: impl Into<String>) -> Response {
     validation_error(
@@ -567,7 +593,7 @@ fn convert_with_kind(
     match kind {
         ScalarKind::Bool => parse_bool(raw)
             .map(|v| {
-                pyo3::types::PyBool::new(py, v)
+                PyBool::new(py, v)
                     .to_owned()
                     .into_any()
                     .unbind()
@@ -877,9 +903,7 @@ fn resolve_list_parameter(
             (true, _) => Some(
                 param
                     .default_value
-                    .as_ref()
-                    .map(|v| v.clone_ref(py))
-                    .unwrap_or_else(|| py.None()),
+                    .as_ref().map_or_else(|| py.None(), |v| v.clone_ref(py)),
             ),
             (false, true) => {
                 return Err(validation_error(
@@ -900,7 +924,7 @@ fn resolve_list_parameter(
         items.push(value);
     }
 
-    pyo3::types::PyList::new(py, items)
+    PyList::new(py, items)
         .map_err(|err| {
             use axum::response::IntoResponse;
             err.print(py);
@@ -918,6 +942,40 @@ pub fn resolve_parameter_value(
     param: &ParsedParameter,
     request_input: &RequestInput<'_>,
 ) -> Result<Option<Py<PyAny>>, Response> {
+    if param.is_pydantic_model && matches!(param.source, ParameterSource::Query) {
+        let values = PyDict::new(py);
+        for (name, value) in request_input.get_all_query_params() {
+            let value = PyString::new(py, value.as_ref());
+            if let Ok(Some(existing)) = values.get_item(name.as_ref()) {
+                let list = if let Ok(list) = existing.cast::<PyList>() {
+                    list.clone()
+                } else {
+                    let list = PyList::new(py, [existing])
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+                    values
+                        .set_item(name.as_ref(), &list)
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+                    list
+                };
+                list.append(value)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+            } else {
+                values
+                    .set_item(name.as_ref(), value)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+            }
+        }
+        let model = param
+            .annotation
+            .as_ref()
+            .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+        let result = model
+            .bind(py)
+            .call_method1("model_validate", (&values,))
+            .or_else(|_| model.bind(py).call1((&values,)))
+            .map_err(|err| pydantic_error_to_response(py, &err))?;
+        return Ok(Some(result.unbind()));
+    }
     if param.is_list {
         return resolve_list_parameter(py, param, request_input);
     }
@@ -928,9 +986,7 @@ pub fn resolve_parameter_value(
             return Ok(Some(
                 param
                     .default_value
-                    .as_ref()
-                    .map(|v| v.clone_ref(py))
-                    .unwrap_or_else(|| py.None()),
+                    .as_ref().map_or_else(|| py.None(), |v| v.clone_ref(py)),
             ));
         }
         if param.required {
@@ -965,7 +1021,7 @@ fn form_field_to_py(
                 file.content.clone(),
             ),
         )
-        .map(|upload| upload.into_any())
+        .map(Py::into_any)
         .map_err(|err| {
             err.print(py);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -1002,9 +1058,7 @@ fn apply_body_and_validation(
             if param.has_default {
                 let value = param
                     .default_value
-                    .as_ref()
-                    .map(|d| d.clone_ref(py))
-                    .unwrap_or_else(|| py.None());
+                    .as_ref().map_or_else(|| py.None(), |d| d.clone_ref(py));
                 _ = kwargs.set_item(param.name_py.bind(py), value);
             }
         });
@@ -1061,17 +1115,14 @@ fn apply_body_and_validation(
 
     let parsed_storage;
     let json_payload = match payload {
-        BodyPayload::Json { raw, value } => match value {
-            Some(payload) => payload,
-            None => {
-                let mut json_buf = raw.to_vec();
-                parsed_storage = simd_json::to_owned_value(&mut json_buf).map_err(|_| {
-                    (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response()
-                })?;
-                &parsed_storage
-            }
+        BodyPayload::Json { raw, value } => if let Some(payload) = value { payload } else {
+            let mut json_buf = raw.to_vec();
+            parsed_storage = simd_json::to_owned_value(&mut json_buf).map_err(|_| {
+                (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response()
+            })?;
+            &parsed_storage
         },
-        BodyPayload::Form(form) => {
+        BodyPayload::Form { fields: form, .. } => {
             for &idx in &handler.payload.body_param_indices {
                 let param = &handler.payload.parsed_params[idx];
                 let values = form
@@ -1082,9 +1133,7 @@ fn apply_body_and_validation(
                     if param.has_default {
                         let default_value = param
                             .default_value
-                            .as_ref()
-                            .map(|d| d.clone_ref(py))
-                            .unwrap_or_else(|| py.None());
+                            .as_ref().map_or_else(|| py.None(), |d| d.clone_ref(py));
                         kwargs.set_item(param.name_py.bind(py), default_value).ok();
                     } else if param.required {
                         return Err(validation_error(
@@ -1104,7 +1153,7 @@ fn apply_body_and_validation(
                 let converted = converted?;
 
                 let value: Py<PyAny> = if param.is_list {
-                    pyo3::types::PyList::new(py, converted)
+                    PyList::new(py, converted)
                         .map_err(|err| {
                             err.print(py);
                             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -1176,9 +1225,7 @@ fn apply_body_and_validation(
         if param.has_default {
             let default_value = param
                 .default_value
-                .as_ref()
-                .map(|d| d.clone_ref(py))
-                .unwrap_or_else(|| py.None());
+                .as_ref().map_or_else(|| py.None(), |d| d.clone_ref(py));
             kwargs.set_item(param.name_py.bind(py), default_value).ok();
         } else if param.required {
             return Err(validation_error_response(format!(
@@ -1197,7 +1244,7 @@ pub fn apply_request_data(
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
     kwargs: &Bound<'_, PyDict>,
-) -> Result<Option<Py<crate::engine::background::PyBackgroundTasks>>, Response> {
+) -> Result<Option<Py<PyBackgroundTasks>>, Response> {
     if handler.payload.has_multiple_query_params {
         request_input.get_all_query_params();
     }
@@ -1207,7 +1254,7 @@ pub fn apply_request_data(
             err.print(py);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         };
-        let req = crate::http::request::create_py_request(
+        let req = create_py_request(
             py,
             request_input,
             payload.and_then(|p| match p {
@@ -1219,10 +1266,10 @@ pub fn apply_request_data(
         kwargs.set_item(name.bind(py), req).map_err(fail)?;
     }
 
-    let mut bg_tasks_instance: Option<Py<crate::engine::background::PyBackgroundTasks>> = None;
+    let mut bg_tasks_instance: Option<Py<PyBackgroundTasks>> = None;
 
     handler.payload.parsed_params.iter().try_for_each(
-        |param| -> Result<(), axum::response::Response> {
+        |param| -> Result<(), Response> {
             if matches!(param.source, ParameterSource::Body)
                 || handler
                     .payload
@@ -1236,7 +1283,7 @@ pub fn apply_request_data(
                 let instance = if let Some(bg) = &bg_tasks_instance {
                     bg.clone()
                 } else {
-                    let bg = Py::new(py, crate::engine::background::PyBackgroundTasks::new())
+                    let bg = Py::new(py, PyBackgroundTasks::new())
                         .map_err(|_| {
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1263,6 +1310,7 @@ pub fn apply_request_data(
     Ok(bg_tasks_instance)
 }
 
+#[must_use]
 pub fn get_response_type_from_class(py: Python<'_>, cls: &Bound<'_, PyAny>) -> ResponseType {
     if cls.is(py.get_type::<PyJSONResponse>()) {
         ResponseType::Json
@@ -1279,6 +1327,7 @@ pub fn get_response_type_from_class(py: Python<'_>, cls: &Bound<'_, PyAny>) -> R
     }
 }
 
+#[must_use]
 pub fn get_serialization_hint(py: Python<'_>, func: &Bound<'_, PyAny>) -> SerializationHint {
     let result: PyResult<SerializationHint> = (|| {
         let annotations = func.getattr(intern!(py, "__annotations__"))?;
@@ -1294,7 +1343,7 @@ pub fn get_serialization_hint(py: Python<'_>, func: &Bound<'_, PyAny>) -> Serial
 
         let type_name = ann
             .getattr(intern!(py, "__name__"))
-            .or_else(|_| ann.str().map(|s| s.into_any()))?;
+            .or_else(|_| ann.str().map(Bound::into_any))?;
         let name_str = type_name.cast::<PyString>()?.to_str()?;
 
         Ok(match name_str {
@@ -1312,6 +1361,7 @@ pub fn get_serialization_hint(py: Python<'_>, func: &Bound<'_, PyAny>) -> Serial
     result.unwrap_or(SerializationHint::Unknown)
 }
 
+#[must_use]
 pub fn get_response_type(py: Python<'_>, func: &Bound<'_, PyAny>) -> ResponseType {
     let result: PyResult<ResponseType> = (|| {
         let annotations = func.getattr(intern!(py, "__annotations__"))?;
@@ -1335,7 +1385,7 @@ pub fn get_response_type(py: Python<'_>, func: &Bound<'_, PyAny>) -> ResponseTyp
 
         let type_name = ann
             .getattr(intern!(py, "__name__"))
-            .or_else(|_| ann.str().map(|s| s.into_any()))?;
+            .or_else(|_| ann.str().map(Bound::into_any))?;
         let name_str = type_name.cast::<PyString>()?.to_str()?;
 
         Ok(match name_str {

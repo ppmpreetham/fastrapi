@@ -1,12 +1,17 @@
 use std::borrow::Cow;
 
+use crate::utils::py_any_to_json;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyUserWarning};
 use pyo3::prelude::*;
+use pyo3::types::PyDictMethods;
+use pyo3::types::PyList;
+use pyo3::types::PyListMethods;
 use pyo3::types::{PyDict, PyString, PyTuple};
+use pyo3::PyClassInitializer;
 use simd_json::json;
+use std::convert::Into;
 
 // Base Errors
 
@@ -70,9 +75,9 @@ impl PyValidationException {
     fn __str__(&self, py: Python<'_>) -> String {
         let errors = self._errors.bind(py);
         let len = errors
-            .cast::<pyo3::types::PyList>()
-            .map(|list| list.len())
-            .or_else(|_| errors.cast::<pyo3::types::PyDict>().map(|dict| dict.len()))
+            .cast::<PyList>()
+            .map(PyListMethods::len)
+            .or_else(|_| errors.cast::<PyDict>().map(PyDictMethods::len))
             .unwrap_or(0);
         format!(
             "{} validation error{} occurred",
@@ -116,10 +121,17 @@ impl PyHTTPException {
         detail: Option<Bound<'_, PyAny>>,
         headers: Option<Bound<'_, PyDict>>,
     ) -> Self {
+        let default_detail = StatusCode::from_u16(status_code)
+            .ok()
+            .and_then(|status| status.canonical_reason())
+            .unwrap_or("Internal Server Error");
         Self {
             status_code,
-            detail: detail.map(|d| d.into()).unwrap_or_else(|| py.None()),
-            headers: headers.map(|h| h.into()),
+            detail: detail.map_or_else(
+                || PyString::new(py, default_detail).into_any().unbind(),
+                Into::into,
+            ),
+            headers: headers.map(Into::into),
         }
     }
 
@@ -185,6 +197,7 @@ impl PyHTTPException {
         }
     }
 
+    #[must_use]
     pub fn to_response(&self, py: Python<'_>) -> Response {
         let status =
             StatusCode::try_from(self.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -194,7 +207,7 @@ impl PyHTTPException {
             return (status, headers).into_response();
         }
 
-        let detail = crate::utils::py_any_to_json(py, self.detail.bind(py));
+        let detail = py_any_to_json(py, self.detail.bind(py));
         (status, headers, Json(json!({ "detail": detail }))).into_response()
     }
 }
@@ -211,6 +224,30 @@ impl PyHTTPException {
 pub struct PyWebSocketException {
     pub code: u16,
     pub reason: Option<String>,
+}
+
+#[pyclass(
+    extends = PyException,
+    name = "WebSocketDisconnect",
+    get_all,
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct PyWebSocketDisconnect {
+    pub code: u16,
+    pub reason: Option<String>,
+}
+
+#[pymethods]
+impl PyWebSocketDisconnect {
+    #[new]
+    #[pyo3(signature = (code=1000, reason=None))]
+    fn new(code: u16, reason: Option<String>) -> Self {
+        Self { code, reason }
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
 }
 
 #[pymethods]
