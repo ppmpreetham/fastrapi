@@ -2,6 +2,9 @@ use crate::runtime::py_bridge;
 use bytes::{BufMut, Bytes, BytesMut};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes};
+use pyo3::Bound;
+use pyo3::types::PyDict;
+use std::cmp::min;
 
 crate::cached_py_import!(TEMPFILE_MODULE, "tempfile");
 
@@ -49,7 +52,7 @@ impl PyUploadFile {
 }
 
 fn spool_to_file(py: Python<'_>, content: &[u8]) -> PyResult<Py<PyAny>> {
-    let kwargs = pyo3::types::PyDict::new(py);
+    let kwargs = PyDict::new(py);
     kwargs.set_item(pyo3::intern!(py, "max_size"), SPOOL_MAX_MEM)?;
     let file = TEMPFILE_MODULE
         .get(py)?
@@ -91,7 +94,7 @@ impl PyUploadFile {
                 Python::attach(|py| {
                     file.bind(py)
                         .call_method1(pyo3::intern!(py, "read"), (size,))
-                        .map(|obj| obj.unbind())
+                        .map(Bound::unbind)
                 })
             });
         }
@@ -100,7 +103,7 @@ impl PyUploadFile {
         let end = if size < 0 {
             self.file_content.len()
         } else {
-            std::cmp::min(self.cursor + size as usize, self.file_content.len())
+            min(self.cursor + size as usize, self.file_content.len())
         };
         let data = self.file_content.slice(start..end);
         self.cursor = end;
