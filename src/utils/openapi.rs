@@ -14,6 +14,14 @@ use simd_json::json;
 use simd_json::owned::Value as JsonValue;
 use simd_json::prelude::*;
 use std::collections::HashMap;
+use crate::types::route::SecurityKind;
+use regex::Regex;
+use simd_json::owned::Object;
+use simd_json::prelude::TypedScalarValue;
+use simd_json::serde::to_owned_value;
+use std::boxed::Box;
+use std::result::Result;
+use std::sync::OnceLock;
 crate::cached_py_import!(ENUM_MODULE, "enum");
 crate::cached_py_import!(TYPING_MODULE, "typing");
 crate::cached_py_import!(TYPING_GET_ORIGIN, "typing", "get_origin");
@@ -24,7 +32,7 @@ pub fn deep_merge_json(target: &mut JsonValue, source: JsonValue) {
         let source_obj = source.as_object().expect("Source must be an object");
         let target_obj = target.as_object_mut().expect("Target must be an object");
 
-        for (k, v) in source_obj.iter() {
+        for (k, v) in source_obj {
             if target_obj.contains_key(k.as_str()) {
                 let target_val = target_obj.get_mut(k).expect("Key not found in target");
                 deep_merge_json(target_val, v.clone());
@@ -189,19 +197,60 @@ impl Default for OpenApiSpec {
     }
 }
 
+#[must_use]
 pub fn extract_pydantic_schema(py: Python, model: &Bound<PyAny>, mode: &str) -> Option<JsonValue> {
     // Pydantic v2
     if let Ok(schema_method) = model.getattr("model_json_schema") {
-        let kwargs = pyo3::types::PyDict::new(py);
+        let kwargs = PyDict::new(py);
         _ = kwargs.set_item("mode", mode);
         if let Ok(result) = schema_method.call((), Some(&kwargs))
             && let Ok(dict) = result.cast::<PyDict>()
         {
-            // fastapi omits `default: null` entries pydantic emits for
-            // `Optional[...] = None` fields
             let mut schema = py_dict_to_json(py, dict);
             strip_null_defaults(&mut schema);
             return Some(schema);
+        }
+    }
+
+    if let Ok(typing) = py.import("typing")
+        && let Ok(origin) = typing.getattr("get_origin").and_then(|f| f.call1((model,)))
+        && let Ok(args) = typing.getattr("get_args").and_then(|f| f.call1((model,)))
+    {
+        let list_type = py.import("builtins").ok()?.getattr("list").ok()?;
+        if origin.is(&list_type) {
+            let item = args.try_iter().ok()?.next()?.ok()?;
+            let schema = extract_pydantic_schema(py, &item, mode).unwrap_or_else(|| json!({}));
+            return Some(json!({"type": "array", "items": schema}));
+        }
+        let union_type = py.import("types").ok()?.getattr("UnionType").ok()?;
+        if origin.is(&typing.getattr("Union").ok()?) || origin.is(&union_type) {
+            let schemas = args
+                .try_iter()
+                .ok()?
+                .filter_map(Result::ok)
+                .filter(|arg| !arg.is_none())
+                .filter_map(|arg| extract_pydantic_schema(py, &arg, mode))
+                .collect::<Vec<_>>();
+            if !schemas.is_empty() {
+                return Some(json!({"anyOf": schemas}));
+            }
+        }
+    }
+
+    if let Ok(pydantic) = py.import("pydantic") {
+        let adapter_kwargs = PyDict::new(py);
+        _ = adapter_kwargs.set_item("_parent_depth", 0);
+        if let Ok(adapter) = pydantic
+            .getattr("TypeAdapter")
+            .and_then(|ty| ty.call((model,), Some(&adapter_kwargs)))
+        {
+            let kwargs = PyDict::new(py);
+            _ = kwargs.set_item("mode", mode);
+            if let Ok(result) = adapter.call_method("json_schema", (), Some(&kwargs))
+                && let Ok(dict) = result.cast::<PyDict>()
+            {
+                return Some(py_dict_to_json(py, dict));
+            }
         }
     }
 
@@ -221,8 +270,7 @@ fn strip_null_defaults(schema: &mut JsonValue) {
     if schema.is_object() {
         let drop_default = schema
             .get("default")
-            .map(|value| value.is_null())
-            .unwrap_or(false);
+            .is_some_and(TypedScalarValue::is_null);
         if drop_default && let Some(obj) = schema.as_object_mut() {
             obj.remove(&"default".to_string());
         }
@@ -245,7 +293,14 @@ fn get_schema_name(model: &Bound<PyAny>) -> String {
         .getattr("__name__")
         .ok()
         .and_then(|name| name.extract::<String>().ok())
-        .unwrap_or_else(|| "UnknownSchema".to_string())
+        .unwrap_or_else(|| {
+            model
+                .str().map_or_else(|_| "UnknownSchema".to_string(), |value| {
+                    value
+                        .to_string_lossy()
+                        .replace(['[', ']', ' ', '\'', ','], "_")
+                })
+        })
 }
 
 /// `typing.get_origin(x) is typing.Literal`
@@ -363,14 +418,14 @@ fn python_type_to_openapi_type(
             .ok()
             .and_then(|args| args.try_iter().ok())
             .map(|iter| {
-                iter.filter_map(|a| a.ok())
+                iter.filter_map(Result::ok)
                     .map(|a| py_any_to_json(py, &a))
                     .collect()
             })
             .unwrap_or_default();
         if !values.is_empty() {
-            let all_str = values.iter().all(|v| v.is_str());
-            let all_int = values.iter().all(|v| v.is_i64());
+            let all_str = values.iter().all(TypedScalarValue::is_str);
+            let all_int = values.iter().all(TypedScalarValue::is_i64);
             let mut schema = json!({ "enum": values });
             if let Some(obj) = schema.as_object_mut() {
                 if all_str {
@@ -399,8 +454,8 @@ fn python_type_to_openapi_type(
                     .collect()
                 })
                 .unwrap_or_default();
-            let all_str = values.iter().all(|v| v.is_str());
-            let all_int = values.iter().all(|v| v.is_i64());
+            let all_str = values.iter().all(TypedScalarValue::is_str);
+            let all_int = values.iter().all(TypedScalarValue::is_i64);
             let mut schema = json!({ "enum": values, "title": schema_name });
             if let Some(obj) = schema.as_object_mut() {
                 if all_str {
@@ -427,9 +482,7 @@ fn python_type_to_openapi_type(
                 let items = type_hint
                     .getattr("__args__")
                     .ok()
-                    .and_then(|args| args.get_item(0).ok())
-                    .map(|elem| python_type_to_openapi_type(py, &elem, schemas))
-                    .unwrap_or_else(|| json!({ "type": "string" }));
+                    .and_then(|args| args.get_item(0).ok()).map_or_else(|| json!({ "type": "string" }), |elem| python_type_to_openapi_type(py, &elem, schemas));
                 return json!({ "type": "array", "items": items });
             }
             "dict" => return json!({ "type": "object" }),
@@ -444,9 +497,7 @@ fn python_type_to_openapi_type(
             let items = type_hint
                 .getattr("__args__")
                 .ok()
-                .and_then(|args| args.get_item(0).ok())
-                .map(|elem| python_type_to_openapi_type(py, &elem, schemas))
-                .unwrap_or_else(|| json!({ "type": "string" }));
+                .and_then(|args| args.get_item(0).ok()).map_or_else(|| json!({ "type": "string" }), |elem| python_type_to_openapi_type(py, &elem, schemas));
             return json!({ "type": "array", "items": items });
         }
 
@@ -574,7 +625,7 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
     );
 
     if let Some(wh) = &app.webhooks
-        && let Ok(router) = wh.bind(py).cast::<crate::decorators::PyAPIRouter>()
+        && let Ok(router) = wh.bind(py).cast::<PyAPIRouter>()
     {
         let wh_collected = collect_routes(py, &router.borrow());
         let wh_paths = build_paths_from_routes(
@@ -594,12 +645,12 @@ pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
         components.security_schemes = security_schemes;
     }
     debug!("Built OpenAPI spec with {} paths", spec.paths.len());
-    simd_json::serde::to_owned_value(&spec).unwrap_or_else(|_| json!({}))
+    to_owned_value(&spec).unwrap_or_else(|_| json!({}))
 }
 
-/// OpenAPI securitySchemes entry
+/// `OpenAPI` securitySchemes entry
 fn scheme_to_openapi(
-    kind: &crate::types::route::SecurityKind,
+    kind: &SecurityKind,
     description: Option<&str>,
     scopes: Option<&simd_json::OwnedValue>,
 ) -> JsonValue {
@@ -697,17 +748,14 @@ fn build_request_body(
             .parsed_params
             .iter()
             .find(|param| param.validator_index == Some(0))
-            .map(|param| param.embed)
-            .unwrap_or(false);
+            .is_some_and(|param| param.embed);
 
         let body_schema = if embedded {
             let param_name = handler
                 .payload
                 .parsed_params
                 .iter()
-                .find(|param| param.validator_index == Some(0))
-                .map(|param| param.external_name.clone())
-                .unwrap_or_else(|| validators[0].name.clone());
+                .find(|param| param.validator_index == Some(0)).map_or_else(|| validators[0].name.clone(), |param| param.external_name.clone());
             let wrapper_name = body_model_name(
                 handler.execution.func.bind(py),
                 &strip_converters(&route.path),
@@ -740,7 +788,7 @@ fn build_request_body(
         });
     }
 
-    let mut properties = simd_json::owned::Object::new();
+    let mut properties = Object::new();
     let mut required_fields = Vec::new();
 
     for validator in validators {
@@ -791,9 +839,9 @@ fn build_request_body(
 
 /// drops the `:convertor` suffix inside `{...}` path templates
 fn strip_converters(path: &str) -> String {
-    static PATH_PARAM_REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static PATH_PARAM_REGEX: OnceLock<regex::Regex> = OnceLock::new();
     let regex = PATH_PARAM_REGEX
-        .get_or_init(|| regex::Regex::new(r"\{([^}]+)\}").expect("invalid path param regex"));
+        .get_or_init(|| Regex::new(r"\{([^}]+)\}").expect("invalid path param regex"));
     regex
         .replace_all(path, |caps: &regex::Captures| {
             format!("{{{}}}", caps[1].split(':').next().unwrap_or(&caps[1]))
@@ -876,7 +924,7 @@ pub fn build_paths_from_routes(
         };
 
         if !route.security.is_empty() {
-            let mut grouped = simd_json::owned::Object::new();
+            let mut grouped = Object::new();
             for req in &route.security {
                 let compiled = req.scheme.as_ref();
                 security_schemes
@@ -892,7 +940,7 @@ pub fn build_paths_from_routes(
                 grouped.insert(compiled.name.clone(), json!(scope_list));
             }
             operation.security = Some(vec![
-                simd_json::serde::to_owned_value(&grouped).unwrap_or_else(|_| json!({})),
+                to_owned_value(&grouped).unwrap_or_else(|_| json!({})),
             ]);
         }
 
@@ -923,9 +971,7 @@ pub fn build_paths_from_routes(
 
                 let mut schema = param
                     .annotation
-                    .as_ref()
-                    .map(|annotation| python_type_to_openapi_type(py, annotation.bind(py), schemas))
-                    .unwrap_or_else(|| json!({"type": "string"}));
+                    .as_ref().map_or_else(|| json!({"type": "string"}), |annotation| python_type_to_openapi_type(py, annotation.bind(py), schemas));
 
                 // fastapi puts the `examples=[...]` list on the parameter's json schema
                 if let Some(examples) = marker
@@ -944,7 +990,10 @@ pub fn build_paths_from_routes(
                     .is_some_and(|obj| obj.contains_key("$ref"));
                 if !is_ref && let Some(obj) = schema.as_object_mut() {
                     if !obj.contains_key("title") {
-                        obj.insert("title".to_string(), json!(schema_title(&param.external_name)));
+                        obj.insert(
+                            "title".to_string(),
+                            json!(schema_title(&param.external_name)),
+                        );
                     }
                     if param.has_default
                         && let Some(default) = &param.default_value
@@ -1002,9 +1051,28 @@ pub fn build_paths_from_routes(
             };
             if let Some(schema) = extract_pydantic_schema(py, rm_bound, mode) {
                 let schema_name = get_schema_name(rm_bound);
-                schemas.insert(schema_name.clone(), schema);
-                response_schema =
-                    json!({ "$ref": format!("#/components/schemas/{}", schema_name) });
+                if schema_name.starts_with("list[")
+                    || schema_name.starts_with("tuple[")
+                    || schema_name.starts_with("typing.")
+                {
+                    if let Some(defs) = schema.get("$defs").and_then(JsonValue::as_object) {
+                        schemas.extend(
+                            defs.iter()
+                                .map(|(name, value)| (name.clone(), value.clone())),
+                        );
+                    }
+                    if let Some(defs) = schema.get("definitions").and_then(JsonValue::as_object) {
+                        schemas.extend(
+                            defs.iter()
+                                .map(|(name, value)| (name.clone(), value.clone())),
+                        );
+                    }
+                    response_schema = schema;
+                } else {
+                    schemas.insert(schema_name.clone(), schema);
+                    response_schema =
+                        json!({ "$ref": format!("#/components/schemas/{}", schema_name) });
+                }
             }
         }
 
@@ -1090,7 +1158,8 @@ pub fn build_paths_from_routes(
             parameters: None,
         });
 
-        let mut operation_val = simd_json::serde::to_owned_value(&operation).unwrap_or_else(|_| json!({}));
+        let mut operation_val =
+            to_owned_value(&operation).unwrap_or_else(|_| json!({}));
 
         if let Some(extra) = &route.openapi_extra {
             deep_merge_json(&mut operation_val, extra.clone());
@@ -1135,17 +1204,18 @@ pub fn build_paths_from_routes(
     paths
 }
 
+#[must_use]
 pub fn parse_callbacks_to_json(
     py: Python<'_>,
     callbacks_bound: &Bound<'_, PyAny>,
 ) -> Option<JsonValue> {
-    let mut callbacks_map = simd_json::owned::Object::new();
+    let mut callbacks_map = Object::new();
     let mut dummy_schemas = HashMap::new();
     let mut dummy_security = HashMap::new();
 
     if let Ok(list) = callbacks_bound.try_iter() {
         for item in list.flatten() {
-            if let Ok(router_ref) = item.cast::<crate::decorators::PyAPIRouter>() {
+            if let Ok(router_ref) = item.cast::<PyAPIRouter>() {
                 let router = router_ref.borrow();
                 let collected = collect_routes(py, &router);
                 let paths = build_paths_from_routes(
@@ -1159,7 +1229,8 @@ pub fn parse_callbacks_to_json(
                 );
 
                 for (path, path_item) in paths {
-                    let value = simd_json::serde::to_owned_value(&path_item).unwrap_or_else(|_| json!({}));
+                    let value =
+                        to_owned_value(&path_item).unwrap_or_else(|_| json!({}));
                     callbacks_map.insert(path, value);
                 }
             }
@@ -1169,9 +1240,9 @@ pub fn parse_callbacks_to_json(
             if let Ok(k_str) = k.extract::<String>()
                 && let Ok(list) = v.try_iter()
             {
-                let mut inner_map = simd_json::owned::Object::new();
+                let mut inner_map = Object::new();
                 for item in list.flatten() {
-                    if let Ok(router_ref) = item.cast::<crate::decorators::PyAPIRouter>() {
+                    if let Ok(router_ref) = item.cast::<PyAPIRouter>() {
                         let router = router_ref.borrow();
                         let collected = collect_routes(py, &router);
                         let paths = build_paths_from_routes(
@@ -1185,8 +1256,8 @@ pub fn parse_callbacks_to_json(
                         );
 
                         for (path, path_item) in paths {
-                            let value =
-                                simd_json::serde::to_owned_value(&path_item).unwrap_or_else(|_| json!({}));
+                            let value = to_owned_value(&path_item)
+                                .unwrap_or_else(|_| json!({}));
                             inner_map.insert(path, value);
                         }
                     }
@@ -1199,7 +1270,7 @@ pub fn parse_callbacks_to_json(
     if callbacks_map.is_empty() {
         None
     } else {
-        Some(JsonValue::Object(std::boxed::Box::new(callbacks_map)))
+        Some(JsonValue::Object(Box::new(callbacks_map)))
     }
 }
 
