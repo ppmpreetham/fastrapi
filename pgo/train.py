@@ -1,7 +1,7 @@
 import json
 import os
-import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -15,44 +15,19 @@ HOST = "127.0.0.1"
 PORT = 8000
 BASE = f"http://{HOST}:{PORT}"
 DEFAULT_ITERATIONS = 200
-DEFAULT_MAX_SECONDS = 120
+DEFAULT_MAX_SECONDS = 90
 PAYLOAD_DIR = Path(__file__).resolve().parent / "payloads"
 EXPECTED_ERROR_STATUSES = {400, 401, 403, 404, 405, 422}
-TRAINING_DEPENDENCIES = ["pydantic>=2.9.0"]
 
 
 def ensure_training_dependencies():
     try:
         import pydantic  # noqa: F401
-        return
-    except ModuleNotFoundError:
-        pass
-
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "ensurepip", "--upgrade"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        pass
-
-    pip_cmd = [sys.executable, "-m", "pip", "install", *TRAINING_DEPENDENCIES]
-    try:
-        subprocess.check_call(pip_cmd)
-        return
-    except (OSError, subprocess.CalledProcessError):
-        pass
-
-    uv = shutil.which("uv")
-    if uv:
-        subprocess.check_call(
-            [uv, "pip", "install", "--python", sys.executable, *TRAINING_DEPENDENCIES]
-        )
-        return
-
-    subprocess.check_call(pip_cmd)
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "PGO training requires the wheel dependencies; install the project "
+            "before invoking the trainer"
+        ) from exc
 
 
 def load_payloads():
@@ -111,6 +86,8 @@ def run_static_routes():
     request("/config")
     request("/version")
     request("/html")
+    request("/static/")
+    request("/download")
     request("/heavy", headers={"Accept-Encoding": "gzip"})
     request("/docs", headers={"Accept": "text/html"})
     request("/api-docs/openapi.json")
@@ -212,6 +189,53 @@ def run_expected_errors():
     )
 
 
+def run_websocket(index):
+    """Exercise the upgrade, frame parsing, and close paths without a client dependency."""
+
+    def recv_exact(sock, size):
+        data = bytearray()
+        while len(data) < size:
+            chunk = sock.recv(size - len(data))
+            if not chunk:
+                raise RuntimeError("websocket closed before response frame completed")
+            data.extend(chunk)
+        return bytes(data)
+
+    with socket.create_connection((HOST, PORT), timeout=5) as sock:
+        sock.settimeout(5)
+        sock.sendall(
+            (
+                "GET /ws HTTP/1.1\r\n"
+                f"Host: {HOST}:{PORT}\r\n"
+                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                "Sec-WebSocket-Key: cGdvLXRyYWluaW5nLWtleQ==\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode()
+        )
+        response = bytearray()
+        while b"\r\n\r\n" not in response:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise RuntimeError("websocket closed during upgrade")
+            response.extend(chunk)
+        if b" 101 " not in response:
+            raise RuntimeError("websocket upgrade failed")
+        payload = f"pgo-{index}".encode()
+        mask = b"PGO!"
+        frame = bytes([0x81, 0x80 | len(payload)]) + mask
+        frame += bytes(byte ^ mask[offset % 4] for offset, byte in enumerate(payload))
+        sock.sendall(frame)
+        header = recv_exact(sock, 2)
+        if len(header) != 2 or header[0] & 0x0F != 1:
+            raise RuntimeError("websocket response frame missing")
+        length = header[1] & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", recv_exact(sock, 2))[0]
+        body = recv_exact(sock, length)
+        if body != b"echo:" + payload:
+            raise RuntimeError("unexpected websocket response")
+
+
 def run_workload(iterations, max_seconds):
     payloads = load_payloads()
     started = time.time()
@@ -233,6 +257,7 @@ def run_workload(iterations, max_seconds):
 
         if index % 25 == 0:
             run_expected_errors()
+            run_websocket(index)
 
         completed = index + 1
         if completed == 1 or completed % 25 == 0 or completed == iterations:
@@ -242,8 +267,8 @@ def run_workload(iterations, max_seconds):
 
 def main():
     ensure_training_dependencies()
-    iterations = int(os.environ.get("PGO_ITERATIONS", DEFAULT_ITERATIONS))
-    max_seconds = int(os.environ.get("PGO_MAX_SECONDS", DEFAULT_MAX_SECONDS))
+    iterations = max(1, min(int(os.environ.get("PGO_ITERATIONS", DEFAULT_ITERATIONS)), 1000))
+    max_seconds = max(1, min(int(os.environ.get("PGO_MAX_SECONDS", DEFAULT_MAX_SECONDS)), 600))
     proc = subprocess.Popen([sys.executable, "-m", "pgo.app"])
 
     try:

@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import List, Optional
 
 from fastrapi import (
@@ -9,6 +11,7 @@ from fastrapi import (
     Query,
     Security,
     SecurityScopes,
+    StaticFiles,
 )
 from fastrapi import (
     Path as PathParam,
@@ -20,16 +23,29 @@ from fastrapi.middleware import (
     TrustedHostMiddleware,
 )
 from fastrapi.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
 )
 from pydantic import BaseModel
+
+
+@asynccontextmanager
+async def _lifespan(application):
+    yield
+
 
 app = FastrAPI(
     title="FastrAPI PGO Workload",
     version="0.3.0",
     description="Broad local workload used by maturin PGO training.",
     openapi_url="/api-docs/openapi.json",
+    lifespan=_lifespan,
+)
+app.mount(
+    "/static",
+    StaticFiles(directory=str(Path(__file__).resolve().parent / "static"), html=True),
+    name="static",
 )
 
 app.add_middleware(
@@ -211,6 +227,11 @@ def html() -> HTMLResponse:
         </main>
         """
     )
+
+
+@app.get("/download")
+def download() -> FileResponse:
+    return FileResponse(str(Path(__file__).resolve().parent / "static" / "index.html"))
 
 
 @app.get("/heavy")
@@ -455,8 +476,12 @@ def middleware_probe(body: GenericJSON):
     return {"seen": True, "payload": body.data}
 
 
-# TODO: later - register a websocket workload once the PGO trainer has a
-# stdlib-friendly websocket client or an optional dependency gate.
+@app.websocket("/ws")
+async def websocket_probe(ws):
+    await ws.accept()
+    message = await ws.receive_text()
+    await ws.send_text(f"echo:{message}")
+    await ws.close()
 
 
 if __name__ == "__main__":
