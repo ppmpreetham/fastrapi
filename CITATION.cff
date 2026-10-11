@@ -14,7 +14,7 @@ authors:
     email: business@preetham.top
 repository-code: 'https://www.github.com/ppmpreetham/fastrapi'
 url: 'https://fastrapi.preetham.top/'
-abstract: Make APIs 9x faster than FastAPI now!
+abstract: Make APIs 6x faster than FastAPI now!
 keywords:
   - fastrapi
   - api
