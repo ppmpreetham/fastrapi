@@ -6,6 +6,8 @@ from typing import List
 from fastrapi import FastrAPI, Depends, Request
 from pydantic import BaseModel
 from fastrapi.responses import FileResponse, JSONResponse
+from fastrapi.responses import EventSourceResponse
+from fastrapi.sse import ServerSentEvent
 
 
 def test_file_response(client, app, tmp_path):
@@ -19,6 +21,61 @@ def test_file_response(client, app, tmp_path):
     r = client.get("/dl")
     assert r.status_code == 200
     assert r.text == "file content here"
+
+
+def test_file_response_cache_and_ranges(client, app, tmp_path):
+    f = tmp_path / "range.txt"
+    f.write_text("0123456789")
+
+    @app.get("/range")
+    def range_route() -> FileResponse:
+        return FileResponse(str(f))
+
+    full = client.get("/range")
+    assert full.status_code == 200
+    assert full.headers["accept-ranges"] == "bytes"
+    assert full.headers["etag"]
+    assert full.headers["last-modified"]
+
+    partial = client.get("/range", headers={"Range": "bytes=2-5"})
+    assert partial.status_code == 206
+    assert partial.text == "2345"
+    assert partial.headers["content-range"] == "bytes 2-5/10"
+
+    unchanged = client.get("/range", headers={"If-None-Match": full.headers["etag"]})
+    assert unchanged.status_code == 304
+
+
+def test_file_response_multi_range(client, app, tmp_path):
+    f = tmp_path / "multi.txt"
+    f.write_text("0123456789")
+
+    @app.get("/multi")
+    def multi_route() -> FileResponse:
+        return FileResponse(str(f))
+
+    response = client.get("/multi", headers={"Range": "bytes=0-1,8-9"})
+    assert response.status_code == 206
+    assert "multipart/byteranges" in response.headers["content-type"]
+    assert "01" in response.text
+    assert "89" in response.text
+
+
+def test_sse_response_formatting(client, app):
+    @app.get("/events")
+    def events() -> EventSourceResponse:
+        return EventSourceResponse(
+            iter([ServerSentEvent(data="hello", event="message", id="1", retry=25)]),
+            ping=None,
+            sep="\n",
+        )
+
+    response = client.get("/events")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.text == 'event: message\ndata: "hello"\nid: 1\nretry: 25\n\n'
+
+
 
 
 def test_repeated_query_list_params(client, app):

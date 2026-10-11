@@ -1,7 +1,7 @@
 """One deep test case for the Rust kernel validation fast path.
 
 Run directly as a script (used by `test_kernel_validation.py` in two
-subprocesses — kernel flag off and on) — it prints a JSON summary of every
+subprocesses, kernel flag off and on), it prints a JSON summary of every
 (status, body) pair so the parent test can diff the two engines:
 
     FASTRAPI_KERNEL_VALIDATION=0 python tests/kernel_case_app.py
@@ -22,11 +22,10 @@ import time
 from datetime import date, datetime
 from typing import Annotated, Dict, List, Literal, Optional
 
-import httpx
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
-
 import fastrapi
+import httpx
 from fastrapi import FastrAPI
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 # ---------------------------------------------------------------------------
 # models
@@ -36,7 +35,7 @@ from fastrapi import FastrAPI
 class KitchenSink(BaseModel):
     """A flat model covering every kernel-supported validator.
 
-    Deliberately data-only: no validators, no default_factory, no Enum —
+    Deliberately data-only: no validators, no default_factory, no Enum,
     those contain non-JSON leaves in the core schema and must (and do) fall
     back to the Python path.
     """
@@ -127,16 +126,39 @@ def _sink(**overrides) -> dict:
 
 BATTERY = [
     # -- valid payloads (flag-on run must take the model_construct fast path) --
-    ("full", "/sink", _body(_sink(
-        shout="whisper", userName="ann", bio="hey", tags=["a", "b"],
-        counts={"x": 1, "y": 2}, token="aGk=", score=99,
-        day="2020-01-01", when="2020-01-01T12:30:00Z",
-    ))),
+    (
+        "full",
+        "/sink",
+        _body(
+            _sink(
+                shout="whisper",
+                userName="ann",
+                bio="hey",
+                tags=["a", "b"],
+                counts={"x": 1, "y": 2},
+                token="aGk=",
+                score=99,
+                day="2020-01-01",
+                when="2020-01-01T12:30:00Z",
+            )
+        ),
+    ),
     ("minimal", "/sink", _body(_sink())),
-    ("coerce-strings", "/sink", _body(_sink(
-        age="42", scale="1.5", active="true", color="blue",
-        score="7", counts={"k": "3"}, when="2020-01-01T00:00:00",
-    ))),
+    (
+        "coerce-strings",
+        "/sink",
+        _body(
+            _sink(
+                age="42",
+                scale="1.5",
+                active="true",
+                color="blue",
+                score="7",
+                counts={"k": "3"},
+                when="2020-01-01T00:00:00",
+            )
+        ),
+    ),
     ("alias", "/sink", _body(_sink(userName="ann"))),
     ("alias-and-name", "/sink", _body(_sink(userName="a", nick="b"))),
     ("by-name", "/sink", _body(_sink(nick="ann"))),
@@ -157,13 +179,23 @@ BATTERY = [
     ("bad-b64", "/sink", _body(_sink(token="not!b64"))),
     ("bad-list-item", "/sink", _body(_sink(tags=[1]))),
     ("bad-dict-value", "/sink", _body(_sink(counts={"a": "z"}))),
-    ("missing-city", "/sink", _body({"name": "anne", "age": 1, "scale": 1.0, "active": True, "color": "red"})),
+    (
+        "missing-city",
+        "/sink",
+        _body({"name": "anne", "age": 1, "scale": 1.0, "active": True, "color": "red"}),
+    ),
     ("extra-key", "/sink", _body(_sink(sneaky=1))),
     ("wrong-type-list", "/sink", _body(_sink(tags="not-a-list"))),
     ("scale-null", "/sink", _body(_sink(scale=None))),
     ("empty-object", "/sink", _body({})),
     # -- multi-error: error order must follow field declaration order --
-    ("multi-error", "/sink", _body({"name": "Anne", "age": "abc", "scale": 1.0, "active": True, "color": "red"})),
+    (
+        "multi-error",
+        "/sink",
+        _body(
+            {"name": "Anne", "age": "abc", "scale": 1.0, "active": True, "color": "red"}
+        ),
+    ),
     # -- raw payloads --
     ("bad-json", "/sink", b"{oops"),
     ("bad-utf8", "/sink", b"\xff\xfe{}"),
@@ -196,7 +228,9 @@ class LiveClient(httpx.Client):
 
     def post_raw(self, path: str, content: bytes):
         self._ensure()
-        return self.post(path, content=content, headers={"Content-Type": "application/json"})
+        return self.post(
+            path, content=content, headers={"Content-Type": "application/json"}
+        )
 
 
 # Error-message skew between the *installed* pydantic-core's jiter/speedate
@@ -204,8 +238,12 @@ class LiveClient(httpx.Client):
 # uses. Only the human text inside *_parsing / json_invalid errors differs;
 # types, locs, inputs and everything else are compared strictly.
 SKEWY_TYPES = {
-    "json_invalid", "date_parsing", "date_from_datetime_parsing",
-    "time_parsing", "datetime_parsing", "datetime_from_date_parsing",
+    "json_invalid",
+    "date_parsing",
+    "date_from_datetime_parsing",
+    "time_parsing",
+    "datetime_parsing",
+    "datetime_from_date_parsing",
     "timedelta_parsing",
 }
 
@@ -234,7 +272,11 @@ def run_battery() -> dict:
             except Exception:
                 body = resp.text
             results.append(
-                {"case": name, "status": resp.status_code, "body": _normalize_skew(body)}
+                {
+                    "case": name,
+                    "status": resp.status_code,
+                    "body": _normalize_skew(body),
+                }
             )
     return {
         "results": results,

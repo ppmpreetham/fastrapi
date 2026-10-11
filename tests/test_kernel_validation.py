@@ -1,11 +1,11 @@
 """The one huge test for the kernel validation fast path.
 
 Runs the entire request battery in `kernel_case_app.py` twice against the
-real fastrapi server — once with `FASTRAPI_KERNEL_VALIDATION=0` (pure
-pydantic) and once with `=1` (Rust kernel fast path) — and asserts:
+real fastrapi server, once with `FASTRAPI_KERNEL_VALIDATION=0` (pure
+pydantic) and once with `=1` (Rust kernel fast path), and asserts:
 
 1. **Byte-identical behavior**: every response (status + body) is identical
-   between the two engines — both now speak fastapi's wire format (body-rooted
+   between the two engines, both now speak fastapi's wire format (body-rooted
    `loc`, `input` present, no pydantic `url`), so there is nothing left to
    tell them apart on the wire.
 2. **The fast path actually engages**: `fastrapi.kernel_validation_count()`
@@ -43,7 +43,9 @@ def _run_battery(flag: str) -> dict:
         timeout=300,
     )
     assert proc.returncode == 0, f"runner failed:\n{proc.stdout}\n{proc.stderr}"
-    markers = [ln for ln in proc.stdout.splitlines() if ln.startswith("KERNEL_CASE_JSON:")]
+    markers = [
+        ln for ln in proc.stdout.splitlines() if ln.startswith("KERNEL_CASE_JSON:")
+    ]
     assert markers, f"no summary in runner output:\n{proc.stdout}\n{proc.stderr}"
     return json.loads(markers[-1].split(":", 1)[1])
 
@@ -85,13 +87,15 @@ def test_kernel_fast_path_is_identical_to_pydantic_and_engages():
     assert kernel["kernel_validations"] > 0, "kernel fast path did not engage"
 
     # 4. fallback selection: models whose schema needs Python (validators)
-    #    still went through pydantic, even with the flag on — their model
+    #    still went through pydantic, even with the flag on, their model
     #    validator side-effects ran, which the rust path cannot do.
     assert kernel["probe_validations"] > 0, (
         "validator-bearing models must fall back to pydantic"
     )
     probe_err = json.dumps(_find(kernel["results"], "probe-bad")["body"])
-    assert "detail" in probe_err, "fallback model validation must still produce 422 detail"
+    assert "detail" in probe_err, (
+        "fallback model validation must still produce 422 detail"
+    )
     probe_ok = json.dumps(_find(baseline["results"], "probe-valid")["body"])
     assert _normalized(_find(baseline["results"], "probe-valid")) == _normalized(
         _find(kernel["results"], "probe-valid")
@@ -122,8 +126,8 @@ def test_kernel_fast_path_is_identical_to_pydantic_and_engages():
     multi = _find(kernel["results"], "multi-error")["body"]["detail"]
     assert [e["type"] for e in multi] == [
         "string_pattern_mismatch",  # name
-        "missing",                  # city
-        "int_parsing",              # age
+        "missing",  # city
+        "int_parsing",  # age
     ]
     # fastapi roots body errors at ["body", ...]
     assert [e["loc"] for e in multi] == [

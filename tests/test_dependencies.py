@@ -1,6 +1,5 @@
 # tests/test_dependencies.py
 from fastrapi import Depends
-import pytest
 
 def test_sync_dependency(client, app, sample_dependency):
     @app.get("/user-info")
@@ -12,8 +11,7 @@ def test_sync_dependency(client, app, sample_dependency):
     assert response.json() == {"user_id": 42, "role": "admin"}
 
 
-@pytest.mark.asyncio
-async def test_async_dependency(async_client, app, async_sample_dependency):
+def test_async_dependency(async_client, app, async_sample_dependency):
     @app.get("/async-user")
     async def get_async_user(dep=Depends(async_sample_dependency)):
         return dep

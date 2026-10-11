@@ -4,7 +4,6 @@ import time
 
 import httpx
 import pytest
-
 from fastrapi import APIRouter, FastrAPI
 
 
@@ -428,7 +427,7 @@ class TestPostServeFrozen:
         # base router's sub_routers and gets frozen by recursive
         # freeze() at serve time. (Note: freeze() in router.rs only
         # freezes self, but flatten + cached_flat is what matters; we
-        # check the visible contract — registration after serve fails
+        # check the visible contract, registration after serve fails
         # for the router used by the app.)
         router = APIRouter(prefix="/api")
 
