@@ -1,4 +1,7 @@
 use crate::engine::types::{FrontendMount, StaticMount};
+use axum::body::Body;
+use axum::http::Method;
+use axum::http::header::ACCEPT;
 use axum::{
     Router,
     extract::Request,
@@ -6,27 +9,21 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use smallvec::SmallVec;
+use std::convert::Infallible;
 use std::{
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
-use tower::{ServiceExt, service_fn};
-use tower_http::services::{ServeDir, ServeFile};
-use axum::body::Body;
-use axum::http::Method;
-use axum::http::header::ACCEPT;
-use std::convert::Infallible;
 use tokio::fs;
 use tokio::fs::symlink_metadata;
+use tower::{ServiceExt, service_fn};
+use tower_http::services::{ServeDir, ServeFile};
 
 pub(crate) async fn serve_frontend_mounts(
     mounts: Arc<Vec<FrontendMount>>,
     req: Request,
 ) -> Option<Response> {
-    if !matches!(
-        *req.method(),
-        Method::GET | Method::HEAD
-    ) {
+    if !matches!(*req.method(), Method::GET | Method::HEAD) {
         return None;
     }
 

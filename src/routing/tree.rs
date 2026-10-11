@@ -1,17 +1,17 @@
 use crate::ffi::decorators::PyAPIRouter;
 use crate::ffi::py_handlers::assign_execution_mode;
+use crate::routing::dependencies::DependencyNode;
+use crate::routing::dependencies::InjectionType;
 use crate::routing::dependencies::collect_dependency_callables;
 use crate::routing::dependencies::parse_external_dependencies;
 use crate::routing::dependencies::shift_dependency_indices;
-use crate::routing::dependencies::DependencyNode;
-use crate::routing::dependencies::InjectionType;
 use crate::routing::types::RouteHandler;
 use crate::routing::types::{RouteEntry, WebSocketEntry};
-use pyo3::prelude::Python;
 use pyo3::Py;
+use pyo3::prelude::Python;
 use std::string::ToString;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 impl PyAPIRouter {
     pub fn mark_frozen(&self) {

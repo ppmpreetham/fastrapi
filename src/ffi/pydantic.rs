@@ -1,5 +1,9 @@
+use crate::engine::background::PyBackgroundTasks;
 use crate::ffi::datastructures::PyUploadFile;
+use crate::ffi::kernel_validation::maybe_validate_with_kernel;
 use crate::globals::BASEMODEL_TYPE;
+use crate::http::request::PyRequest;
+use crate::http::request::create_py_request;
 use crate::http::responses::{
     PyFileResponse, PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse,
 };
@@ -14,6 +18,10 @@ use crate::utils::{json_to_py_object, py_any_to_json, py_to_response};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use pyo3::Bound;
+use pyo3::Py;
+use pyo3::types::PyBytes;
+use pyo3::types::PyList;
 use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyModule, PyString, PyTuple, PyType};
 use pyo3::{intern, prelude::*};
 use simd_json::OwnedValue as Value;
@@ -21,14 +29,6 @@ use simd_json::prelude::*;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::HashSet;
-use crate::engine::background::PyBackgroundTasks;
-use crate::ffi::kernel_validation::maybe_validate_with_kernel;
-use crate::http::request::PyRequest;
-use crate::http::request::create_py_request;
-use pyo3::Bound;
-use pyo3::Py;
-use pyo3::types::PyBytes;
-use pyo3::types::PyList;
 use std::fmt;
 use std::str::from_utf8;
 
@@ -256,9 +256,7 @@ pub fn validate_json_with_pydantic(
     validator: &PydanticValidator,
     raw_payload: &[u8],
 ) -> Result<Py<PyAny>, Response> {
-    if let Some(handled) =
-        maybe_validate_with_kernel(py, validator, raw_payload)
-    {
+    if let Some(handled) = maybe_validate_with_kernel(py, validator, raw_payload) {
         return handled;
     }
 
@@ -359,7 +357,9 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         dependencies::parse_dependencies(py, func, &path_param_names).unwrap_or_default();
 
     let dependency_needs_request = dependencies.iter().any(|dep| dep.needs_request_object);
-    let all_deps_sync = dependencies.iter().all(super::super::routing::dependencies::DependencyNode::is_sync_callable);
+    let all_deps_sync = dependencies
+        .iter()
+        .all(super::super::routing::dependencies::DependencyNode::is_sync_callable);
     let dep_param_names: HashSet<String> = dependencies
         .iter()
         .filter_map(|d| d.param_name.as_ref().map(|n| n.bind(py).to_string()))
@@ -371,10 +371,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     let mut request_param: Option<Py<PyString>> = None;
     let mut response_param = None;
 
-    let request_cls: Py<PyAny> = py
-        .get_type::<PyRequest>()
-        .into_any()
-        .unbind();
+    let request_cls: Py<PyAny> = py.get_type::<PyRequest>().into_any().unbind();
 
     _ = (|| -> PyResult<()> {
         let inspect = get_inspect(py)?;
@@ -432,7 +429,8 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                         .ok()
                         .map(Bound::unbind);
                     let validate_python = ann_bound
-                        .getattr(intern!(py, "model_validate")).map_or_else(|_| ann.clone_ref(py), Bound::unbind);
+                        .getattr(intern!(py, "model_validate"))
+                        .map_or_else(|_| ann.clone_ref(py), Bound::unbind);
                     let validate_json_method = core_validator.as_ref().and_then(|core| {
                         core.bind(py)
                             .getattr(intern!(py, "validate_json"))
@@ -592,12 +590,7 @@ fn convert_with_kind(
     let loc = param.error_loc();
     match kind {
         ScalarKind::Bool => parse_bool(raw)
-            .map(|v| {
-                PyBool::new(py, v)
-                    .to_owned()
-                    .into_any()
-                    .unbind()
-            })
+            .map(|v| PyBool::new(py, v).to_owned().into_any().unbind())
             .ok_or_else(|| {
                 validation_error(
                     &loc,
@@ -903,7 +896,8 @@ fn resolve_list_parameter(
             (true, _) => Some(
                 param
                     .default_value
-                    .as_ref().map_or_else(|| py.None(), |v| v.clone_ref(py)),
+                    .as_ref()
+                    .map_or_else(|| py.None(), |v| v.clone_ref(py)),
             ),
             (false, true) => {
                 return Err(validation_error(
@@ -986,7 +980,8 @@ pub fn resolve_parameter_value(
             return Ok(Some(
                 param
                     .default_value
-                    .as_ref().map_or_else(|| py.None(), |v| v.clone_ref(py)),
+                    .as_ref()
+                    .map_or_else(|| py.None(), |v| v.clone_ref(py)),
             ));
         }
         if param.required {
@@ -1058,7 +1053,8 @@ fn apply_body_and_validation(
             if param.has_default {
                 let value = param
                     .default_value
-                    .as_ref().map_or_else(|| py.None(), |d| d.clone_ref(py));
+                    .as_ref()
+                    .map_or_else(|| py.None(), |d| d.clone_ref(py));
                 _ = kwargs.set_item(param.name_py.bind(py), value);
             }
         });
@@ -1115,13 +1111,17 @@ fn apply_body_and_validation(
 
     let parsed_storage;
     let json_payload = match payload {
-        BodyPayload::Json { raw, value } => if let Some(payload) = value { payload } else {
-            let mut json_buf = raw.to_vec();
-            parsed_storage = simd_json::to_owned_value(&mut json_buf).map_err(|_| {
-                (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response()
-            })?;
-            &parsed_storage
-        },
+        BodyPayload::Json { raw, value } => {
+            if let Some(payload) = value {
+                payload
+            } else {
+                let mut json_buf = raw.to_vec();
+                parsed_storage = simd_json::to_owned_value(&mut json_buf).map_err(|_| {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response()
+                })?;
+                &parsed_storage
+            }
+        }
         BodyPayload::Form { fields: form, .. } => {
             for &idx in &handler.payload.body_param_indices {
                 let param = &handler.payload.parsed_params[idx];
@@ -1133,7 +1133,8 @@ fn apply_body_and_validation(
                     if param.has_default {
                         let default_value = param
                             .default_value
-                            .as_ref().map_or_else(|| py.None(), |d| d.clone_ref(py));
+                            .as_ref()
+                            .map_or_else(|| py.None(), |d| d.clone_ref(py));
                         kwargs.set_item(param.name_py.bind(py), default_value).ok();
                     } else if param.required {
                         return Err(validation_error(
@@ -1225,7 +1226,8 @@ fn apply_body_and_validation(
         if param.has_default {
             let default_value = param
                 .default_value
-                .as_ref().map_or_else(|| py.None(), |d| d.clone_ref(py));
+                .as_ref()
+                .map_or_else(|| py.None(), |d| d.clone_ref(py));
             kwargs.set_item(param.name_py.bind(py), default_value).ok();
         } else if param.required {
             return Err(validation_error_response(format!(
@@ -1268,8 +1270,11 @@ pub fn apply_request_data(
 
     let mut bg_tasks_instance: Option<Py<PyBackgroundTasks>> = None;
 
-    handler.payload.parsed_params.iter().try_for_each(
-        |param| -> Result<(), Response> {
+    handler
+        .payload
+        .parsed_params
+        .iter()
+        .try_for_each(|param| -> Result<(), Response> {
             if matches!(param.source, ParameterSource::Body)
                 || handler
                     .payload
@@ -1283,14 +1288,13 @@ pub fn apply_request_data(
                 let instance = if let Some(bg) = &bg_tasks_instance {
                     bg.clone()
                 } else {
-                    let bg = Py::new(py, PyBackgroundTasks::new())
-                        .map_err(|_| {
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "Failed to initialize BackgroundTasks",
-                            )
-                                .into_response()
-                        })?;
+                    let bg = Py::new(py, PyBackgroundTasks::new()).map_err(|_| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Failed to initialize BackgroundTasks",
+                        )
+                            .into_response()
+                    })?;
                     bg_tasks_instance = Some(bg.clone());
                     bg
                 };
@@ -1303,8 +1307,7 @@ pub fn apply_request_data(
             }
 
             Ok(())
-        },
-    )?;
+        })?;
 
     apply_body_and_validation(py, handler, payload, kwargs)?;
     Ok(bg_tasks_instance)

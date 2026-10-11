@@ -7,11 +7,11 @@
 
 use std::sync::RwLock;
 
+use pyo3::class::basic::CompareOp;
 use pyo3::exceptions::{PyAssertionError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
-use pyo3::class::basic::CompareOp;
 use pyo3::types::PyTuple;
+use pyo3::types::{PyAny, PyDict};
 use std::collections::hash_map::DefaultHasher;
 
 struct SplitUrl {
@@ -244,7 +244,10 @@ fn url_from_scope(scope: &Bound<'_, PyAny>) -> PyResult<String> {
         }
     }
 
-    let netloc = if let Some((authority, true)) = host_header.as_deref().and_then(parse_host_header) { Some(authority) } else {
+    let netloc = if let Some((authority, true)) = host_header.as_deref().and_then(parse_host_header)
+    {
+        Some(authority)
+    } else {
         let server: Option<(String, u16)> = match scope.get_item("server")? {
             v if !v.is_none() => v.extract().ok(),
             _ => None,
@@ -470,11 +473,7 @@ impl PyURL {
         hasher.finish()
     }
 
-    fn __richcmp__(
-        &self,
-        other: &Bound<'_, PyAny>,
-        op: CompareOp,
-    ) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
         let other_str = match other.cast::<PyURL>() {
             Ok(other) => other.borrow().url.clone(),
             Err(_) => other.str()?.to_string(),

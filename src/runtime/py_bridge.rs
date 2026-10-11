@@ -9,10 +9,10 @@ use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio as par;
 use tokio::sync::oneshot;
 
-pub use pyo3_async_runtimes::{TaskLocals, into_future_with_locals};
 use crate::globals::PYTHON_RUNTIME;
 use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
+pub use pyo3_async_runtimes::{TaskLocals, into_future_with_locals};
 use std::clone::Clone;
 
 tokio::task_local! {

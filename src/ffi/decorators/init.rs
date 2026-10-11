@@ -1,14 +1,4 @@
 use super::PyAPIRouter;
-use crate::routing::dependencies::{DependencyNode, InjectionType};
-use crate::routing::types::{HttpMethod, ParameterSource, SerializationHint, WebSocketEntry};
-use ahash::AHashSet;
-use hyper::StatusCode;
-use pyo3::prelude::*;
-use pyo3::types::{PyCFunction, PyDict, PyTuple};
-use smallvec::SmallVec;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use crate::ffi::py_handlers::ExecutionMode;
 use crate::ffi::py_handlers::assign_execution_mode;
 use crate::ffi::pydantic::ParsedRouteMetadata;
@@ -18,6 +8,7 @@ use crate::routing::dependencies::collect_dependency_callables;
 use crate::routing::dependencies::parse_dependencies;
 use crate::routing::dependencies::parse_external_dependencies;
 use crate::routing::dependencies::shift_dependency_indices;
+use crate::routing::dependencies::{DependencyNode, InjectionType};
 use crate::routing::params::extract_path_param_names;
 use crate::routing::security::describe_scheme;
 use crate::routing::types::ExecutionPlan;
@@ -26,13 +17,22 @@ use crate::routing::types::ResponseFormatter;
 use crate::routing::types::RouteEntry;
 use crate::routing::types::RouteHandler;
 use crate::routing::types::ValidationRules;
+use crate::routing::types::{HttpMethod, ParameterSource, SerializationHint, WebSocketEntry};
 use crate::utils::json_to_py_object;
 use crate::utils::openapi::parse_callbacks_to_json;
 use crate::utils::py_any_to_json;
+use ahash::AHashSet;
+use hyper::StatusCode;
 use pyo3::Bound;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::types::{PyCFunction, PyDict, PyTuple};
+use smallvec::SmallVec;
 use std::convert::Into;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 #[inline]
 fn extract<'py, T>(kwargs: Option<&Bound<'py, PyDict>>, key: &str) -> Option<T>
@@ -109,11 +109,8 @@ impl RouteOptions {
 
         let default_status = status_code
             .map(|c| {
-                StatusCode::from_u16(c).map_err(|_| {
-                    PyValueError::new_err(
-                        "status_code must be between 100 and 599",
-                    )
-                })
+                StatusCode::from_u16(c)
+                    .map_err(|_| PyValueError::new_err("status_code must be between 100 and 599"))
             })
             .transpose()?;
 
@@ -123,14 +120,12 @@ impl RouteOptions {
 
         let dump_options = build_dump_options(py, kwargs)?;
 
-        let responses =
-            extract_bound(kwargs, "responses").map(|d| py_any_to_json(py, &d));
+        let responses = extract_bound(kwargs, "responses").map(|d| py_any_to_json(py, &d));
 
-        let openapi_extra =
-            extract_bound(kwargs, "openapi_extra").map(|d| py_any_to_json(py, &d));
+        let openapi_extra = extract_bound(kwargs, "openapi_extra").map(|d| py_any_to_json(py, &d));
 
-        let callbacks = extract_bound(kwargs, "callbacks")
-            .and_then(|x| parse_callbacks_to_json(py, &x));
+        let callbacks =
+            extract_bound(kwargs, "callbacks").and_then(|x| parse_callbacks_to_json(py, &x));
 
         let mut merged_tags = parent_tags.to_vec();
         if let Some(kw) = kwargs
@@ -301,24 +296,12 @@ impl PyAPIRouter {
             let py = args.py();
             let func: Bound<'_, PyAny> = args.get_item(0)?;
 
-            let mut metadata =
-                parse_route_metadata(py, &func, &path_for_closure);
+            let mut metadata = parse_route_metadata(py, &func, &path_for_closure);
             if let Some(dependencies) = &opts.dependencies {
-                let path_param_names =
-                    extract_path_param_names(&path_for_closure);
-                let callables = collect_dependency_callables(
-                    py,
-                    Some(dependencies),
-                );
-                let mut external = parse_external_dependencies(
-                    py,
-                    &callables,
-                    &path_param_names,
-                )?;
-                shift_dependency_indices(
-                    &mut metadata.dependencies,
-                    external.len(),
-                );
+                let path_param_names = extract_path_param_names(&path_for_closure);
+                let callables = collect_dependency_callables(py, Some(dependencies));
+                let mut external = parse_external_dependencies(py, &callables, &path_param_names)?;
+                shift_dependency_indices(&mut metadata.dependencies, external.len());
                 external.append(&mut metadata.dependencies);
                 metadata.dependencies = external;
                 metadata.dependency_needs_request = metadata
@@ -366,11 +349,10 @@ impl PyAPIRouter {
                 metadata.response_type
             };
 
-            let path_param_names: Vec<Arc<str>> =
-                extract_path_param_names(&path_for_closure)
-                    .into_iter()
-                    .map(|s| Arc::from(s.as_str()))
-                    .collect();
+            let path_param_names: Vec<Arc<str>> = extract_path_param_names(&path_for_closure)
+                .into_iter()
+                .map(|s| Arc::from(s.as_str()))
+                .collect();
 
             let serialization_hint = if opts.bypass_serialization {
                 SerializationHint::Unknown
@@ -547,9 +529,7 @@ impl PyAPIRouter {
             ));
         }
         if !path.starts_with('/') {
-            return Err(PyValueError::new_err(
-                "WebSocket path must start with '/'",
-            ));
+            return Err(PyValueError::new_err("WebSocket path must start with '/'"));
         }
         let websockets = Arc::clone(&self.websocket_entries);
         let closure = move |args: &Bound<'_, PyTuple>,
@@ -560,13 +540,9 @@ impl PyAPIRouter {
 
             let path_param_names = extract_path_param_names(&path);
             let deps: SmallVec<[DependencyNode; 4]> =
-                parse_dependencies(
-                    py,
-                    func.bind(py),
-                    &path_param_names,
-                )
-                .unwrap_or_default()
-                .into();
+                parse_dependencies(py, func.bind(py), &path_param_names)
+                    .unwrap_or_default()
+                    .into();
 
             let entry = WebSocketEntry {
                 path: path.clone(),
@@ -668,9 +644,8 @@ impl PyAPIRouter {
         kwargs: &Bound<'_, PyDict>,
     ) -> PyResult<()> {
         for method in methods.unwrap_or_else(|| vec!["GET".to_string()]) {
-            let http_method = HttpMethod::from_str(&method.to_ascii_uppercase()).map_err(|_| {
-                PyValueError::new_err(format!("Invalid HTTP method: {method}"))
-            })?;
+            let http_method = HttpMethod::from_str(&method.to_ascii_uppercase())
+                .map_err(|_| PyValueError::new_err(format!("Invalid HTTP method: {method}")))?;
             let decorator =
                 self.create_method_decorator_kw(py, http_method, path.clone(), Some(kwargs))?;
             decorator.call1(py, (endpoint.clone(),))?;

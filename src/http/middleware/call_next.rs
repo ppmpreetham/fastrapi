@@ -1,6 +1,11 @@
 use crate::runtime::py_bridge;
 use std::sync::Arc;
 
+use crate::globals::spawn;
+use crate::http::request::PyRequest;
+use crate::http::responses::convert_auto_response;
+use crate::runtime::blocking::run_python;
+use axum::http::HeaderMap;
 use axum::{
     body::{Body, to_bytes},
     extract::Request,
@@ -8,17 +13,12 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use pyo3::intern;
-use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict};
-use axum::http::HeaderMap;
-use crate::globals::spawn;
-use crate::http::request::PyRequest;
-use crate::http::responses::convert_auto_response;
-use crate::runtime::blocking::run_python;
 use futures_util::future::BoxFuture;
 use pyo3::Bound;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::intern;
+use pyo3::prelude::*;
+use pyo3::types::{PyAny, PyBytes, PyDict};
 use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::oneshot::Receiver;
 use tokio::sync::oneshot::channel;
@@ -184,20 +184,19 @@ fn drive(
             });
         }
 
-        let outcome =
-            run_python(move |py| -> Result<Outcome, Response> {
-                invoke(
-                    py,
-                    &mw,
-                    method.as_str(),
-                    uri.path(),
-                    uri.query().unwrap_or(""),
-                    headers,
-                    rx,
-                    &async_loop,
-                )
-            })
-            .await;
+        let outcome = run_python(move |py| -> Result<Outcome, Response> {
+            invoke(
+                py,
+                &mw,
+                method.as_str(),
+                uri.path(),
+                uri.query().unwrap_or(""),
+                headers,
+                rx,
+                &async_loop,
+            )
+        })
+        .await;
 
         match outcome {
             Ok(Ok(Outcome::Respond(response))) => response,
@@ -242,20 +241,15 @@ fn invoke(
     _ = scope.set_item(intern!(py, "path"), path);
     _ = scope.set_item(intern!(py, "query_string"), query);
 
-    let req_obj = PyRequest::create_bound(
-        py,
-        scope.into_any().unbind(),
-        Some(headers),
-        None,
-    )
-    .map_err(fail)?
-    .into_any()
-    .unbind();
+    let req_obj = PyRequest::create_bound(py, scope.into_any().unbind(), Some(headers), None)
+        .map_err(fail)?
+        .into_any()
+        .unbind();
 
     let bridged = async move {
-        let response = downstream.await.map_err(|_| {
-            PyRuntimeError::new_err("call_next pipeline terminated")
-        })?;
+        let response = downstream
+            .await
+            .map_err(|_| PyRuntimeError::new_err("call_next pipeline terminated"))?;
         let (parts, body) = split_response(response);
         let body_bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
         Python::attach(|py| Ok(parts_to_py(py, parts, body_bytes)?.unbind()))

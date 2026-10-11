@@ -1,5 +1,8 @@
-use super::lifecycle::{start_background_asyncio_loop, run_startup_phase, log_python_error, stop_background_asyncio_loop, run_shutdown_phase};
-use super::reload::{resolve_reload_dirs, ReloadConfig, run_reload_supervisor};
+use super::lifecycle::{
+    log_python_error, run_shutdown_phase, run_startup_phase, start_background_asyncio_loop,
+    stop_background_asyncio_loop,
+};
+use super::reload::{ReloadConfig, resolve_reload_dirs, run_reload_supervisor};
 use super::routes::build_router;
 
 use crate::engine::types::FastrAPI;

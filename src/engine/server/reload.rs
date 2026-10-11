@@ -1,14 +1,14 @@
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
+use std::env::current_dir;
+use std::io;
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::channel;
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::Duration,
 };
-use std::env::current_dir;
-use std::io;
-use std::sync::mpsc::RecvTimeoutError;
-use std::sync::mpsc::channel;
 
 #[derive(Clone)]
 pub(crate) struct ReloadConfig {

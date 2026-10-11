@@ -4,22 +4,22 @@ use super::types::{ParsedParameter, RequestInput};
 use crate::ffi::pydantic;
 use crate::runtime::py_bridge;
 
+use crate::routing::security::OAuth2PasswordRequestForm;
+use crate::routing::security::OAuth2PasswordRequestFormStrict;
+use crate::routing::security::describe_scheme;
+use crate::runtime::executor::execute_teardowns_async;
 use axum::response::Response;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::exceptions::PyStopIteration;
 use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::types::PyType;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::routing::security::OAuth2PasswordRequestForm;
-use crate::routing::security::OAuth2PasswordRequestFormStrict;
-use crate::routing::security::describe_scheme;
-use crate::runtime::executor::execute_teardowns_async;
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::exceptions::PyStopAsyncIteration;
-use pyo3::exceptions::PyStopIteration;
-use pyo3::types::PyType;
 
 type SharedPyObject = Py<PyAny>;
 
@@ -131,9 +131,9 @@ pub(crate) fn request_plan<'a>(
             let mut replacement_plan =
                 parse_external_dependencies(py, &[replacement.unbind()], paths)?;
             let mut local = HashMap::new();
-            let mut replacement_root = replacement_plan.pop().ok_or_else(|| {
-                PyRuntimeError::new_err("Empty dependency replacement")
-            })?;
+            let mut replacement_root = replacement_plan
+                .pop()
+                .ok_or_else(|| PyRuntimeError::new_err("Empty dependency replacement"))?;
             for child in &mut replacement_plan {
                 child.is_top_level = false;
             }
@@ -431,17 +431,13 @@ pub fn parse_dependencies(
 }
 fn adapt_security_schemes(py: Python<'_>, nodes: &mut [DependencyNode]) {
     for node in nodes.iter_mut() {
-        let is_form_type = node
-            .func
-            .bind(py)
-            .cast::<PyType>()
-            .is_ok_and(|ty| {
-                ty.is_subclass_of::<OAuth2PasswordRequestForm>()
+        let is_form_type = node.func.bind(py).cast::<PyType>().is_ok_and(|ty| {
+            ty.is_subclass_of::<OAuth2PasswordRequestForm>()
+                .unwrap_or(false)
+                || ty
+                    .is_subclass_of::<OAuth2PasswordRequestFormStrict>()
                     .unwrap_or(false)
-                    || ty
-                        .is_subclass_of::<OAuth2PasswordRequestFormStrict>()
-                        .unwrap_or(false)
-            });
+        });
         let is_form = node
             .func
             .bind(py)
@@ -453,10 +449,7 @@ fn adapt_security_schemes(py: Python<'_>, nodes: &mut [DependencyNode]) {
         if is_form_type && let Ok(instance) = node.func.bind(py).call0() {
             node.func = instance.unbind();
         }
-        if describe_scheme(py, node.func.bind(py)).is_some()
-            || is_form
-            || is_form_type
-        {
+        if describe_scheme(py, node.func.bind(py)).is_some() || is_form || is_form_type {
             node.injection_plan = vec![(
                 PyString::intern(py, "request").unbind(),
                 InjectionType::Request,
@@ -905,17 +898,13 @@ async fn execute_dependencies_inner(
                 let value = match outcome {
                     Ok(v) => v,
                     Err(e) => {
-                        return Err(
-                            if e.is_instance_of::<PyStopAsyncIteration>(py) {
-                                DependencyExecutionError::Python(
-                                    PyRuntimeError::new_err(
-                                        "Async generator dependency exited before yielding",
-                                    ),
-                                )
-                            } else {
-                                DependencyExecutionError::Python(e)
-                            },
-                        );
+                        return Err(if e.is_instance_of::<PyStopAsyncIteration>(py) {
+                            DependencyExecutionError::Python(PyRuntimeError::new_err(
+                                "Async generator dependency exited before yielding",
+                            ))
+                        } else {
+                            DependencyExecutionError::Python(e)
+                        });
                     }
                 };
                 teardown_tasks.push(TeardownTask {
@@ -987,15 +976,13 @@ fn execute_sync_node(
         let value = match generator.call_method0(intern!(py, "__next__")) {
             Ok(v) => v.unbind(),
             Err(e) => {
-                return Err(
-                    if e.is_instance_of::<PyStopIteration>(py) {
-                        DependencyExecutionError::Python(PyRuntimeError::new_err(
-                            "Generator dependency exited before yielding",
-                        ))
-                    } else {
-                        DependencyExecutionError::Python(e)
-                    },
-                );
+                return Err(if e.is_instance_of::<PyStopIteration>(py) {
+                    DependencyExecutionError::Python(PyRuntimeError::new_err(
+                        "Generator dependency exited before yielding",
+                    ))
+                } else {
+                    DependencyExecutionError::Python(e)
+                });
             }
         };
         let teardown = TeardownTask {

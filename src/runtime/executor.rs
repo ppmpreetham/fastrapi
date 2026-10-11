@@ -16,17 +16,17 @@ use std::sync::{Arc, OnceLock};
 use tracing::error;
 
 use super::blocking;
-use crate::http::request::create_py_request;
-use axum::http::HeaderMap;
-use axum::http::HeaderName;
-use axum::http::HeaderValue;
 use crate::engine::background::PyBackgroundTasks;
 use crate::engine::errors::dispatch_exception_handler;
 use crate::globals::spawn;
+use crate::http::request::create_py_request;
 use crate::http::responses::PyResponse;
 use crate::http::responses::convert_response_by_type;
 use crate::routing::dependencies::TeardownTasks;
 use crate::utils::py_json_response_with_dump_options;
+use axum::http::HeaderMap;
+use axum::http::HeaderName;
+use axum::http::HeaderValue;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3::exceptions::PyStopIteration;
@@ -76,23 +76,13 @@ fn specialized_response_conversion(
                 return s.to_string_lossy().into_owned().into_response();
             }
 
-            match convert_response_by_type(
-                py,
-                result,
-                handler,
-                request_headers,
-            ) {
+            match convert_response_by_type(py, result, handler, request_headers) {
                 Ok(resp) => resp,
                 Err(err) => python_error_to_response(py, err),
             }
         }
 
-        _ => match convert_response_by_type(
-            py,
-            result,
-            handler,
-            request_headers,
-        ) {
+        _ => match convert_response_by_type(py, result, handler, request_headers) {
             Ok(resp) => resp,
             Err(err) => python_error_to_response(py, err),
         },
@@ -109,9 +99,7 @@ pub(crate) fn python_error_to_response_in(
     err: PyErr,
     request_input: Option<&RequestInput<'_>>,
 ) -> Response {
-    if let Some(response) =
-        dispatch_exception_handler(py, &err, request_input)
-    {
+    if let Some(response) = dispatch_exception_handler(py, &err, request_input) {
         return response;
     }
 
@@ -127,7 +115,8 @@ fn log_python_error(py: Python<'_>, err: &PyErr) {
         let traceback_bound = TRACEBACK_MODULE.get(py)?;
 
         let traceback_obj = err
-            .traceback(py).map_or_else(|| py.None(), |tb| tb.into_any().unbind());
+            .traceback(py)
+            .map_or_else(|| py.None(), |tb| tb.into_any().unbind());
         let lines = traceback_bound.call_method1(
             intern!(py, "format_exception"),
             (err.get_type(py), err.value(py), traceback_obj.bind(py)),
@@ -175,10 +164,7 @@ pub(crate) fn build_request_input_from_parts<'a>(
 }
 
 #[inline(always)]
-fn spawn_background_tasks(
-    async_loop: &Arc<Py<PyAny>>,
-    bg_tasks: Option<Py<PyBackgroundTasks>>,
-) {
+fn spawn_background_tasks(async_loop: &Arc<Py<PyAny>>, bg_tasks: Option<Py<PyBackgroundTasks>>) {
     if let Some(tasks) = bg_tasks {
         let async_loop = async_loop.clone();
         spawn(async move {
@@ -201,13 +187,7 @@ fn prepare_kwargs_and_payload<'py>(
     handler: &RouteHandler,
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
-) -> Result<
-    (
-        Bound<'py, PyDict>,
-        Option<Py<PyBackgroundTasks>>,
-    ),
-    Response,
-> {
+) -> Result<(Bound<'py, PyDict>, Option<Py<PyBackgroundTasks>>), Response> {
     let kwargs = PyDict::new(py);
     let bg_tasks = pydantic::apply_request_data(py, handler, request_input, payload, &kwargs)?;
 
@@ -242,18 +222,15 @@ fn resolve_sync_deps<'py>(
 }
 
 #[inline(always)]
-fn execute_teardowns_sync(
-    py: Python<'_>,
-    teardowns: TeardownTasks,
-    error: Option<&PyErr>,
-) {
+fn execute_teardowns_sync(py: Python<'_>, teardowns: TeardownTasks, error: Option<&PyErr>) {
     for task in teardowns.into_iter().rev() {
         if task.is_async {
             tracing::error!("Async generator dependency found in sync route!");
         } else {
             let result = if let Some(error) = error {
                 let traceback = error
-                    .traceback(py).map_or_else(|| py.None(), |value| value.into_any().unbind());
+                    .traceback(py)
+                    .map_or_else(|| py.None(), |value| value.into_any().unbind());
                 task.generator.bind(py).call_method1(
                     pyo3::intern!(py, "throw"),
                     (error.get_type(py), error.value(py), traceback),
@@ -275,10 +252,7 @@ fn execute_teardowns_sync(
     }
 }
 
-pub(crate) async fn execute_teardowns_async(
-    async_loop: &Arc<Py<PyAny>>,
-    teardowns: TeardownTasks,
-) {
+pub(crate) async fn execute_teardowns_async(async_loop: &Arc<Py<PyAny>>, teardowns: TeardownTasks) {
     let mut sync_batch: Vec<Py<PyAny>> = Vec::new();
 
     for task in teardowns.into_iter().rev() {
@@ -525,13 +499,7 @@ fn payload_raw_bytes(payload: Option<&BodyPayload>) -> Option<&[u8]> {
 fn run_sync_gil_section(
     py: Python<'_>,
     state: &GilSection<'_, '_, '_>,
-) -> Result<
-    (
-        Response,
-        Option<Py<PyBackgroundTasks>>,
-    ),
-    Response,
-> {
+) -> Result<(Response, Option<Py<PyBackgroundTasks>>), Response> {
     let GilSection {
         handler,
         request_input,
@@ -741,13 +709,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
         &handler.payload.path_param_names,
     );
     let setup = Python::attach(
-        |py| -> Result<
-            (
-                PyTaskFuture,
-                Option<Py<PyBackgroundTasks>>,
-            ),
-            Response,
-        > {
+        |py| -> Result<(PyTaskFuture, Option<Py<PyBackgroundTasks>>), Response> {
             let (kwargs, bg_tasks) =
                 prepare_kwargs_and_payload(py, &handler, &request_input, payload.as_deref())?;
 
@@ -801,14 +763,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
         &handler.payload.path_param_names,
     );
     let prep = Python::attach(
-        |py| -> Result<
-            (
-                Option<Py<PyAny>>,
-                Py<PyDict>,
-                Option<Py<PyBackgroundTasks>>,
-            ),
-            Response,
-        > {
+        |py| -> Result<(Option<Py<PyAny>>, Py<PyDict>, Option<Py<PyBackgroundTasks>>), Response> {
             let (kwargs, bg_tasks) =
                 prepare_kwargs_and_payload(py, &handler, &request_input, payload.as_deref())?;
 
@@ -1019,9 +974,7 @@ async fn run_managed_handler(
         let (kwargs, background) =
             prepare_kwargs_and_payload(py, &handler, &input, payload.as_deref())?;
         let objects = (|| -> PyResult<_> {
-            let response = py
-                .get_type::<PyResponse>()
-                .call0()?;
+            let response = py.get_type::<PyResponse>().call0()?;
             response.setattr("status_code", 0u16)?;
             response.setattr("raw_headers", PyList::empty(py))?;
             if let Some(name) = &handler.payload.response_param {
@@ -1113,12 +1066,7 @@ async fn run_managed_handler(
         Python::attach(|py| -> Result<_, DependencyExecutionError> {
             let value = value.bind(py);
             let explicit = value.hasattr("status_code")? && value.hasattr("raw_headers")?;
-            let response = convert_response_by_type(
-                py,
-                value,
-                &handler,
-                Some(input.headers),
-            )?;
+            let response = convert_response_by_type(py, value, &handler, Some(input.headers))?;
             Ok((response, explicit))
         })
     }
@@ -1128,7 +1076,8 @@ async fn run_managed_handler(
             Err(DependencyExecutionError::Python(err)) => (
                 err.get_type(py).into_any().unbind(),
                 err.value(py).clone().into_any().unbind(),
-                err.traceback(py).map_or_else(|| py.None(), |tb| tb.into_any().unbind()),
+                err.traceback(py)
+                    .map_or_else(|| py.None(), |tb| tb.into_any().unbind()),
             ),
             Err(DependencyExecutionError::Response(_)) => {
                 let err = PyValueError::new_err("Request validation failed");
@@ -1173,21 +1122,15 @@ async fn run_managed_handler(
                         if let Ok(status) = metadata.getattr("status_code")?.extract::<u16>()
                             && status != 0
                         {
-                            *response.status_mut() =
-                                StatusCode::from_u16(status).map_err(|err| {
-                                    PyValueError::new_err(err.to_string())
-                                })?;
+                            *response.status_mut() = StatusCode::from_u16(status)
+                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
                         }
                         for item in metadata.getattr("raw_headers")?.try_iter()? {
                             let (name, value): (Vec<u8>, Vec<u8>) = item?.extract()?;
-                            let name =
-                                HeaderName::from_bytes(&name).map_err(|err| {
-                                    PyValueError::new_err(err.to_string())
-                                })?;
-                            let value =
-                                HeaderValue::from_bytes(&value).map_err(|err| {
-                                    PyValueError::new_err(err.to_string())
-                                })?;
+                            let name = HeaderName::from_bytes(&name)
+                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                            let value = HeaderValue::from_bytes(&value)
+                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
                             response.headers_mut().append(name, value);
                         }
                         Ok(())

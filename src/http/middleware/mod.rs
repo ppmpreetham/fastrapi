@@ -1,12 +1,14 @@
 use crate::http::responses::convert_auto_response;
 use crate::runtime::blocking::run_python;
 use crate::runtime::py_bridge;
+use axum::http::HeaderValue;
 use axum::{
     extract::Request,
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use pyo3::Bound;
 use pyo3::exceptions::{PyKeyError, PyTypeError};
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -16,8 +18,6 @@ use std::borrow::Cow;
 use std::str;
 use std::sync::Arc;
 use tracing::error;
-use axum::http::HeaderValue;
-use pyo3::Bound;
 
 pub mod asgi;
 pub mod call_next;
@@ -113,8 +113,7 @@ impl PyMiddleware {
         obj: &Bound<'_, PyAny>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        if obj.is_instance_of::<PyType>() && Self::call_param_count(py, obj) == Some(3)
-        {
+        if obj.is_instance_of::<PyType>() && Self::call_param_count(py, obj) == Some(3) {
             let is_async = obj
                 .getattr(intern!(py, "__call__"))
                 .ok()

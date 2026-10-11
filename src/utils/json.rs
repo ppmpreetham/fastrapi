@@ -5,6 +5,9 @@ use axum::{
     response::{IntoResponse, Response as AxumResponse},
 };
 use bytes::{BufMut, BytesMut};
+use papaya::HashMap;
+use pyo3::Bound;
+use pyo3::types::PyMemoryView;
 use pyo3::{
     exceptions::PyValueError,
     intern,
@@ -16,19 +19,16 @@ use pyo3::{
 };
 use pythonize::pythonize;
 use simd_json::OwnedValue as Value;
-use std::{
-    borrow::Cow,
-    cell::RefCell,
-    io::{self, Write},
-};
-use papaya::HashMap;
-use pyo3::Bound;
-use pyo3::types::PyMemoryView;
 use simd_json::owned;
 use simd_json::owned::Object;
 use std::boxed::Box;
 use std::str::from_utf8;
 use std::sync::LazyLock;
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    io::{self, Write},
+};
 
 thread_local! {
     static RESPONSE_BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(1024));
@@ -57,10 +57,7 @@ fn json_text_of(value: &Bound<'_, PyAny>) -> PyResult<String> {
 }
 
 fn lossy_text(text: &Bound<'_, PyString>) -> String {
-    json_text(text).map_or_else(
-        |_| text.to_string_lossy().into_owned(),
-        Cow::into_owned,
-    )
+    json_text(text).map_or_else(|_| text.to_string_lossy().into_owned(), Cow::into_owned)
 }
 
 #[inline]
@@ -211,7 +208,9 @@ pub fn write_json_string<W: Write>(writer: &mut W, value: &str) -> PyResult<()> 
 
 #[inline]
 pub fn write_json_bytes<W: Write>(writer: &mut W, bytes: &[u8]) -> PyResult<()> {
-    if let Ok(s) = from_utf8(bytes) { write_json_string(writer, s) } else {
+    if let Ok(s) = from_utf8(bytes) {
+        write_json_string(writer, s)
+    } else {
         let mut scratch = Vec::with_capacity(bytes.len() * 4 + 2);
         scratch.push(b'[');
         for (idx, byte) in bytes.iter().enumerate() {

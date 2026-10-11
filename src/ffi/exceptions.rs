@@ -3,13 +3,13 @@ use std::borrow::Cow;
 use crate::utils::py_any_to_json;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
+use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyUserWarning};
 use pyo3::prelude::*;
 use pyo3::types::PyDictMethods;
 use pyo3::types::PyList;
 use pyo3::types::PyListMethods;
 use pyo3::types::{PyDict, PyString, PyTuple};
-use pyo3::PyClassInitializer;
 use simd_json::json;
 use std::convert::Into;
 

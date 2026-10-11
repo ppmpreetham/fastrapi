@@ -6,10 +6,10 @@ use super::utils::{
     list_element_annotation,
 };
 use crate::ffi::pydantic;
+use pyo3::Bound;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyString};
-use pyo3::Bound;
 
 pub const PARAM_CLASS_QUERY: &str = "Query";
 pub const PARAM_CLASS_PATH: &str = "Path";
@@ -86,12 +86,10 @@ pub fn parse_parameter_spec(
         .filter(|annotation| !is_inspect_empty(py, annotation));
     let has_annotation = raw_annotation.is_some();
     let annotation = raw_annotation.map(|raw| base_annotation(py, &raw).unbind());
-    let (is_list, element_annotation) = annotation
-        .as_ref()
-        .map_or((false, None), |ann| {
-            let (is_list, elem) = list_element_annotation(py, ann.bind(py));
-            (is_list, elem.map(Bound::unbind))
-        });
+    let (is_list, element_annotation) = annotation.as_ref().map_or((false, None), |ann| {
+        let (is_list, elem) = list_element_annotation(py, ann.bind(py));
+        (is_list, elem.map(Bound::unbind))
+    });
 
     let effective_annotation = if is_list {
         element_annotation.or_else(|| annotation.clone())
@@ -183,8 +181,10 @@ pub fn parse_parameter_spec(
             )
         };
 
-    let external_name = param_object
-        .as_ref().map_or_else(|| param_name.to_string(), |obj| external_name_for_param(param_name, &source, obj.bind(py)));
+    let external_name = param_object.as_ref().map_or_else(
+        || param_name.to_string(),
+        |obj| external_name_for_param(param_name, &source, obj.bind(py)),
+    );
 
     let is_file_param = param_object
         .as_ref()

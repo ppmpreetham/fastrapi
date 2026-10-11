@@ -1,25 +1,25 @@
+use crate::ffi::datastructures::PyURL;
 use crate::ffi::exceptions::PyHTTPException;
+use crate::globals::PYTHON_RUNTIME;
+use crate::globals::lifespan_state;
+use crate::globals::serve_app;
 use crate::http::form;
 use crate::routing::types::RequestInput;
 use crate::runtime::py_bridge;
+use axum::http::HeaderMap;
+use axum::http::header::COOKIE;
+use cookie::Cookie;
+use pyo3::Py;
 use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyAssertionError, PyRuntimeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyString, PyTuple};
-use std::sync::Arc;
-use tokio::sync::OnceCell;
-use axum::http::HeaderMap;
-use axum::http::header::COOKIE;
-use cookie::Cookie;
-use crate::ffi::datastructures::PyURL;
-use crate::globals::PYTHON_RUNTIME;
-use crate::globals::lifespan_state;
-use crate::globals::serve_app;
-use pyo3::Py;
 use pyo3::types::PyList;
+use pyo3::types::{PyAny, PyBytes, PyDict, PyString, PyTuple};
 use std::str::from_utf8;
+use std::sync::Arc;
 use tokio::runtime::Handle;
+use tokio::sync::OnceCell;
 use tokio::task::block_in_place;
 
 crate::cached_py_import!(STARLETTE_HEADERS, "starlette.datastructures", "Headers");
@@ -194,7 +194,8 @@ impl PyHTTPConnection {
     pub fn path_params(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
         Ok(scope
-            .get_item(intern!(py, "path_params")).map_or_else(|_| PyDict::new(py).into(), Into::into))
+            .get_item(intern!(py, "path_params"))
+            .map_or_else(|_| PyDict::new(py).into(), Into::into))
     }
 
     #[getter]
@@ -236,14 +237,16 @@ impl PyHTTPConnection {
     #[getter]
     pub fn client(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let scope = self.scope.bind(py);
-        scope
-            .get_item(intern!(py, "client")).map_or_else(|_| Ok(py.None()), |client| {
+        scope.get_item(intern!(py, "client")).map_or_else(
+            |_| Ok(py.None()),
+            |client| {
                 if let Ok((host, port)) = client.extract::<(String, u16)>() {
                     let client_info = PyClientInfo { host, port };
                     return Ok(Bound::new(py, client_info)?.into_any().unbind());
                 }
                 Ok(client.into())
-            })
+            },
+        )
     }
 
     #[getter]
@@ -784,9 +787,7 @@ impl PyRequest {
         let content_type = form::content_type_of(py, conn.borrow().scope.bind(py));
         if content_type.starts_with("multipart/form-data") {
             let parsed = if let Ok(handle) = Handle::try_current() {
-                block_in_place(|| {
-                    handle.block_on(form::parse_form(&content_type, &raw))
-                })
+                block_in_place(|| handle.block_on(form::parse_form(&content_type, &raw)))
             } else {
                 PYTHON_RUNTIME.block_on(form::parse_form(&content_type, &raw))
             }

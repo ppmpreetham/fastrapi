@@ -1,5 +1,5 @@
-use pyo3::prelude::*;
 use pyo3::PyClassInitializer;
+use pyo3::prelude::*;
 
 #[pyclass(name = "Depends", subclass, get_all, from_py_object)]
 #[derive(Clone)]

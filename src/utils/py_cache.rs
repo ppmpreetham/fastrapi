@@ -1,7 +1,7 @@
+use pyo3::Bound;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyModule;
-use pyo3::Bound;
 
 pub struct LazyPyModule {
     module_name: &'static str,

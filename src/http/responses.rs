@@ -1,11 +1,11 @@
-pub use crate::http::sse::PyEventSourceResponse;
-use axum::http::header::CONTENT_TYPE;
-use bytes::Bytes;
 use crate::engine::background::spawn_response_background;
 use crate::engine::background::spawn_response_background_value;
 use crate::globals::async_loop_pool;
+pub use crate::http::sse::PyEventSourceResponse;
 use crate::routing::types::RouteHandler;
 use crate::utils::py_json_response_with_dump_options;
+use axum::http::header::CONTENT_TYPE;
+use bytes::Bytes;
 use papaya::HashMap;
 use pyo3::Bound;
 use pyo3::exceptions::PyStopAsyncIteration;
@@ -62,9 +62,8 @@ enum ResponseKind {
     File,
 }
 
-static RESPONSE_KIND_CACHE: LazyLock<
-    papaya::HashMap<usize, (Py<PyType>, ResponseKind)>,
-> = LazyLock::new(|| HashMap::with_capacity(32));
+static RESPONSE_KIND_CACHE: LazyLock<papaya::HashMap<usize, (Py<PyType>, ResponseKind)>> =
+    LazyLock::new(|| HashMap::with_capacity(32));
 
 #[inline]
 fn response_kind(result: &Bound<'_, PyAny>) -> ResponseKind {
@@ -142,9 +141,11 @@ fn validate_response_model<'py>(
     let args = typing.getattr("get_args")?.call1((model,))?;
     let list_type = py.import("builtins")?.getattr("list")?;
     if origin.is(&list_type) {
-        let item_model = args.try_iter()?.next().transpose()?.ok_or_else(|| {
-            PyTypeError::new_err("response list model has no item type")
-        })?;
+        let item_model = args
+            .try_iter()?
+            .next()
+            .transpose()?
+            .ok_or_else(|| PyTypeError::new_err("response list model has no item type"))?;
         let input = if let Ok(input) = value.cast::<PyList>() {
             input.clone()
         } else {
@@ -387,8 +388,7 @@ pub fn apply_response_metadata(
     if let Some(media_type) = media_type
         && let Ok(hval) = HeaderValue::try_from(media_type)
     {
-        res.headers_mut()
-            .insert(CONTENT_TYPE, hval);
+        res.headers_mut().insert(CONTENT_TYPE, hval);
     }
 
     res
@@ -835,8 +835,7 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
             ResponseKind::Streaming | ResponseKind::Sse
         ) {
             let data = extract_base_response_data(result, StatusCode::OK);
-            let content = data
-                .content.map_or_else(|| py.None(), Bound::unbind);
+            let content = data.content.map_or_else(|| py.None(), Bound::unbind);
             (
                 content,
                 data.status_code,
@@ -850,10 +849,8 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         };
 
-    let request_loop = py_bridge::request_loop().or_else(|| {
-        async_loop_pool()
-            .map(|pool| Python::attach(|py| Arc::new(pool.pick(py))))
-    });
+    let request_loop = py_bridge::request_loop()
+        .or_else(|| async_loop_pool().map(|pool| Python::attach(|py| Arc::new(pool.pick(py)))));
     let Some(request_loop) = request_loop else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -1064,9 +1061,8 @@ fn conditional_not_modified(headers: &HeaderMap, etag: &str, modified: Option<Sy
         )
         .is_some_and(|(modified, since)| {
             modified
-                .duration_since(UNIX_EPOCH).is_ok_and(|value| {
-                    UNIX_EPOCH + Duration::from_secs(value.as_secs()) <= since
-                })
+                .duration_since(UNIX_EPOCH)
+                .is_ok_and(|value| UNIX_EPOCH + Duration::from_secs(value.as_secs()) <= since)
         })
 }
 

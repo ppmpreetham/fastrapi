@@ -1,5 +1,5 @@
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::PyErr;
+use pyo3::exceptions::PyRuntimeError;
 use std::io;
 use thiserror::Error;
 

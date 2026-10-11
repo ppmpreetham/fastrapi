@@ -1,26 +1,26 @@
 use super::server;
 pub use super::types::{FastrAPI, FrontendMount, HostMount, StaticMount, SubAppMount};
 use crate::decorators::PyAPIRouter;
+use crate::ffi::decorators;
+use crate::http::middleware::DeclaredLayer;
 use crate::http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware};
 use crate::http::staticfiles::PyStaticFiles;
 use crate::routing::types::HttpMethod;
+use crate::utils::openapi::build_openapi_spec;
 use ahash::AHasher;
+use parking_lot::Mutex;
+use pyo3::Bound;
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyCFunction, PyDict, PyList, PyString, PyTuple};
+use std::convert::Into;
+use std::env::var_os;
 use std::hash::Hasher;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tracing::info;
-use crate::ffi::decorators;
-use crate::http::middleware::DeclaredLayer;
-use crate::utils::openapi::build_openapi_spec;
-use parking_lot::Mutex;
-use pyo3::Bound;
-use std::convert::Into;
-use std::env::var_os;
 
 crate::cached_py_import!(STARLETTE_STATE, "starlette.datastructures", "State");
 
@@ -225,7 +225,9 @@ impl FastrAPI {
         let class_name = class_name.cast::<PyString>()?.to_str()?;
 
         let empty_dict;
-        let opts = if let Some(dict) = kwargs { dict } else {
+        let opts = if let Some(dict) = kwargs {
+            dict
+        } else {
             empty_dict = PyDict::new(middleware_class.py());
             &empty_dict
         };
@@ -267,9 +269,7 @@ impl FastrAPI {
         name: Option<String>,
     ) -> PyResult<()> {
         if !path.starts_with('/') {
-            return Err(PyValueError::new_err(
-                "Mount path must start with '/'",
-            ));
+            return Err(PyValueError::new_err("Mount path must start with '/'"));
         }
 
         let normalized_path = if path.len() > 1 {
@@ -625,10 +625,7 @@ impl FastrAPI {
 
 impl FastrAPI {
     #[inline]
-    fn _router<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> pyo3::PyRef<'py, decorators::PyAPIRouter> {
+    fn _router<'py>(&self, py: Python<'py>) -> pyo3::PyRef<'py, decorators::PyAPIRouter> {
         self.router.bind(py).borrow()
     }
 

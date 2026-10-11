@@ -1,10 +1,10 @@
-use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
 use cookie::Cookie;
 use cookie::SameSite;
 use cookie::time::Duration;
 use pyo3::exceptions::PyAssertionError;
 use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 crate::cached_py_import!(JSON_DUMPS, "json", "dumps");
 crate::cached_py_import!(

@@ -13,7 +13,7 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
     middleware::Next,
     response::{Html, IntoResponse, Response},
-    routing::{MethodRouter, get, post, put, delete, patch, options, head},
+    routing::{MethodRouter, delete, get, head, options, patch, post, put},
 };
 use bytes::Bytes;
 use pyo3::prelude::*;
@@ -21,7 +21,14 @@ use simd_json::OwnedValue as JsonValue;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::engine::errors::dispatch_status_handler;
+use crate::engine::server::dispatch::dispatch_path_with_root;
+use crate::globals::set_exception_handlers;
+use crate::http::websocket::ws_param_names;
 use crate::match_method_router;
+use crate::routing::router::RoutePattern;
+use crate::routing::tree::join_path;
+use crate::types::response::ResponseType;
 use crate::{
     engine::metrics::prometheus_handle,
     globals::PYTHON_RUNTIME,
@@ -44,13 +51,6 @@ use axum::http::Method;
 use axum::http::header::ALLOW;
 use axum::http::header::HOST;
 use axum::routing::any;
-use crate::engine::errors::dispatch_status_handler;
-use crate::engine::server::dispatch::dispatch_path_with_root;
-use crate::globals::set_exception_handlers;
-use crate::http::websocket::ws_param_names;
-use crate::routing::router::RoutePattern;
-use crate::routing::tree::join_path;
-use crate::types::response::ResponseType;
 use metrics::SharedString;
 use pyo3::types::PyDict;
 use pyo3::types::PyString;
@@ -271,9 +271,7 @@ fn register_routes(
             match dispatch_or_not_found(router.clone(), state.clone(), req).await {
                 Ok(resp) => resp,
                 Err(req) => {
-                    let handler_resp = Python::attach(|py| {
-                        dispatch_status_handler(py, 404)
-                    });
+                    let handler_resp = Python::attach(|py| dispatch_status_handler(py, 404));
                     match handler_resp {
                         Some(resp) => resp,
                         None => serve_frontend_mounts(frontend_mounts, req)
@@ -302,31 +300,25 @@ fn method_not_allowed_response(router: FrozenRouter, root: Arc<str>, request: Re
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.split(':').next().unwrap_or(value));
-    let path = dispatch_path_with_root(
-        root.as_ref(),
-        request.uri().path(),
-    )
-    .unwrap_or(request.uri().path());
+    let path = dispatch_path_with_root(root.as_ref(), request.uri().path())
+        .unwrap_or(request.uri().path());
     let allow = router
         .allowed_methods(path, host)
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let mut response = Python::attach(|py| {
-        dispatch_status_handler(py, StatusCode::METHOD_NOT_ALLOWED.as_u16())
-    })
-    .unwrap_or_else(|| {
-        (
-            StatusCode::METHOD_NOT_ALLOWED,
-            axum::Json(simd_json::json!({"detail": "Method Not Allowed"})),
-        )
-            .into_response()
-    });
+    let mut response =
+        Python::attach(|py| dispatch_status_handler(py, StatusCode::METHOD_NOT_ALLOWED.as_u16()))
+            .unwrap_or_else(|| {
+                (
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    axum::Json(simd_json::json!({"detail": "Method Not Allowed"})),
+                )
+                    .into_response()
+            });
     if let Ok(value) = HeaderValue::from_str(&allow) {
-        response
-            .headers_mut()
-            .insert(ALLOW, value);
+        response.headers_mut().insert(ALLOW, value);
     }
     response
 }
@@ -461,10 +453,7 @@ pub(crate) fn apply_declared_middleware(
         return Ok(());
     };
     let class_name_obj = cls.getattr("__name__")?;
-    let class_name = class_name_obj
-        .cast::<PyString>()?
-        .to_str()?
-        .to_owned();
+    let class_name = class_name_obj.cast::<PyString>()?.to_str()?.to_owned();
 
     if let Some(builder) = MIDDLEWARE_REGISTRY.get(&class_name) {
         builder.parse_kwargs(kwargs, container)?;
@@ -495,10 +484,7 @@ fn no_request_method_router(
         && !state.sync_to_threadpool
         && handler.response.response_class.is_none()
         && handler.response.response_model.is_none()
-        && matches!(
-            handler.response.response_type,
-            ResponseType::Json
-        )
+        && matches!(handler.response.response_type, ResponseType::Json)
     {
         return sync_no_request_method_router(method, handler);
     }
@@ -527,16 +513,10 @@ fn no_request_method_router(
     })
 }
 
-fn sync_no_request_method_router(
-    method: HttpMethod,
-    handler: Arc<RouteHandler>,
-) -> MethodRouter {
+fn sync_no_request_method_router(method: HttpMethod, handler: Arc<RouteHandler>) -> MethodRouter {
     let use_json_fast_path = handler.response.response_model.is_none()
         && handler.response.response_class.is_none()
-        && matches!(
-            handler.response.response_type,
-            ResponseType::Json
-        );
+        && matches!(handler.response.response_type, ResponseType::Json);
 
     match_method_router!(method, {
         let handler = handler;
@@ -690,14 +670,9 @@ pub(crate) async fn record_prometheus_metrics(req: Request, next: Next) -> Respo
         other => SharedString::from(other.to_string()),
     };
 
-    let path: metrics::SharedString = match response
-        .extensions()
-        .get::<RoutePattern>()
-    {
+    let path: metrics::SharedString = match response.extensions().get::<RoutePattern>() {
         Some(pattern) => SharedString::from(pattern.0.clone()),
-        None if response.status() == StatusCode::NOT_FOUND => {
-            SharedString::from("unmatched")
-        }
+        None if response.status() == StatusCode::NOT_FOUND => SharedString::from("unmatched"),
         None => SharedString::from(raw_uri.path().to_owned()),
     };
 

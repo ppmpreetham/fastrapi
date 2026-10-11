@@ -3,21 +3,21 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::http::{
-    request::{create_py_request, create_stub_request},
-    responses::convert_auto_response,
-};
-use crate::routing::types::RequestInput;
-use axum::http::StatusCode;
 use crate::ffi::exceptions::PyHTTPException;
 use crate::ffi::exceptions::PyRequestValidationError;
 use crate::ffi::pydantic::ValidationErrorDetails;
 use crate::globals::PYTHON_RUNTIME;
 use crate::globals::async_loop_pool;
 use crate::globals::exception_handlers;
+use crate::http::{
+    request::{create_py_request, create_stub_request},
+    responses::convert_auto_response,
+};
+use crate::routing::types::RequestInput;
 use crate::runtime::py_bridge::request_loop;
 use crate::runtime::py_bridge::schedule_task;
 use crate::utils::json_to_py_object;
+use axum::http::StatusCode;
 use pyo3::Py;
 use pyo3::types::PyInt;
 use pyo3::types::PyString;
@@ -30,10 +30,7 @@ pub(crate) fn dispatch_validation_handler(
     mut response: Response,
     request_input: Option<&RequestInput<'_>>,
 ) -> Response {
-    let Some(details) = response
-        .extensions_mut()
-        .remove::<ValidationErrorDetails>()
-    else {
+    let Some(details) = response.extensions_mut().remove::<ValidationErrorDetails>() else {
         return response;
     };
     let Some(registry) = exception_handlers() else {
@@ -70,8 +67,7 @@ pub(crate) fn dispatch_exception_handler(
     let bound_registry = registry.bind(py);
 
     let exc_value = err.value(py).clone();
-    let handler = if let Ok(http_error) =
-        exc_value.cast::<PyHTTPException>()
+    let handler = if let Ok(http_error) = exc_value.cast::<PyHTTPException>()
         && let Ok(Some(handler)) = bound_registry.get_item(http_error.borrow().status_code)
     {
         handler
@@ -92,9 +88,8 @@ pub(crate) fn dispatch_exception_handler(
 
 fn handler_response(py: Python<'_>, result: Bound<'_, PyAny>) -> Option<Response> {
     if result.hasattr("__await__").unwrap_or(false) {
-        let loop_ = request_loop().or_else(|| {
-            async_loop_pool().map(|pool| Arc::new(pool.pick(py)))
-        })?;
+        let loop_ =
+            request_loop().or_else(|| async_loop_pool().map(|pool| Arc::new(pool.pick(py))))?;
         let future = schedule_task(py, &loop_, result).ok()?;
         let result = py
             .detach(|| {

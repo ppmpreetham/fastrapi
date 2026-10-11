@@ -1,6 +1,6 @@
+use crate::ffi::pydantic::strip_optional;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyString};
-use crate::ffi::pydantic::strip_optional;
 
 crate::cached_py_import!(INSPECT_PARAMETER_EMPTY, "inspect", "Parameter", "empty");
 
@@ -9,10 +9,7 @@ pub fn is_inspect_empty(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
 }
 
 pub fn is_ellipsis(value: &Bound<'_, PyAny>) -> bool {
-    value
-        .get_type()
-        .name()
-        .is_ok_and(|name| name == "ellipsis")
+    value.get_type().name().is_ok_and(|name| name == "ellipsis")
 }
 
 pub fn annotation_name(py: Python<'_>, annotation: &Py<PyAny>) -> Option<String> {
@@ -62,8 +59,7 @@ pub fn list_element_annotation<'py>(
     annotation: &Bound<'py, PyAny>,
 ) -> (bool, Option<Bound<'py, PyAny>>) {
     // `Optional[List[int]]` and `Union[List[int], None]` behave as list params.
-    let annotation =
-        strip_optional(py, annotation).unwrap_or_else(|| annotation.clone());
+    let annotation = strip_optional(py, annotation).unwrap_or_else(|| annotation.clone());
     let is_type_named = |obj: &Bound<'py, PyAny>, name: &str| {
         obj.get_type()
             .name()

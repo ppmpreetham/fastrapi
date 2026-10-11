@@ -11,6 +11,7 @@ use pyo3::prelude::Python;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
+use crate::engine::errors::dispatch_validation_handler;
 use crate::{
     ffi::py_handlers::{ExecutionMode, run_py_handler, run_py_handler_no_request},
     routing::{
@@ -20,7 +21,6 @@ use crate::{
     runtime::py_bridge,
 };
 use axum::http::header::HOST;
-use crate::engine::errors::dispatch_validation_handler;
 
 /// dispatches requests to the route handler
 pub(crate) async fn dispatch_or_not_found(

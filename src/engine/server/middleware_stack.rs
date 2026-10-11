@@ -28,16 +28,16 @@ use tracing::info;
 
 use tracing::error;
 
+use crate::engine::server::routes::parse_header_name;
+use crate::engine::server::routes::parse_header_value;
+use crate::engine::server::routes::record_prometheus_metrics;
 use crate::engine::types::FastrAPI;
+use crate::http::middleware::PyMiddlewareKind;
 use crate::http::middleware::{
     DeclaredLayer, MiddlewareContainer, PreparedMiddlewares, PyMiddleware, asgi, build_cors_layer,
     execute_py_middlewares,
 };
 use axum::http::HeaderName;
-use crate::engine::server::routes::parse_header_name;
-use crate::engine::server::routes::parse_header_value;
-use crate::engine::server::routes::record_prometheus_metrics;
-use crate::http::middleware::PyMiddlewareKind;
 use pyo3::Bound;
 use std::time;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -130,9 +130,7 @@ fn apply_legacy(
 
 fn apply_config_layers(mut app: Router, app_config: &FastrAPI) -> Router {
     if app_config.prometheus_config.is_some() {
-        app = app.layer(axum_middleware::from_fn(
-            record_prometheus_metrics,
-        ));
+        app = app.layer(axum_middleware::from_fn(record_prometheus_metrics));
     }
 
     if app_config.trace_requests {

@@ -1,4 +1,6 @@
+use crate::globals::serve_app;
 use crate::runtime::py_bridge;
+use axum::http::HeaderMap;
 use axum::{
     body::{Body, to_bytes},
     extract::Request,
@@ -6,21 +8,19 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
+use bytes::BytesMut;
 use pyo3::{
     exceptions::PyRuntimeError,
     intern,
     prelude::*,
     types::{PyAny, PyByteArray, PyBytes, PyDict, PyList},
 };
-use tracing::error;
-use axum::http::HeaderMap;
-use bytes::Bytes;
-use bytes::BytesMut;
-use crate::globals::serve_app;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::channel;
+use tracing::error;
 
 const DOWNSTREAM_KEY: &str = "_fastrapi_downstream";
 
@@ -393,7 +393,9 @@ fn collect_response(messages: Vec<ResponseMessage>) -> Response {
                         HeaderValue::try_from(value.as_ref()),
                     ) {
                         headers.append(name, value);
-                    } else { error!("asgi middleware sent an invalid response header") }
+                    } else {
+                        error!("asgi middleware sent an invalid response header")
+                    }
                 }
             }
             ResponseMessage::Body(chunk) => body.extend(chunk),

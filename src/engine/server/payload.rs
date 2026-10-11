@@ -1,5 +1,6 @@
 use super::serve::AppState;
 
+use crate::ffi::pydantic::ValidationErrorDetails;
 use crate::routing::types::{BodyField, BodyPayload, ParameterSource, RouteHandler, UploadedFile};
 use ahash::AHashMap;
 use axum::{
@@ -8,12 +9,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt;
-use smallvec::SmallVec;
-use crate::ffi::pydantic::ValidationErrorDetails;
 use multer::Constraints;
 use multer::Error;
 use multer::Multipart;
 use multer::SizeLimit;
+use smallvec::SmallVec;
 use std::str::from_utf8;
 
 pub(crate) async fn extract_payload(
@@ -151,9 +151,7 @@ pub(crate) fn multipart_error_response(err: multer::Error) -> Response {
         Error::FieldSizeExceeded { .. } | Error::StreamSizeExceeded { .. } => {
             (StatusCode::PAYLOAD_TOO_LARGE, err.to_string()).into_response()
         }
-        Error::UnknownField { .. } => {
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
-        }
+        Error::UnknownField { .. } => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
         _ => (StatusCode::BAD_REQUEST, "Invalid multipart body").into_response(),
     }
 }

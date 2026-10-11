@@ -1,12 +1,12 @@
-use crate::utils::py_any_to_json;
-use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList};
-use bytes::Bytes;
 use crate::http::responses::api::init_headers;
+use crate::utils::py_any_to_json;
+use bytes::Bytes;
 use pyo3::Bound;
 use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use pyo3::types::PyType;
+use pyo3::types::{PyAny, PyDict, PyList};
 
 #[pyclass(
     name = "EventSourceResponse",
@@ -44,14 +44,10 @@ impl PyEventSourceResponse {
         sep: String,
     ) -> PyResult<Self> {
         if ping.is_some_and(|value| value < 0.0) {
-            return Err(PyValueError::new_err(
-                "ping must be non-negative",
-            ));
+            return Err(PyValueError::new_err("ping must be non-negative"));
         }
         if sep.is_empty() {
-            return Err(PyValueError::new_err(
-                "sep must not be empty",
-            ));
+            return Err(PyValueError::new_err("sep must not be empty"));
         }
         let raw_headers = init_headers(
             py,
@@ -123,9 +119,7 @@ impl PyServerSentEvent {
             ));
         }
         if retry.is_some_and(|value| value < 0) {
-            return Err(PyValueError::new_err(
-                "retry must be non-negative",
-            ));
+            return Err(PyValueError::new_err("retry must be non-negative"));
         }
         Ok(Self {
             data: data.unwrap_or_else(|| py.None()),
@@ -268,10 +262,7 @@ impl PyServerSentEvent {
     fn model_post_init(&self, _context: &Bound<'_, PyAny>) {}
 
     #[classmethod]
-    fn model_validate(
-        _cls: &Bound<'_, PyType>,
-        value: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn model_validate(_cls: &Bound<'_, PyType>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(event) = value.cast::<PyServerSentEvent>() {
             return Ok(event.clone().unbind().into_any());
         }

@@ -1,9 +1,9 @@
 use crate::runtime::py_bridge;
 use bytes::{BufMut, Bytes, BytesMut};
-use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes};
 use pyo3::Bound;
+use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use pyo3::types::{PyAny, PyBytes};
 use std::cmp::min;
 
 crate::cached_py_import!(TEMPFILE_MODULE, "tempfile");

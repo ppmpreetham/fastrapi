@@ -5,10 +5,10 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyTuple};
 use std::future::Future;
+use std::mem::take;
 use std::pin::Pin;
 use std::sync::Arc;
 use tracing::error;
-use std::mem::take;
 
 type TaskFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 

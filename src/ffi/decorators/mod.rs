@@ -8,11 +8,11 @@ pub use crate::routing::tree::*;
 use crate::routing::types::{HttpMethod, RouteEntry, SubRouterMount, WebSocketEntry};
 
 use parking_lot::Mutex;
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::prelude::{pyclass, pymethods, Py, PyAny, PyAnyMethods, PyResult, Python};
 use pyo3::Bound;
-use std::sync::atomic::{AtomicBool, Ordering};
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::{Py, PyAny, PyAnyMethods, PyResult, Python, pyclass, pymethods};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[pyclass(name = "APIRouter", skip_from_py_object)]
 #[derive(Clone)]

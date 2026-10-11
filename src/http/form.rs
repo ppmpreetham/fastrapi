@@ -1,10 +1,10 @@
 use crate::ffi::datastructures::{PyFormData, PyUploadFile};
 use bytes::Bytes;
-use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyString};
 use futures_util::stream::once;
 use multer::Multipart;
 use pyo3::Py;
+use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyString};
 
 const MULTIPART: &str = "multipart/form-data";
 const URLENCODED: &str = "application/x-www-form-urlencoded";

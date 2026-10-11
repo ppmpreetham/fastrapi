@@ -1,8 +1,8 @@
 use crate::engine::types::FastrAPI;
-use crate::globals::clear_lifespan_state;
-use crate::globals::set_lifespan_state;
 use crate::globals::AsyncLoopPool;
 use crate::globals::PYTHON_RUNTIME;
+use crate::globals::clear_lifespan_state;
+use crate::globals::set_lifespan_state;
 use crate::runtime::py_bridge::schedule_task;
 use pyo3::{exceptions::PyTypeError, prelude::*};
 use std::thread::Builder;

@@ -7,9 +7,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
+use crate::exceptions::PyWebSocketDisconnect;
 use crate::utils::{json_to_py_object, write_py_json};
 use bytes::BytesMut;
-use crate::exceptions::PyWebSocketDisconnect;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3::exceptions::PyTypeError;
@@ -67,9 +67,7 @@ async fn next_message(rx_arc: SharedRx) -> PyResult<WSMessage> {
     let mut rx = {
         let mut guard = rx_arc.lock();
         guard.take().ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "Concurrent receive operations are not supported",
-            )
+            PyRuntimeError::new_err("Concurrent receive operations are not supported")
         })?
     };
 
@@ -101,12 +99,7 @@ impl PyWebSocket {
         let state = self.handshake_state.clone();
         py_bridge::future_into_py(py, async move {
             if state
-                .compare_exchange(
-                    0,
-                    1,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
                 && let Some(sender) = decision.lock().take()
             {
@@ -195,12 +188,7 @@ impl PyWebSocket {
         let state = self.handshake_state.clone();
         py_bridge::future_into_py(py, async move {
             if state
-                .compare_exchange(
-                    0,
-                    2,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
+                .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
                 && let Some(sender) = decision.lock().take()
             {
@@ -256,7 +244,8 @@ impl PyWebSocket {
     #[getter]
     fn scope(&self, py: Python<'_>) -> Py<PyAny> {
         self.scope
-            .as_ref().map_or_else(|| py.None(), |scope| scope.clone_ref(py).into_any())
+            .as_ref()
+            .map_or_else(|| py.None(), |scope| scope.clone_ref(py).into_any())
     }
 
     fn iter_text(self_: Py<Self>) -> PyResult<Py<WSIterator>> {
@@ -292,7 +281,8 @@ fn scope_value(scope: &Option<Py<PyDict>>, py: Python<'_>, key: &str) -> Py<PyAn
     scope
         .as_ref()
         .and_then(|s| s.bind(py).get_item(key).ok())
-        .flatten().map_or_else(|| py.None(), Bound::unbind)
+        .flatten()
+        .map_or_else(|| py.None(), Bound::unbind)
 }
 
 /// Async iterator powering `iter_text()` / `iter_json()`.
@@ -324,9 +314,7 @@ impl WSIterator {
                 }
                 Ok(WSMessage::Text(bytes)) => parse_json_bytes(&bytes),
                 Ok(WSMessage::Binary(_)) => Err(expected("text", "binary")),
-                Ok(WSMessage::Close(_)) | Err(_) => {
-                    Err(PyStopAsyncIteration::new_err(()))
-                }
+                Ok(WSMessage::Close(_)) | Err(_) => Err(PyStopAsyncIteration::new_err(())),
             }
         })
     }

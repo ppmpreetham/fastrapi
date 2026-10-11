@@ -1,10 +1,10 @@
-use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
 use crate::http::responses::PyHTMLResponse;
 use crate::http::responses::PyJSONResponse;
 use crate::routing::dependencies::parse_dependencies;
 use crate::routing::params::extract_path_param_names;
 use pyo3::Bound;
+use pyo3::prelude::*;
+use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
 
 fn python_type<'py>(
     py: Python<'py>,

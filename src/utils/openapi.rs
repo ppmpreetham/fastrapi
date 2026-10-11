@@ -1,3 +1,4 @@
+use crate::types::route::SecurityKind;
 use crate::{
     FastrAPI,
     decorators::PyAPIRouter,
@@ -9,17 +10,16 @@ use crate::{
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString, PyType};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use simd_json::json;
-use simd_json::owned::Value as JsonValue;
-use simd_json::prelude::*;
-use std::collections::HashMap;
-use crate::types::route::SecurityKind;
-use regex::Regex;
 use simd_json::owned::Object;
+use simd_json::owned::Value as JsonValue;
 use simd_json::prelude::TypedScalarValue;
+use simd_json::prelude::*;
 use simd_json::serde::to_owned_value;
 use std::boxed::Box;
+use std::collections::HashMap;
 use std::result::Result;
 use std::sync::OnceLock;
 crate::cached_py_import!(ENUM_MODULE, "enum");
@@ -268,9 +268,7 @@ pub fn extract_pydantic_schema(py: Python, model: &Bound<PyAny>, mode: &str) -> 
 /// recursively removes `"default": null` entries from a json schema
 fn strip_null_defaults(schema: &mut JsonValue) {
     if schema.is_object() {
-        let drop_default = schema
-            .get("default")
-            .is_some_and(TypedScalarValue::is_null);
+        let drop_default = schema.get("default").is_some_and(TypedScalarValue::is_null);
         if drop_default && let Some(obj) = schema.as_object_mut() {
             obj.remove(&"default".to_string());
         }
@@ -294,12 +292,14 @@ fn get_schema_name(model: &Bound<PyAny>) -> String {
         .ok()
         .and_then(|name| name.extract::<String>().ok())
         .unwrap_or_else(|| {
-            model
-                .str().map_or_else(|_| "UnknownSchema".to_string(), |value| {
+            model.str().map_or_else(
+                |_| "UnknownSchema".to_string(),
+                |value| {
                     value
                         .to_string_lossy()
                         .replace(['[', ']', ' ', '\'', ','], "_")
-                })
+                },
+            )
         })
 }
 
@@ -482,7 +482,11 @@ fn python_type_to_openapi_type(
                 let items = type_hint
                     .getattr("__args__")
                     .ok()
-                    .and_then(|args| args.get_item(0).ok()).map_or_else(|| json!({ "type": "string" }), |elem| python_type_to_openapi_type(py, &elem, schemas));
+                    .and_then(|args| args.get_item(0).ok())
+                    .map_or_else(
+                        || json!({ "type": "string" }),
+                        |elem| python_type_to_openapi_type(py, &elem, schemas),
+                    );
                 return json!({ "type": "array", "items": items });
             }
             "dict" => return json!({ "type": "object" }),
@@ -497,7 +501,11 @@ fn python_type_to_openapi_type(
             let items = type_hint
                 .getattr("__args__")
                 .ok()
-                .and_then(|args| args.get_item(0).ok()).map_or_else(|| json!({ "type": "string" }), |elem| python_type_to_openapi_type(py, &elem, schemas));
+                .and_then(|args| args.get_item(0).ok())
+                .map_or_else(
+                    || json!({ "type": "string" }),
+                    |elem| python_type_to_openapi_type(py, &elem, schemas),
+                );
             return json!({ "type": "array", "items": items });
         }
 
@@ -755,7 +763,11 @@ fn build_request_body(
                 .payload
                 .parsed_params
                 .iter()
-                .find(|param| param.validator_index == Some(0)).map_or_else(|| validators[0].name.clone(), |param| param.external_name.clone());
+                .find(|param| param.validator_index == Some(0))
+                .map_or_else(
+                    || validators[0].name.clone(),
+                    |param| param.external_name.clone(),
+                );
             let wrapper_name = body_model_name(
                 handler.execution.func.bind(py),
                 &strip_converters(&route.path),
@@ -939,9 +951,7 @@ pub fn build_paths_from_routes(
                 let scope_list: Vec<JsonValue> = req.scopes.iter().map(|s| json!(s)).collect();
                 grouped.insert(compiled.name.clone(), json!(scope_list));
             }
-            operation.security = Some(vec![
-                to_owned_value(&grouped).unwrap_or_else(|_| json!({})),
-            ]);
+            operation.security = Some(vec![to_owned_value(&grouped).unwrap_or_else(|_| json!({}))]);
         }
 
         let parameters: Vec<Parameter> = handler
@@ -969,9 +979,10 @@ pub fn build_paths_from_routes(
                     return None;
                 }
 
-                let mut schema = param
-                    .annotation
-                    .as_ref().map_or_else(|| json!({"type": "string"}), |annotation| python_type_to_openapi_type(py, annotation.bind(py), schemas));
+                let mut schema = param.annotation.as_ref().map_or_else(
+                    || json!({"type": "string"}),
+                    |annotation| python_type_to_openapi_type(py, annotation.bind(py), schemas),
+                );
 
                 // fastapi puts the `examples=[...]` list on the parameter's json schema
                 if let Some(examples) = marker
@@ -1158,8 +1169,7 @@ pub fn build_paths_from_routes(
             parameters: None,
         });
 
-        let mut operation_val =
-            to_owned_value(&operation).unwrap_or_else(|_| json!({}));
+        let mut operation_val = to_owned_value(&operation).unwrap_or_else(|_| json!({}));
 
         if let Some(extra) = &route.openapi_extra {
             deep_merge_json(&mut operation_val, extra.clone());
@@ -1229,8 +1239,7 @@ pub fn parse_callbacks_to_json(
                 );
 
                 for (path, path_item) in paths {
-                    let value =
-                        to_owned_value(&path_item).unwrap_or_else(|_| json!({}));
+                    let value = to_owned_value(&path_item).unwrap_or_else(|_| json!({}));
                     callbacks_map.insert(path, value);
                 }
             }
@@ -1256,8 +1265,7 @@ pub fn parse_callbacks_to_json(
                         );
 
                         for (path, path_item) in paths {
-                            let value = to_owned_value(&path_item)
-                                .unwrap_or_else(|_| json!({}));
+                            let value = to_owned_value(&path_item).unwrap_or_else(|_| json!({}));
                             inner_map.insert(path, value);
                         }
                     }

@@ -1,11 +1,11 @@
 use crate::ffi::exceptions::PyHTTPException;
 use crate::http::request::PyRequest;
+use pyo3::Py;
+use pyo3::PyErr;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use pyo3::types::PyString;
-use pyo3::Py;
-use pyo3::PyErr;
 
 #[pyclass(
     name = "OAuth2PasswordRequestForm",

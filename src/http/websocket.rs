@@ -15,18 +15,18 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 use tracing::error;
 
+use crate::error::FastRapiError;
+use crate::globals::serve_app;
+use crate::globals::spawn;
 pub use crate::http::ws_python::PyWebSocket;
+use crate::http::ws_python::WSDecision;
 use crate::http::ws_python::WSMessage;
+use crate::routing::types::RequestInput;
+use crate::runtime::executor::execute_teardowns_async;
 use axum::extract::ConnectInfo;
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::Response;
-use crate::error::FastRapiError;
-use crate::globals::serve_app;
-use crate::globals::spawn;
-use crate::http::ws_python::WSDecision;
-use crate::routing::types::RequestInput;
-use crate::runtime::executor::execute_teardowns_async;
 use parking_lot::Mutex;
 use pyo3::types::PyList;
 use smallvec::SmallVec;
@@ -146,7 +146,9 @@ pub async fn ws_handler(
         }
     })
     .await;
-    let decision = if let Ok(Some(decision)) = decision { decision } else {
+    let decision = if let Ok(Some(decision)) = decision {
+        decision
+    } else {
         execute_teardowns_async(&route.async_loop, teardowns).await;
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -208,9 +210,7 @@ async fn handle_connection(
     }
     Python::attach(|py| {
         if let Ok(websocket) = py_ws_obj.try_borrow(py) {
-            websocket
-                .is_connected
-                .store(false, Ordering::Release);
+            websocket.is_connected.store(false, Ordering::Release);
         }
     });
     execute_teardowns_async(&route.async_loop, teardowns).await;
@@ -258,11 +258,7 @@ fn match_path_params(
     ranges
 }
 
-fn build_scope(
-    py: Python<'_>,
-    parts: &Parts,
-    input: &RequestInput<'_>,
-) -> Py<PyDict> {
+fn build_scope(py: Python<'_>, parts: &Parts, input: &RequestInput<'_>) -> Py<PyDict> {
     let scope = PyDict::new(py);
     _ = scope.set_item("type", "websocket");
     _ = scope.set_item("path", parts.uri.path());
@@ -287,10 +283,7 @@ fn build_scope(
     } else {
         _ = scope.set_item("app", py.None());
     }
-    if let Some(connect) = parts
-        .extensions
-        .get::<ConnectInfo<SocketAddr>>()
-    {
+    if let Some(connect) = parts.extensions.get::<ConnectInfo<SocketAddr>>() {
         _ = scope.set_item("client", (connect.0.ip().to_string(), connect.0.port()));
     } else {
         _ = scope.set_item("client", py.None());

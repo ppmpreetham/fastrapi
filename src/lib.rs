@@ -192,14 +192,14 @@ mod fastrapi {
     #[pymodule_export]
     use crate::PySecurityScopes as SecurityScopes;
 
+    #[pymodule_export]
+    use crate::PyInstrumentator as Instrumentator;
     use crate::ffi::compat::register_compat_modules;
     use crate::ffi::encoders;
     use crate::ffi::kernel_validation::kernel_validation_count;
     use crate::ffi::openapi;
     use crate::pydantic::register_pydantic_integration;
     use crate::status::create_status_submodule;
-    #[pymodule_export]
-    use crate::PyInstrumentator as Instrumentator;
 
     #[pymodule]
     mod responses {
@@ -223,11 +223,11 @@ mod fastrapi {
 
     #[pymodule]
     mod sse {
-        use crate::http::sse::register_sse_api;
         #[pymodule_export]
         use crate::PyEventSourceResponse as EventSourceResponse;
         #[pymodule_export]
         use crate::PyServerSentEvent as ServerSentEvent;
+        use crate::http::sse::register_sse_api;
         use pyo3::prelude::*;
 
         #[pymodule_init]
@@ -291,8 +291,8 @@ mod fastrapi {
         use crate::ffi::routing::register;
         #[pymodule_export]
         use crate::ffi::routing::{
-            iter_route_contexts, PyAPIRoute as APIRoute, PyAPIWebSocketRoute as APIWebSocketRoute,
-            PyRouteContext as RouteContext,
+            PyAPIRoute as APIRoute, PyAPIWebSocketRoute as APIWebSocketRoute,
+            PyRouteContext as RouteContext, iter_route_contexts,
         };
 
         #[pymodule_init]
