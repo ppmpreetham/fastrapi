@@ -57,9 +57,9 @@ use pyo3::types::PyString;
 
 pub(crate) fn build_router(
     py: Python,
-    app_state: AppState,
-    docs_url: Option<String>,
-    openapi_url: Option<String>,
+    app_state: &AppState,
+    docs_url: Option<&str>,
+    openapi_url: Option<&str>,
     app_config: &FastrAPI,
 ) -> Router {
     let mut middlewares = app_config.middlewares.clone();
@@ -69,7 +69,7 @@ pub(crate) fn build_router(
     {
         let mut base_mut = base_router.borrow_mut();
         if base_mut.dependencies.is_none() {
-            base_mut.dependencies = app_config.dependencies.clone();
+            base_mut.dependencies.clone_from(&app_config.dependencies);
         }
     }
     if let Some(handlers) = &app_config.exception_handlers
@@ -92,7 +92,7 @@ pub(crate) fn build_router(
         {
             let mut sub_mut = sub_router.borrow_mut();
             if sub_mut.dependencies.is_none() {
-                sub_mut.dependencies = sub_ref.dependencies.clone();
+                sub_mut.dependencies.clone_from(&sub_ref.dependencies);
             }
         }
         sub_router.borrow().freeze(py);
@@ -155,14 +155,14 @@ pub(crate) fn build_router(
         let host = route.host.clone().map(Arc::from);
         frozen_router_builder.add_route(
             route.method,
-            route.path.clone(),
+            &route.path,
             route.handler.clone(),
             host.clone(),
         );
         if route.method == HttpMethod::GET {
             frozen_router_builder.add_route(
                 HttpMethod::HEAD,
-                route.path.clone(),
+                &route.path,
                 route.handler.clone(),
                 host,
             );
@@ -171,13 +171,13 @@ pub(crate) fn build_router(
     let frozen_router = Arc::new(frozen_router_builder.build());
 
     let app = Router::new();
-    let app = register_routes(app, py, &app_state, app_config, &flat, frozen_router);
+    let app = register_routes(app, py, app_state, app_config, &flat, frozen_router);
     let app = register_docs_endpoints(
         app,
         py,
         app_config,
-        docs_url.as_deref(),
-        openapi_url.as_deref(),
+        docs_url,
+        openapi_url,
     );
     middleware_stack::build_stack(app, app_config, &middlewares, app_state.pick_loop())
 }
@@ -261,7 +261,7 @@ fn register_routes(
     app = app.method_not_allowed_fallback(move |req: Request| {
         let router = method_router.clone();
         let root = method_root.clone();
-        async move { method_not_allowed_response((*router).clone(), root, req) }
+        async move { method_not_allowed_response(&router, &root, &req) }
     });
 
     app.fallback({
@@ -294,13 +294,13 @@ fn not_found_response() -> Response {
 }
 
 /// 405
-fn method_not_allowed_response(router: FrozenRouter, root: Arc<str>, request: Request) -> Response {
+fn method_not_allowed_response(router: &FrozenRouter, root: &str, request: &Request) -> Response {
     let host = request
         .headers()
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.split(':').next().unwrap_or(value));
-    let path = dispatch_path_with_root(root.as_ref(), request.uri().path())
+    let path = dispatch_path_with_root(root, request.uri().path())
         .unwrap_or(request.uri().path());
     let allow = router
         .allowed_methods(path, host)
@@ -426,13 +426,13 @@ fn merge_declared_middlewares(
 
     iter.flatten().for_each(|item| {
         if let Err(err) = apply_declared_middleware(py, &item, container) {
-            log_python_error("middleware setup failed", err);
+            log_python_error("middleware setup failed", &err);
         }
     });
 }
 
 pub(crate) fn apply_declared_middleware(
-    _py: Python<'_>,
+    py: Python<'_>,
     middleware_item: &Bound<'_, PyAny>,
     container: &mut MiddlewareContainer,
 ) -> PyResult<()> {
@@ -459,7 +459,7 @@ pub(crate) fn apply_declared_middleware(
         builder.parse_kwargs(kwargs, container)?;
         container.record_layer(&class_name);
     } else {
-        let py_middleware = PyMiddleware::new(_py, cls.clone().unbind());
+        let py_middleware = PyMiddleware::new(py, cls.clone().unbind());
         container.py_middlewares.push(Arc::new(py_middleware));
     }
 

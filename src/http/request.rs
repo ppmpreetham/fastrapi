@@ -410,7 +410,7 @@ impl PyHTTPConnection {
         Ok(scope.call_method0(intern!(py, "items"))?.into())
     }
 
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+    fn __repr__(&self, py: Python<'_>) -> String {
         let scope = self.scope.bind(py);
         let type_str: String = scope
             .get_item(intern!(py, "type"))
@@ -426,13 +426,9 @@ impl PyHTTPConnection {
             .unwrap_or_default();
 
         if method_str.is_empty() {
-            Ok(format!(
-                "HTTPConnection(type={type_str:?}, path={path_str:?})"
-            ))
+            format!("HTTPConnection(type={type_str:?}, path={path_str:?})")
         } else {
-            Ok(format!(
-                "HTTPConnection(type={type_str:?}, method={method_str:?}, path={path_str:?})"
-            ))
+            format!("HTTPConnection(type={type_str:?}, method={method_str:?}, path={path_str:?})")
         }
     }
 
@@ -546,7 +542,7 @@ pub(crate) fn create_stub_request(py: Python<'_>) -> PyResult<Py<PyAny>> {
 pub struct PyRequest {
     #[pyo3(get, set)]
     pub send: Py<PyAny>,
-    pub(crate) _body: Arc<OnceCell<Arc<[u8]>>>,
+    pub(crate) body_cache: Arc<OnceCell<Arc<[u8]>>>,
     pub(crate) raw_headers: Option<Arc<HeaderMap>>,
 }
 
@@ -563,12 +559,12 @@ impl PyRequest {
         };
         let req = PyRequest {
             send: py.None(),
-            _body: Arc::new(OnceCell::new()),
+            body_cache: Arc::new(OnceCell::new()),
             raw_headers: headers,
         };
 
         if let Some(bytes) = raw_body.into() {
-            _ = req._body.set(bytes.into());
+            _ = req.body_cache.set(bytes.into());
         }
 
         let initializer = PyClassInitializer::from(conn).add_subclass(req);
@@ -611,7 +607,7 @@ impl PyRequest {
         py: Python<'py>,
         conn: &PyHTTPConnection,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if let Some(bytes) = self._body.get() {
+        if let Some(bytes) = self.body_cache.get() {
             let payload = PyBytes::new(py, bytes).into_any().unbind();
             return py_bridge::future_into_py(py, async move { Ok(payload) });
         }
@@ -634,7 +630,7 @@ impl PyRequest {
 
         let content_length = extract_content_length(scope_any);
         let receive = conn.receive.clone();
-        let body_cell = self._body.clone();
+        let body_cell = self.body_cache.clone();
         let locals = py_bridge::get_current_locals(py)?;
 
         py_bridge::future_into_py_with_locals(py, locals.clone(), async move {
@@ -680,7 +676,7 @@ impl PyRequest {
         let conn = PyHTTPConnection::new(py, scope, receive)?;
         let req = Self {
             send: send.unwrap_or_else(|| py.None()),
-            _body: Arc::new(OnceCell::new()),
+            body_cache: Arc::new(OnceCell::new()),
             raw_headers: None,
         };
         Ok(PyClassInitializer::from(conn).add_subclass(req))
@@ -754,7 +750,7 @@ impl PyRequest {
         let content_type = form::content_type_of(py, conn_borrow.scope.bind(py));
         let locals = py_bridge::get_current_locals(py)?;
         let body_fut = py_bridge::into_future_with_locals(&locals, body_awaitable)?;
-        let body_cell = req_borrow._body.clone();
+        let body_cell = req_borrow.body_cache.clone();
 
         py_bridge::future_into_py_with_locals(py, locals, async move {
             let body_bytes: Py<PyAny> = body_fut.await?;
@@ -783,7 +779,7 @@ impl PyRequest {
     fn form_sync<'py>(self_: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let conn: &Bound<'py, PyHTTPConnection> = self_.as_super();
         let request = self_.borrow();
-        let raw = request._body.get().cloned().unwrap_or_default();
+        let raw = request.body_cache.get().cloned().unwrap_or_default();
         let content_type = form::content_type_of(py, conn.borrow().scope.bind(py));
         if content_type.starts_with("multipart/form-data") {
             let parsed = if let Ok(handle) = Handle::try_current() {
@@ -812,7 +808,7 @@ impl PyRequest {
         kwargs.set_item("receive", conn.borrow().receive.clone_ref(py))?;
         kwargs.set_item("send", self_.borrow().send.clone_ref(py))?;
         let starlette = request.call((conn.borrow().scope.clone_ref(py),), Some(&kwargs))?;
-        if let Some(body) = self_.borrow()._body.get() {
+        if let Some(body) = self_.borrow().body_cache.get() {
             starlette.setattr("_body", PyBytes::new(py, body.as_ref()))?;
         }
         starlette.call_method0("stream")
@@ -832,7 +828,7 @@ impl PyRequest {
         starlette.call_method1("send_push_promise", (path,))
     }
 
-    fn __repr__(self_: &Bound<'_, Self>) -> PyResult<String> {
+    fn __repr__(self_: &Bound<'_, Self>) -> String {
         let conn: &Bound<'_, PyHTTPConnection> = self_.as_super();
         let scope = conn.borrow().scope.bind(self_.py()).clone();
         let method: String = scope
@@ -843,6 +839,6 @@ impl PyRequest {
             .get_item(intern!(self_.py(), "path"))
             .and_then(|p| p.extract())
             .unwrap_or_else(|_| String::new());
-        Ok(format!("Request(method={method:?}, path={path:?})"))
+        format!("Request(method={method:?}, path={path:?})")
     }
 }

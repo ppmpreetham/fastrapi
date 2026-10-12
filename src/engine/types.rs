@@ -57,6 +57,10 @@ pub(crate) struct OpenApiCacheEntry {
     pub dict: Py<PyAny>,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "FastAPI application options require multiple boolean configuration flags"
+)]
 #[pyclass(name = "FastrAPI")]
 pub struct FastrAPI {
     #[pyo3(get, set)]

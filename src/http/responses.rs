@@ -931,7 +931,7 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
                 match chunk {
                     Ok(Some(b)) => yield Ok::<_, Infallible>(b),
                     Ok(None) => break,
-                    Err(()) => continue,
+                    Err(()) => {}
                 }
             }
         }
@@ -1074,7 +1074,7 @@ fn file_stream(
 ) -> Body {
     Body::from_stream(async_stream::stream! {
         let Ok(mut file) = File::open(path).await else { return; };
-        let mut buffer = [0_u8; 64 * 1024];
+        let mut buffer = vec![0_u8; 64 * 1024];
         for range in ranges {
             if let Some(boundary) = &boundary {
                 yield Ok::<bytes::Bytes, Infallible>(Bytes::from(format!("--{boundary}\r\nContent-Type: {content_type}\r\nContent-Range: bytes {}-{}\r\n\r\n", range.start(), range.end())));

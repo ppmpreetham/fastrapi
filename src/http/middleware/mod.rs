@@ -15,6 +15,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyIterator, PyList, PyString, PyType};
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::str;
 use std::sync::Arc;
 use tracing::error;
@@ -294,11 +295,11 @@ impl PyLazyHeaders {
             if i > 0 {
                 out.push_str(", ");
             }
-            out.push_str(&format!(
-                "b'{}': b'{}'",
-                name,
+            let _ = write!(
+                out,
+                "b'{name}': b'{}'",
                 String::from_utf8_lossy(value.as_bytes())
-            ));
+            );
         }
         out.push_str("})");
         out
@@ -365,7 +366,7 @@ pub struct PreparedMiddlewares {
 
 impl PreparedMiddlewares {
     #[must_use]
-    pub fn new(middlewares: Arc<Vec<Arc<PyMiddleware>>>) -> Self {
+    pub fn new(middlewares: &[Arc<PyMiddleware>]) -> Self {
         let (context, call_next): (Vec<Arc<PyMiddleware>>, Vec<Arc<PyMiddleware>>) = middlewares
             .iter()
             .filter(|mw| mw.kind != PyMiddlewareKind::Asgi)
@@ -398,7 +399,7 @@ pub async fn execute_py_middleware(
     next: Next,
     async_loop: Arc<Py<PyAny>>,
 ) -> Response {
-    let prepared = Arc::new(PreparedMiddlewares::new(Arc::new(vec![middleware])));
+    let prepared = Arc::new(PreparedMiddlewares::new(&[middleware]));
     execute_py_middlewares(prepared, request, next, async_loop).await
 }
 

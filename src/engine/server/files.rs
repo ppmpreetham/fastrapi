@@ -204,9 +204,8 @@ fn frontend_match<'a, 'p>(
 }
 
 async fn static_request_hits_symlink(directory: &Path, request_path: &str, html: bool) -> bool {
-    let decoded = match percent_encoding::percent_decode_str(request_path).decode_utf8() {
-        Ok(decoded) => decoded,
-        Err(_) => return false,
+    let Ok(decoded) = percent_encoding::percent_decode_str(request_path).decode_utf8() else {
+        return false;
     };
     if symlink_metadata(directory)
         .await

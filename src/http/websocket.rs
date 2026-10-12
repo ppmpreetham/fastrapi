@@ -109,10 +109,10 @@ pub async fn ws_handler(
             .call_method1("signature", (route.handler.bind(py),))?
             .getattr("parameters")?;
         for name in route.param_names.iter() {
-            if parameters.contains(name.as_ref())?
+            if parameters.contains(&**name)?
                 && let Some(value) = request_input.get_path_param(name)
             {
-                kwargs.set_item(name.as_ref(), value)?;
+                kwargs.set_item(&**name, value)?;
             }
         }
 
@@ -146,9 +146,7 @@ pub async fn ws_handler(
         }
     })
     .await;
-    let decision = if let Ok(Some(decision)) = decision {
-        decision
-    } else {
+    let Ok(Some(decision)) = decision else {
         execute_teardowns_async(&route.async_loop, teardowns).await;
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -160,9 +158,8 @@ pub async fn ws_handler(
             StatusCode::FORBIDDEN.into_response()
         }
         WSDecision::Accept => {
-            let (response, fut) = match ws.upgrade() {
-                Ok(result) => result,
-                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            let Ok((response, fut)) = ws.upgrade() else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             };
             let connection_route = route.clone();
             spawn(async move {
@@ -321,8 +318,7 @@ async fn socket_pump(
                         ws.write_frame(Frame::pong(payload_into_owned(frame.payload)))
                             .await?;
                     }
-                    OpCode::Pong => {}
-                    _ => {}
+                    OpCode::Pong | OpCode::Continuation => {}
                 }
             }
 

@@ -72,7 +72,7 @@ impl PyAPIRouter {
     #[pyo3(signature = (*, prefix=String::new(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None, route_class=None))]
     fn new(
         prefix: String,
-        tags: Option<Py<PyAny>>,
+        tags: Option<&Bound<'_, PyAny>>,
         dependencies: Option<Py<PyAny>>,
         responses: Option<Py<PyAny>>,
         deprecated: Option<bool>,
@@ -81,15 +81,13 @@ impl PyAPIRouter {
         generate_unique_id_function: Option<Py<PyAny>>,
         route_class: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
-        let tag_vec = Python::attach(|py| {
-            tags.as_ref()
-                .and_then(|obj| obj.bind(py).try_iter().ok())
-                .map(|iter| {
-                    iter.filter_map(|item| item.ok()?.extract::<String>().ok())
-                        .collect()
-                })
-                .unwrap_or_default()
-        });
+        let tag_vec = tags
+            .and_then(|obj| obj.try_iter().ok())
+            .map(|iter| {
+                iter.filter_map(|item| item.ok()?.extract::<String>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         if let Some(rc) = &route_class {
             let is_type = Python::attach(|py| rc.bind(py).is_instance_of::<PyType>());
@@ -132,8 +130,8 @@ impl PyAPIRouter {
     fn add_api_route(
         &self,
         py: Python<'_>,
-        path: String,
-        endpoint: Bound<'_, PyAny>,
+        path: &str,
+        endpoint: &Bound<'_, PyAny>,
         response_model: Option<Py<PyAny>>,
         status_code: Option<u16>,
         tags: Option<Py<PyAny>>,
@@ -171,7 +169,7 @@ impl PyAPIRouter {
             openapi_extra,
             generate_unique_id_function,
         );
-        self.add_api_route_impl(py, path, &endpoint, methods, &kwargs)
+        self.add_api_route_impl(py, path, endpoint, methods, &kwargs)
     }
 
     #[pyo3(signature = (path))]

@@ -23,9 +23,9 @@ pub(crate) struct ReloadConfig {
 pub(crate) fn run_reload_supervisor(
     executable: &str,
     argv: &[String],
-    config: ReloadConfig,
+    config: &ReloadConfig,
 ) -> Result<(), String> {
-    let ignore_globs = build_reload_ignore_globs(&config)?;
+    let ignore_globs = build_reload_ignore_globs(config)?;
     let (tx, rx) = channel();
     let mut watcher = RecommendedWatcher::new(
         move |event| {
@@ -56,7 +56,7 @@ pub(crate) fn run_reload_supervisor(
 
         match rx.recv_timeout(debounce) {
             Ok(Ok(event)) => {
-                if !reload_event_matches(&event, &config, &ignore_globs) {
+                if !reload_event_matches(&event, config, ignore_globs.as_ref()) {
                     continue;
                 }
                 println!("Python file change detected, restarting server...");
@@ -94,7 +94,7 @@ pub(crate) fn stop_child(child: &mut Child) {
 pub(crate) fn reload_event_matches(
     event: &notify::Event,
     config: &ReloadConfig,
-    ignore_globs: &Option<GlobSet>,
+    ignore_globs: Option<&GlobSet>,
 ) -> bool {
     event.paths.iter().any(|path| {
         path.extension().and_then(|ext| ext.to_str()) == Some("py")
@@ -105,7 +105,7 @@ pub(crate) fn reload_event_matches(
 pub(crate) fn is_reload_ignored(
     path: &Path,
     config: &ReloadConfig,
-    ignore_globs: &Option<GlobSet>,
+    ignore_globs: Option<&GlobSet>,
 ) -> bool {
     if path.ancestors().any(is_default_reload_ignored_dir) {
         return true;
@@ -132,9 +132,7 @@ pub(crate) fn is_reload_ignored(
         return true;
     }
 
-    ignore_globs
-        .as_ref()
-        .is_some_and(|globs| globs.is_match(path))
+    ignore_globs.is_some_and(|globs| globs.is_match(path))
 }
 
 fn is_default_reload_ignored_dir(path: &Path) -> bool {

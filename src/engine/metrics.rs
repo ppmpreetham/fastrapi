@@ -49,7 +49,7 @@ impl PyInstrumentator {
     }
 
     #[pyo3(signature = (app, endpoint = "/metrics"))]
-    fn expose(slf: Py<Self>, app: Bound<'_, FastrAPI>, endpoint: &str) -> PyResult<Py<Self>> {
+    fn expose(slf: Py<Self>, app: &Bound<'_, FastrAPI>, endpoint: &str) -> PyResult<Py<Self>> {
         if !endpoint.starts_with('/') {
             return Err(PyValueError::new_err(
                 "Prometheus metrics endpoint must start with '/'",

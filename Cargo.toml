@@ -105,17 +105,26 @@ future-incompatible = "warn"
 nonstandard-style = "warn"
 
 [lints.clippy]
-all = "warn"
+all = { level = "warn", priority = -2 }
+pedantic = { level = "warn", priority = -2 }
+perf = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
 redundant_clone = "warn"
-pedantic = "warn"
 inline_always = "allow"
 unseparated_literal_suffix = "allow"
 similar_names = "allow"
 missing_panics_doc = "allow"
 missing_errors_doc = "allow"
-absolute_paths = "deny"
-perf = { level = "warn", priority = -1 }
-complexity = { level = "warn", priority = -1 }
+absolute_paths = "allow"
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+too_many_lines = "allow"
+unused_self = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+unreadable_literal = "allow"
+implicit_hasher = "allow"
 
 [package.metadata.maturin]
 generate-stubs = true

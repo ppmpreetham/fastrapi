@@ -210,14 +210,14 @@ mod fastrapi {
             PyEventSourceResponse as EventSourceResponse, PyFileResponse as FileResponse,
             PyHTMLResponse as HTMLResponse, PyJSONResponse as JSONResponse,
             PyORJSONResponse as ORJSONResponse, PyPlainTextResponse as PlainTextResponse,
-            PyRedirectResponse as RedirectResponse, PyStreamingResponse as StreamingResponse,
-            PyUJSONResponse as UJSONResponse,
+            PyRedirectResponse as RedirectResponse, PyResponse,
+            PyStreamingResponse as StreamingResponse, PyUJSONResponse as UJSONResponse,
         };
 
         #[pymodule_init]
         fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
             let py = m.py();
-            m.add("Response", py.get_type::<crate::responses::PyResponse>())
+            m.add("Response", py.get_type::<PyResponse>())
         }
     }
 
@@ -478,6 +478,7 @@ mod fastrapi {
 
     #[pymodule]
     mod websocket {
+        use crate::exceptions::{PyWebSocketDisconnect, PyWebSocketException};
         use pyo3::prelude::*;
 
         #[pymodule_export]
@@ -488,12 +489,9 @@ mod fastrapi {
             let py = m.py();
             m.add(
                 "WebSocketDisconnect",
-                py.get_type::<crate::exceptions::PyWebSocketDisconnect>(),
+                py.get_type::<PyWebSocketDisconnect>(),
             )?;
-            m.add(
-                "WebSocketException",
-                py.get_type::<crate::exceptions::PyWebSocketException>(),
-            )?;
+            m.add("WebSocketException", py.get_type::<PyWebSocketException>())?;
             if let Ok(value) = py
                 .import("starlette.websockets")
                 .and_then(|module| module.getattr("WebSocketState"))
@@ -506,12 +504,18 @@ mod fastrapi {
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        use crate::exceptions::{PyWebSocketDisconnect, PyWebSocketException};
+        use crate::ffi::routing;
+        use crate::responses::PyResponse;
+        use crate::templating::PyJinja2Templates;
+        use crate::websocket::PyWebSocket;
+
         let py = m.py();
         m.setattr("__package__", "fastrapi")?;
         m.setattr("__path__", PyList::empty(py))?;
         m.add("FastAPI", py.get_type::<crate::FastrAPI>())?;
         m.add("FastrAPI", py.get_type::<crate::FastrAPI>())?;
-        m.add("Response", py.get_type::<crate::responses::PyResponse>())?;
+        m.add("Response", py.get_type::<PyResponse>())?;
         m.add(
             "Middleware",
             py.import("starlette.middleware")?.getattr("Middleware")?,
@@ -531,12 +535,9 @@ mod fastrapi {
             py.import("starlette.testclient")?.getattr("TestClient")?,
         )?;
 
-        m.add(
-            "Jinja2Templates",
-            py.get_type::<crate::templating::PyJinja2Templates>(),
-        )?;
+        m.add("Jinja2Templates", py.get_type::<PyJinja2Templates>())?;
         let templating = PyModule::new(py, "templating")?;
-        templating.add_class::<crate::templating::PyJinja2Templates>()?;
+        templating.add_class::<PyJinja2Templates>()?;
         m.add_submodule(&templating)?;
         let testclient = PyModule::new(py, "testclient")?;
         testclient.add(
@@ -549,15 +550,12 @@ mod fastrapi {
         applications.add("FastAPI", py.get_type::<crate::FastrAPI>())?;
         m.add_submodule(&applications)?;
         let websockets = PyModule::new(py, "websockets")?;
-        websockets.add("WebSocket", py.get_type::<crate::websocket::PyWebSocket>())?;
+        websockets.add("WebSocket", py.get_type::<PyWebSocket>())?;
         websockets.add(
             "WebSocketDisconnect",
-            py.get_type::<crate::exceptions::PyWebSocketDisconnect>(),
+            py.get_type::<PyWebSocketDisconnect>(),
         )?;
-        websockets.add(
-            "WebSocketException",
-            py.get_type::<crate::exceptions::PyWebSocketException>(),
-        )?;
+        websockets.add("WebSocketException", py.get_type::<PyWebSocketException>())?;
         if let Ok(value) = py
             .import("starlette.websockets")
             .and_then(|module| module.getattr("WebSocketState"))
@@ -586,7 +584,7 @@ mod fastrapi {
         openapi::register(m)?;
         register_pydantic_integration(m)?;
         super::register_asyncio_alias(m)?;
-        crate::ffi::routing::register(m)?;
+        routing::register(m)?;
         // fastrapi.jsonable_encoder + fastrapi.encoders.jsonable_encoder
         encoders::register(m)?;
         register_compat_modules(m)?;

@@ -182,62 +182,62 @@ impl PyServerSentEvent {
         Ok(result.unbind())
     }
 
-    #[pyo3(signature = (*_args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs))]
     fn model_dump_json(
         &self,
         py: Python<'_>,
-        _args: &Bound<'_, PyTuple>,
+        args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<String> {
-        let dumped = self.model_dump(py, _args, kwargs)?;
+        let dumped = self.model_dump(py, args, kwargs)?;
         py.import("json")?
             .getattr("dumps")?
             .call1((dumped.bind(py),))?
             .extract()
     }
 
-    #[pyo3(signature = (*_args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs))]
     fn dict(
         &self,
         py: Python<'_>,
-        _args: &Bound<'_, PyTuple>,
+        args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyDict>> {
-        self.model_dump(py, _args, kwargs)
+        self.model_dump(py, args, kwargs)
     }
 
-    #[pyo3(signature = (*_args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs))]
     fn json(
         &self,
         py: Python<'_>,
-        _args: &Bound<'_, PyTuple>,
+        args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<String> {
-        self.model_dump_json(py, _args, kwargs)
+        self.model_dump_json(py, args, kwargs)
     }
 
-    #[pyo3(signature = (*_args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs))]
     fn copy(
         &self,
         py: Python<'_>,
-        _args: &Bound<'_, PyTuple>,
+        args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        self.model_copy(py, _args, kwargs)
+        self.model_copy(py, args, kwargs)
     }
 
-    #[pyo3(signature = (*_args, **kwargs))]
+    #[pyo3(signature = (*args, **kwargs))]
     fn model_copy(
         &self,
         py: Python<'_>,
-        _args: &Bound<'_, PyTuple>,
+        args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         let deep = kwargs
             .and_then(|value| value.get_item("deep").ok().flatten())
             .and_then(|value| value.extract::<bool>().ok())
             .unwrap_or(false);
-        let data = self.model_dump(py, _args, None)?;
+        let data = self.model_dump(py, args, None)?;
         if let Some(kwargs) = kwargs
             && let Some(update) = kwargs.get_item("update")?
             && !update.is_none()
@@ -262,13 +262,13 @@ impl PyServerSentEvent {
     fn model_post_init(&self, _context: &Bound<'_, PyAny>) {}
 
     #[classmethod]
-    fn model_validate(_cls: &Bound<'_, PyType>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn model_validate(cls: &Bound<'_, PyType>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(event) = value.cast::<PyServerSentEvent>() {
             return Ok(event.clone().unbind().into_any());
         }
         let dict = value.cast::<PyDict>()?;
         let kwargs = dict.copy()?.into_any().cast_into::<PyDict>()?;
-        _cls.call((), Some(&kwargs)).map(Bound::unbind)
+        cls.call((), Some(&kwargs)).map(Bound::unbind)
     }
 }
 

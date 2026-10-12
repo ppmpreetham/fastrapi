@@ -6,8 +6,8 @@ use pyo3::prelude::Python;
 
 impl PyAPIRouter {
     #[inline]
-    fn _router<'a>(&'a self, _py: Python<'_>) -> &'a PyAPIRouter {
+    fn router_ref<'a>(&'a self, _py: Python<'_>) -> &'a PyAPIRouter {
         self
     }
 }
-crate::generate_http_methods!(PyAPIRouter, _router);
+crate::generate_http_methods!(PyAPIRouter, router_ref);

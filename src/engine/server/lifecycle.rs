@@ -42,7 +42,7 @@ fn spawn_loop_thread(py: Python<'_>, event_loop: &Py<PyAny>) -> PyResult<()> {
                 _ = asyncio.call_method1("set_event_loop", (&event_loop,));
             }
             if let Err(err) = event_loop.call_method0("run_forever") {
-                log_python_error("python async loop stopped with error", err);
+                log_python_error("python async loop stopped with error", &err);
             }
             _ = event_loop.call_method0("close");
         });
@@ -62,17 +62,17 @@ pub(crate) fn stop_background_asyncio_loop(py: Python<'_>, pool: &AsyncLoopPool)
 
 pub(crate) fn run_startup_phase(
     py: Python<'_>,
-    app: Py<FastrAPI>,
+    app: &Py<FastrAPI>,
     lifespan: Option<Py<PyAny>>,
     on_startup: Option<Py<PyAny>>,
     event_loop: &Py<PyAny>,
 ) -> PyResult<Option<EnteredLifespan>> {
     if let Some(lifespan_handler) = lifespan {
-        return enter_lifespan(py, app, lifespan_handler, event_loop).map(Some);
+        return enter_lifespan(py, app, &lifespan_handler, event_loop).map(Some);
     }
 
     if let Some(startup_handlers) = on_startup {
-        run_lifecycle_handlers(py, startup_handlers, event_loop)?;
+        run_lifecycle_handlers(py, &startup_handlers, event_loop)?;
     }
 
     Ok(None)
@@ -85,23 +85,23 @@ pub(crate) fn run_shutdown_phase(
     event_loop: &Py<PyAny>,
 ) -> PyResult<()> {
     if let Some(entered) = entered_lifespan {
-        return exit_lifespan(py, entered);
+        return exit_lifespan(py, &entered);
     }
 
     if let Some(shutdown_handlers) = on_shutdown {
-        run_lifecycle_handlers(py, shutdown_handlers, event_loop)?;
+        run_lifecycle_handlers(py, &shutdown_handlers, event_loop)?;
     }
 
     Ok(())
 }
 pub(crate) fn run_lifecycle_handlers(
     py: Python<'_>,
-    handlers: Py<PyAny>,
+    handlers: &Py<PyAny>,
     event_loop: &Py<PyAny>,
 ) -> PyResult<()> {
-    extract_lifecycle_handlers(py, &handlers)?
+    extract_lifecycle_handlers(py, handlers)?
         .into_iter()
-        .try_for_each(|handler| run_lifecycle_handler(py, handler, event_loop))
+        .try_for_each(|handler| run_lifecycle_handler(py, &handler, event_loop))
 }
 
 pub(crate) fn extract_lifecycle_handlers(
@@ -130,7 +130,7 @@ pub(crate) fn extract_lifecycle_handlers(
 
 pub(crate) fn run_lifecycle_handler(
     py: Python<'_>,
-    handler: Py<PyAny>,
+    handler: &Py<PyAny>,
     event_loop: &Py<PyAny>,
 ) -> PyResult<()> {
     let handler_bound = handler.bind(py);
@@ -152,8 +152,8 @@ pub(crate) fn run_lifecycle_handler(
 
 pub(crate) fn enter_lifespan(
     py: Python<'_>,
-    app: Py<FastrAPI>,
-    lifespan: Py<PyAny>,
+    app: &Py<FastrAPI>,
+    lifespan: &Py<PyAny>,
     event_loop: &Py<PyAny>,
 ) -> PyResult<EnteredLifespan> {
     let manager = lifespan.bind(py).call1((app.clone_ref(py),))?;
@@ -174,7 +174,7 @@ pub(crate) fn enter_lifespan(
     })
 }
 
-pub(crate) fn exit_lifespan(py: Python<'_>, entered_lifespan: EnteredLifespan) -> PyResult<()> {
+pub(crate) fn exit_lifespan(py: Python<'_>, entered_lifespan: &EnteredLifespan) -> PyResult<()> {
     let event_loop = entered_lifespan.event_loop.bind(py);
 
     let awaitable = entered_lifespan
@@ -198,7 +198,7 @@ pub(crate) fn run_awaitable_in_loop(
     py.detach(|| PYTHON_RUNTIME.block_on(future))
 }
 
-pub(crate) fn log_python_error(context: &str, err: PyErr) {
+pub(crate) fn log_python_error(context: &str, err: &PyErr) {
     error!("{}: {}", context, err);
     Python::attach(|py| err.print(py));
 }

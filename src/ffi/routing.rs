@@ -226,11 +226,10 @@ impl PyAPIRoute {
         }
     }
 
-    fn get_route_handler(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(slf
-            .as_any()
+    fn get_route_handler(slf: &Bound<'_, Self>, py: Python<'_>) -> Py<PyAny> {
+        slf.as_any()
             .getattr("endpoint")
-            .map_or_else(|_| py.None(), Bound::unbind))
+            .map_or_else(|_| py.None(), Bound::unbind)
     }
 
     fn handle<'py>(
@@ -251,8 +250,8 @@ impl PyAPIRoute {
         delegate.call_method1("handle", (scope, receive, send))
     }
 
-    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
-        Ok(format!("APIRoute(path={})", slf.borrow().path))
+    fn __repr__(slf: &Bound<'_, Self>) -> String {
+        format!("APIRoute(path={})", slf.borrow().path)
     }
 }
 
@@ -287,7 +286,7 @@ impl PyAPIWebSocketRoute {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let py = slf.py();
-        slf.borrow_mut().path = path.to_owned();
+        path.clone_into(&mut slf.borrow_mut().path);
         let attrs = PyDict::new(py);
         attrs.set_item("endpoint", endpoint)?;
         attrs.set_item("name", name.unwrap_or(&path.into_pyobject(py)?.into_any()))?;

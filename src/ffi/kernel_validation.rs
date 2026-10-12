@@ -214,6 +214,7 @@ fn schema_has_aliases(schema: &CoreSchema) -> bool {
         CoreSchema::Model { schema, .. }
         | CoreSchema::ModelField { schema, .. }
         | CoreSchema::Nullable { schema, .. }
+        | CoreSchema::Definitions { schema, .. }
         | CoreSchema::Json { schema } => schema_has_aliases(schema),
         CoreSchema::Default { schema, .. } | CoreSchema::WithDefault { schema, .. } => {
             schema.as_ref().is_some_and(|s| schema_has_aliases(s))
@@ -248,7 +249,6 @@ fn schema_has_aliases(schema: &CoreSchema) -> bool {
             json: lax_schema,
             python: strict_schema,
         } => schema_has_aliases(lax_schema) || schema_has_aliases(strict_schema),
-        CoreSchema::Definitions { schema, .. } => schema_has_aliases(schema),
         _ => false,
     }
 }
@@ -265,7 +265,7 @@ fn strip_shadowed_name_keys(schema: &CoreSchema, value: &mut Value, rules: Alias
                     CoreSchema::ModelField {
                         schema,
                         validation_alias,
-                    } => (name.clone(), validation_alias.clone(), schema.as_ref()),
+                    } => (name.clone(), validation_alias.clone(), &**schema),
                     other => (name.clone(), None, other),
                 })
                 .collect();
@@ -278,7 +278,7 @@ fn strip_shadowed_name_keys(schema: &CoreSchema, value: &mut Value, rules: Alias
                     (
                         field.name.clone(),
                         field.validation_alias.clone(),
-                        field.schema.as_ref(),
+                        &*field.schema,
                     )
                 })
                 .collect();
@@ -377,7 +377,8 @@ fn schema_has_nested_models(schema: &CoreSchema) -> bool {
             CoreSchema::Nullable { schema, .. }
             | CoreSchema::Json { schema }
             | CoreSchema::Model { schema, .. }
-            | CoreSchema::ModelField { schema, .. } => walk(schema, inside),
+            | CoreSchema::ModelField { schema, .. }
+            | CoreSchema::Definitions { schema, .. } => walk(schema, inside),
             CoreSchema::WithDefault { schema, .. } | CoreSchema::Default { schema, .. } => {
                 schema.as_ref().is_some_and(|s| walk(s, inside))
             }
@@ -388,7 +389,6 @@ fn schema_has_nested_models(schema: &CoreSchema) -> bool {
                 lax_schema,
                 strict_schema,
             } => walk(lax_schema, inside) || walk(strict_schema, inside),
-            CoreSchema::Definitions { schema, .. } => walk(schema, inside),
             // conservative: refs may point at models
             CoreSchema::DefinitionRef { .. } => inside_struct,
             _ => false,
@@ -405,9 +405,8 @@ fn validate_body(
         let mut parsed = parse_json(raw_payload).ok()?;
         strip_shadowed_name_keys(&fast.schema_core, &mut parsed, AliasRules::default());
         let serde_value = value_to_serde(&parsed);
-        let normalized = match serde_json::to_vec(&serde_value) {
-            Ok(bytes) => bytes,
-            Err(_) => return None,
+        let Ok(normalized) = serde_json::to_vec(&serde_value) else {
+            return None;
         };
         match fast.schema.validate_json(&normalized) {
             Ok(value) => value,

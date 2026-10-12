@@ -394,7 +394,7 @@ fn collect_response(messages: Vec<ResponseMessage>) -> Response {
                     ) {
                         headers.append(name, value);
                     } else {
-                        error!("asgi middleware sent an invalid response header")
+                        error!("asgi middleware sent an invalid response header");
                     }
                 }
             }

@@ -79,6 +79,10 @@ impl FastrAPI {
         request_id_header=None,
         powered_by_header=None,
     ))]
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "FastAPI constructor signature requires multiple configuration flags"
+    )]
     fn new(
         py: Python<'_>,
         debug: bool,
@@ -265,7 +269,7 @@ impl FastrAPI {
         &mut self,
         py: Python<'_>,
         path: String,
-        app: Py<PyAny>,
+        app: &Bound<'_, PyAny>,
         name: Option<String>,
     ) -> PyResult<()> {
         if !path.starts_with('/') {
@@ -278,10 +282,9 @@ impl FastrAPI {
             path
         };
 
-        if let Ok(sub_app) = app.bind(py).extract::<PyRef<'_, FastrAPI>>() {
+        if let Ok(sub_app) = app.extract::<PyRef<'_, FastrAPI>>() {
             self.inherit_sub_app_lifespan(py, &sub_app)?;
             let owned = app
-                .bind(py)
                 .clone()
                 .into_any()
                 .cast_into::<FastrAPI>()
@@ -294,7 +297,7 @@ impl FastrAPI {
             return Ok(());
         }
 
-        let static_files = app.bind(py).extract::<PyRef<'_, PyStaticFiles>>()?;
+        let static_files = app.extract::<PyRef<'_, PyStaticFiles>>()?;
         self.static_mounts.push(StaticMount {
             path: normalized_path,
             directory: static_files.directory.clone(),
@@ -306,8 +309,8 @@ impl FastrAPI {
         Ok(())
     }
 
-    fn on_event(slf: Py<Self>, py: Python<'_>, event_type: String) -> PyResult<Py<PyAny>> {
-        let startup = match event_type.as_str() {
+    fn on_event(slf: Py<Self>, py: Python<'_>, event_type: &str) -> PyResult<Py<PyAny>> {
+        let startup = match event_type {
             "startup" => true,
             "shutdown" => false,
             _ => {
@@ -341,17 +344,16 @@ impl FastrAPI {
     #[pyo3(signature = (host, app, *, name=None))]
     fn host(
         &mut self,
-        py: Python<'_>,
+        _py: Python<'_>,
         host: String,
-        app: Py<PyAny>,
-        name: Option<String>,
+        app: &Bound<'_, PyAny>,
+        name: Option<&str>,
     ) -> PyResult<()> {
         if host.starts_with('/') {
             return Err(PyValueError::new_err("Host must not start with '/'"));
         }
         let _ = name;
         let owned = app
-            .bind(py)
             .clone()
             .into_any()
             .cast_into::<FastrAPI>()
@@ -381,8 +383,8 @@ impl FastrAPI {
     fn add_api_route(
         &self,
         py: Python<'_>,
-        path: String,
-        endpoint: Bound<'_, PyAny>,
+        path: &str,
+        endpoint: &Bound<'_, PyAny>,
         methods: Option<Vec<String>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
@@ -423,7 +425,7 @@ impl FastrAPI {
         self.router.bind(py).borrow().add_api_route_impl(
             py,
             path,
-            &endpoint,
+            endpoint,
             methods,
             &route_kwargs,
         )
@@ -484,6 +486,10 @@ impl FastrAPI {
         .map(Into::into)
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 pymethod receiver requires Py<Self>"
+    )]
     #[pyo3(signature = (host=None, port=None, *, reload=false, reload_dirs=None, reload_ignore_dirs=None, reload_ignore_patterns=None, reload_ignore_paths=None, reload_tick=750, reload_ignore_worker_failure=false))]
     fn serve(
         slf: Py<Self>,
@@ -512,7 +518,7 @@ impl FastrAPI {
                 reload_ignore_worker_failure,
             )
         } else {
-            server::serve(py, host, port, slf)
+            server::serve(py, host, port, &slf)
         }
     }
 
@@ -625,7 +631,7 @@ impl FastrAPI {
 
 impl FastrAPI {
     #[inline]
-    fn _router<'py>(&self, py: Python<'py>) -> pyo3::PyRef<'py, decorators::PyAPIRouter> {
+    fn router_ref<'py>(&self, py: Python<'py>) -> pyo3::PyRef<'py, decorators::PyAPIRouter> {
         self.router.bind(py).borrow()
     }
 
@@ -678,4 +684,4 @@ impl FastrAPI {
         Ok(())
     }
 }
-crate::generate_http_methods!(FastrAPI, _router);
+crate::generate_http_methods!(FastrAPI, router_ref);

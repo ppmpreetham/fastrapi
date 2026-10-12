@@ -52,6 +52,10 @@ impl PyPydanticV1NotSupportedError {
 
 #[pyclass(extends = PyException, subclass, name = "ValidationException")]
 pub struct PyValidationException {
+    #[expect(
+        clippy::pub_underscore_fields,
+        reason = "FastAPI RequestValidationError._errors attribute compatibility"
+    )]
     #[pyo3(get)]
     pub _errors: Py<PyAny>,
 }
@@ -68,10 +72,18 @@ impl PyValidationException {
     #[pyo3(signature = (*_args, **_kwargs))]
     fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
 
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "Accesses Python compatibility field _errors"
+    )]
     fn errors<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
         self._errors.bind(py).clone()
     }
 
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "Accesses Python compatibility field _errors"
+    )]
     fn __str__(&self, py: Python<'_>) -> String {
         let errors = self._errors.bind(py);
         let len = errors

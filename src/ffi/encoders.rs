@@ -4,6 +4,10 @@ use pyo3::types::PyDict;
 use crate::utils::{json_to_py_object, py_any_to_json};
 use pyo3::Bound;
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "FastAPI's jsonable_encoder accepts multiple boolean filtering flags"
+)]
 #[pyfunction]
 #[pyo3(signature = (obj, *, include=None, exclude=None, by_alias=true, exclude_unset=false, exclude_defaults=false, exclude_none=false, custom_encoder=None, sqlalchemy_safe=true))]
 fn jsonable_encoder(

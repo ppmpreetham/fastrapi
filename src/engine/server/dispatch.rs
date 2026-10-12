@@ -160,7 +160,7 @@ fn tag_with_pattern(mut resp: Response, pattern: &Arc<str>) -> Response {
 }
 
 pub(crate) fn dispatch_path<'a>(state: &AppState, original_path: &'a str) -> Option<&'a str> {
-    dispatch_path_with_root(state.root_path.as_ref(), original_path)
+    dispatch_path_with_root(&state.root_path, original_path)
 }
 
 pub(crate) fn dispatch_path_with_root<'a>(root: &str, original_path: &'a str) -> Option<&'a str> {

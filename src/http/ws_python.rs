@@ -213,15 +213,15 @@ impl PyWebSocket {
 
     #[getter]
     fn headers(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        starlette(WS_STARLETTE_HEADERS.get(py)?, "raw", &raw_headers(self, py))
+        starlette(&WS_STARLETTE_HEADERS.get(py)?, "raw", &raw_headers(self, py))
     }
 
     #[getter]
     fn query_params(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         starlette(
-            WS_STARLETTE_QUERY_PARAMS.get(py)?,
+            &WS_STARLETTE_QUERY_PARAMS.get(py)?,
             "query_string",
-            &scope_value(&self.scope, py, "query_string"),
+            &scope_value(self.scope.as_ref(), py, "query_string"),
         )
     }
 
@@ -266,7 +266,7 @@ fn iterator(ws: Py<PyWebSocket>, json: bool) -> PyResult<Py<WSIterator>> {
 }
 
 /// Instantiates a Starlette class from a single keyword argument.
-fn starlette(cls: Bound<'_, PyAny>, arg_name: &str, value: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+fn starlette(cls: &Bound<'_, PyAny>, arg_name: &str, value: &Py<PyAny>) -> PyResult<Py<PyAny>> {
     let kwargs = PyDict::new(cls.py());
     kwargs.set_item(arg_name, value.bind(cls.py()))?;
     Ok(cls.call((), Some(&kwargs))?.unbind())
@@ -274,12 +274,11 @@ fn starlette(cls: Bound<'_, PyAny>, arg_name: &str, value: &Py<PyAny>) -> PyResu
 
 /// The raw `(bytes, bytes)` header list; empty until upgrade metadata lands.
 fn raw_headers(ws: &PyWebSocket, py: Python<'_>) -> Py<PyAny> {
-    scope_value(&ws.scope, py, "headers")
+    scope_value(ws.scope.as_ref(), py, "headers")
 }
 
-fn scope_value(scope: &Option<Py<PyDict>>, py: Python<'_>, key: &str) -> Py<PyAny> {
+fn scope_value(scope: Option<&Py<PyDict>>, py: Python<'_>, key: &str) -> Py<PyAny> {
     scope
-        .as_ref()
         .and_then(|s| s.bind(py).get_item(key).ok())
         .flatten()
         .map_or_else(|| py.None(), Bound::unbind)

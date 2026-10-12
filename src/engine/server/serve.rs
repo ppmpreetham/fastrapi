@@ -78,7 +78,7 @@ pub fn serve(
     py: Python<'_>,
     host: Option<String>,
     port: Option<u16>,
-    app: Py<FastrAPI>,
+    app: &Py<FastrAPI>,
 ) -> PyResult<()> {
     let default_filter = "info";
     let filter = var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
@@ -132,18 +132,24 @@ pub fn serve(
     let redoc_url = app_config.redoc_url.clone();
     let scalar_url = app_config.scalar_url.clone();
     let elements_url = app_config.elements_url.clone();
-    let router = build_router(py, app_state, docs_url, openapi_url, &app_config);
+    let router = build_router(
+        py,
+        &app_state,
+        docs_url.as_deref(),
+        openapi_url.as_deref(),
+        &app_config,
+    );
     drop(app_config);
 
     let server_thread = spawn(move || {
         let entered_lifespan = Python::attach(|py| {
-            run_startup_phase(py, app, lifespan, on_startup, app_loop.as_ref())
+            run_startup_phase(py, &app, lifespan, on_startup, &app_loop)
         });
 
         let entered_lifespan = match entered_lifespan {
             Ok(entered) => entered,
             Err(err) => {
-                log_python_error("startup failed", err);
+                log_python_error("startup failed", &err);
                 Python::attach(|py| stop_background_asyncio_loop(py, &pool_for_shutdown));
                 return;
             }
@@ -187,9 +193,9 @@ pub fn serve(
 
         Python::attach(|py| {
             if let Err(err) =
-                run_shutdown_phase(py, entered_lifespan, on_shutdown, app_loop.as_ref())
+                run_shutdown_phase(py, entered_lifespan, on_shutdown, &app_loop)
             {
-                log_python_error("shutdown failed", err);
+                log_python_error("shutdown failed", &err);
             }
         });
         Python::attach(|py| stop_background_asyncio_loop(py, &pool_for_shutdown));
@@ -236,6 +242,6 @@ pub fn serve_with_reload(
         tick_ms: reload_tick.max(50),
         ignore_worker_failure: reload_ignore_worker_failure,
     };
-    py.detach(move || run_reload_supervisor(&executable, &argv, config))
+    py.detach(move || run_reload_supervisor(&executable, &argv, &config))
         .map_err(PyRuntimeError::new_err)
 }

@@ -68,6 +68,10 @@ pub struct ParameterConstraints {
     pub pattern: Option<Arc<Regex>>,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Parsed parameter tracks multiple boolean validation and extraction flags"
+)]
 #[derive(Clone, Debug)]
 pub struct ParsedParameter {
     pub name: String,
@@ -205,6 +209,10 @@ pub struct ExecutionPlan {
     pub rate_limit_per_second: Option<u32>,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Payload spec tracks multiple boolean dispatch and dependency characteristics"
+)]
 #[derive(Clone)]
 pub struct PayloadSpec {
     pub dependency_needs_request: bool,

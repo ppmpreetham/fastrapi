@@ -638,7 +638,7 @@ impl PyAPIRouter {
     pub(crate) fn add_api_route_impl(
         &self,
         py: Python<'_>,
-        path: String,
+        path: &str,
         endpoint: &Bound<'_, PyAny>,
         methods: Option<Vec<String>>,
         kwargs: &Bound<'_, PyDict>,
@@ -647,7 +647,7 @@ impl PyAPIRouter {
             let http_method = HttpMethod::from_str(&method.to_ascii_uppercase())
                 .map_err(|_| PyValueError::new_err(format!("Invalid HTTP method: {method}")))?;
             let decorator =
-                self.create_method_decorator_kw(py, http_method, path.clone(), Some(kwargs))?;
+                self.create_method_decorator_kw(py, http_method, path.to_owned(), Some(kwargs))?;
             decorator.call1(py, (endpoint.clone(),))?;
         }
         Ok(())

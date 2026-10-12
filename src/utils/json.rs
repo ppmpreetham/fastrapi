@@ -147,12 +147,20 @@ pub fn json_response_with_status(
 
 #[inline]
 #[must_use]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Used as function pointer in Result::map_err"
+)]
 pub fn json_io_error(err: io::Error) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
 #[inline]
 #[must_use]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Used as function pointer in Result::map_err"
+)]
 pub fn json_ser_error(err: simd_json::Error) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
@@ -535,7 +543,10 @@ pub fn write_py_json<W: Write>(
             }
         }
 
-        PyJsonKind::UuidOrDecimal | PyJsonKind::Path | PyJsonKind::IpAddress => {
+        PyJsonKind::UuidOrDecimal
+        | PyJsonKind::Path
+        | PyJsonKind::IpAddress
+        | PyJsonKind::FallbackStr => {
             if let Ok(s) = json_text_of(value) {
                 write_json_string(writer, &s)
             } else {
@@ -546,14 +557,6 @@ pub fn write_py_json<W: Write>(
         PyJsonKind::Enum => {
             if let Ok(inner) = value.getattr(intern!(py, "value")) {
                 write_py_json(py, &inner, writer)
-            } else {
-                writer.write_all(b"null").map_err(json_io_error)
-            }
-        }
-
-        PyJsonKind::FallbackStr => {
-            if let Ok(s) = json_text_of(value) {
-                write_json_string(writer, &s)
             } else {
                 writer.write_all(b"null").map_err(json_io_error)
             }
@@ -820,7 +823,10 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
             }
         }
 
-        PyJsonKind::UuidOrDecimal | PyJsonKind::Path | PyJsonKind::IpAddress => {
+        PyJsonKind::UuidOrDecimal
+        | PyJsonKind::Path
+        | PyJsonKind::IpAddress
+        | PyJsonKind::FallbackStr => {
             if let Ok(s) = value.str() {
                 simd_json::json!(lossy_text(&s))
             } else {
@@ -831,14 +837,6 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         PyJsonKind::Enum => {
             if let Ok(inner) = value.getattr(intern!(py, "value")) {
                 py_any_to_json(py, &inner)
-            } else {
-                simd_json::json!(null)
-            }
-        }
-
-        PyJsonKind::FallbackStr => {
-            if let Ok(s) = value.str() {
-                simd_json::json!(lossy_text(&s))
             } else {
                 simd_json::json!(null)
             }

@@ -568,12 +568,12 @@ fn py_dicts_to_json_vec(py: Python<'_>, value: &Py<PyAny>) -> Option<Vec<JsonVal
 pub fn build_openapi_spec(py: Python<'_>, app: &FastrAPI) -> JsonValue {
     let mut spec = OpenApiSpec::default();
 
-    spec.info.title = app.title.clone();
-    spec.info.version = app.version.clone();
-    spec.info.summary = app.summary.clone();
+    spec.info.title.clone_from(&app.title);
+    spec.info.version.clone_from(&app.version);
+    spec.info.summary.clone_from(&app.summary);
 
     spec.info.description = (!app.description.is_empty()).then(|| app.description.clone());
-    spec.info.terms_of_service = app.terms_of_service.clone();
+    spec.info.terms_of_service.clone_from(&app.terms_of_service);
 
     if let Some(contact) = &app.contact
         && let Ok(dict) = contact.bind(py).cast::<PyDict>()

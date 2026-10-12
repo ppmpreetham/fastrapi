@@ -40,10 +40,9 @@ impl PyBackgroundTasks {
         func: Py<PyAny>,
         args: Vec<Py<PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<()> {
+    ) {
         let mut tasks = self.tasks.lock();
         tasks.push((func, args, kwargs.map(|kw| kw.clone().unbind())));
-        Ok(())
     }
 }
 

@@ -65,6 +65,10 @@ pub enum InjectionType {
     SecurityScopes,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Dependency graph nodes track multiple execution properties as booleans"
+)]
 #[derive(Clone, Debug)]
 pub struct DependencyNode {
     pub func_id: u64,
@@ -100,6 +104,64 @@ pub type ResolvedDependency = (Py<PyString>, SharedPyObject);
 pub type ResolvedDependencies = SmallVec<[ResolvedDependency; 4]>;
 pub type ResultRegistry = SmallVec<[Option<SharedPyObject>; 8]>;
 
+fn visit(
+    py: Python<'_>,
+    index: usize,
+    source: &[DependencyNode],
+    overrides: &Bound<'_, PyDict>,
+    paths: &[String],
+    output: &mut Vec<DependencyNode>,
+    visited: &mut HashMap<usize, usize>,
+) -> PyResult<usize> {
+    if let Some(index) = visited.get(&index) {
+        return Ok(*index);
+    }
+    let original = &source[index];
+    let mut node = original.clone();
+    if let Some(replacement) = overrides.get_item(original.func.bind(py))? {
+        let mut replacement_plan =
+            parse_external_dependencies(py, &[replacement.unbind()], paths)?;
+        let mut local = HashMap::new();
+        let mut replacement_root = replacement_plan
+            .pop()
+            .ok_or_else(|| PyRuntimeError::new_err("Empty dependency replacement"))?;
+        for child in &mut replacement_plan {
+            child.is_top_level = false;
+        }
+        for (_, injection) in &mut replacement_root.injection_plan {
+            if let InjectionType::Dependency(child) = injection {
+                *child = visit(
+                    py,
+                    *child,
+                    &replacement_plan,
+                    overrides,
+                    paths,
+                    output,
+                    &mut local,
+                )?;
+            }
+        }
+        let root = output.len();
+        replacement_root.index = root;
+        replacement_root.func_id = original.func_id;
+        replacement_root.param_name.clone_from(&original.param_name);
+        replacement_root.is_top_level = original.is_top_level;
+        replacement_root.use_cache = original.use_cache;
+        output.push(replacement_root);
+        visited.insert(index, root);
+        return Ok(root);
+    }
+    for (_, injection) in &mut node.injection_plan {
+        if let InjectionType::Dependency(child) = injection {
+            *child = visit(py, *child, source, overrides, paths, output, visited)?;
+        }
+    }
+    node.index = output.len();
+    visited.insert(index, node.index);
+    output.push(node);
+    Ok(output.len() - 1)
+}
+
 pub(crate) fn request_plan<'a>(
     py: Python<'_>,
     plan: &'a [DependencyNode],
@@ -112,63 +174,6 @@ pub(crate) fn request_plan<'a>(
     let overrides = overrides.bind(py).cast::<PyDict>()?;
     if overrides.is_empty() {
         return Ok(Cow::Borrowed(plan));
-    }
-    fn visit(
-        py: Python<'_>,
-        index: usize,
-        source: &[DependencyNode],
-        overrides: &Bound<'_, PyDict>,
-        paths: &[String],
-        output: &mut Vec<DependencyNode>,
-        visited: &mut HashMap<usize, usize>,
-    ) -> PyResult<usize> {
-        if let Some(index) = visited.get(&index) {
-            return Ok(*index);
-        }
-        let original = &source[index];
-        let mut node = original.clone();
-        if let Some(replacement) = overrides.get_item(original.func.bind(py))? {
-            let mut replacement_plan =
-                parse_external_dependencies(py, &[replacement.unbind()], paths)?;
-            let mut local = HashMap::new();
-            let mut replacement_root = replacement_plan
-                .pop()
-                .ok_or_else(|| PyRuntimeError::new_err("Empty dependency replacement"))?;
-            for child in &mut replacement_plan {
-                child.is_top_level = false;
-            }
-            for (_, injection) in &mut replacement_root.injection_plan {
-                if let InjectionType::Dependency(child) = injection {
-                    *child = visit(
-                        py,
-                        *child,
-                        &replacement_plan,
-                        overrides,
-                        paths,
-                        output,
-                        &mut local,
-                    )?;
-                }
-            }
-            let root = output.len();
-            replacement_root.index = root;
-            replacement_root.func_id = original.func_id;
-            replacement_root.param_name = original.param_name.clone();
-            replacement_root.is_top_level = original.is_top_level;
-            replacement_root.use_cache = original.use_cache;
-            output.push(replacement_root);
-            visited.insert(index, root);
-            return Ok(root);
-        }
-        for (_, injection) in &mut node.injection_plan {
-            if let InjectionType::Dependency(child) = injection {
-                *child = visit(py, *child, source, overrides, paths, output, visited)?;
-            }
-        }
-        node.index = output.len();
-        visited.insert(index, node.index);
-        output.push(node);
-        Ok(output.len() - 1)
     }
     let paths = path_names
         .iter()
@@ -529,7 +534,7 @@ fn extract_and_flatten(
     func: &Bound<PyAny>,
     path_param_names: &[String],
     is_top_level: bool,
-    parent_param_name: Option<String>,
+    parent_param_name: Option<&str>,
     scopes: Vec<String>,
     use_cache: bool,
     flat_plan: &mut Vec<DependencyNode>,
@@ -613,7 +618,7 @@ fn extract_and_flatten(
                 &target_callable,
                 path_param_names,
                 is_top_level && parent_param_name.is_none(),
-                Some(param_name_str.to_owned()),
+                Some(param_name_str),
                 child_scopes,
                 child_use_cache,
                 flat_plan,
@@ -643,7 +648,6 @@ fn extract_and_flatten(
         is_async_generator,
         index: node_index,
         param_name: parent_param_name
-            .as_deref()
             .map(|name| PyString::intern(py, name).unbind()),
         scopes,
         use_cache,

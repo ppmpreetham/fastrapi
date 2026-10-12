@@ -30,7 +30,7 @@ impl PathConvertor {
         })
     }
 
-    fn matches(&self, value: &str) -> bool {
+    fn matches(self, value: &str) -> bool {
         match self {
             Self::Str | Self::Path => true,
             Self::Int => !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()),
@@ -66,6 +66,10 @@ pub enum RouteMatch<'a> {
     Params(RouteTarget, matchit::Params<'a, 'a>),
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "Fields categorize routes by type: static_routes, param_routes, websocket_routes"
+)]
 #[derive(Clone)]
 pub struct FrozenRouter {
     static_routes: [AHashMap<Box<str>, RouteTarget>; HTTP_METHOD_COUNT],
@@ -135,12 +139,12 @@ impl FrozenRouterBuilder {
     pub fn add_route(
         &mut self,
         method: HttpMethod,
-        path: String,
+        path: &str,
         handler: Arc<RouteHandler>,
         host: Option<Arc<str>>,
     ) {
         let idx = method as usize;
-        let (normalized, has_params, convertors) = normalize_register(&path);
+        let (normalized, has_params, convertors) = normalize_register(path);
 
         let target = RouteTarget {
             handler,
@@ -156,8 +160,8 @@ impl FrozenRouterBuilder {
         }
     }
 
-    pub fn add_websocket(&mut self, path: String, handler: Py<PyAny>) {
-        let (normalized, _, _) = normalize_register(&path);
+    pub fn add_websocket(&mut self, path: &str, handler: Py<PyAny>) {
+        let (normalized, _, _) = normalize_register(path);
         self.websocket_routes
             .insert(normalized.into_owned(), handler);
     }
@@ -170,11 +174,11 @@ impl FrozenRouterBuilder {
                 return None;
             }
             let mut router = Router::new();
-            entries.iter().for_each(|(path, target)| {
+            for (path, target) in entries {
                 if let Err(e) = router.insert(path, target.clone()) {
-                    tracing::warn!("Failed to insert parameterized route '{}': {}", path, e);
+                    tracing::warn!("Failed to insert parameterized route '{path}': {e}");
                 }
-            });
+            }
 
             Some(router)
         });

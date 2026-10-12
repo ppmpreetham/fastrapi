@@ -77,7 +77,7 @@ fn apply_declared(
             DeclaredLayer::HttpsRedirect => https_redirect_layer(app),
             DeclaredLayer::Custom(mw) => {
                 if mw.kind == PyMiddlewareKind::Asgi {
-                    asgi_layer(app, mw.clone(), async_loop.clone(), max_body_size)
+                    asgi_layer(app, mw, async_loop.clone(), max_body_size)
                 } else {
                     custom_layer(app, mw.clone(), async_loop.clone())
                 }
@@ -351,9 +351,7 @@ fn decorator_layer(
         container.py_middlewares.len()
     );
 
-    let py_mws = Arc::new(PreparedMiddlewares::new(Arc::new(
-        container.py_middlewares.clone(),
-    )));
+    let py_mws = Arc::new(PreparedMiddlewares::new(&container.py_middlewares));
     app.layer(axum_middleware::from_fn(move |req, next| {
         let py_mws = py_mws.clone();
         let loop_ = async_loop.clone();
@@ -363,7 +361,7 @@ fn decorator_layer(
 
 fn asgi_layer(
     app: Router,
-    mw: Arc<PyMiddleware>,
+    mw: &PyMiddleware,
     async_loop: Arc<Py<PyAny>>,
     max_body_size: usize,
 ) -> Router {
@@ -402,7 +400,7 @@ fn custom_layer(app: Router, mw: Arc<PyMiddleware>, async_loop: Arc<Py<PyAny>>) 
         let mw = mw.clone();
         let loop_ = async_loop.clone();
         async move {
-            let prepared = Arc::new(PreparedMiddlewares::new(Arc::new(vec![mw])));
+            let prepared = Arc::new(PreparedMiddlewares::new(&[mw]));
             execute_py_middlewares(prepared, req, next, loop_).await
         }
     }))

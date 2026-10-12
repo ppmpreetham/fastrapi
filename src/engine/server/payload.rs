@@ -123,14 +123,17 @@ pub(crate) async fn parse_multipart_form(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(multipart_error_response)?
+        .map_err(|err| multipart_error_response(&err))?
     {
         let Some(name) = field.name().map(str::to_owned) else {
             continue;
         };
         let filename = field.file_name().map(str::to_owned);
         let content_type = field.content_type().map(ToString::to_string);
-        let bytes = field.bytes().await.map_err(multipart_error_response)?;
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|err| multipart_error_response(&err))?;
 
         let entry = match filename {
             Some(filename) => BodyField::File(UploadedFile {
@@ -146,7 +149,7 @@ pub(crate) async fn parse_multipart_form(
     Ok(form)
 }
 
-pub(crate) fn multipart_error_response(err: multer::Error) -> Response {
+pub(crate) fn multipart_error_response(err: &multer::Error) -> Response {
     match err {
         Error::FieldSizeExceeded { .. } | Error::StreamSizeExceeded { .. } => {
             (StatusCode::PAYLOAD_TOO_LARGE, err.to_string()).into_response()

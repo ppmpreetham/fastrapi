@@ -89,24 +89,28 @@ fn specialized_response_conversion(
     }
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "convenience wrapper accepting owned PyErr"
+)]
 fn python_error_to_response(py: Python<'_>, err: PyErr) -> Response {
-    python_error_to_response_in(py, err, None)
+    python_error_to_response_in(py, &err, None)
 }
 
 /// @`app.exception_handler` registry
 pub(crate) fn python_error_to_response_in(
     py: Python<'_>,
-    err: PyErr,
+    err: &PyErr,
     request_input: Option<&RequestInput<'_>>,
 ) -> Response {
-    if let Some(response) = dispatch_exception_handler(py, &err, request_input) {
+    if let Some(response) = dispatch_exception_handler(py, err, request_input) {
         return response;
     }
 
     if let Ok(http_error) = err.value(py).cast::<PyHTTPException>() {
         return http_error.borrow().to_response(py);
     }
-    log_python_error(py, &err);
+    log_python_error(py, err);
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
@@ -385,9 +389,9 @@ pub(crate) fn render_no_request_json_response(py: Python<'_>, handler: &RouteHan
 type PyTaskFuture = py_bridge::PyTaskFuture;
 
 #[inline(always)]
-async fn await_python_future<'a>(
+async fn await_python_future(
     handler: &RouteHandler,
-    request_input: Option<&RequestInput<'a>>,
+    request_input: Option<&RequestInput<'_>>,
     future_result: Result<PyTaskFuture, Response>,
 ) -> Result<Response, Response> {
     let future = match future_result {
@@ -403,7 +407,7 @@ async fn await_python_future<'a>(
             handler,
             request_input.map(|input| input.headers),
         )),
-        Err(err) => Err(python_error_to_response_in(py, err, request_input)),
+        Err(err) => Err(python_error_to_response_in(py, &err, request_input)),
     })
 }
 
@@ -489,9 +493,8 @@ async fn core_async_no_args(
 
 fn payload_raw_bytes(payload: Option<&BodyPayload>) -> Option<&[u8]> {
     match payload {
-        Some(BodyPayload::Json { raw, .. }) => Some(raw),
-        Some(BodyPayload::Form { raw, .. }) => Some(raw),
-        _ => None,
+        Some(BodyPayload::Json { raw, .. } | BodyPayload::Form { raw, .. }) => Some(raw),
+        None => None,
     }
 }
 
@@ -512,7 +515,7 @@ fn run_sync_gil_section(
     let req_obj = if needs_request_object {
         Some(
             create_py_request(py, request_input, payload_raw_bytes(payload))
-                .map_err(|e| python_error_to_response_in(py, e, Some(request_input)))?,
+                .map_err(|e| python_error_to_response_in(py, &e, Some(request_input)))?,
         )
     } else {
         None
@@ -676,7 +679,7 @@ async fn core_async_no_deps(
             .func
             .bind(py)
             .call((), Some(&kwargs))
-            .map_err(|err| python_error_to_response_in(py, err, Some(&request_input)))?;
+            .map_err(|err| python_error_to_response_in(py, &err, Some(&request_input)))?;
 
         let future = into_asyncio_future(py, &async_loop, coroutine)?;
         Ok((future, bg_tasks))
@@ -716,7 +719,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
             let req_obj = if NEEDS_REQ {
                 Some(
                     create_py_request(py, &request_input, payload_raw_bytes(payload.as_deref()))
-                        .map_err(|e| python_error_to_response_in(py, e, Some(&request_input)))?,
+                        .map_err(|e| python_error_to_response_in(py, &e, Some(&request_input)))?,
                 )
             } else {
                 None
@@ -729,7 +732,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
                 .func
                 .bind(py)
                 .call((), Some(&kwargs))
-                .map_err(|err| python_error_to_response_in(py, err, Some(&request_input)))?;
+                .map_err(|err| python_error_to_response_in(py, &err, Some(&request_input)))?;
 
             let future = into_asyncio_future(py, &async_loop, coroutine)?;
             Ok((future, bg_tasks))
@@ -770,7 +773,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
             let req_obj = if NEEDS_REQ {
                 Some(
                     create_py_request(py, &request_input, payload_raw_bytes(payload.as_deref()))
-                        .map_err(|e| python_error_to_response_in(py, e, Some(&request_input)))?,
+                        .map_err(|e| python_error_to_response_in(py, &e, Some(&request_input)))?,
                 )
             } else {
                 None
@@ -817,7 +820,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
             .func
             .bind(py)
             .call((), Some(kwargs))
-            .map_err(|err| python_error_to_response_in(py, err, Some(&request_input)))?;
+            .map_err(|err| python_error_to_response_in(py, &err, Some(&request_input)))?;
 
         into_asyncio_future(py, &async_loop, coroutine)
     });
@@ -997,7 +1000,7 @@ async fn run_managed_handler(
                 plan,
             ))
         })();
-        objects.map_err(|err| python_error_to_response_in(py, err, Some(&input)))
+        objects.map_err(|err| python_error_to_response_in(py, &err, Some(&input)))
     });
     let (kwargs, background, request, metadata, stack, plan) = match setup {
         Ok(value) => value,
@@ -1012,7 +1015,7 @@ async fn run_managed_handler(
         Err(err) => Err(err),
     };
     if let Err(err) = entered {
-        return Python::attach(|py| python_error_to_response_in(py, err, Some(&input)));
+        return Python::attach(|py| python_error_to_response_in(py, &err, Some(&input)));
     }
     let outcome = async {
         let values = dependencies::execute_request_dependencies(
@@ -1098,11 +1101,11 @@ async fn run_managed_handler(
     };
     Python::attach(|py| {
         match exit {
-            Err(err) => return python_error_to_response_in(py, err, Some(&input)),
+            Err(err) => return python_error_to_response_in(py, &err, Some(&input)),
             Ok(value) if outcome.is_err() && value.bind(py).is_truthy().unwrap_or(false) => {
                 return python_error_to_response_in(
                     py,
-                    PyRuntimeError::new_err(
+                    &PyRuntimeError::new_err(
                         "A dependency suppressed an exception before a response was produced",
                     ),
                     Some(&input),
@@ -1112,7 +1115,7 @@ async fn run_managed_handler(
         }
         match outcome {
             Err(DependencyExecutionError::Python(err)) => {
-                python_error_to_response_in(py, err, Some(&input))
+                python_error_to_response_in(py, &err, Some(&input))
             }
             Err(DependencyExecutionError::Response(response)) => *response,
             Ok((mut response, explicit)) => {
@@ -1136,7 +1139,7 @@ async fn run_managed_handler(
                         Ok(())
                     })();
                     if let Err(err) = applied {
-                        return python_error_to_response_in(py, err, Some(&input));
+                        return python_error_to_response_in(py, &err, Some(&input));
                     }
                 }
                 spawn_background_tasks(&async_loop, background);

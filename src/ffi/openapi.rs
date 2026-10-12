@@ -28,13 +28,13 @@ pub fn get_openapi(
     title: String,
     version: String,
     openapi_version: &str,
-    summary: Option<String>,
-    description: Option<String>,
+    summary: Option<&str>,
+    description: Option<&str>,
     routes: &Bound<'_, PyAny>,
     webhooks: Option<&Bound<'_, PyAny>>,
     tags: Option<&Bound<'_, PyAny>>,
     servers: Option<&Bound<'_, PyAny>>,
-    terms_of_service: Option<String>,
+    terms_of_service: Option<&str>,
     contact: Option<&Bound<'_, PyAny>>,
     license_info: Option<&Bound<'_, PyAny>>,
     separate_input_output_schemas: bool,
@@ -43,13 +43,13 @@ pub fn get_openapi(
     let info = PyDict::new(py);
     info.set_item("title", title)?;
     info.set_item("version", version)?;
-    if let Some(summary) = &summary {
+    if let Some(summary) = summary {
         info.set_item("summary", summary)?;
     }
-    if let Some(description) = &description {
+    if let Some(description) = description {
         info.set_item("description", description)?;
     }
-    if let Some(terms) = &terms_of_service {
+    if let Some(terms) = terms_of_service {
         info.set_item("termsOfService", terms)?;
     }
     if let Some(contact) = contact {

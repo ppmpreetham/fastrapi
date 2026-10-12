@@ -95,11 +95,11 @@ fn split_response(response: Response) -> (DownstreamParts, Body) {
     )
 }
 
-fn parts_to_py(
-    py: Python<'_>,
-    parts: DownstreamParts,
+fn parts_to_py<'py>(
+    py: Python<'py>,
+    parts: &DownstreamParts,
     body: bytes::Bytes,
-) -> PyResult<Bound<'_, PyAny>> {
+) -> PyResult<Bound<'py, PyAny>> {
     let headers_dict = PyDict::new(py);
     for (name, value) in &parts.headers {
         if let Ok(value) = value.to_str() {
@@ -252,7 +252,7 @@ fn invoke(
             .map_err(|_| PyRuntimeError::new_err("call_next pipeline terminated"))?;
         let (parts, body) = split_response(response);
         let body_bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
-        Python::attach(|py| Ok(parts_to_py(py, parts, body_bytes)?.unbind()))
+        Python::attach(|py| Ok(parts_to_py(py, &parts, body_bytes)?.unbind()))
     };
     let locals = TaskLocals::new(async_loop.bind(py).clone());
     let future = py_bridge::future_into_py_with_locals(py, locals, bridged)

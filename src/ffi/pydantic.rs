@@ -310,11 +310,11 @@ pub fn is_pydantic_model(py: Python<'_>, type_hint: &Bound<'_, PyAny>) -> bool {
 #[pyfunction]
 fn test_model(
     py: Python<'_>,
-    module: String,
-    class_name: String,
+    module: &str,
+    class_name: &str,
     data: Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let model = load_module(py, &module, &class_name)?;
+    let model = load_module(py, module, class_name)?;
     let bound_model = model.bind(py);
     let validated = bound_model.call1((data,))?;
     Ok(validated.into())
@@ -326,6 +326,10 @@ pub fn register_pydantic_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Route metadata requires multiple boolean flags for execution strategy"
+)]
 pub struct ParsedRouteMetadata {
     pub param_validators: Vec<PydanticValidator>,
     pub response_type: ResponseType,
@@ -479,6 +483,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     }
 }
 
+#[expect(clippy::needless_pass_by_value)]
 fn validation_error(
     loc: &[String],
     msg: impl fmt::Display,
@@ -488,9 +493,9 @@ fn validation_error(
     let detail = simd_json::json!({
         "detail": [{
             "type": kind,
-            "loc": loc.iter().map(|s| simd_json::json!(s.as_str())).collect::<Vec<_>>(),
+            "loc": loc,
             "msg": msg.to_string(),
-            "input": input,
+            "input": input
         }]
     });
     let mut response = (StatusCode::UNPROCESSABLE_ENTITY, Json(detail.clone())).into_response();
@@ -872,7 +877,7 @@ fn raw_values_for_list<'a>(
         ParameterSource::Query => request_input
             .get_all_query_params()
             .iter()
-            .filter(|(k, _)| matches_name(k.as_ref()))
+            .filter(|(k, _)| matches_name(k))
             .map(|(_, v)| v.clone())
             .collect(),
         ParameterSource::Header | ParameterSource::Cookie | ParameterSource::Path => {
@@ -939,15 +944,15 @@ pub fn resolve_parameter_value(
     if param.is_pydantic_model && matches!(param.source, ParameterSource::Query) {
         let values = PyDict::new(py);
         for (name, value) in request_input.get_all_query_params() {
-            let value = PyString::new(py, value.as_ref());
-            if let Ok(Some(existing)) = values.get_item(name.as_ref()) {
+            let value = PyString::new(py, value);
+            if let Ok(Some(existing)) = values.get_item(&**name) {
                 let list = if let Ok(list) = existing.cast::<PyList>() {
                     list.clone()
                 } else {
                     let list = PyList::new(py, [existing])
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
                     values
-                        .set_item(name.as_ref(), &list)
+                        .set_item(&**name, &list)
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
                     list
                 };
@@ -1261,7 +1266,7 @@ pub fn apply_request_data(
             request_input,
             payload.and_then(|p| match p {
                 BodyPayload::Json { raw, .. } => Some(raw.as_ref()),
-                _ => None,
+                BodyPayload::Form { .. } => None,
             }),
         )
         .map_err(fail)?;

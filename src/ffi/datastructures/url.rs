@@ -5,6 +5,7 @@
 //! IPv6/userinfo edge cases), cached for the object's lifetime. Construction
 //! from an ASGI scope and query surgery run natively.
 
+use std::fmt::Write as _;
 use std::sync::RwLock;
 
 use pyo3::class::basic::CompareOp;
@@ -254,9 +255,7 @@ fn url_from_scope(scope: &Bound<'_, PyAny>) -> PyResult<String> {
         };
         server.map(|(host, port)| {
             let default_port = match scheme.as_str() {
-                "https" => 443,
-                "ws" => 80,
-                "wss" => 443,
+                "https" | "wss" => 443,
                 _ => 80,
             };
             let host = if host.contains(':') && !host.starts_with('[') {
@@ -543,7 +542,7 @@ impl PyURL {
             };
             let mut netloc = hostname;
             if let Some(port) = port {
-                netloc.push_str(&format!(":{port}"));
+                let _ = write!(netloc, ":{port}");
             }
             if let Some(username) = username {
                 match password {
@@ -587,7 +586,7 @@ impl PyURL {
     ) -> PyResult<Bound<'a, Self>> {
         let py = slf.py();
         let existing = slf.borrow().components()?.query.unwrap_or_default();
-        let mut pairs: Vec<(String, String)> = parse_qsl_pairs(py, &existing)?;
+        let mut pairs: Vec<(String, String)> = parse_qsl_pairs(py, &existing);
         if let Some(kwargs) = kwargs {
             let updates = urlencode_pairs(kwargs)?;
             let keys: Vec<&str> = updates.iter().map(|(k, _)| k.as_str()).collect();
@@ -620,7 +619,7 @@ impl PyURL {
         let py = slf.py();
         let existing = slf.borrow().components()?.query.unwrap_or_default();
         let remove: Vec<String> = keys.iter().map(|k| k.extract()).collect::<PyResult<_>>()?;
-        let pairs: Vec<(String, String)> = parse_qsl_pairs(py, &existing)?
+        let pairs: Vec<(String, String)> = parse_qsl_pairs(py, &existing)
             .into_iter()
             .filter(|(key, _)| !remove.contains(key))
             .collect();
@@ -657,10 +656,10 @@ impl PyURL {
 }
 
 /// `urllib.parse.parse_qsl` with `keep_blank_values=True`.
-fn parse_qsl_pairs(_py: Python<'_>, query: &str) -> PyResult<Vec<(String, String)>> {
-    Ok(form_urlencoded::parse(query.as_bytes())
+fn parse_qsl_pairs(_py: Python<'_>, query: &str) -> Vec<(String, String)> {
+    form_urlencoded::parse(query.as_bytes())
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect())
+        .collect()
 }
 
 fn urlencode_pairs(kwargs: &Bound<'_, PyDict>) -> PyResult<Vec<(String, String)>> {
