@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "fastrapi"
-version = "0.3.3"
+dynamic = ["version"]
 description = "A high-performance Python API framework powered by Rust"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -59,6 +59,8 @@ testpaths = ["tests"]
 [tool.maturin]
 bindings = "pyo3"
 features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "fastrapi.fastrapi"
 include = [{ path = "pgo/**/*", format = "sdist" }]
 pgo-command = "python -m pgo.train"
 

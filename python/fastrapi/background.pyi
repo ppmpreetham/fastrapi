@@ -1,0 +1,6 @@
+from typing import Any, final
+
+@final
+class BackgroundTasks:
+    def __new__(cls, /) -> BackgroundTasks: ...
+    def add_task(self, /, func: Any, *args, **kwargs) -> None: ...
