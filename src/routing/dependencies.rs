@@ -119,8 +119,7 @@ fn visit(
     let original = &source[index];
     let mut node = original.clone();
     if let Some(replacement) = overrides.get_item(original.func.bind(py))? {
-        let mut replacement_plan =
-            parse_external_dependencies(py, &[replacement.unbind()], paths)?;
+        let mut replacement_plan = parse_external_dependencies(py, &[replacement.unbind()], paths)?;
         let mut local = HashMap::new();
         let mut replacement_root = replacement_plan
             .pop()
@@ -647,8 +646,7 @@ fn extract_and_flatten(
         is_generator,
         is_async_generator,
         index: node_index,
-        param_name: parent_param_name
-            .map(|name| PyString::intern(py, name).unbind()),
+        param_name: parent_param_name.map(|name| PyString::intern(py, name).unbind()),
         scopes,
         use_cache,
         is_top_level,

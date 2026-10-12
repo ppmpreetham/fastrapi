@@ -35,12 +35,7 @@ impl PyBackgroundTasks {
     }
 
     #[pyo3(signature = (func, *args, **kwargs))]
-    fn add_task(
-        &self,
-        func: Py<PyAny>,
-        args: Vec<Py<PyAny>>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) {
+    fn add_task(&self, func: Py<PyAny>, args: Vec<Py<PyAny>>, kwargs: Option<&Bound<'_, PyDict>>) {
         let mut tasks = self.tasks.lock();
         tasks.push((func, args, kwargs.map(|kw| kw.clone().unbind())));
     }
@@ -127,10 +122,17 @@ pub fn spawn_response_background_value(background: Py<PyAny>) {
     };
     let async_loop = Python::attach(|py| Arc::new(pool.pick(py)));
     spawn(async move {
-        let futures = Python::attach(|py| background.bind(py).cast::<PyBackgroundTasks>().map_or_else(|_| spawn_tasks(
-            &async_loop,
-            vec![(background.clone_ref(py), Vec::new(), None)],
-          ), |tasks| tasks.borrow().execute_all(&async_loop)));
+        let futures = Python::attach(|py| {
+            background.bind(py).cast::<PyBackgroundTasks>().map_or_else(
+                |_| {
+                    spawn_tasks(
+                        &async_loop,
+                        vec![(background.clone_ref(py), Vec::new(), None)],
+                    )
+                },
+                |tasks| tasks.borrow().execute_all(&async_loop),
+            )
+        });
         for task in futures {
             task.await;
         }

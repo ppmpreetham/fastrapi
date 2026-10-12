@@ -142,9 +142,8 @@ pub fn serve(
     drop(app_config);
 
     let server_thread = spawn(move || {
-        let entered_lifespan = Python::attach(|py| {
-            run_startup_phase(py, &app, lifespan, on_startup, &app_loop)
-        });
+        let entered_lifespan =
+            Python::attach(|py| run_startup_phase(py, &app, lifespan, on_startup, &app_loop));
 
         let entered_lifespan = match entered_lifespan {
             Ok(entered) => entered,
@@ -192,9 +191,7 @@ pub fn serve(
         }
 
         Python::attach(|py| {
-            if let Err(err) =
-                run_shutdown_phase(py, entered_lifespan, on_shutdown, &app_loop)
-            {
+            if let Err(err) = run_shutdown_phase(py, entered_lifespan, on_shutdown, &app_loop) {
                 log_python_error("shutdown failed", &err);
             }
         });

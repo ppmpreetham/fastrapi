@@ -141,9 +141,9 @@ fn parse_netloc(netloc: &str) -> (Option<String>, Option<u16>, Option<String>, O
         hostport.find(']').map_or((Some(hostport), None), |end| {
             let port = hostport[end + 1..]
                 .strip_prefix(':')
-               .and_then(|p| p.parse().ok());
-           (Some(&hostport[..=end]), port)
-       })
+                .and_then(|p| p.parse().ok());
+            (Some(&hostport[..=end]), port)
+        })
     } else {
         match hostport.rsplit_once(':') {
             Some((host, port)) => (Some(host), port.parse().ok()),

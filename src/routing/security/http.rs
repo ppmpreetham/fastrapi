@@ -107,7 +107,11 @@ pub struct HTTPDigest {
 impl HTTPDigest {
     #[new]
     #[pyo3(signature = (*, scheme_name=None, description=None, auto_error=true))]
-    const fn new(scheme_name: Option<String>, description: Option<String>, auto_error: bool) -> Self {
+    const fn new(
+        scheme_name: Option<String>,
+        description: Option<String>,
+        auto_error: bool,
+    ) -> Self {
         Self {
             scheme_name,
             description,

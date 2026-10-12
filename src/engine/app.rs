@@ -422,13 +422,10 @@ impl FastrAPI {
             pick("openapi_extra"),
             pick("generate_unique_id_function"),
         );
-        self.router.bind(py).borrow().add_api_route_impl(
-            py,
-            path,
-            endpoint,
-            methods,
-            &route_kwargs,
-        )
+        self.router
+            .bind(py)
+            .borrow()
+            .add_api_route_impl(py, path, endpoint, methods, &route_kwargs)
     }
 
     #[pyo3(signature = (path, *, directory, fallback=Some("auto".to_string()), check_dir=true))]
@@ -664,11 +661,7 @@ impl FastrAPI {
         }
     }
 
-    fn inherit_sub_app_lifespan(
-        &mut self,
-        py: Python<'_>,
-        sub: &PyRef<'_, Self>,
-    ) -> PyResult<()> {
+    fn inherit_sub_app_lifespan(&mut self, py: Python<'_>, sub: &PyRef<'_, Self>) -> PyResult<()> {
         let extend = |parent: &mut Option<Py<PyAny>>, child: &Option<Py<PyAny>>| -> PyResult<()> {
             let Some(child_list) = child else {
                 return Ok(());

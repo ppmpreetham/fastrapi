@@ -213,7 +213,11 @@ impl PyWebSocket {
 
     #[getter]
     fn headers(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        starlette(&WS_STARLETTE_HEADERS.get(py)?, "raw", &raw_headers(self, py))
+        starlette(
+            &WS_STARLETTE_HEADERS.get(py)?,
+            "raw",
+            &raw_headers(self, py),
+        )
     }
 
     #[getter]

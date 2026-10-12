@@ -112,11 +112,13 @@ fn py_schema_to_json(obj: &Bound<'_, PyAny>) -> Option<serde_json::Value> {
         return Some(b.is_true().into());
     }
     if let Ok(i) = obj.cast::<PyInt>() {
-      return i.extract::<i64>().map_or_else(|_| i
-           .extract::<u64>()
-           .map(Into::into)
-                .or_else(|_| i.extract::<i128>().map(|v| Number::from_i128(v).into()))
-                .ok(),
+        return i.extract::<i64>().map_or_else(
+            |_| {
+                i.extract::<u64>()
+                    .map(Into::into)
+                    .or_else(|_| i.extract::<i128>().map(|v| Number::from_i128(v).into()))
+                    .ok()
+            },
             |v| Some(v.into()),
         );
     }
