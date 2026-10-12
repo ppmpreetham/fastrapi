@@ -138,15 +138,12 @@ fn parse_netloc(netloc: &str) -> (Option<String>, Option<u16>, Option<String>, O
         None => (None, None),
     };
     let (host, port) = if hostport.starts_with('[') {
-        match hostport.find(']') {
-            Some(end) => {
-                let port = hostport[end + 1..]
-                    .strip_prefix(':')
-                    .and_then(|p| p.parse().ok());
-                (Some(&hostport[..=end]), port)
-            }
-            None => (Some(hostport), None),
-        }
+        hostport.find(']').map_or((Some(hostport), None), |end| {
+            let port = hostport[end + 1..]
+                .strip_prefix(':')
+               .and_then(|p| p.parse().ok());
+           (Some(&hostport[..=end]), port)
+       })
     } else {
         match hostport.rsplit_once(':') {
             Some((host, port)) => (Some(host), port.parse().ok()),
@@ -193,7 +190,7 @@ fn parse_host_header(header: &str) -> Option<(String, bool)> {
     Some((header.to_string(), valid_port))
 }
 
-fn is_host_byte(b: u8) -> bool {
+const fn is_host_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric()
         || matches!(
             b,
@@ -300,7 +297,7 @@ pub struct PyURL {
 }
 
 impl PyURL {
-    pub(crate) fn from_string(url: String) -> Self {
+    pub(crate) const fn from_string(url: String) -> Self {
         Self {
             url,
             parts: RwLock::new(None),
@@ -473,7 +470,7 @@ impl PyURL {
     }
 
     fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
-        let other_str = match other.cast::<PyURL>() {
+        let other_str = match other.cast::<Self>() {
             Ok(other) => other.borrow().url.clone(),
             Err(_) => other.str()?.to_string(),
         };
@@ -634,7 +631,7 @@ impl PyURL {
             drop(this);
             return Ok(slf.clone());
         }
-        let base = PyURL::from_string(base_url.to_string());
+        let base = Self::from_string(base_url.to_string());
         let b = base.components()?;
         let absolute = format!(
             "{}://{}{}",
@@ -643,7 +640,7 @@ impl PyURL {
             parts.path,
         );
         drop(this);
-        Py::new(slf.py(), PyURL::from_string(absolute)).map(|obj| obj.into_bound(slf.py()))
+        Py::new(slf.py(), Self::from_string(absolute)).map(|obj| obj.into_bound(slf.py()))
     }
 
     fn __truediv__(&self, other: &str) -> String {

@@ -259,11 +259,11 @@ impl PyServerSentEvent {
     }
 
     #[pyo3(signature = (_context))]
-    fn model_post_init(&self, _context: &Bound<'_, PyAny>) {}
+    const fn model_post_init(&self, _context: &Bound<'_, PyAny>) {}
 
     #[classmethod]
     fn model_validate(cls: &Bound<'_, PyType>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(event) = value.cast::<PyServerSentEvent>() {
+        if let Ok(event) = value.cast::<Self>() {
             return Ok(event.clone().unbind().into_any());
         }
         let dict = value.cast::<PyDict>()?;

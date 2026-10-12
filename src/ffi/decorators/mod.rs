@@ -180,7 +180,7 @@ impl PyAPIRouter {
     #[pyo3(signature = (router, *, prefix="", tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
     pub fn include_router(
         &self,
-        router: &Bound<'_, PyAPIRouter>,
+        router: &Bound<'_, Self>,
         prefix: &str,
         tags: Option<&Bound<'_, PyAny>>,
         dependencies: Option<&Bound<'_, PyAny>>,
@@ -222,7 +222,7 @@ impl PyAPIRouter {
     fn nest(
         &self,
         prefix: &str,
-        router: &Bound<'_, PyAPIRouter>,
+        router: &Bound<'_, Self>,
         tags: Option<&Bound<'_, PyAny>>,
         dependencies: Option<&Bound<'_, PyAny>>,
         responses: Option<&Bound<'_, PyAny>>,

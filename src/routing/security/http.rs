@@ -25,7 +25,7 @@ pub struct HTTPBearer {
 impl HTTPBearer {
     #[new]
     #[pyo3(signature = (*, bearer_format=None, scheme_name=None, description=None, auto_error=true))]
-    fn new(
+    const fn new(
         bearer_format: Option<String>,
         scheme_name: Option<String>,
         description: Option<String>,
@@ -68,7 +68,7 @@ pub struct HTTPBasic {
 impl HTTPBasic {
     #[new]
     #[pyo3(signature = (*, scheme_name=None, realm=None, description=None, auto_error=true))]
-    fn new(
+    const fn new(
         scheme_name: Option<String>,
         realm: Option<String>,
         description: Option<String>,
@@ -107,7 +107,7 @@ pub struct HTTPDigest {
 impl HTTPDigest {
     #[new]
     #[pyo3(signature = (*, scheme_name=None, description=None, auto_error=true))]
-    fn new(scheme_name: Option<String>, description: Option<String>, auto_error: bool) -> Self {
+    const fn new(scheme_name: Option<String>, description: Option<String>, auto_error: bool) -> Self {
         Self {
             scheme_name,
             description,

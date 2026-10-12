@@ -25,7 +25,7 @@ pub enum FastRapiError {
 }
 
 impl From<FastRapiError> for PyErr {
-    fn from(err: FastRapiError) -> PyErr {
+    fn from(err: FastRapiError) -> Self {
         PyRuntimeError::new_err(err.to_string())
     }
 }

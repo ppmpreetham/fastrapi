@@ -301,7 +301,7 @@ fn method_not_allowed_response(router: &FrozenRouter, root: &str, request: &Requ
         .and_then(|value| value.to_str().ok())
         .map(|value| value.split(':').next().unwrap_or(value));
     let path = dispatch_path_with_root(root, request.uri().path())
-        .unwrap_or(request.uri().path());
+        .unwrap_or_else(|| request.uri().path());
     let allow = router
         .allowed_methods(path, host)
         .iter()

@@ -83,7 +83,7 @@ macro_rules! define_validation_subclass {
             }
 
             #[pyo3(signature = (*_args, **_kwargs))]
-            fn __init__(&self, _args: &pyo3::prelude::Bound<'_, pyo3::types::PyTuple>, _kwargs: Option<&pyo3::prelude::Bound<'_, pyo3::types::PyDict>>) {}
+            const fn __init__(&self, _args: &pyo3::prelude::Bound<'_, pyo3::types::PyTuple>, _kwargs: Option<&pyo3::prelude::Bound<'_, pyo3::types::PyDict>>) {}
         }
     };
 }
@@ -264,7 +264,7 @@ macro_rules! define_param_internal {
                 **_extra
             ))]
             #[allow(clippy::too_many_arguments)]
-            fn new(
+            const fn new(
                 default: Option<pyo3::prelude::Py<pyo3::prelude::PyAny>>,
                 default_factory: Option<pyo3::prelude::Py<pyo3::prelude::PyAny>>,
                 $( $extra_arg_name : $extra_arg_type , )*

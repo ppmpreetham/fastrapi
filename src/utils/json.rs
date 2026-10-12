@@ -43,13 +43,10 @@ pub fn is_enum_instance(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
 }
 
 fn json_text<'a>(text: &'a Bound<'_, PyString>) -> PyResult<Cow<'a, str>> {
-    match text.to_cow() {
-        Ok(text) => Ok(text),
-        Err(_) => Err(text
-            .call_method1(intern!(text.py(), "encode"), ("utf-8",))
-            .err()
-            .unwrap_or_else(|| PyValueError::new_err("surrogates not allowed"))),
-    }
+    text.to_cow().map_or_else(
+        |_| Err(text.call_method1(intern!(text.py(), "encode"), ("utf-8",)).err().unwrap_or_else(|| PyValueError::new_err("surrogates not allowed"))),
+        Ok,
+    )
 }
 
 fn json_text_of(value: &Bound<'_, PyAny>) -> PyResult<String> {
@@ -81,10 +78,7 @@ pub fn write_pydantic_model_json_opts<W: Write>(
     writer: &mut W,
     options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<bool> {
-    let json = match options {
-        Some(opts) => value.call_method(intern!(py, "model_dump_json"), (), Some(opts)),
-        None => value.call_method0(intern!(py, "model_dump_json")),
-    };
+    let json = options.map_or_else(|| value.call_method0(intern!(py, "model_dump_json")), |opts| value.call_method(intern!(py, "model_dump_json"), (), Some(opts)));
 
     let Ok(json) = json else {
         return Ok(false);
@@ -732,13 +726,11 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         PyJsonKind::Str(s) => simd_json::json!(lossy_text(&s)),
         PyJsonKind::Bool(b) => simd_json::json!(b.is_true()),
         PyJsonKind::Int(i) => {
-            if let Ok(v) = i.extract::<i64>() {
-                simd_json::json!(v)
-            } else if let Ok(s) = value.str() {
+            i.extract::<i64>().map_or_else(|_| if let Ok(s) = value.str() {
                 simd_json::json!(lossy_text(&s))
             } else {
                 simd_json::json!(null)
-            }
+            }, |v| simd_json::json!(v))
         }
 
         PyJsonKind::Float(f) => match f.extract::<f64>() {
@@ -816,23 +808,13 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
             {
                 return simd_json::json!(f);
             }
-            if let Ok(s) = value.str() {
-                simd_json::json!(lossy_text(&s))
-            } else {
-                simd_json::json!(null)
-            }
+            value.str().map_or_else(|_| simd_json::json!(null), |s| simd_json::json!(lossy_text(&s)))
         }
 
         PyJsonKind::UuidOrDecimal
         | PyJsonKind::Path
         | PyJsonKind::IpAddress
-        | PyJsonKind::FallbackStr => {
-            if let Ok(s) = value.str() {
-                simd_json::json!(lossy_text(&s))
-            } else {
-                simd_json::json!(null)
-            }
-        }
+        | PyJsonKind::FallbackStr => value.str().map_or_else(|_| simd_json::json!(null), |s| simd_json::json!(lossy_text(&s))),
 
         PyJsonKind::Enum => {
             if let Ok(inner) = value.getattr(intern!(py, "value")) {
@@ -847,10 +829,10 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
 #[inline]
 #[must_use]
 pub fn bytes_to_json(b: &[u8]) -> Value {
-    match from_utf8(b) {
-        Ok(s) => simd_json::json!(s.to_owned()),
-        Err(_) => Value::Array(Box::new(
+    from_utf8(b).map_or_else(
+        |_| Value::Array(Box::new(
             b.iter().map(|&x| simd_json::json!(x)).collect::<Vec<_>>(),
         )),
-    }
+        |s| simd_json::json!(s.to_owned()),
+    )
 }

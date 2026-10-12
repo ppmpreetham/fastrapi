@@ -109,7 +109,6 @@ all = { level = "warn", priority = -2 }
 pedantic = { level = "warn", priority = -2 }
 perf = { level = "warn", priority = -1 }
 complexity = { level = "warn", priority = -1 }
-redundant_clone = "warn"
 inline_always = "allow"
 unseparated_literal_suffix = "allow"
 similar_names = "allow"
@@ -125,6 +124,15 @@ cast_sign_loss = "allow"
 cast_precision_loss = "allow"
 unreadable_literal = "allow"
 implicit_hasher = "allow"
+
+# nursery
+significant_drop_tightening = "warn"
+redundant_clone = "warn"
+use_self = "warn"
+redundant_else = "warn"
+or_fun_call = "warn"
+missing_const_for_fn = "warn"
+derive_partial_eq_without_eq = "warn"
 
 [package.metadata.maturin]
 generate-stubs = true

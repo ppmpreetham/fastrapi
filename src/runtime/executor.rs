@@ -325,10 +325,7 @@ fn call_handler_and_convert(
     request_headers: Option<&HeaderMap>,
 ) -> Result<Response, PyErr> {
     let py_func = handler.execution.func.bind(py);
-    let result = match kwargs {
-        Some(kw) => py_func.call((), Some(kw)),
-        None => py_func.call0(),
-    };
+    let result = kwargs.map_or_else(|| py_func.call0(), |kw| py_func.call((), Some(kw)));
     match result {
         Ok(res) => Ok(specialized_response_conversion(
             py,
@@ -841,7 +838,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
     response
 }
 
-pub fn assign_execution_mode(handler: &mut RouteHandler) {
+pub const fn assign_execution_mode(handler: &mut RouteHandler) {
     let is_async = handler.execution.is_async;
     let deps_empty = handler.payload.dependencies.is_empty();
     let all_sync = handler.payload.all_deps_sync;

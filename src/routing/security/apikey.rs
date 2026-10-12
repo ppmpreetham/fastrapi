@@ -26,7 +26,7 @@ macro_rules! define_api_key_security {
         impl $struct_name {
             #[new]
             #[pyo3(signature = (*, name, scheme_name=None, description=None, auto_error=true))]
-            fn new(
+            const fn new(
                 name: String,
                 scheme_name: Option<String>,
                 description: Option<String>,

@@ -6,7 +6,7 @@ use pyo3::prelude::Python;
 
 impl PyAPIRouter {
     #[inline]
-    fn router_ref<'a>(&'a self, _py: Python<'_>) -> &'a PyAPIRouter {
+    const fn router_ref<'a>(&'a self, _py: Python<'_>) -> &'a Self {
         self
     }
 }

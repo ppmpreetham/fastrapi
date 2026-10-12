@@ -33,13 +33,13 @@ impl TryFrom<&Method> for HttpMethod {
 
     fn try_from(method: &Method) -> Result<Self, Self::Error> {
         Ok(match *method {
-            Method::GET => HttpMethod::GET,
-            Method::POST => HttpMethod::POST,
-            Method::PUT => HttpMethod::PUT,
-            Method::DELETE => HttpMethod::DELETE,
-            Method::PATCH => HttpMethod::PATCH,
-            Method::OPTIONS => HttpMethod::OPTIONS,
-            Method::HEAD => HttpMethod::HEAD,
+            Method::GET => Self::GET,
+            Method::POST => Self::POST,
+            Method::PUT => Self::PUT,
+            Method::DELETE => Self::DELETE,
+            Method::PATCH => Self::PATCH,
+            Method::OPTIONS => Self::OPTIONS,
+            Method::HEAD => Self::HEAD,
             _ => return Err(()),
         })
     }

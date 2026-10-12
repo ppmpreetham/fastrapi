@@ -127,13 +127,10 @@ pub fn spawn_response_background_value(background: Py<PyAny>) {
     };
     let async_loop = Python::attach(|py| Arc::new(pool.pick(py)));
     spawn(async move {
-        let futures = Python::attach(|py| match background.bind(py).cast::<PyBackgroundTasks>() {
-            Ok(tasks) => tasks.borrow().execute_all(&async_loop),
-            Err(_) => spawn_tasks(
-                &async_loop,
-                vec![(background.clone_ref(py), Vec::new(), None)],
-            ),
-        });
+        let futures = Python::attach(|py| background.bind(py).cast::<PyBackgroundTasks>().map_or_else(|_| spawn_tasks(
+            &async_loop,
+            vec![(background.clone_ref(py), Vec::new(), None)],
+          ), |tasks| tasks.borrow().execute_all(&async_loop)));
         for task in futures {
             task.await;
         }

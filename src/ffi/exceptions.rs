@@ -21,7 +21,7 @@ pub struct PyFastAPIError;
 #[pymethods]
 impl PyFastAPIError {
     #[new]
-    fn new() -> Self {
+    const fn new() -> Self {
         Self
     }
 }
@@ -70,7 +70,7 @@ impl PyValidationException {
     }
 
     #[pyo3(signature = (*_args, **_kwargs))]
-    fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
+    const fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
 
     #[expect(
         clippy::used_underscore_binding,
@@ -148,7 +148,7 @@ impl PyHTTPException {
     }
 
     #[pyo3(signature = (*_args, **_kwargs))]
-    fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
+    const fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
 
     fn __str__(&self, py: Python<'_>) -> String {
         let detail = self.detail.bind(py);
@@ -191,7 +191,7 @@ fn response_headers(py: Python<'_>, headers: Option<&Py<PyDict>>) -> HeaderMap {
     map
 }
 
-fn body_allowed(status: StatusCode) -> bool {
+const fn body_allowed(status: StatusCode) -> bool {
     let code = status.as_u16();
     code >= 200 && !matches!(code, 204 | 205 | 304)
 }
@@ -254,24 +254,24 @@ pub struct PyWebSocketDisconnect {
 impl PyWebSocketDisconnect {
     #[new]
     #[pyo3(signature = (code=1000, reason=None))]
-    fn new(code: u16, reason: Option<String>) -> Self {
+    const fn new(code: u16, reason: Option<String>) -> Self {
         Self { code, reason }
     }
 
     #[pyo3(signature = (*_args, **_kwargs))]
-    fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
+    const fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
 }
 
 #[pymethods]
 impl PyWebSocketException {
     #[new]
     #[pyo3(signature = (code, reason=None))]
-    fn new(code: u16, reason: Option<String>) -> Self {
+    const fn new(code: u16, reason: Option<String>) -> Self {
         Self { code, reason }
     }
 
     #[pyo3(signature = (*_args, **_kwargs))]
-    fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
+    const fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
 
     fn __str__(&self) -> String {
         format!("{}: {}", self.code, self.reason.as_deref().unwrap_or(""))
@@ -291,7 +291,7 @@ pub struct PyFastAPIDeprecationWarning;
 #[pymethods]
 impl PyFastAPIDeprecationWarning {
     #[new]
-    fn new() -> Self {
+    const fn new() -> Self {
         Self
     }
 }

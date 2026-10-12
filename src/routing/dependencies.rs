@@ -89,7 +89,7 @@ pub struct DependencyNode {
 impl DependencyNode {
     #[inline]
     #[must_use]
-    pub fn is_sync_callable(&self) -> bool {
+    pub const fn is_sync_callable(&self) -> bool {
         !self.is_async && !self.is_async_generator
     }
 }

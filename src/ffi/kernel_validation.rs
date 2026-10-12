@@ -1,7 +1,8 @@
 //! Rust-native request validation, built on `pydantic-core-kernel` (which is the
 //! pure-Rust decoupling of pydantic-core)
 
-//! The kernel keeps pydantic semantics 1:1, so 422 responses are indistinguishable from pydantic's.
+//! The kernel keeps pydantic semantics 1:1, so 422 responses
+//! are indistinguishable from pydantic's.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -111,14 +112,13 @@ fn py_schema_to_json(obj: &Bound<'_, PyAny>) -> Option<serde_json::Value> {
         return Some(b.is_true().into());
     }
     if let Ok(i) = obj.cast::<PyInt>() {
-        return match i.extract::<i64>() {
-            Ok(v) => Some(v.into()),
-            Err(_) => i
-                .extract::<u64>()
-                .map(Into::into)
+      return i.extract::<i64>().map_or_else(|_| i
+           .extract::<u64>()
+           .map(Into::into)
                 .or_else(|_| i.extract::<i128>().map(|v| Number::from_i128(v).into()))
                 .ok(),
-        };
+            |v| Some(v.into()),
+        );
     }
     if let Ok(f) = obj.cast::<PyFloat>() {
         return Some(f.value().into());

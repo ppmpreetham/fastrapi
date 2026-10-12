@@ -148,7 +148,7 @@ impl PyAPIRoute {
     /// keeps pyo3's subtype allocation; `__init__` fills the state.
     #[new]
     #[pyo3(signature = (*args, **kwargs))]
-    fn py_new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+    const fn py_new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> Self {
         let _ = (args, kwargs);
         Self {
             path: String::new(),
@@ -270,7 +270,7 @@ pub struct PyAPIWebSocketRoute {
 impl PyAPIWebSocketRoute {
     #[new]
     #[pyo3(signature = (*args, **kwargs))]
-    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+    const fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> Self {
         let _ = (args, kwargs);
         Self {
             path: String::new(),

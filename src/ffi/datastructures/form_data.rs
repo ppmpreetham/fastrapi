@@ -126,7 +126,7 @@ impl PyFormData {
         slf.getattr("keys")?.call0()
     }
 
-    fn __len__(&self) -> usize {
+    const fn __len__(&self) -> usize {
         self.items.len()
     }
 
@@ -192,7 +192,7 @@ impl PyFormData {
 impl PyFormData {
     /// starlette compares `sorted(self._list)`; sorting by (key, value-repr)
     /// is deterministic and never raises across mixed value types.
-    fn sorted_eq(&self, py: Python<'_>, other: &PyFormData) -> PyResult<bool> {
+    fn sorted_eq(&self, py: Python<'_>, other: &Self) -> PyResult<bool> {
         fn sorted_keys(form: &PyFormData, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
             let mut reprs: Vec<(String, String)> = form
                 .items

@@ -64,7 +64,7 @@ pub struct OAuth2PasswordBearer {
 impl OAuth2PasswordBearer {
     #[new]
     #[pyo3(signature = (token_url, scheme_name=None, scopes=None, description=None, auto_error=true))]
-    fn new(
+    const fn new(
         token_url: String,
         scheme_name: Option<String>,
         scopes: Option<Py<PyDict>>,
@@ -109,7 +109,7 @@ pub struct OAuth2AuthorizationCodeBearer {
 impl OAuth2AuthorizationCodeBearer {
     #[new]
     #[pyo3(signature = (authorization_url, token_url, refresh_url=None, scopes=None, *, scheme_name=None, description=None, auto_error=true))]
-    fn new(
+    const fn new(
         authorization_url: String,
         token_url: String,
         refresh_url: Option<String>,
@@ -154,7 +154,7 @@ pub struct OpenIdConnect {
 impl OpenIdConnect {
     #[new]
     #[pyo3(signature = (openid_connect_url, scheme_name=None, description=None, auto_error=true))]
-    fn new(
+    const fn new(
         openid_connect_url: String,
         scheme_name: Option<String>,
         description: Option<String>,

@@ -110,7 +110,7 @@ pub(crate) fn http_bearer_call(
     })
 }
 
-fn empty_credentials() -> HTTPAuthorizationCredentials {
+const fn empty_credentials() -> HTTPAuthorizationCredentials {
     HTTPAuthorizationCredentials {
         scheme: String::new(),
         credentials: String::new(),

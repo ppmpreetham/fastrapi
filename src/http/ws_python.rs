@@ -293,7 +293,7 @@ pub struct WSIterator {
 
 #[pymethods]
 impl WSIterator {
-    fn __aiter__(self_: Py<Self>) -> Py<Self> {
+    const fn __aiter__(self_: Py<Self>) -> Py<Self> {
         self_
     }
 

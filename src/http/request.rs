@@ -57,7 +57,7 @@ pub struct PyAppInfo {
 #[pymethods]
 impl PyAppInfo {
     #[new]
-    fn new(scope: Py<PyAny>) -> Self {
+    const fn new(scope: Py<PyAny>) -> Self {
         Self { scope }
     }
 
@@ -432,7 +432,7 @@ impl PyHTTPConnection {
         }
     }
 
-    fn __bool__(&self) -> bool {
+    const fn __bool__(&self) -> bool {
         true
     }
 }
@@ -552,12 +552,12 @@ impl PyRequest {
         scope: Py<PyAny>,
         headers: Option<Arc<HeaderMap>>,
         raw_body: impl Into<Option<&'a [u8]>>,
-    ) -> PyResult<Bound<'_, PyRequest>> {
+    ) -> PyResult<Bound<'_, Self>> {
         let conn = PyHTTPConnection {
             scope,
             receive: py.None(),
         };
-        let req = PyRequest {
+        let req = Self {
             send: py.None(),
             body_cache: Arc::new(OnceCell::new()),
             raw_headers: headers,

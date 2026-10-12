@@ -282,12 +282,12 @@ impl FastrAPI {
             path
         };
 
-        if let Ok(sub_app) = app.extract::<PyRef<'_, FastrAPI>>() {
+        if let Ok(sub_app) = app.extract::<PyRef<'_, Self>>() {
             self.inherit_sub_app_lifespan(py, &sub_app)?;
             let owned = app
                 .clone()
                 .into_any()
-                .cast_into::<FastrAPI>()
+                .cast_into::<Self>()
                 .map_err(PyErr::from)?
                 .unbind();
             self.app_mounts.push(SubAppMount {
@@ -356,7 +356,7 @@ impl FastrAPI {
         let owned = app
             .clone()
             .into_any()
-            .cast_into::<FastrAPI>()
+            .cast_into::<Self>()
             .map_err(PyErr::from)?
             .unbind();
         self.host_mounts.push(HostMount { host, app: owned });
@@ -667,7 +667,7 @@ impl FastrAPI {
     fn inherit_sub_app_lifespan(
         &mut self,
         py: Python<'_>,
-        sub: &PyRef<'_, FastrAPI>,
+        sub: &PyRef<'_, Self>,
     ) -> PyResult<()> {
         let extend = |parent: &mut Option<Py<PyAny>>, child: &Option<Py<PyAny>>| -> PyResult<()> {
             let Some(child_list) = child else {

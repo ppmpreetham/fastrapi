@@ -13,7 +13,7 @@ impl PyDepends {
     #[new]
     #[pyo3(signature = (dependency=None, *, use_cache=true))]
     #[must_use]
-    pub fn new(dependency: Option<Py<PyAny>>, use_cache: bool) -> Self {
+    pub const fn new(dependency: Option<Py<PyAny>>, use_cache: bool) -> Self {
         Self {
             dependency,
             use_cache,
