@@ -54,7 +54,7 @@ pub(crate) fn is_rate_limited(req: &Request, handler: usize, limit: u32) -> bool
         data: AtomicU64::new(u64::from(now_secs) << 32),
     });
 
-    let result = bucket.data.fetch_update(SeqCst, SeqCst, |val| {
+    let result = bucket.data.try_update(SeqCst, SeqCst, |val| {
         let window_time = (val >> 32) as u32;
         let count = (val & 0xFFFFFFFF) as u32;
 
