@@ -178,6 +178,7 @@ fn register_routes(
     // 1. Cached routes
     app = group_and_register_routes(app, routes, |route| {
         if route.host.is_none()
+            && route.handler.execution.rate_limit_per_second.is_none()
             && route.handler.execution.cache_response
             && !route.path.contains('{')
             && matches!(
@@ -198,6 +199,7 @@ fn register_routes(
     // 2. Direct no request routes
     app = group_and_register_routes(app, routes, |route| {
         if route.host.is_none()
+            && route.handler.execution.rate_limit_per_second.is_none()
             && !route.handler.execution.cache_response
             && !route.path.contains('{')
             && matches!(
