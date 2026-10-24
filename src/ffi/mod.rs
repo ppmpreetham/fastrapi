@@ -3,6 +3,7 @@
 
 pub(crate) mod compat;
 pub mod decorators;
+pub(crate) mod docs;
 pub mod encoders;
 pub mod openapi;
 pub mod routing;

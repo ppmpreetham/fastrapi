@@ -2,7 +2,7 @@
 //! This module builds the `fastrapi` submodules for dependencies, security, exception handlers, OpenAPI and docs.
 
 use fastrapi_core::path::extract_path_param_names;
-use fastrapi_http::responses::{PyHTMLResponse, PyJSONResponse};
+use fastrapi_http::responses::PyJSONResponse;
 use fastrapi_routing::dependencies::parse_dependencies;
 use pyo3::Bound;
 use pyo3::prelude::*;
@@ -232,9 +232,7 @@ pub(crate) fn register_exception_handlers(parent: &Bound<'_, PyModule>) -> PyRes
 pub(crate) fn register_openapi_helpers(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
     let docs = PyModule::new(py, "docs")?;
-    docs.add_function(wrap_pyfunction!(swagger_ui_html, &docs)?)?;
-    docs.add_function(wrap_pyfunction!(redoc_html, &docs)?)?;
-    docs.add_function(wrap_pyfunction!(swagger_ui_oauth2_redirect_html, &docs)?)?;
+    crate::ffi::docs::register(&docs)?;
     module.add_submodule(&docs)?;
     py.import("sys")?
         .getattr("modules")?
@@ -568,45 +566,4 @@ pub(crate) fn register_compat_modules(parent: &Bound<'_, PyModule>) -> PyResult<
             .set_item(name, module)?;
     }
     Ok(())
-}
-
-fn html_response(py: Python<'_>, title: &str) -> PyResult<Py<PyAny>> {
-    Ok(py
-        .get_type::<PyHTMLResponse>()
-        .call1((format!(
-            "<!doctype html><html><head><title>{title}</title></head><body></body></html>"
-        ),))?
-        .unbind())
-}
-
-#[pyfunction(name = "get_swagger_ui_html")]
-#[pyo3(signature = (*, openapi_url, title, **_kwargs))]
-fn swagger_ui_html(
-    py: Python<'_>,
-    openapi_url: &str,
-    title: &str,
-    _kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    html_response(py, &format!("{title} - Swagger UI ({openapi_url})"))
-}
-
-#[pyfunction(name = "get_redoc_html")]
-#[pyo3(signature = (*, openapi_url, title, **_kwargs))]
-fn redoc_html(
-    py: Python<'_>,
-    openapi_url: &str,
-    title: &str,
-    _kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    html_response(py, &format!("{title} - ReDoc ({openapi_url})"))
-}
-
-#[pyfunction(name = "get_swagger_ui_oauth2_redirect_html")]
-#[pyo3(signature = (*_args, **_kwargs))]
-fn swagger_ui_oauth2_redirect_html(
-    py: Python<'_>,
-    _args: &Bound<'_, PyTuple>,
-    _kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    html_response(py, "OAuth2 Redirect")
 }
