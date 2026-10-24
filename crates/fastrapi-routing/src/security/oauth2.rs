@@ -239,19 +239,35 @@ pub struct OpenIdConnect {
 #[pymethods]
 impl OpenIdConnect {
     #[new]
-    #[pyo3(signature = (openid_connect_url, scheme_name=None, description=None, auto_error=true))]
-    const fn new(
-        openid_connect_url: String,
+    #[pyo3(signature = (
+        openIdConnectUrl=None,
+        scheme_name=None,
+        description=None,
+        auto_error=true,
+        *,
+        openid_connect_url=None
+    ))]
+    #[expect(
+        non_snake_case,
+        reason = "FastAPI names this argument openIdConnectUrl"
+    )]
+    fn new(
+        openIdConnectUrl: Option<String>,
         scheme_name: Option<String>,
         description: Option<String>,
         auto_error: bool,
-    ) -> Self {
-        Self {
-            openid_connect_url,
+        openid_connect_url: Option<String>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            openid_connect_url: required_url(
+                openIdConnectUrl,
+                openid_connect_url,
+                "openIdConnectUrl",
+            )?,
             scheme_name,
             description,
             auto_error,
-        }
+        })
     }
 
     /// Call self as a function.

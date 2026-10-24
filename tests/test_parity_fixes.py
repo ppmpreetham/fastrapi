@@ -62,3 +62,9 @@ def test_password_bearer_refresh_url_in_openapi(client, app):
 
     flow = client.get("/openapi.json").json()["components"]["securitySchemes"]["OAuth2"]
     assert flow["flows"]["password"] == {"tokenUrl": "/token", "refreshUrl": "/refresh", "scopes": {}}
+
+
+def test_openid_connect_takes_fastapi_argument_name():
+    from fastrapi.security import OpenIdConnect
+
+    assert OpenIdConnect(openIdConnectUrl="/oidc").openid_connect_url == "/oidc"
