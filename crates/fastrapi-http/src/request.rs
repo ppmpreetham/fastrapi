@@ -11,16 +11,14 @@ use cookie::Cookie;
 use fastrapi_pyutil::imports::{SIMPLE_COOKIE, STARLETTE_HEADERS, STARLETTE_STATE, TYPES};
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::server_state::{lifespan_state, serve_app};
-use fastrapi_runtime::tokio_runtime::PYTHON_RUNTIME;
+use futures_util::FutureExt;
 use pyo3::exceptions::{PyAssertionError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyString, PyTuple};
 use pyo3::{Py, PyClassInitializer, intern};
 use std::str::from_utf8;
 use std::sync::Arc;
-use tokio::runtime::Handle;
 use tokio::sync::OnceCell;
-use tokio::task::block_in_place;
 
 fastrapi_pyutil::cached_py_import!(
     STARLETTE_QUERY_PARAMS,
@@ -782,12 +780,11 @@ impl PyRequest {
         let raw = request.body_cache.get().cloned().unwrap_or_default();
         let content_type = form::content_type_of(py, conn.borrow().scope.bind(py));
         if content_type.starts_with("multipart/form-data") {
-            let parsed = if let Ok(handle) = Handle::try_current() {
-                block_in_place(|| handle.block_on(form::parse_form(&content_type, &raw)))
-            } else {
-                PYTHON_RUNTIME.block_on(form::parse_form(&content_type, &raw))
-            }
-            .map_err(|message| PyHTTPException::bad_request(py, &message))?;
+            // The body is already in memory, so the parse finishes on its first poll.
+            let parsed = form::parse_form(&content_type, &raw)
+                .now_or_never()
+                .ok_or_else(|| PyRuntimeError::new_err("the form parser did not finish"))?
+                .map_err(|message| PyHTTPException::bad_request(py, &message))?;
             return form::to_form_data(py, parsed).map(|value| value.bind(py).clone());
         }
         Ok(form::parse_urlencoded_form_data(py, &raw)?.into_bound(py))
