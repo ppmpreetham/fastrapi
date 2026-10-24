@@ -1,29 +1,23 @@
-use crate::engine::types::FastrAPI;
-use crate::globals::AsyncLoopPool;
-use crate::globals::PYTHON_RUNTIME;
-use crate::globals::clear_lifespan_state;
-use crate::globals::set_lifespan_state;
-use crate::runtime::py_bridge::schedule_task;
-use pyo3::{exceptions::PyTypeError, prelude::*};
+use crate::engine::config::FastrAPI;
+use fastrapi_runtime::py_bridge::{EventLoop, schedule_task};
+use fastrapi_runtime::server_state::{clear_lifespan_state, set_lifespan_state};
+use fastrapi_runtime::tokio_runtime::PYTHON_RUNTIME;
+use pyo3::exceptions::PyTypeError;
+use pyo3::prelude::*;
 use std::thread::Builder;
 use tracing::error;
 
-crate::cached_py_import!(ASYNCIO_MODULE, "asyncio");
+fastrapi_pyutil::cached_py_import!(ASYNCIO_MODULE, "asyncio");
 
 pub(crate) struct EnteredLifespan {
     manager: Py<PyAny>,
-    event_loop: Py<PyAny>,
+    event_loop: EventLoop,
 }
 
-pub(crate) fn start_background_asyncio_loop(py: Python<'_>) -> PyResult<AsyncLoopPool> {
-    let count = 1;
-    let mut loops = Vec::with_capacity(count);
-    for _ in 0..count {
-        let event_loop = create_event_loop(py)?;
-        spawn_loop_thread(py, &event_loop)?;
-        loops.push(event_loop);
-    }
-    Ok(AsyncLoopPool::new(loops))
+pub(crate) fn start_background_asyncio_loop(py: Python<'_>) -> PyResult<EventLoop> {
+    let event_loop = create_event_loop(py)?;
+    spawn_loop_thread(py, &event_loop)?;
+    Ok(EventLoop::leak(event_loop))
 }
 
 pub(crate) fn create_event_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -50,13 +44,10 @@ fn spawn_loop_thread(py: Python<'_>, event_loop: &Py<PyAny>) -> PyResult<()> {
     Ok(())
 }
 
-pub(crate) fn stop_background_asyncio_loop(py: Python<'_>, pool: &AsyncLoopPool) {
-    for event_loop in pool.loops() {
-        if let Ok(stop) = event_loop.bind(py).getattr("stop") {
-            _ = event_loop
-                .bind(py)
-                .call_method1("call_soon_threadsafe", (stop,));
-        }
+pub(crate) fn stop_background_asyncio_loop(py: Python<'_>, event_loop: EventLoop) {
+    let event_loop = event_loop.bind(py);
+    if let Ok(stop) = event_loop.getattr("stop") {
+        _ = event_loop.call_method1("call_soon_threadsafe", (stop,));
     }
 }
 
@@ -65,7 +56,7 @@ pub(crate) fn run_startup_phase(
     app: &Py<FastrAPI>,
     lifespan: Option<Py<PyAny>>,
     on_startup: Option<Py<PyAny>>,
-    event_loop: &Py<PyAny>,
+    event_loop: EventLoop,
 ) -> PyResult<Option<EnteredLifespan>> {
     if let Some(lifespan_handler) = lifespan {
         return enter_lifespan(py, app, &lifespan_handler, event_loop).map(Some);
@@ -82,7 +73,7 @@ pub(crate) fn run_shutdown_phase(
     py: Python<'_>,
     entered_lifespan: Option<EnteredLifespan>,
     on_shutdown: Option<Py<PyAny>>,
-    event_loop: &Py<PyAny>,
+    event_loop: EventLoop,
 ) -> PyResult<()> {
     if let Some(entered) = entered_lifespan {
         return exit_lifespan(py, &entered);
@@ -97,7 +88,7 @@ pub(crate) fn run_shutdown_phase(
 pub(crate) fn run_lifecycle_handlers(
     py: Python<'_>,
     handlers: &Py<PyAny>,
-    event_loop: &Py<PyAny>,
+    event_loop: EventLoop,
 ) -> PyResult<()> {
     extract_lifecycle_handlers(py, handlers)?
         .into_iter()
@@ -131,7 +122,7 @@ pub(crate) fn extract_lifecycle_handlers(
 pub(crate) fn run_lifecycle_handler(
     py: Python<'_>,
     handler: &Py<PyAny>,
-    event_loop: &Py<PyAny>,
+    event_loop: EventLoop,
 ) -> PyResult<()> {
     let handler_bound = handler.bind(py);
 
@@ -142,7 +133,7 @@ pub(crate) fn run_lifecycle_handler(
 
     if is_async {
         let coroutine = handler_bound.call0()?;
-        run_awaitable_in_loop(py, event_loop.bind(py), coroutine)?;
+        run_awaitable_in_loop(py, event_loop, coroutine)?;
     } else {
         handler_bound.call0()?;
     }
@@ -154,35 +145,28 @@ pub(crate) fn enter_lifespan(
     py: Python<'_>,
     app: &Py<FastrAPI>,
     lifespan: &Py<PyAny>,
-    event_loop: &Py<PyAny>,
+    event_loop: EventLoop,
 ) -> PyResult<EnteredLifespan> {
     let manager = lifespan.bind(py).call1((app.clone_ref(py),))?;
     let awaitable = manager.call_method0("__aenter__")?;
 
-    let state = match run_awaitable_in_loop(py, event_loop.bind(py), awaitable) {
-        Ok(state) => state,
-        Err(err) => {
-            return Err(err);
-        }
-    };
+    let state = run_awaitable_in_loop(py, event_loop, awaitable)?;
     if !state.bind(py).is_none() {
         set_lifespan_state(state.clone_ref(py));
     }
     Ok(EnteredLifespan {
         manager: manager.unbind(),
-        event_loop: event_loop.clone_ref(py),
+        event_loop,
     })
 }
 
 pub(crate) fn exit_lifespan(py: Python<'_>, entered_lifespan: &EnteredLifespan) -> PyResult<()> {
-    let event_loop = entered_lifespan.event_loop.bind(py);
-
     let awaitable = entered_lifespan
         .manager
         .bind(py)
         .call_method1("__aexit__", (py.None(), py.None(), py.None()))?;
 
-    let result = run_awaitable_in_loop(py, event_loop, awaitable);
+    let result = run_awaitable_in_loop(py, entered_lifespan.event_loop, awaitable);
     clear_lifespan_state();
 
     result.map(|_| ())
@@ -190,11 +174,10 @@ pub(crate) fn exit_lifespan(py: Python<'_>, entered_lifespan: &EnteredLifespan) 
 
 pub(crate) fn run_awaitable_in_loop(
     py: Python<'_>,
-    event_loop: &Bound<'_, PyAny>,
+    event_loop: EventLoop,
     awaitable: Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let event_loop = event_loop.clone().unbind();
-    let future = schedule_task(py, &event_loop, awaitable)?;
+    let future = schedule_task(py, event_loop, awaitable)?;
     py.detach(|| PYTHON_RUNTIME.block_on(future))
 }
 

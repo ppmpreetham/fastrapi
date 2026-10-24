@@ -1,7 +1,6 @@
-use crate::http::responses::PyHTMLResponse;
-use crate::http::responses::PyJSONResponse;
-use crate::routing::dependencies::parse_dependencies;
-use crate::routing::params::extract_path_param_names;
+use fastrapi_core::path::extract_path_param_names;
+use fastrapi_http::responses::{PyHTMLResponse, PyJSONResponse};
+use fastrapi_routing::dependencies::parse_dependencies;
 use pyo3::Bound;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};

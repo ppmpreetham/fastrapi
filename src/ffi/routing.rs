@@ -16,9 +16,9 @@ use pyo3::exceptions::{PyAssertionError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyTuple};
 
-use crate::routing::params::extract_path_param_names;
-use crate::routing::types::HttpMethod;
-use crate::utils::LazyPyAttr;
+use fastrapi_core::method::HttpMethod;
+use fastrapi_core::path::extract_path_param_names;
+use fastrapi_pyutil::lazy::LazyPyAttr;
 use pyo3::Bound;
 
 /// Path params extracted from a matched request path, in declaration order.
@@ -107,7 +107,7 @@ pub(crate) fn route_matches<'py>(
 
 /// starlette's `Match` enum, aliased as `fastrapi.routing.Match` so `is`
 /// checks and annotations in user code behave identically.
-fn match_enum(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+fn match_enum(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     static MATCH_ENUM: LazyPyAttr = LazyPyAttr::new("starlette.routing", "Match");
     MATCH_ENUM.get(py)
 }
@@ -399,7 +399,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(iter_route_contexts, module)?)?;
     let py = module.py();
     let match_enum = match_enum(py)?;
-    module.setattr("Match", &match_enum)?;
+    module.setattr("Match", match_enum)?;
     for name in ["NONE", "PARTIAL", "FULL"] {
         module.setattr(name, match_enum.getattr(name)?)?;
     }

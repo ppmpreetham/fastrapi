@@ -1,0 +1,27 @@
+[package]
+name = "fastrapi-routing"
+description = "fastrapi's route model: parameters, dependency injection, security schemes and validation"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fastrapi-core.workspace = true
+fastrapi-http.workspace = true
+fastrapi-pyutil.workspace = true
+fastrapi-runtime.workspace = true
+ahash.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+pydantic-core-kernel.workspace = true
+pyo3.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+simd-json.workspace = true
+smallvec.workspace = true
+smart-default.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

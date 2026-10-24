@@ -1,19 +1,14 @@
-use crate::engine::types::{FrontendMount, StaticMount};
+use crate::engine::config::{FrontendMount, StaticMount};
+use axum::Router;
 use axum::body::Body;
-use axum::http::Method;
+use axum::extract::Request;
 use axum::http::header::ACCEPT;
-use axum::{
-    Router,
-    extract::Request,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
+use axum::http::{Method, StatusCode};
+use axum::response::{IntoResponse, Response};
 use smallvec::SmallVec;
 use std::convert::Infallible;
-use std::{
-    path::{Component, Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs;
 use tokio::fs::symlink_metadata;
 use tower::{ServiceExt, service_fn};
@@ -96,12 +91,16 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
     }
 
     let directory = Arc::new(PathBuf::from(mount.directory));
-    let html = mount.html;
+    let index = if mount.html {
+        DirectoryIndex::IndexHtml
+    } else {
+        DirectoryIndex::None
+    };
     let service = service_fn(move |req: Request| {
         let directory = directory.clone();
         let serve_dir = serve_dir.clone();
         async move {
-            if static_request_hits_symlink(&directory, req.uri().path(), html).await {
+            if static_request_hits_symlink(&directory, req.uri().path(), index).await {
                 return Ok::<_, Infallible>(StatusCode::FORBIDDEN.into_response());
             }
 
@@ -203,7 +202,17 @@ fn frontend_match<'a, 'p>(
         .max_by_key(|(mount, _)| mount.path.len())
 }
 
-async fn static_request_hits_symlink(directory: &Path, request_path: &str, html: bool) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectoryIndex {
+    None,
+    IndexHtml,
+}
+
+async fn static_request_hits_symlink(
+    directory: &Path,
+    request_path: &str,
+    index: DirectoryIndex,
+) -> bool {
     let Ok(decoded) = percent_encoding::percent_decode_str(request_path).decode_utf8() else {
         return false;
     };
@@ -231,7 +240,7 @@ async fn static_request_hits_symlink(directory: &Path, request_path: &str, html:
         }
     }
 
-    if html
+    if index == DirectoryIndex::IndexHtml
         && let Ok(metadata) = fs::metadata(&file_path).await
         && metadata.is_dir()
     {

@@ -1,0 +1,15 @@
+[package]
+name = "fastrapi-runtime"
+description = "The tokio runtime fastrapi runs on, its bridge to the asyncio loop, and process-wide server state"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fastrapi-pyutil.workspace = true
+parking_lot.workspace = true
+pyo3.workspace = true
+pyo3-async-runtimes.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

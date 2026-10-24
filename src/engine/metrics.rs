@@ -1,9 +1,10 @@
-use axum::{Router, routing::get};
+use axum::Router;
+use axum::routing::get;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use pyo3::prelude::*;
 use std::sync::{Arc, OnceLock};
 
-use crate::engine::types::{FastrAPI, PrometheusConfig};
+use crate::engine::config::{FastrAPI, PrometheusConfig};
 use pyo3::exceptions::PyValueError;
 
 static PROMETHEUS_HANDLE: OnceLock<Arc<PrometheusHandle>> = OnceLock::new();

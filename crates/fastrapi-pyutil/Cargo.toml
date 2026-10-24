@@ -1,0 +1,16 @@
+[package]
+name = "fastrapi-pyutil"
+description = "pyo3 helpers shared by every fastrapi crate: cached imports and the Python-to-JSON writer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum.workspace = true
+bytes.workspace = true
+papaya.workspace = true
+pyo3.workspace = true
+pythonize.workspace = true
+simd-json.workspace = true
+
+[lints]
+workspace = true

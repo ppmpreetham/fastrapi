@@ -1,28 +1,26 @@
-use super::server;
-pub use super::types::{FastrAPI, FrontendMount, HostMount, StaticMount, SubAppMount};
-use crate::decorators::PyAPIRouter;
+use super::config::{FastrAPI, FrontendMount, HostMount, StaticMount, SubAppMount};
+use super::server::serve::{serve, serve_with_reload};
 use crate::ffi::decorators;
-use crate::http::middleware::DeclaredLayer;
-use crate::http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware};
-use crate::http::staticfiles::PyStaticFiles;
-use crate::routing::types::HttpMethod;
-use crate::utils::openapi::build_openapi_spec;
+use crate::ffi::decorators::{API_ROUTE_OPTIONS, PyAPIRouter, collect_router_routes};
 use ahash::AHasher;
+use fastrapi_core::method::HttpMethod;
+use fastrapi_http::middleware::{
+    DeclaredLayer, MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware,
+};
+use fastrapi_http::staticfiles::PyStaticFiles;
+use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
+use fastrapi_pyutil::imports::STARLETTE_STATE;
 use parking_lot::Mutex;
-use pyo3::Bound;
 use pyo3::exceptions::PyValueError;
-use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyCFunction, PyDict, PyList, PyString, PyTuple};
-use std::convert::Into;
+use pyo3::{Bound, intern};
 use std::env::var_os;
 use std::hash::Hasher;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tracing::info;
-
-crate::cached_py_import!(STARLETTE_STATE, "starlette.datastructures", "State");
 
 #[pymethods]
 impl FastrAPI {
@@ -144,7 +142,7 @@ impl FastrAPI {
                 .map(Bound::unbind)?,
         };
         let generate_unique_id_function = generate_unique_id_function;
-        let base_router = Py::new(py, PyAPIRouter::new_())?;
+        let base_router = Py::new(py, PyAPIRouter::default())?;
 
         let state = STARLETTE_STATE
             .get(py)
@@ -388,40 +386,16 @@ impl FastrAPI {
         methods: Option<Vec<String>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let pick = |key: &str| -> Option<Py<PyAny>> {
-            kwargs
-                .and_then(|kw| kw.get_item(key).ok())
-                .flatten()
-                .filter(|v| !v.is_none())
-                .map(Py::from)
-        };
-        let get_bool = |key: &str, default: bool| -> bool {
-            kwargs
-                .and_then(|kw| kw.get_item(key).ok())
-                .flatten()
-                .filter(|v| !v.is_none())
-                .and_then(|v| v.extract::<bool>().ok())
-                .unwrap_or(default)
-        };
-        let route_kwargs = PyAPIRouter::api_route_kwargs(
-            py,
-            pick("response_model"),
-            pick("status_code").and_then(|v| v.bind(py).extract().ok()),
-            pick("tags"),
-            pick("dependencies"),
-            pick("summary").and_then(|v| v.bind(py).extract().ok()),
-            pick("description").and_then(|v| v.bind(py).extract().ok()),
-            pick("response_description").and_then(|v| v.bind(py).extract().ok()),
-            pick("responses"),
-            pick("deprecated").and_then(|v| v.bind(py).extract().ok()),
-            pick("operation_id").and_then(|v| v.bind(py).extract().ok()),
-            get_bool("include_in_schema", true),
-            pick("response_class"),
-            pick("name").and_then(|v| v.bind(py).extract().ok()),
-            pick("callbacks"),
-            pick("openapi_extra"),
-            pick("generate_unique_id_function"),
-        );
+        let route_kwargs = PyDict::new(py);
+        if let Some(kwargs) = kwargs {
+            for key in API_ROUTE_OPTIONS {
+                if let Some(value) = kwargs.get_item(key)?
+                    && !value.is_none()
+                {
+                    route_kwargs.set_item(key, value)?;
+                }
+            }
+        }
         self.router
             .bind(py)
             .borrow()
@@ -505,7 +479,7 @@ impl FastrAPI {
         println!("running on FastRAPI v{VERSION}");
 
         if reload && var_os("FASTRAPI_RELOAD_CHILD").is_none() {
-            server::serve_with_reload(
+            serve_with_reload(
                 py,
                 reload_dirs,
                 reload_ignore_dirs,
@@ -515,7 +489,7 @@ impl FastrAPI {
                 reload_ignore_worker_failure,
             )
         } else {
-            server::serve(py, host, port, &slf)
+            serve(py, host, port, &slf)
         }
     }
 
@@ -583,11 +557,11 @@ impl FastrAPI {
             return Ok(entry.dict.clone_ref(py));
         }
 
-        let spec = build_openapi_spec(py, self);
+        let spec = self.openapi_spec(py);
         let json_str = simd_json::to_string(&spec).unwrap_or_else(|_| "{}".to_string());
         let json_module = py.import(pyo3::intern!(py, "json"))?;
         let dict = json_module.call_method1(pyo3::intern!(py, "loads"), (json_str,))?;
-        *self.openapi_cache.lock() = Some(super::types::OpenApiCacheEntry {
+        *self.openapi_cache.lock() = Some(super::config::OpenApiCacheEntry {
             fingerprint,
             title: self.title.clone(),
             version: self.version.clone(),
@@ -678,3 +652,29 @@ impl FastrAPI {
     }
 }
 crate::generate_http_methods!(FastrAPI, router_ref);
+
+impl FastrAPI {
+    pub(crate) fn openapi_spec(&self, py: Python<'_>) -> simd_json::OwnedValue {
+        let routes = self.router.bind(py).borrow().flatten(py).0.clone();
+        let document = AppDocument {
+            title: &self.title,
+            version: &self.version,
+            summary: self.summary.as_deref(),
+            description: &self.description,
+            terms_of_service: self.terms_of_service.as_deref(),
+            contact: self.contact.as_ref(),
+            license_info: self.license_info.as_ref(),
+            servers: self.servers.as_ref(),
+            root_path_in_servers: self.root_path_in_servers,
+            root_path: &self.root_path,
+            openapi_tags: self.openapi_tags.as_ref(),
+            openapi_external_docs: self.openapi_external_docs.as_ref(),
+            responses: self.responses.as_ref(),
+            webhooks: self.webhooks.as_ref(),
+            generate_unique_id_function: self.generate_unique_id_function.as_ref(),
+            separate_input_output_schemas: self.separate_input_output_schemas,
+            routes: &routes,
+        };
+        build_openapi_spec(py, &document, collect_router_routes)
+    }
+}

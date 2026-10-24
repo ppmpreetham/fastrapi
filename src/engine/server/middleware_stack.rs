@@ -1,59 +1,51 @@
+use fastrapi_runtime::py_bridge::EventLoop;
 use std::sync::Arc;
 
-use axum::{
-    Router,
-    extract::Request,
-    http::{
-        StatusCode, header,
-        uri::{Authority, PathAndQuery, Scheme, Uri},
-    },
-    middleware::{self as axum_middleware, Next},
-    response::{IntoResponse, Response},
-};
-use pyo3::{Py, PyAny, Python, prelude::PyResult, types::PyAnyMethods as _};
+use axum::Router;
+use axum::extract::Request;
+use axum::http::uri::{Authority, PathAndQuery, Scheme, Uri};
+use axum::http::{HeaderName, StatusCode, header};
+use axum::middleware::{self as axum_middleware, Next};
+use axum::response::{IntoResponse, Response};
+use pyo3::prelude::PyResult;
+use pyo3::types::PyAnyMethods as _;
+use pyo3::{Bound, Py, PyAny, Python};
 use sha2::{Digest, Sha256};
-use tower_http::{
-    compression::{CompressionLayer, predicate::SizeAbove},
-    normalize_path::NormalizePathLayer,
-    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    set_header::SetResponseHeaderLayer,
-    timeout::TimeoutLayer,
-    trace::TraceLayer,
-};
-use tower_sessions::{
-    Expiry, SessionManagerLayer,
-    cookie::{Key, SameSite, time::Duration},
-};
-use tracing::info;
+use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::SizeAbove;
+use tower_http::normalize_path::NormalizePathLayer;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::timeout::TimeoutLayer;
+use tower_http::trace::TraceLayer;
+use tower_sessions::cookie::time::Duration;
+use tower_sessions::cookie::{Key, SameSite};
+use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
+use tracing::{error, info};
 
-use tracing::error;
-
-use crate::engine::server::routes::parse_header_name;
-use crate::engine::server::routes::parse_header_value;
-use crate::engine::server::routes::record_prometheus_metrics;
-use crate::engine::types::FastrAPI;
-use crate::http::middleware::PyMiddlewareKind;
-use crate::http::middleware::{
+use crate::engine::config::FastrAPI;
+use crate::engine::server::routes::{
+    parse_header_name, parse_header_value, record_prometheus_metrics,
+};
+use fastrapi_http::middleware::PyMiddlewareKind;
+use fastrapi_http::middleware::{
     DeclaredLayer, MiddlewareContainer, PreparedMiddlewares, PyMiddleware, asgi, build_cors_layer,
     execute_py_middlewares,
 };
-use axum::http::HeaderName;
-use pyo3::Bound;
 use std::time;
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_sessions::MemoryStore;
 
 pub(crate) fn build_stack(
     app: Router,
     app_config: &FastrAPI,
     container: &MiddlewareContainer,
-    async_loop: Arc<Py<PyAny>>,
+    event_loop: EventLoop,
 ) -> Router {
     let max_body_size = app_config.max_body_size.unwrap_or(usize::MAX);
     let app = if container.order.is_empty() {
-        apply_legacy(app, container, async_loop)
+        apply_legacy(app, container, event_loop)
     } else {
-        apply_declared(app, container, async_loop, max_body_size)
+        apply_declared(app, container, event_loop, max_body_size)
     };
 
     apply_config_layers(app, app_config)
@@ -62,7 +54,7 @@ pub(crate) fn build_stack(
 fn apply_declared(
     mut app: Router,
     container: &MiddlewareContainer,
-    async_loop: Arc<Py<PyAny>>,
+    event_loop: EventLoop,
     max_body_size: usize,
 ) -> Router {
     // axum's `.layer()` makes each successive call OUTERMOST, so applying
@@ -77,22 +69,18 @@ fn apply_declared(
             DeclaredLayer::HttpsRedirect => https_redirect_layer(app),
             DeclaredLayer::Custom(mw) => {
                 if mw.kind == PyMiddlewareKind::Asgi {
-                    asgi_layer(app, mw, async_loop.clone(), max_body_size)
+                    asgi_layer(app, mw, event_loop, max_body_size)
                 } else {
-                    custom_layer(app, mw.clone(), async_loop.clone())
+                    custom_layer(app, mw.clone(), event_loop)
                 }
             }
         };
     }
     // Decorator-style middlewares stay innermost.
-    decorator_layer(app, container, async_loop)
+    decorator_layer(app, container, event_loop)
 }
 
-fn apply_legacy(
-    mut app: Router,
-    container: &MiddlewareContainer,
-    async_loop: Arc<Py<PyAny>>,
-) -> Router {
+fn apply_legacy(mut app: Router, container: &MiddlewareContainer, event_loop: EventLoop) -> Router {
     if container.session.is_some() {
         info!("🔑 Layer: Sessions");
         app = session_layer(app, container);
@@ -104,7 +92,7 @@ fn apply_legacy(
     }
 
     if !container.py_middlewares.is_empty() {
-        app = decorator_layer(app, container, async_loop);
+        app = decorator_layer(app, container, event_loop);
     }
 
     if let Some(_config) = &container.https_redirect {
@@ -337,11 +325,7 @@ fn https_redirect_layer(app: Router) -> Router {
     ))
 }
 
-fn decorator_layer(
-    app: Router,
-    container: &MiddlewareContainer,
-    async_loop: Arc<Py<PyAny>>,
-) -> Router {
+fn decorator_layer(app: Router, container: &MiddlewareContainer, event_loop: EventLoop) -> Router {
     if container.py_middlewares.is_empty() {
         return app;
     }
@@ -354,7 +338,7 @@ fn decorator_layer(
     let py_mws = Arc::new(PreparedMiddlewares::new(&container.py_middlewares));
     app.layer(axum_middleware::from_fn(move |req, next| {
         let py_mws = py_mws.clone();
-        let loop_ = async_loop.clone();
+        let loop_ = event_loop;
         async move { execute_py_middlewares(py_mws, req, next, loop_).await }
     }))
 }
@@ -362,7 +346,7 @@ fn decorator_layer(
 fn asgi_layer(
     app: Router,
     mw: &PyMiddleware,
-    async_loop: Arc<Py<PyAny>>,
+    event_loop: EventLoop,
     max_body_size: usize,
 ) -> Router {
     let instance = Python::attach(|py| -> PyResult<Py<PyAny>> {
@@ -381,9 +365,9 @@ fn asgi_layer(
             let instance = Arc::new(instance);
             app.layer(axum_middleware::from_fn(move |req, next| {
                 let instance = instance.clone();
-                let async_loop = async_loop.clone();
+                let event_loop = event_loop;
                 async move {
-                    asgi::run_asgi_request(instance, req, next, async_loop, max_body_size).await
+                    asgi::run_asgi_request(instance, req, next, event_loop, max_body_size).await
                 }
             }))
         }
@@ -395,10 +379,10 @@ fn asgi_layer(
     }
 }
 
-fn custom_layer(app: Router, mw: Arc<PyMiddleware>, async_loop: Arc<Py<PyAny>>) -> Router {
+fn custom_layer(app: Router, mw: Arc<PyMiddleware>, event_loop: EventLoop) -> Router {
     app.layer(axum_middleware::from_fn(move |req, next| {
         let mw = mw.clone();
-        let loop_ = async_loop.clone();
+        let loop_ = event_loop;
         async move {
             let prepared = Arc::new(PreparedMiddlewares::new(&[mw]));
             execute_py_middlewares(prepared, req, next, loop_).await

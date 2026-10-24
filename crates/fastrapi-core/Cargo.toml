@@ -1,0 +1,22 @@
+[package]
+name = "fastrapi-core"
+description = "Python-free building blocks of fastrapi: methods, the route table, path templates and request-shape types"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ahash.workspace = true
+axum.workspace = true
+bytes.workspace = true
+globset.workspace = true
+matchit.workspace = true
+notify.workspace = true
+papaya.workspace = true
+regex.workspace = true
+simd-json.workspace = true
+smallvec.workspace = true
+strum.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

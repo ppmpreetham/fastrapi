@@ -1,0 +1,17 @@
+[package]
+name = "fastrapi-openapi"
+description = "Builds the OpenAPI document for a fastrapi app from its analysed routes"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fastrapi-core.workspace = true
+fastrapi-pyutil.workspace = true
+fastrapi-routing.workspace = true
+pyo3.workspace = true
+serde.workspace = true
+simd-json.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::utils::{json_to_py_object, py_any_to_json};
+use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
 use pyo3::Bound;
 
 #[expect(

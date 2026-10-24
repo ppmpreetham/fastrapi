@@ -1,35 +1,30 @@
-use super::PyAPIRouter;
-use crate::ffi::py_handlers::ExecutionMode;
-use crate::ffi::py_handlers::assign_execution_mode;
-use crate::ffi::pydantic::ParsedRouteMetadata;
-use crate::ffi::pydantic::get_response_type_from_class;
-use crate::ffi::pydantic::parse_route_metadata;
-use crate::routing::dependencies::collect_dependency_callables;
-use crate::routing::dependencies::parse_dependencies;
-use crate::routing::dependencies::parse_external_dependencies;
-use crate::routing::dependencies::shift_dependency_indices;
-use crate::routing::dependencies::{DependencyNode, InjectionType};
-use crate::routing::params::extract_path_param_names;
-use crate::routing::security::describe_scheme;
-use crate::routing::types::ExecutionPlan;
-use crate::routing::types::PayloadSpec;
-use crate::routing::types::ResponseFormatter;
-use crate::routing::types::RouteEntry;
-use crate::routing::types::RouteHandler;
-use crate::routing::types::ValidationRules;
-use crate::routing::types::{HttpMethod, ParameterSource, SerializationHint, WebSocketEntry};
-use crate::utils::json_to_py_object;
-use crate::utils::openapi::parse_callbacks_to_json;
-use crate::utils::py_any_to_json;
+use super::router::PyAPIRouter;
 use ahash::AHashSet;
+use fastrapi_core::method::HttpMethod;
+use fastrapi_core::params::ParameterSource;
+use fastrapi_core::path::extract_path_param_names;
+use fastrapi_http::response_type::ResponseFormatter;
+use fastrapi_openapi::paths::parse_callbacks_to_json;
+use fastrapi_pyutil::json::{SerializationHint, json_to_py_object, py_any_to_json};
+use fastrapi_routing::analysis::{
+    ParsedRouteMetadata, get_response_type_from_class, parse_route_metadata,
+};
+use fastrapi_routing::dependencies::{
+    DependencyNode, collect_dependency_callables, parse_dependencies, parse_external_dependencies,
+    shift_dependency_indices,
+};
+use fastrapi_routing::route::{
+    ExecutionMode, ExecutionPlan, PayloadSpec, RouteEntry, RouteHandler, ValidationRules,
+    WebSocketEntry,
+};
+use fastrapi_routing::security::describe_scheme;
 use hyper::StatusCode;
 use pyo3::Bound;
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict, PyTuple};
 use smallvec::SmallVec;
-use std::convert::Into;
+use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -42,6 +37,36 @@ where
     let kw = kwargs?;
     let obj = kw.get_item(key).ok()??;
     obj.extract().ok()
+}
+
+pub(crate) const API_ROUTE_OPTIONS: [&str; 16] = [
+    "response_model",
+    "status_code",
+    "tags",
+    "dependencies",
+    "summary",
+    "description",
+    "response_description",
+    "responses",
+    "deprecated",
+    "operation_id",
+    "include_in_schema",
+    "response_class",
+    "name",
+    "callbacks",
+    "openapi_extra",
+    "generate_unique_id_function",
+];
+
+pub(crate) fn set_if_some<'py, T>(
+    kwargs: &Bound<'py, PyDict>,
+    key: &str,
+    value: Option<T>,
+) -> PyResult<()>
+where
+    T: pyo3::IntoPyObject<'py>,
+{
+    value.map_or(Ok(()), |value| kwargs.set_item(key, value))
 }
 
 #[inline]
@@ -74,7 +99,7 @@ struct RouteOptions {
     description: Option<String>,
     include_in_schema: bool,
     cache_resp: bool,
-    rate_limit: Option<u32>,
+    rate_limit: Option<NonZeroU32>,
     response_description: Option<String>,
     operation_id: Option<String>,
     responses: Option<simd_json::OwnedValue>,
@@ -99,7 +124,12 @@ impl RouteOptions {
         let description = extract::<String>(kwargs, "description");
         let include_in_schema = extract::<bool>(kwargs, "include_in_schema").unwrap_or(true);
         let cache_resp = extract::<bool>(kwargs, "cache_resp").unwrap_or(false);
-        let rate_limit = extract::<u32>(kwargs, "rate_limit");
+        let rate_limit = extract::<u32>(kwargs, "rate_limit")
+            .map(|rps| {
+                NonZeroU32::new(rps)
+                    .ok_or_else(|| PyValueError::new_err("rate_limit must be greater than 0"))
+            })
+            .transpose()?;
         let response_description = extract::<String>(kwargs, "response_description");
         let operation_id = extract::<String>(kwargs, "operation_id");
         let deprecated = extract::<bool>(kwargs, "deprecated");
@@ -124,8 +154,8 @@ impl RouteOptions {
 
         let openapi_extra = extract_bound(kwargs, "openapi_extra").map(|d| py_any_to_json(py, &d));
 
-        let callbacks =
-            extract_bound(kwargs, "callbacks").and_then(|x| parse_callbacks_to_json(py, &x));
+        let callbacks = extract_bound(kwargs, "callbacks")
+            .and_then(|x| parse_callbacks_to_json(py, &x, super::router::collect_router_routes));
 
         let mut merged_tags = parent_tags.to_vec();
         if let Some(kw) = kwargs
@@ -304,14 +334,6 @@ impl PyAPIRouter {
                 shift_dependency_indices(&mut metadata.dependencies, external.len());
                 external.append(&mut metadata.dependencies);
                 metadata.dependencies = external;
-                metadata.dependency_needs_request = metadata
-                    .dependencies
-                    .iter()
-                    .any(|dependency| dependency.needs_request_object);
-                metadata.all_deps_sync = metadata
-                    .dependencies
-                    .iter()
-                    .all(DependencyNode::is_sync_callable);
             }
             let analysis = RouteAnalysis::new(&metadata);
 
@@ -319,7 +341,9 @@ impl PyAPIRouter {
             for node in &metadata.dependencies {
                 let bound = node.func.bind(py);
                 if let Some(spec) = describe_scheme(py, bound) {
-                    use crate::types::route::{CompiledSecurityScheme, RouteSecurityRequirement};
+                    use fastrapi_core::security::{
+                        CompiledSecurityScheme, RouteSecurityRequirement,
+                    };
                     security_requirements.push(RouteSecurityRequirement {
                         scheme: Arc::new(CompiledSecurityScheme {
                             id: bound.as_ptr() as u32,
@@ -372,23 +396,12 @@ impl PyAPIRouter {
                     rate_limit_per_second: opts.rate_limit,
                 },
                 payload: PayloadSpec {
-                    dependency_needs_request: metadata.dependency_needs_request,
-                    all_deps_sync: metadata.all_deps_sync,
+                    dependency_needs_request: false,
+                    all_deps_sync: true,
+                    dependency_needs_response: false,
+                    has_generators: false,
+                    has_async_dependencies: false,
                     needs_kwargs: analysis.needs_kwargs,
-                    dependency_needs_response: metadata.dependencies.iter().any(|dependency| {
-                        dependency
-                            .injection_plan
-                            .iter()
-                            .any(|(_, injection)| matches!(injection, InjectionType::Response))
-                    }),
-                    has_generators: metadata
-                        .dependencies
-                        .iter()
-                        .any(|dependency| dependency.is_generator || dependency.is_async_generator),
-                    has_async_dependencies: metadata
-                        .dependencies
-                        .iter()
-                        .any(|dependency| dependency.is_async || dependency.is_async_generator),
                     request_param: metadata.request_param.clone(),
                     response_param: metadata.response_param.clone(),
                     dependency_overrides: None,
@@ -415,7 +428,8 @@ impl PyAPIRouter {
                 },
             };
 
-            assign_execution_mode(&mut handler);
+            handler.payload.refresh_dependency_flags();
+            handler.assign_execution_mode();
 
             let route_instance = router_route_class
                 .as_ref()
@@ -554,85 +568,6 @@ impl PyAPIRouter {
             Ok(func)
         };
         PyCFunction::new_closure(py, None, None, closure).map(Into::into)
-    }
-
-    pub(crate) fn api_route_kwargs(
-        py: Python<'_>,
-        response_model: Option<Py<PyAny>>,
-        status_code: Option<u16>,
-        tags: Option<Py<PyAny>>,
-        dependencies: Option<Py<PyAny>>,
-        summary: Option<String>,
-        description: Option<String>,
-        response_description: Option<String>,
-        responses: Option<Py<PyAny>>,
-        deprecated: Option<bool>,
-        operation_id: Option<String>,
-        include_in_schema: bool,
-        response_class: Option<Py<PyAny>>,
-        name: Option<String>,
-        callbacks: Option<Py<PyAny>>,
-        openapi_extra: Option<Py<PyAny>>,
-        generate_unique_id_function: Option<Py<PyAny>>,
-    ) -> Bound<'_, PyDict> {
-        let kwargs = PyDict::new(py);
-        let entries: [(&str, Option<Bound<'_, PyAny>>); 16] = [
-            ("response_model", response_model.map(|v| v.into_bound(py))),
-            (
-                "status_code",
-                status_code.map(|v| v.into_pyobject(py).unwrap().into_any()),
-            ),
-            ("tags", tags.map(|v| v.into_bound(py))),
-            ("dependencies", dependencies.map(|v| v.into_bound(py))),
-            (
-                "summary",
-                summary.map(|v| v.into_pyobject(py).unwrap().into_any()),
-            ),
-            (
-                "description",
-                description.map(|v| v.into_pyobject(py).unwrap().into_any()),
-            ),
-            (
-                "response_description",
-                response_description.map(|v| v.into_pyobject(py).unwrap().into_any()),
-            ),
-            ("responses", responses.map(|v| v.into_bound(py))),
-            (
-                "deprecated",
-                deprecated.map(|v| v.into_pyobject(py).unwrap().to_owned().into_any()),
-            ),
-            (
-                "operation_id",
-                operation_id.map(|v| v.into_pyobject(py).unwrap().into_any()),
-            ),
-            (
-                "include_in_schema",
-                Some(
-                    include_in_schema
-                        .into_pyobject(py)
-                        .unwrap()
-                        .to_owned()
-                        .into_any(),
-                ),
-            ),
-            ("response_class", response_class.map(|v| v.into_bound(py))),
-            (
-                "name",
-                name.map(|v| v.into_pyobject(py).unwrap().into_any()),
-            ),
-            ("callbacks", callbacks.map(|v| v.into_bound(py))),
-            ("openapi_extra", openapi_extra.map(|v| v.into_bound(py))),
-            (
-                "generate_unique_id_function",
-                generate_unique_id_function.map(|v| v.into_bound(py)),
-            ),
-        ];
-        for (key, value) in entries {
-            if let Some(value) = value {
-                kwargs.set_item(key, value).ok();
-            }
-        }
-        kwargs
     }
 
     pub(crate) fn add_api_route_impl(

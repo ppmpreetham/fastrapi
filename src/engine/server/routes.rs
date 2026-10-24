@@ -4,60 +4,45 @@ use super::lifecycle::log_python_error;
 use super::middleware_stack;
 use super::serve::AppState;
 
-use crate::engine::types::FastrAPI;
+use crate::engine::config::FastrAPI;
 use ahash::AHashMap;
-use axum::{
-    Json, Router,
-    body::{Body, to_bytes},
-    extract::Request,
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
-    middleware::Next,
-    response::{Html, IntoResponse, Response},
-    routing::{MethodRouter, delete, get, head, options, patch, post, put},
-};
+use axum::body::{Body, to_bytes};
+use axum::extract::Request;
+use axum::handler::Handler;
+use axum::http::header::{ALLOW, CONTENT_TYPE, HOST};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use axum::middleware::Next;
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{MethodFilter, MethodRouter, any, get, on};
+use axum::{Json, Router};
 use bytes::Bytes;
 use pyo3::prelude::*;
 use simd_json::OwnedValue as JsonValue;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::engine::errors::dispatch_status_handler;
-use crate::engine::server::dispatch::dispatch_path_with_root;
-use crate::globals::set_exception_handlers;
-use crate::http::websocket::ws_param_names;
-use crate::match_method_router;
-use crate::routing::router::RoutePattern;
-use crate::routing::tree::join_path;
-use crate::types::response::ResponseType;
-use crate::{
-    engine::metrics::prometheus_handle,
-    globals::PYTHON_RUNTIME,
-    http::{
-        middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware},
-        websocket::{WsRouteState, ws_handler},
-    },
-    routing::{
-        router::{FrozenRouter, FrozenRouterBuilder},
-        types::{HttpMethod, RouteEntry, RouteHandler, WebSocketEntry},
-    },
-    runtime::executor::{
-        ExecutionMode, render_no_request_json_response, render_no_request_response,
-        run_py_handler_no_request,
-    },
-    runtime::py_bridge,
-    utils::{openapi::build_openapi_spec, py_any_to_json},
+use crate::engine::exception_dispatch::dispatch_status_handler;
+use crate::engine::executor::{
+    render_no_request_json_response, render_no_request_response, run_py_handler_no_request,
 };
-use axum::http::Method;
-use axum::http::header::ALLOW;
-use axum::http::header::HOST;
-use axum::routing::any;
+use crate::engine::metrics::prometheus_handle;
+use crate::engine::server::websocket::{WsRouteState, ws_handler, ws_param_names};
+use fastrapi_core::method::HttpMethod;
+use fastrapi_core::path::{join_path, strip_root_path};
+use fastrapi_core::router::{FrozenRouter, FrozenRouterBuilder, RoutePattern};
+use fastrapi_http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware};
+use fastrapi_http::response_type::ResponseType;
+use fastrapi_pyutil::json::py_any_to_json;
+use fastrapi_routing::route::{ExecutionMode, RouteEntry, RouteHandler, WebSocketEntry};
+use fastrapi_runtime::py_bridge;
+use fastrapi_runtime::server_state::set_exception_handlers;
+use fastrapi_runtime::tokio_runtime::PYTHON_RUNTIME;
 use metrics::SharedString;
-use pyo3::types::PyDict;
-use pyo3::types::PyString;
+use pyo3::types::{PyDict, PyString};
 
 pub(crate) fn build_router(
     py: Python,
-    app_state: &AppState,
+    app_state: &'static AppState,
     docs_url: Option<&str>,
     openapi_url: Option<&str>,
     app_config: &FastrAPI,
@@ -126,33 +111,23 @@ pub(crate) fn build_router(
         }));
         ws_routes.extend(sub_flat.1.iter().cloned());
     }
-    let flat = (routes, ws_routes);
-    let flat = if let Some(overrides) = &app_config.dependency_overrides {
-        (
-            flat.0
-                .into_iter()
-                .map(|mut route| {
-                    let mut handler = (*route.handler).clone();
-                    handler.payload.dependency_overrides = Some(overrides.clone_ref(py));
-                    route.handler = Arc::new(handler);
-                    route
-                })
-                .collect(),
-            flat.1
-                .into_iter()
-                .map(|mut ws| {
-                    ws.dependency_overrides = Some(overrides.clone_ref(py));
-                    ws
-                })
-                .collect(),
-        )
-    } else {
-        flat
-    };
+    if let Some(overrides) = &app_config.dependency_overrides {
+        for route in &mut routes {
+            if !route.handler.payload.dependencies.is_empty() {
+                let mut handler = (*route.handler).clone();
+                handler.payload.dependency_overrides = Some(overrides.clone_ref(py));
+                route.handler = Arc::new(handler);
+            }
+        }
+        for ws in &mut ws_routes {
+            ws.dependency_overrides = Some(overrides.clone_ref(py));
+        }
+    }
+    let routes: &'static [RouteEntry] = Vec::leak(routes);
 
     let mut frozen_router_builder = FrozenRouterBuilder::new();
-    flat.0.iter().for_each(|route| {
-        let host = route.host.clone().map(Arc::from);
+    for route in routes {
+        let host: Option<Box<str>> = route.host.as_deref().map(Into::into);
         frozen_router_builder.add_route(
             route.method,
             &route.path,
@@ -167,27 +142,37 @@ pub(crate) fn build_router(
                 host,
             );
         }
-    });
-    let frozen_router = Arc::new(frozen_router_builder.build());
+    }
+    let frozen_router: &'static FrozenRouter<RouteHandler> =
+        Box::leak(Box::new(frozen_router_builder.build()));
 
     let app = Router::new();
-    let app = register_routes(app, py, app_state, app_config, &flat, frozen_router);
+    let app = register_routes(
+        app,
+        py,
+        app_state,
+        app_config,
+        routes,
+        &ws_routes,
+        frozen_router,
+    );
     let app = register_docs_endpoints(app, py, app_config, docs_url, openapi_url);
-    middleware_stack::build_stack(app, app_config, &middlewares, app_state.pick_loop())
+    middleware_stack::build_stack(app, app_config, &middlewares, app_state.event_loop)
 }
 
 fn register_routes(
     mut app: Router,
     py: Python<'_>,
-    app_state: &AppState,
+    app_state: &'static AppState,
     app_config: &FastrAPI,
-    flat: &(Vec<RouteEntry>, Vec<WebSocketEntry>),
-    frozen_router: Arc<FrozenRouter>,
+    routes: &'static [RouteEntry],
+    ws_routes: &[WebSocketEntry],
+    frozen_router: &'static FrozenRouter<RouteHandler>,
 ) -> Router {
     let frontend_mounts = Arc::new(app_config.frontend_mounts.clone());
 
     // 1. Cached routes
-    app = group_and_register_routes(app, &flat.0, |route| {
+    app = group_and_register_routes(app, routes, |route| {
         if route.host.is_none()
             && route.handler.execution.cache_response
             && !route.path.contains('{')
@@ -207,7 +192,7 @@ fn register_routes(
     });
 
     // 2. Direct no request routes
-    app = group_and_register_routes(app, &flat.0, |route| {
+    app = group_and_register_routes(app, routes, |route| {
         if route.host.is_none()
             && !route.handler.execution.cache_response
             && !route.path.contains('{')
@@ -216,21 +201,20 @@ fn register_routes(
                 ExecutionMode::SyncNoArgs | ExecutionMode::AsyncNoArgs
             )
         {
-            let method_router =
-                no_request_method_router(route.method, route.handler.clone(), app_state.clone());
+            let method_router = no_request_method_router(route.method, &route.handler, app_state);
             Some((route.path.as_str(), method_router))
         } else {
             None
         }
     });
 
-    app = flat.1.iter().fold(app, |current_app, ws| {
+    app = ws_routes.iter().fold(app, |current_app, ws| {
         let state = Arc::new(WsRouteState {
             handler: Arc::new(ws.handler.clone_ref(py)),
             deps: Arc::new(ws.deps.to_vec()),
             template: Arc::from(ws.path.as_str()),
             param_names: ws_param_names(&ws.path),
-            async_loop: app_state.pick_loop(),
+            event_loop: app_state.event_loop,
             dependency_overrides: ws
                 .dependency_overrides
                 .as_ref()
@@ -250,19 +234,13 @@ fn register_routes(
             add_static_mount(current_app, mount)
         });
 
-    let method_router = frozen_router.clone();
-    let method_root = app_state.root_path.clone();
-    app = app.method_not_allowed_fallback(move |req: Request| {
-        let router = method_router.clone();
-        let root = method_root.clone();
-        async move { method_not_allowed_response(&router, &root, &req) }
+    app = app.method_not_allowed_fallback(move |req: Request| async move {
+        method_not_allowed_response(frozen_router, &app_state.root_path, &req)
     });
 
     app.fallback({
-        let router = frozen_router;
-        let state = app_state.clone();
         any(move |req: Request| async move {
-            match dispatch_or_not_found(router.clone(), state.clone(), req).await {
+            match dispatch_or_not_found(frozen_router, app_state, req).await {
                 Ok(resp) => resp,
                 Err(req) => {
                     let handler_resp = Python::attach(|py| dispatch_status_handler(py, 404));
@@ -288,14 +266,17 @@ fn not_found_response() -> Response {
 }
 
 /// 405
-fn method_not_allowed_response(router: &FrozenRouter, root: &str, request: &Request) -> Response {
+fn method_not_allowed_response(
+    router: &FrozenRouter<RouteHandler>,
+    root: &str,
+    request: &Request,
+) -> Response {
     let host = request
         .headers()
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.split(':').next().unwrap_or(value));
-    let path =
-        dispatch_path_with_root(root, request.uri().path()).unwrap_or_else(|| request.uri().path());
+    let path = strip_root_path(root, request.uri().path()).unwrap_or_else(|| request.uri().path());
     let allow = router
         .allowed_methods(path, host)
         .iter()
@@ -335,7 +316,7 @@ pub(crate) fn register_docs_endpoints(
     docs_url: Option<&str>,
     openapi_url: Option<&str>,
 ) -> Router {
-    let openapi_json = Arc::new(build_openapi_spec(py, app_config));
+    let openapi_json = Arc::new(app_config.openapi_spec(py));
 
     if let Some(openapi_url) = openapi_url {
         app = app.route(
@@ -459,20 +440,31 @@ pub(crate) fn apply_declared_middleware(
 
     Ok(())
 }
-fn cached_method_router(method: HttpMethod, cached: Arc<CachedResponse>) -> MethodRouter {
-    match_method_router!(method, {
-        let cached = cached;
-        move || {
-            let cached = cached.clone();
-            async move { cached.to_response() }
-        }
-    })
+fn method_router<H, T>(method: HttpMethod, handler: H) -> MethodRouter
+where
+    H: Handler<T, ()>,
+    T: 'static,
+{
+    let filter = match method {
+        HttpMethod::GET => MethodFilter::GET.or(MethodFilter::HEAD),
+        HttpMethod::POST => MethodFilter::POST,
+        HttpMethod::PUT => MethodFilter::PUT,
+        HttpMethod::DELETE => MethodFilter::DELETE,
+        HttpMethod::PATCH => MethodFilter::PATCH,
+        HttpMethod::OPTIONS => MethodFilter::OPTIONS,
+        HttpMethod::HEAD => MethodFilter::HEAD,
+    };
+    on(filter, handler)
+}
+
+fn cached_method_router(method: HttpMethod, cached: &'static CachedResponse) -> MethodRouter {
+    method_router(method, move || async move { cached.to_response() })
 }
 
 fn no_request_method_router(
     method: HttpMethod,
-    handler: Arc<RouteHandler>,
-    state: AppState,
+    handler: &'static RouteHandler,
+    state: &'static AppState,
 ) -> MethodRouter {
     if matches!(handler.execution.execution_mode, ExecutionMode::SyncNoArgs)
         && !state.sync_to_threadpool
@@ -483,56 +475,45 @@ fn no_request_method_router(
         return sync_no_request_method_router(method, handler);
     }
 
-    match_method_router!(method, {
-        let handler = handler;
-        let state = state;
-        move |request: Request| {
-            let handler = handler.clone();
-            let state = state.clone();
-            async move {
-                let async_loop = state.pick_loop();
-                let (request_parts, _) = request.into_parts();
-                py_bridge::scoped_request_loop(async_loop.clone(), async move {
-                    run_py_handler_no_request(
-                        async_loop,
-                        state.sync_to_threadpool,
-                        handler,
-                        Some(request_parts),
-                    )
-                    .await
-                })
-                .await
-            }
-        }
+    method_router(method, move |request: Request| async move {
+        let event_loop = state.event_loop;
+        let (request_parts, _) = request.into_parts();
+        py_bridge::scoped_request_loop(
+            event_loop,
+            run_py_handler_no_request(
+                event_loop,
+                state.sync_to_threadpool,
+                handler,
+                Some(request_parts),
+            ),
+        )
+        .await
     })
 }
 
-fn sync_no_request_method_router(method: HttpMethod, handler: Arc<RouteHandler>) -> MethodRouter {
+fn sync_no_request_method_router(
+    method: HttpMethod,
+    handler: &'static RouteHandler,
+) -> MethodRouter {
     let use_json_fast_path = handler.response.response_model.is_none()
         && handler.response.response_class.is_none()
         && matches!(handler.response.response_type, ResponseType::Json);
 
-    match_method_router!(method, {
-        let handler = handler;
-        move || {
-            let handler = handler.clone();
-            async move {
-                Python::attach(|py| {
-                    if use_json_fast_path {
-                        render_no_request_json_response(py, &handler)
-                    } else {
-                        render_no_request_response(py, &handler)
-                    }
-                })
+    method_router(method, move || async move {
+        Python::attach(|py| {
+            if use_json_fast_path {
+                render_no_request_json_response(py, handler)
+            } else {
+                render_no_request_response(py, handler)
             }
-        }
+        })
     })
 }
 
 fn precompute_const_response(
     py: Python<'_>,
-    handler: &Arc<RouteHandler>,
-) -> Option<Arc<CachedResponse>> {
+    handler: &RouteHandler,
+) -> Option<&'static CachedResponse> {
     let response = render_no_request_response(py, handler);
     let status = response.status();
     let headers = cached_headers(response.headers());
@@ -540,14 +521,13 @@ fn precompute_const_response(
         .block_on(to_bytes(response.into_body(), usize::MAX))
         .ok()?;
 
-    Some(Arc::new(CachedResponse {
+    Some(Box::leak(Box::new(CachedResponse {
         status,
         headers,
-        body,
-    }))
+        body: Bytes::from_static(Vec::leak(body.to_vec())),
+    })))
 }
 
-#[derive(Clone)]
 struct CachedResponse {
     status: StatusCode,
     headers: CachedHeaders,
@@ -602,15 +582,15 @@ pub(crate) fn parse_header_value(value: &str) -> Option<HeaderValue> {
     HeaderValue::from_str(value).ok()
 }
 
-pub(crate) fn group_and_register_routes<F>(
+pub(crate) fn group_and_register_routes<'a, F>(
     mut app: Router,
-    routes: &[RouteEntry],
+    routes: &'a [RouteEntry],
     mut builder: F,
 ) -> Router
 where
-    F: FnMut(&RouteEntry) -> Option<(&str, MethodRouter)>,
+    F: FnMut(&'a RouteEntry) -> Option<(&'a str, MethodRouter)>,
 {
-    let mut grouped_routes: AHashMap<&str, MethodRouter> = AHashMap::new();
+    let mut grouped_routes: AHashMap<&'a str, MethodRouter> = AHashMap::new();
     for route in routes {
         if let Some((path, method_router)) = builder(route) {
             grouped_routes
@@ -665,7 +645,7 @@ pub(crate) async fn record_prometheus_metrics(req: Request, next: Next) -> Respo
     };
 
     let path: metrics::SharedString = match response.extensions().get::<RoutePattern>() {
-        Some(pattern) => SharedString::from(pattern.0.clone()),
+        Some(pattern) => SharedString::from(pattern.0),
         None if response.status() == StatusCode::NOT_FOUND => SharedString::from("unmatched"),
         None => SharedString::from(raw_uri.path().to_owned()),
     };
