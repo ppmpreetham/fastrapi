@@ -27,3 +27,9 @@ def test_request_method(client, app):
         return {"method": request.method}
 
     assert client.post("/m").json() == {"method": "POST"}
+
+
+def test_version():
+    import fastrapi
+
+    assert isinstance(fastrapi.__version__, str)

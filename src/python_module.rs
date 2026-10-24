@@ -465,6 +465,7 @@ mod fastrapi {
         let py = m.py();
         m.setattr("__package__", "fastrapi")?;
         m.setattr("__path__", PyList::empty(py))?;
+        m.add("__version__", env!("CARGO_PKG_VERSION"))?;
         m.add("FastAPI", py.get_type::<crate::engine::config::FastrAPI>())?;
         m.add("FastrAPI", py.get_type::<crate::engine::config::FastrAPI>())?;
         m.add("Response", py.get_type::<PyResponse>())?;
