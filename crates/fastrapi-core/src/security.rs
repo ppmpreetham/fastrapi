@@ -7,6 +7,7 @@ use std::sync::Arc;
 pub enum SecurityKind {
     OAuth2PasswordBearer {
         token_url: String,
+        refresh_url: Option<String>,
         auto_error: bool,
     },
     OAuth2AuthorizationCode {

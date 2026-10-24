@@ -48,3 +48,17 @@ def test_oauth2_classes_take_fastapi_argument_names():
         "/token",
         "/refresh",
     )
+
+
+def test_password_bearer_refresh_url_in_openapi(client, app):
+    from fastrapi import Depends
+    from fastrapi.security import OAuth2PasswordBearer
+
+    scheme = OAuth2PasswordBearer(tokenUrl="/token", refreshUrl="/refresh")
+
+    @app.get("/me")
+    def me(token: str = Depends(scheme)):
+        return {}
+
+    flow = client.get("/openapi.json").json()["components"]["securitySchemes"]["OAuth2"]
+    assert flow["flows"]["password"] == {"tokenUrl": "/token", "refreshUrl": "/refresh", "scopes": {}}

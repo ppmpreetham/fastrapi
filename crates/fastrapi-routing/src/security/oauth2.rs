@@ -73,6 +73,7 @@ impl OAuth2 {
 #[derive(SmartDefault, Clone, Debug)]
 pub struct OAuth2PasswordBearer {
     pub token_url: String,
+    pub refresh_url: Option<String>,
     pub scheme_name: Option<String>,
     pub scopes: Option<Py<PyDict>>,
     pub description: Option<String>,
@@ -83,18 +84,38 @@ pub struct OAuth2PasswordBearer {
 #[pymethods]
 impl OAuth2PasswordBearer {
     #[new]
-    #[pyo3(signature = (tokenUrl=None, scheme_name=None, scopes=None, description=None, auto_error=true, *, token_url=None))]
-    #[expect(non_snake_case, reason = "FastAPI names this argument tokenUrl")]
+    #[pyo3(signature = (
+        tokenUrl=None,
+        scheme_name=None,
+        scopes=None,
+        description=None,
+        auto_error=true,
+        refreshUrl=None,
+        *,
+        token_url=None,
+        refresh_url=None
+    ))]
+    #[expect(
+        non_snake_case,
+        reason = "FastAPI names these arguments tokenUrl and refreshUrl"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the signature copies FastAPI and keeps the snake_case names"
+    )]
     fn new(
         tokenUrl: Option<String>,
         scheme_name: Option<String>,
         scopes: Option<Py<PyDict>>,
         description: Option<String>,
         auto_error: bool,
+        refreshUrl: Option<String>,
         token_url: Option<String>,
+        refresh_url: Option<String>,
     ) -> PyResult<Self> {
         Ok(Self {
             token_url: required_url(tokenUrl, token_url, "tokenUrl")?,
+            refresh_url: refreshUrl.or(refresh_url),
             scheme_name,
             scopes,
             description,

@@ -33,12 +33,19 @@ fn scheme_to_openapi(
     use fastrapi_core::security::SecurityKind;
 
     let mut base = match kind {
-        SecurityKind::OAuth2PasswordBearer { token_url, .. } => {
+        SecurityKind::OAuth2PasswordBearer {
+            token_url,
+            refresh_url,
+            ..
+        } => {
             let flow_scopes = scopes.cloned().unwrap_or_else(|| json!({}));
-            json!({
-                "type": "oauth2",
-                "flows": { "password": { "tokenUrl": token_url, "scopes": flow_scopes } }
-            })
+            let mut password_flow = json!({ "tokenUrl": token_url, "scopes": flow_scopes });
+            if let Some(refresh) = refresh_url
+                && let Some(obj) = password_flow.as_object_mut()
+            {
+                obj.insert(String::from("refreshUrl"), json!(refresh));
+            }
+            json!({ "type": "oauth2", "flows": { "password": password_flow } })
         }
         SecurityKind::OAuth2AuthorizationCode {
             authorization_url,

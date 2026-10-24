@@ -45,6 +45,7 @@ pub fn describe_scheme(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<SchemeS
         scopes: scopes_json(py, obj),
         kind: SecurityKind::OAuth2PasswordBearer {
             token_url: s.token_url.clone(),
+            refresh_url: s.refresh_url.clone(),
             auto_error: s.auto_error,
         },
     });
