@@ -68,3 +68,9 @@ def test_openid_connect_takes_fastapi_argument_name():
     from fastrapi.security import OpenIdConnect
 
     assert OpenIdConnect(openIdConnectUrl="/oidc").openid_connect_url == "/oidc"
+
+
+def test_http_bearer_takes_fastapi_argument_name():
+    from fastrapi.security import HTTPBearer
+
+    assert HTTPBearer(bearerFormat="JWT").bearer_format == "JWT"

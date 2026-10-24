@@ -55,15 +55,17 @@ pub struct HTTPBearer {
 #[pymethods]
 impl HTTPBearer {
     #[new]
-    #[pyo3(signature = (*, bearer_format=None, scheme_name=None, description=None, auto_error=true))]
-    const fn new(
-        bearer_format: Option<String>,
+    #[pyo3(signature = (*, bearerFormat=None, scheme_name=None, description=None, auto_error=true, bearer_format=None))]
+    #[expect(non_snake_case, reason = "FastAPI names this argument bearerFormat")]
+    fn new(
+        bearerFormat: Option<String>,
         scheme_name: Option<String>,
         description: Option<String>,
         auto_error: bool,
+        bearer_format: Option<String>,
     ) -> Self {
         Self {
-            bearer_format,
+            bearer_format: bearerFormat.or(bearer_format),
             scheme_name,
             description,
             auto_error,
