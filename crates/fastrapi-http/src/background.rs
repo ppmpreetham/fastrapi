@@ -9,13 +9,9 @@ use parking_lot::Mutex;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyTuple};
-use std::future::Future;
 use std::mem::take;
-use std::pin::Pin;
 use std::sync::Arc;
 use tracing::error;
-
-type TaskFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// A collection of background tasks that will be called after a response has been
 /// sent to the client.
@@ -77,13 +73,21 @@ impl PyBackgroundTasks {
 
 type Task = (Py<PyAny>, Vec<Py<PyAny>>, Option<Py<PyDict>>);
 
-fn spawn_tasks(event_loop: EventLoop, tasks: Vec<Task>) -> Vec<TaskFuture> {
-    if tasks.is_empty() {
-        return Vec::new();
-    }
-    vec![Box::pin(async move {
-        let coroutine_futs: Vec<TaskFuture> = Python::attach(move |py| {
-            let mut futs: Vec<TaskFuture> = Vec::new();
+/// The tasks of one `BackgroundTasks` object, taken out to run after the response.
+pub struct PendingTasks {
+    event_loop: EventLoop,
+    tasks: Vec<Task>,
+}
+
+impl PendingTasks {
+    /// Runs the synchronous tasks, then waits for the asynchronous tasks in order.
+    pub async fn run(self) {
+        if self.tasks.is_empty() {
+            return;
+        }
+        let Self { event_loop, tasks } = self;
+        let futures: Vec<py_bridge::PyTaskFuture> = Python::attach(move |py| {
+            let mut futs = Vec::new();
             for (func, args, kwargs) in tasks {
                 let Ok(args_tuple) = PyTuple::new(py, &args) else {
                     error!("Background task: failed to build args tuple");
@@ -106,11 +110,7 @@ fn spawn_tasks(event_loop: EventLoop, tasks: Vec<Task>) -> Vec<TaskFuture> {
                             continue;
                         }
                         match py_bridge::schedule_task(py, event_loop, result.into_bound(py)) {
-                            Ok(fut) => futs.push(Box::pin(async move {
-                                if let Err(e) = fut.await {
-                                    error!("Async background task error: {}", e);
-                                }
-                            }) as TaskFuture),
+                            Ok(fut) => futs.push(fut),
                             Err(e) => {
                                 error!("Background task scheduling error: {}", e);
                             }
@@ -124,18 +124,21 @@ fn spawn_tasks(event_loop: EventLoop, tasks: Vec<Task>) -> Vec<TaskFuture> {
             }
             futs
         });
-
-        for fut in coroutine_futs {
-            fut.await;
+        for future in futures {
+            if let Err(e) = future.await {
+                error!("Async background task error: {}", e);
+            }
         }
-    }) as TaskFuture]
+    }
 }
 
 impl PyBackgroundTasks {
     #[must_use]
-    pub fn execute_all(&self, event_loop: EventLoop) -> Vec<TaskFuture> {
-        let tasks = take(&mut *self.tasks.lock());
-        spawn_tasks(event_loop, tasks)
+    pub fn execute_all(&self, event_loop: EventLoop) -> PendingTasks {
+        PendingTasks {
+            event_loop,
+            tasks: take(&mut *self.tasks.lock()),
+        }
     }
 }
 
@@ -154,19 +157,15 @@ pub fn spawn_response_background_value(background: Py<PyAny>) {
         return;
     };
     spawn(async move {
-        let futures = Python::attach(|py| {
+        let pending = Python::attach(|py| {
             background.bind(py).cast::<PyBackgroundTasks>().map_or_else(
-                |_| {
-                    spawn_tasks(
-                        event_loop,
-                        vec![(background.clone_ref(py), Vec::new(), None)],
-                    )
+                |_| PendingTasks {
+                    event_loop,
+                    tasks: vec![(background.clone_ref(py), Vec::new(), None)],
                 },
                 |tasks| tasks.borrow().execute_all(event_loop),
             )
         });
-        for task in futures {
-            task.await;
-        }
+        pending.run().await;
     });
 }

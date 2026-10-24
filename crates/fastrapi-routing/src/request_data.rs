@@ -23,12 +23,13 @@ use pyo3::types::{PyAny, PyBool, PyDict, PyList, PyString, PyType};
 use pyo3::{Bound, Py, intern};
 use simd_json::OwnedValue as Value;
 use simd_json::prelude::ValueAsObject;
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::fmt;
 
 #[expect(clippy::needless_pass_by_value)]
 pub(crate) fn validation_error(
-    loc: &[String],
+    loc: &[&str],
     msg: impl fmt::Display,
     kind: &str,
     input: simd_json::OwnedValue,
@@ -53,7 +54,7 @@ pub struct ValidationErrorDetails(pub simd_json::OwnedValue);
 
 fn validation_error_response(detail: impl Into<String>) -> Response {
     validation_error(
-        &["body".to_owned()],
+        &["body"],
         detail.into(),
         "value_error",
         simd_json::json!(null),
@@ -61,7 +62,7 @@ fn validation_error_response(detail: impl Into<String>) -> Response {
 }
 
 impl ParsedParameter {
-    pub(crate) fn error_loc(&self) -> Vec<String> {
+    pub(crate) fn error_loc(&self) -> [&str; 2] {
         let source = match self.source {
             ParameterSource::Path => "path",
             ParameterSource::Query => "query",
@@ -69,7 +70,7 @@ impl ParsedParameter {
             ParameterSource::Cookie => "cookie",
             ParameterSource::Body | ParameterSource::BackgroundTasks => "body",
         };
-        vec![source.to_owned(), self.external_name.clone()]
+        [source, &self.external_name]
     }
 }
 
@@ -215,7 +216,7 @@ fn convert_with_kind(
             let detail = simd_json::json!({
                 "detail": [{
                     "type": kind,
-                    "loc": loc.iter().map(|s| simd_json::json!(s.as_str())).collect::<Vec<_>>(),
+                    "loc": loc,
                     "msg": msg,
                     "input": simd_json::json!(raw),
                     "ctx": ctx,
@@ -412,7 +413,7 @@ fn raw_value_for_parameter<'a>(
 fn raw_values_for_list<'a>(
     param: &ParsedParameter,
     request_input: &'a RequestInput<'_>,
-) -> Vec<Cow<'a, str>> {
+) -> SmallVec<[Cow<'a, str>; 4]> {
     let matches_name = |key: &str| key == param.external_name || key == param.name;
 
     match param.source {
@@ -427,7 +428,7 @@ fn raw_values_for_list<'a>(
                 .into_iter()
                 .collect()
         }
-        ParameterSource::Body | ParameterSource::BackgroundTasks => Vec::new(),
+        ParameterSource::Body | ParameterSource::BackgroundTasks => SmallVec::new(),
     }
 }
 
@@ -458,7 +459,7 @@ fn resolve_list_parameter(
         });
     }
 
-    let mut items = Vec::with_capacity(raws.len());
+    let mut items: SmallVec<[Py<PyAny>; 4]> = SmallVec::with_capacity(raws.len());
     for raw in &raws {
         let value = convert_scalar_value(py, raw, param)?;
         validate_scalar_constraints(py, param, value.bind(py))?;
@@ -589,7 +590,7 @@ fn apply_body_and_validation(
             .any(|&idx| handler.payload.parsed_params[idx].required)
         {
             return Err(validation_error(
-                &["body".to_owned()],
+                &["body"],
                 "Field required",
                 "missing",
                 simd_json::json!(null),
@@ -616,7 +617,7 @@ fn apply_body_and_validation(
         {
             let idx = param.validator_index.ok_or_else(|| {
                 validation_error(
-                    &["body".to_owned()],
+                    &["body"],
                     "Body validator is not registered",
                     "value_error",
                     simd_json::json!(null),
@@ -633,12 +634,12 @@ fn apply_body_and_validation(
                 let inner = value
                     .as_object()
                     .and_then(|obj| {
-                        obj.get(&param.external_name)
+                        obj.get(param.external_name.as_str())
                             .or_else(|| obj.get(&param.name))
                     })
                     .ok_or_else(|| {
                         validation_error(
-                            &["body".to_owned(), param.external_name.clone()],
+                            &["body", &param.external_name],
                             "Field required",
                             "missing",
                             value.clone(),
@@ -673,8 +674,8 @@ fn apply_body_and_validation(
             for &idx in &handler.payload.body_param_indices {
                 let param = &handler.payload.parsed_params[idx];
                 let values = form
-                    .get(&param.external_name)
-                    .or_else(|| form.get(&param.name));
+                    .get(param.external_name.as_str())
+                    .or_else(|| form.get(param.name.as_str()));
 
                 let Some(values) = values else {
                     if param.has_default {
@@ -685,7 +686,7 @@ fn apply_body_and_validation(
                         kwargs.set_item(param.name_py.bind(py), default_value).ok();
                     } else if param.required {
                         return Err(validation_error(
-                            &["body".to_owned(), param.external_name.clone()],
+                            &["body", &param.external_name],
                             "Field required",
                             "missing",
                             simd_json::json!(null),
@@ -734,7 +735,7 @@ fn apply_body_and_validation(
 
     let obj = json_payload.as_object().ok_or_else(|| {
         validation_error(
-            &["body".to_owned()],
+            &["body"],
             "Input should be a valid dictionary or object to extract fields from",
             "model_attributes_type",
             json_payload.clone(),
@@ -744,14 +745,14 @@ fn apply_body_and_validation(
     for &idx in &handler.payload.body_param_indices {
         let param = &handler.payload.parsed_params[idx];
         let value = obj
-            .get(&param.external_name)
+            .get(param.external_name.as_str())
             .or_else(|| obj.get(&param.name));
 
         if let Some(value) = value {
             if param.is_pydantic_model {
                 let idx = param.validator_index.ok_or_else(|| {
                     validation_error(
-                        &["body".to_owned()],
+                        &["body"],
                         "Body validator is not registered",
                         "value_error",
                         simd_json::json!(null),

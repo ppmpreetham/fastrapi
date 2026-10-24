@@ -4,6 +4,9 @@
 use ahash::AHashMap;
 use bytes::Bytes;
 use smallvec::SmallVec;
+use smol_str::SmolStr;
+
+pub type FormText = SmolStr;
 
 #[derive(Clone, Debug)]
 pub struct UploadedFile {
@@ -14,7 +17,7 @@ pub struct UploadedFile {
 
 #[derive(Clone, Debug)]
 pub enum BodyField {
-    Text(String),
+    Text(FormText),
     File(UploadedFile),
 }
 
@@ -25,7 +28,7 @@ pub enum BodyPayload {
         value: Option<simd_json::OwnedValue>,
     },
     Form {
-        fields: AHashMap<String, SmallVec<[BodyField; 2]>>,
+        fields: AHashMap<FormText, SmallVec<[BodyField; 2]>>,
         raw: Bytes,
     },
 }

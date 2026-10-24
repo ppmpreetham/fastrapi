@@ -8,13 +8,14 @@ use axum::body::{Body, to_bytes};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use fastrapi_core::body::{BodyField, BodyPayload, UploadedFile};
+use fastrapi_core::body::{BodyField, BodyPayload, FormText, UploadedFile};
 use fastrapi_core::params::ParameterSource;
 use fastrapi_routing::request_data::ValidationErrorDetails;
 use fastrapi_routing::route::RouteHandler;
 use futures_util::StreamExt;
 use multer::{Constraints, Error, Multipart, SizeLimit};
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::str::from_utf8;
 
 pub(crate) async fn extract_payload(
@@ -84,10 +85,10 @@ pub(crate) async fn extract_payload(
 pub(crate) fn parse_urlencoded_form(
     body: &[u8],
     max_field_size: Option<usize>,
-) -> Result<AHashMap<String, SmallVec<[BodyField; 2]>>, Response> {
+) -> Result<AHashMap<FormText, SmallVec<[BodyField; 2]>>, Response> {
     let raw = from_utf8(body)
         .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid form body").into_response())?;
-    let mut form: AHashMap<String, SmallVec<[BodyField; 2]>> = AHashMap::new();
+    let mut form: AHashMap<FormText, SmallVec<[BodyField; 2]>> = AHashMap::new();
 
     form_urlencoded::parse(raw.as_bytes()).try_for_each(
         |(key, value)| -> Result<(), Response> {
@@ -96,9 +97,9 @@ pub(crate) fn parse_urlencoded_form(
             {
                 return Err((StatusCode::PAYLOAD_TOO_LARGE, "Form field too large").into_response());
             }
-            form.entry(key.into_owned())
+            form.entry(form_text(key))
                 .or_default()
-                .push(BodyField::Text(value.into_owned()));
+                .push(BodyField::Text(form_text(value)));
             Ok(())
         },
     )?;
@@ -106,12 +107,16 @@ pub(crate) fn parse_urlencoded_form(
     Ok(form)
 }
 
+fn form_text(text: Cow<'_, str>) -> FormText {
+    FormText::new(text)
+}
+
 pub(crate) async fn parse_multipart_form(
     body: Body,
     content_type: &str,
     handler: &RouteHandler,
     state: &AppState,
-) -> Result<AHashMap<String, SmallVec<[BodyField; 2]>>, Response> {
+) -> Result<AHashMap<FormText, SmallVec<[BodyField; 2]>>, Response> {
     let boundary = multer::parse_boundary(content_type)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Missing multipart boundary").into_response())?;
     let stream = body
@@ -119,14 +124,14 @@ pub(crate) async fn parse_multipart_form(
         .map(|res| res.map_err(|e| e.to_string()));
     let constraints = multipart_constraints(handler, state);
     let mut multipart = Multipart::with_constraints(stream, boundary, constraints);
-    let mut form: AHashMap<String, SmallVec<[BodyField; 2]>> = AHashMap::new();
+    let mut form: AHashMap<FormText, SmallVec<[BodyField; 2]>> = AHashMap::new();
 
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|err| multipart_error_response(&err))?
     {
-        let Some(name) = field.name().map(str::to_owned) else {
+        let Some(name) = field.name().map(FormText::new) else {
             continue;
         };
         let filename = field.file_name().map(str::to_owned);
@@ -142,7 +147,7 @@ pub(crate) async fn parse_multipart_form(
                 content_type,
                 content: bytes,
             }),
-            None => BodyField::Text(String::from_utf8_lossy(&bytes).into_owned()),
+            None => BodyField::Text(form_text(String::from_utf8_lossy(&bytes))),
         };
         form.entry(name).or_default().push(entry);
     }

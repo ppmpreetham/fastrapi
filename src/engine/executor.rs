@@ -99,14 +99,15 @@ pub(crate) fn spawn_background_tasks(
 ) {
     if let Some(tasks) = bg_tasks {
         spawn(async move {
-            for task in Python::attach(|py| match tasks.try_borrow(py) {
-                Ok(bg) => bg.execute_all(event_loop),
+            let pending = Python::attach(|py| match tasks.try_borrow(py) {
+                Ok(bg) => Some(bg.execute_all(event_loop)),
                 Err(e) => {
                     tracing::error!("Failed to borrow BackgroundTasks: {}", e);
-                    Vec::new()
+                    None
                 }
-            }) {
-                task.await;
+            });
+            if let Some(pending) = pending {
+                pending.run().await;
             }
         });
     }
