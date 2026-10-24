@@ -1,9 +1,22 @@
+//! The native `fastrapi.encoders` Python module.
+//! It contains `jsonable_encoder`, which converts Python objects into values that JSON can encode.
+
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
 use pyo3::Bound;
 
+/// Convert any object to something that can be encoded in JSON.
+///
+/// This is used internally by FastAPI to make sure anything you return can be
+/// encoded as JSON before it is sent to the client.
+///
+/// You can also use it yourself, for example to convert objects before saving them
+/// in a database that supports only JSON.
+///
+/// Read more about it in the
+/// [FastAPI docs for JSON Compatible Encoder](https://fastapi.tiangolo.com/tutorial/encoder/).
 #[expect(
     clippy::fn_params_excessive_bools,
     reason = "FastAPI's jsonable_encoder accepts multiple boolean filtering flags"

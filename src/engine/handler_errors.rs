@@ -1,3 +1,6 @@
+//! The conversion of Python errors from route handlers into HTTP responses.
+//! This module also writes Python errors to the log.
+
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use fastrapi_http::exceptions::PyHTTPException;
@@ -18,7 +21,7 @@ pub(crate) fn python_error_to_response(py: Python<'_>, err: PyErr) -> Response {
     python_error_to_response_in(py, &err, None)
 }
 
-/// @`app.exception_handler` registry
+/// Converts a Python error into a response with the handlers of the `@app.exception_handler` registry.
 pub(crate) fn python_error_to_response_in(
     py: Python<'_>,
     err: &PyErr,

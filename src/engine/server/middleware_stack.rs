@@ -1,3 +1,7 @@
+//! The construction of the middleware stack of the server.
+//! It adds the built-in middleware layers, such as CORS, GZip, session, trusted host and HTTPS redirect.
+//! It also adds the Python, ASGI and decorator middleware.
+
 use fastrapi_runtime::py_bridge::EventLoop;
 use std::sync::Arc;
 

@@ -1,3 +1,6 @@
+//! The tokio runtime that runs the Python handlers.
+//! The runtime has one worker thread for each CPU and a configurable number of blocking threads.
+
 use std::future::Future;
 use std::num::NonZero;
 use std::sync::LazyLock;

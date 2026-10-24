@@ -1,3 +1,6 @@
+//! This module contains `ResponseType` and `ResponseFormatter`.
+//! They tell the server how to serialize the return value of a route and which status code to use.
+
 use axum::http::StatusCode;
 use fastrapi_pyutil::json::SerializationHint;
 use pyo3::types::PyDict;

@@ -1,3 +1,6 @@
+//! The HTTP methods that FastrAPI routes support.
+//! `HttpMethod` gives each method a small index, so the router can keep one table for each method.
+
 use axum::http::Method;
 use strum::{AsRefStr, Display, EnumCount, EnumIter, EnumString};
 

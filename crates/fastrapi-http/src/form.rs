@@ -1,3 +1,6 @@
+//! This module parses the body of a form request.
+//! It reads `multipart/form-data` and `application/x-www-form-urlencoded` data and makes a `FormData` object for Python.
+
 use crate::form_data::PyFormData;
 use crate::upload_file::PyUploadFile;
 use bytes::Bytes;
@@ -90,7 +93,8 @@ impl FormEntry {
     }
 }
 
-/// Native `FormData` multidict keeps the duplicate-key order.
+/// Makes a native `FormData` multidict from the form entries.
+/// The multidict keeps the order of duplicate keys.
 pub(crate) fn to_form_data(py: Python<'_>, entries: Vec<FormEntry>) -> PyResult<Py<PyAny>> {
     let pairs = entries
         .into_iter()

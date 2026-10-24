@@ -1,9 +1,22 @@
+//! The OAuth2 and OpenID Connect security classes.
+//! These classes read a bearer token from the `Authorization` header.
+//! They also hold the OAuth2 flows for the OpenAPI schema.
+
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use smart_default::SmartDefault;
 
 use super::callable;
 
+/// This is the base class for OAuth2 authentication, an instance of it would be used
+/// as a dependency. All other OAuth2 classes inherit from it and customize it for
+/// each OAuth2 flow.
+///
+/// You normally would not create a new class inheriting from it but use one of the
+/// existing subclasses, and maybe compose them if you want to support multiple flows.
+///
+/// Read more about it in the
+/// [FastAPI docs for Security](https://fastapi.tiangolo.com/tutorial/security/).
 #[pyclass(
     frozen,
     name = "OAuth2",
@@ -38,11 +51,17 @@ impl OAuth2 {
         }
     }
 
+    /// Call self as a function.
     fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
         callable::bearer_token(request, self.auto_error)
     }
 }
 
+/// OAuth2 flow for authentication using a bearer token obtained with a password.
+/// An instance of it would be used as a dependency.
+///
+/// Read more about it in the
+/// [FastAPI docs for Simple OAuth2 with Password and Bearer](https://fastapi.tiangolo.com/tutorial/security/simple-oauth2/).
 #[pyclass(
     frozen,
     name = "OAuth2PasswordBearer",
@@ -80,12 +99,14 @@ impl OAuth2PasswordBearer {
         }
     }
 
-    /// Returns the extracted bearer token or raises 401/403.
+    /// Call self as a function.
     fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
         callable::bearer_token(request, self.auto_error)
     }
 }
 
+/// OAuth2 flow for authentication using a bearer token obtained with an OAuth2 code
+/// flow. An instance of it would be used as a dependency.
 #[pyclass(
     frozen,
     name = "OAuth2AuthorizationCodeBearer",
@@ -129,11 +150,19 @@ impl OAuth2AuthorizationCodeBearer {
         }
     }
 
+    /// Call self as a function.
     fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
         callable::bearer_token(request, self.auto_error)
     }
 }
 
+/// OpenID Connect authentication class. An instance of it would be used as a
+/// dependency.
+///
+/// **Warning**: this is only a stub to connect the components with OpenAPI in FastAPI,
+/// but it doesn't implement the full OpenIdConnect scheme, for example, it doesn't use
+/// the OpenIDConnect URL. You would need to subclass it and implement it in your
+/// code.
 #[pyclass(
     frozen,
     name = "OpenIdConnect",
@@ -168,7 +197,7 @@ impl OpenIdConnect {
         }
     }
 
-    /// `OpenID` Connect carries the identity token as a bearer token
+    /// Call self as a function.
     fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
         callable::bearer_token(request, self.auto_error)
     }

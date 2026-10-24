@@ -1,3 +1,6 @@
+//! This module contains the `WebSocket` Python class, which is compatible with starlette.
+//! The class accepts the connection, sends and receives text, bytes, and JSON messages, and closes the connection.
+
 use bytes::{BufMut, Bytes, BytesMut};
 use fastrapi_pyutil::imports::{STARLETTE_HEADERS, TYPES};
 use fastrapi_runtime::py_bridge;
@@ -75,6 +78,8 @@ async fn next_message(rx_arc: SharedRx) -> PyResult<WSMessage> {
     received.ok_or_else(disconnected)
 }
 
+/// A base class for incoming HTTP connections, that is used to provide
+/// any functionality that is common to both `Request` and `WebSocket`.
 #[pyclass(name = "WebSocket")]
 pub struct PyWebSocket {
     pub tx: mpsc::Sender<WSMessage>,
@@ -254,14 +259,15 @@ fn closed() -> PyErr {
     PyRuntimeError::new_err("WebSocket closed")
 }
 
-/// Instantiates a Starlette class from a single keyword argument.
+/// Makes an instance of a starlette class from one keyword argument.
 fn starlette(cls: &Bound<'_, PyAny>, arg_name: &str, value: &Py<PyAny>) -> PyResult<Py<PyAny>> {
     let kwargs = PyDict::new(cls.py());
     kwargs.set_item(arg_name, value.bind(cls.py()))?;
     Ok(cls.call((), Some(&kwargs))?.unbind())
 }
 
-/// The raw `(bytes, bytes)` header list; empty until upgrade metadata lands.
+/// Returns the raw `(bytes, bytes)` header list.
+/// The list is empty until the upgrade metadata is available.
 fn raw_headers(ws: &PyWebSocket, py: Python<'_>) -> Py<PyAny> {
     scope_value(ws.scope.as_ref(), py, "headers")
 }
@@ -279,7 +285,7 @@ enum WsPayload {
     Json,
 }
 
-/// Async iterator powering `iter_text()` / `iter_json()`.
+/// The asynchronous iterator for `iter_text()` and `iter_json()`.
 #[pyclass(name = "WSIterator")]
 pub struct WSIterator {
     ws: Py<PyWebSocket>,

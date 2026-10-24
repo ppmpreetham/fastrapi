@@ -1,3 +1,7 @@
+//! This module runs middleware that is written in Python.
+//! It supports three middleware types: context functions, starlette-style `call_next` functions, and ASGI classes.
+//! It also contains the `Headers` class that Python middleware reads.
+
 use crate::response_convert::convert_auto_response;
 use axum::extract::Request;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -20,11 +24,11 @@ use tracing::error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PyMiddlewareKind {
-    /// Legacy single-argument style: `handler(ctx_dict) -> response|None`.
+    /// The old style with one argument: `handler(ctx_dict) -> response|None`.
     Context,
-    /// Starlette-style: `handler(request, call_next) -> response`.
+    /// The starlette style: `handler(request, call_next) -> response`.
     CallNext,
-    /// raw asgi middleware class: `async def __call__(self, scope, receive, send)`;
+    /// A raw ASGI middleware class: `async def __call__(self, scope, receive, send)`.
     Asgi,
 }
 
@@ -190,6 +194,7 @@ fn header_key_bytes<'a>(key: &'a Bound<'_, PyAny>) -> PyResult<Cow<'a, [u8]>> {
     }
 }
 
+/// An immutable, case-insensitive multidict.
 #[pyclass(
     frozen,
     name = "Headers",
@@ -293,6 +298,7 @@ impl PyLazyHeaders {
         }
     }
 
+    /// D.keys() -> a set-like object providing a view on D's keys
     fn keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let names: Vec<Bound<'py, PyBytes>> = self
             .unique_entries()
@@ -302,6 +308,7 @@ impl PyLazyHeaders {
         PyList::new(py, names)
     }
 
+    /// D.values() -> an object providing a view on D's values
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let values: Vec<Bound<'py, PyBytes>> = self
             .unique_entries()
@@ -311,6 +318,7 @@ impl PyLazyHeaders {
         PyList::new(py, values)
     }
 
+    /// D.items() -> a set-like object providing a view on D's items
     fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let items: Vec<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> = self
             .unique_entries()

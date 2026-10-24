@@ -1,3 +1,6 @@
+//! Builds the full OpenAPI document of an application.
+//! `AppDocument` contains the application settings, and `build_openapi_spec` converts them into a JSON value.
+
 use super::document::OpenApiSpec;
 use super::paths::build_paths_from_routes;
 use super::schema::py_dicts_to_json_vec;

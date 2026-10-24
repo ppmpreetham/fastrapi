@@ -1,3 +1,6 @@
+//! Types for a parsed request body.
+//! A body is JSON or form data, and form data can contain text fields and uploaded files.
+
 use ahash::AHashMap;
 use bytes::Bytes;
 use smallvec::SmallVec;

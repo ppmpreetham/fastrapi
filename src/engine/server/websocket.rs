@@ -1,3 +1,6 @@
+//! The WebSocket support of the server.
+//! It accepts WebSocket connections, matches the path parameters and moves messages between the socket and the Python handler.
+
 use crate::engine::executor::{build_request_input_from_parts, schedule_python_coroutine};
 use axum::extract::{ConnectInfo, State};
 use axum::response::{IntoResponse, Response};

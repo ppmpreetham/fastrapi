@@ -1,3 +1,7 @@
+//! Analysis of a Python endpoint function when FastrAPI registers a route.
+//! This module reads the function signature and makes the route metadata: the parameters, the dependencies, and the response type.
+//! It also selects the serialization hint for the return value.
+
 use super::pydantic::is_pydantic_model;
 use crate::dependencies::{self, DependencyNode};
 use crate::params;

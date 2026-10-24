@@ -1,3 +1,6 @@
+//! The start of the HTTP server and the shared application state.
+//! This module runs the server, waits for the shutdown signal and supports the reload mode.
+
 use super::lifecycle::{
     log_python_error, run_shutdown_phase, run_startup_phase, start_background_asyncio_loop,
     stop_background_asyncio_loop,

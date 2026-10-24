@@ -1,3 +1,6 @@
+//! This module contains helper functions for the Python response classes.
+//! The functions render the content, make the header list, and set cookies.
+
 use cookie::time::Duration;
 use cookie::{Cookie, SameSite};
 use fastrapi_pyutil::imports::SIMPLE_COOKIE;

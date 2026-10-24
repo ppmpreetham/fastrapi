@@ -1,3 +1,6 @@
+//! The executor for route handlers that need a managed Python context.
+//! It injects the dependencies, applies the response metadata and closes the dependency exit stacks.
+
 use super::executor::{
     build_request_input_from_parts, payload_raw_bytes, prepare_kwargs_and_payload,
     spawn_background_tasks,

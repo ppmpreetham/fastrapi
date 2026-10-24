@@ -1,3 +1,6 @@
+//! Compatibility functions that copy the Python API of FastAPI.
+//! This module builds the `fastrapi` submodules for dependencies, security, exception handlers, OpenAPI and docs.
+
 use fastrapi_core::path::extract_path_param_names;
 use fastrapi_http::responses::{PyHTMLResponse, PyJSONResponse};
 use fastrapi_routing::dependencies::parse_dependencies;
@@ -106,6 +109,11 @@ fn generate_unique_id(py: Python<'_>, route: &Bound<'_, PyAny>) -> String {
     )
 }
 
+/// Pass items or `DefaultPlaceholder`s by descending priority.
+///
+/// The first one to _not_ be a `DefaultPlaceholder` will be returned.
+///
+/// Otherwise, the first item (a `DefaultPlaceholder`) will be returned.
 #[pyfunction]
 #[pyo3(signature = (first_item, *extra_items))]
 fn get_value_or_default(

@@ -1,3 +1,7 @@
+//! The executor that runs Python route handlers for HTTP requests.
+//! It prepares the arguments, resolves the dependencies and calls sync or async handlers.
+//! It then converts the handler result into an HTTP response.
+
 use super::handler_errors::{python_error_to_response, python_error_to_response_in};
 use super::managed::run_managed_handler;
 use axum::http::request::Parts;

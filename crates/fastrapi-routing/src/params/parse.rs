@@ -1,3 +1,6 @@
+//! Converts one parameter of an endpoint signature into a `ParsedParameter`.
+//! It finds the source of the value (path, query, header, body, or other source), the default value, the external name, and the constraints.
+
 use super::constraints::extract_constraints;
 use super::utils::{
     annotation_name, base_annotation, find_annotated_marker, is_background_tasks_type,

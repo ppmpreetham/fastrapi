@@ -1,3 +1,7 @@
+//! This module contains the classes for Server-Sent Events (SSE).
+//! `EventSourceResponse` marks a route that streams events.
+//! `ServerSentEvent` is one event that the server encodes in the `text/event-stream` format.
+
 use crate::response_api::init_headers;
 use bytes::Bytes;
 use fastrapi_pyutil::json::py_any_to_json;
@@ -6,6 +10,16 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyTuple, PyType};
 
+/// Streaming response with `text/event-stream` media type.
+///
+/// Use as `response_class=EventSourceResponse` on a *path operation* that uses `yield`
+/// to enable Server Sent Events (SSE) responses.
+///
+/// Works with **any HTTP method** (`GET`, `POST`, etc.), which makes it compatible
+/// with protocols like MCP that stream SSE over `POST`.
+///
+/// The actual encoding logic lives in the FastAPI routing layer. This class
+/// serves mainly as a marker and sets the correct `Content-Type`.
 #[pyclass(
     name = "EventSourceResponse",
     module = "fastrapi.responses",
@@ -72,6 +86,20 @@ impl PyEventSourceResponse {
 
 crate::macros::response_api_methods!(PyEventSourceResponse, "EventSourceResponse");
 
+/// Represents a single Server-Sent Event.
+///
+/// When `yield`ed from a *path operation function* that uses
+/// `response_class=EventSourceResponse`, each `ServerSentEvent` is encoded
+/// into the [SSE wire format](https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream)
+/// (`text/event-stream`).
+///
+/// If you yield a plain object (dict, Pydantic model, etc.) instead, it is
+/// automatically JSON-encoded and sent as the `data:` field.
+///
+/// All `data` values **including plain strings** are JSON-serialized.
+///
+/// For example, `data="hello"` produces `data: "hello"` on the wire (with
+/// quotes).
 #[pyclass(
     name = "ServerSentEvent",
     module = "fastrapi.sse",

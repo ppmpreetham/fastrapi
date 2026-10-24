@@ -1,3 +1,7 @@
+//! This module runs raw ASGI middleware classes.
+//! It gives `receive` and `send` callables to the middleware and connects them to the axum stack.
+//! It collects the response messages that the middleware sends.
+
 use axum::body::{Body, to_bytes};
 use axum::extract::Request;
 use axum::http::request::Parts;
@@ -39,7 +43,7 @@ pub struct PyDownstreamASGI {
 )]
 pub struct PyScopeDownstream;
 
-/// yields the buffered request body once, then `http.disconnect` forever.
+// Gives the buffered request body one time, then gives `http.disconnect` at each call after that.
 #[pyclass(
     frozen,
     name = "Receive",
@@ -50,7 +54,7 @@ pub struct PyAsgiReceive {
     body: Arc<Mutex<Option<bytes::Bytes>>>,
 }
 
-/// collects the `http.response.*` messages the middleware chain sends.
+// Collects the `http.response.*` messages that the middleware chain sends.
 #[pyclass(
     frozen,
     name = "Send",
@@ -97,8 +101,9 @@ impl PyScopeDownstream {
     }
 }
 
-/// runs the rest of the axum stack, feeding the body from the `receive` the
-/// middleware passed in and emitting the response through the `send` it passed.
+/// Runs the remaining part of the axum stack.
+/// It reads the body from the `receive` callable of the middleware.
+/// It sends the response through the `send` callable of the middleware.
 async fn run_downstream(
     downstream: PyDownstreamASGI,
     receive: Py<PyAny>,
@@ -112,7 +117,7 @@ async fn run_downstream(
     send_response(&locals, &send, resp).await
 }
 
-/// drives the middleware-supplied `receive` callable and reassembles the body.
+/// Calls the `receive` callable of the middleware and assembles the body again.
 async fn drain_receive(
     locals: &py_bridge::TaskLocals,
     receive: &Py<PyAny>,
@@ -139,7 +144,8 @@ async fn drain_receive(
     Ok(buf.freeze())
 }
 
-/// (`body`, `more_body`) from an asgi `http.request` message; `None` on disconnect.
+/// Reads (`body`, `more_body`) from an ASGI `http.request` message.
+/// The body is `None` when the client disconnects.
 fn parse_request_message(py: Python<'_>, msg: &Bound<'_, PyAny>) -> (Option<bytes::Bytes>, bool) {
     let Ok(kind) = msg.get_item(intern!(py, "type")) else {
         return (None, false);
@@ -175,7 +181,7 @@ fn python_bytes(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<bytes::Bytes> 
     Some(Bytes::copy_from_slice(bytes.as_bytes()))
 }
 
-/// emits `http.response.start` + `http.response.body` through the middleware's send.
+/// Sends `http.response.start` and `http.response.body` through the `send` callable of the middleware.
 async fn send_response(
     locals: &py_bridge::TaskLocals,
     send: &Py<PyAny>,
@@ -210,7 +216,7 @@ async fn send_response(
     asgi_call(locals, send, body_msg).await
 }
 
-/// awaits one `send(message)` call on the python loop.
+/// Awaits one `send(message)` call on the Python event loop.
 async fn asgi_call(
     locals: &py_bridge::TaskLocals,
     target: &Py<PyAny>,
@@ -265,7 +271,7 @@ impl PyAsgiSend {
     }
 }
 
-/// collected `http.response.*` messages, parsed.
+/// A parsed `http.response.*` message that the middleware sent.
 enum ResponseMessage {
     Start(u16, Vec<(bytes::Bytes, bytes::Bytes)>),
     Body(bytes::Bytes),

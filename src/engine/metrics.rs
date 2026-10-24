@@ -1,3 +1,6 @@
+//! The Prometheus metrics support of fastrapi.
+//! It contains the global Prometheus handle, the metrics route and the `Instrumentator` Python class.
+
 use axum::Router;
 use axum::routing::get;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};

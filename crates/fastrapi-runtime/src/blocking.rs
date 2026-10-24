@@ -1,3 +1,6 @@
+//! Runs blocking Python code on a tokio blocking thread.
+//! The task gets the Python interpreter before it starts.
+
 use pyo3::Python;
 use tokio::task::{JoinError, spawn_blocking};
 

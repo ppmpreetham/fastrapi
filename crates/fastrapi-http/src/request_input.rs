@@ -1,3 +1,7 @@
+//! This module contains `RequestInput`, a view on the data of one request.
+//! It gives the path parameters, query parameters, cookies, and headers.
+//! It parses the query parameters and cookies only when the code reads them.
+
 use axum::http::HeaderMap;
 use axum::http::header::COOKIE;
 use cookie::Cookie;

@@ -1,3 +1,7 @@
+//! The dispatch of errors to the exception handlers that the user registers.
+//! The functions find the handler for an exception, a validation error or a status code.
+//! They call the handler and convert its result into an HTTP response.
+
 use axum::response::{IntoResponse, Response};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt, PyString};

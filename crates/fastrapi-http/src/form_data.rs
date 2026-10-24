@@ -1,5 +1,6 @@
-//! Starlette-compatible `FormData`: an immutable multidict of text fields and
-//! `UploadFile`s, preserving duplicate keys in insertion order.
+//! This module contains `FormData`, a class that is compatible with starlette.
+//! `FormData` is an immutable multidict of text fields and `UploadFile` objects.
+//! It keeps duplicate keys in the order of insertion.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyTuple};
@@ -10,11 +11,12 @@ use pyo3::Bound;
 use pyo3::class::basic::CompareOp;
 use pyo3::exceptions::PyKeyError;
 
+/// An immutable multidict, containing both file uploads and text input.
 #[pyclass(name = "FormData", module = "fastrapi.datastructures", get_all)]
 pub struct PyFormData {
-    /// Insertion-ordered pairs, duplicates included.
+    /// The key-value pairs in the order of insertion, with duplicates.
     items: Vec<(String, Py<PyAny>)>,
-    /// Last-value-wins view, mirroring starlette's `_dict`.
+    /// A view that keeps only the last value for each key, as the starlette `_dict` does.
     dict: Py<PyDict>,
 }
 
@@ -81,14 +83,17 @@ impl PyFormData {
         PyList::new(py, pairs)
     }
 
+    /// D.keys() -> a set-like object providing a view on D's keys
     fn keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.dict.bind(py).call_method0("keys")
     }
 
+    /// D.values() -> an object providing a view on D's values
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.dict.bind(py).call_method0("values")
     }
 
+    /// D.items() -> a set-like object providing a view on D's items
     fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.dict.bind(py).call_method0("items")
     }
@@ -151,7 +156,7 @@ impl PyFormData {
         })
     }
 
-    /// Close every `UploadFile` value, mirroring starlette's async `close`.
+    // Closes each `UploadFile` value, as the asynchronous starlette `close` method does.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let uploads: Vec<Py<PyAny>> = self
             .items
@@ -190,8 +195,9 @@ impl PyFormData {
 }
 
 impl PyFormData {
-    /// starlette compares `sorted(self._list)`; sorting by (key, value-repr)
-    /// is deterministic and never raises across mixed value types.
+    /// Compares two forms after it sorts their pairs.
+    /// starlette compares `sorted(self._list)`. This method sorts by key and value `repr`.
+    /// This order is always the same, and it does not raise an error for mixed value types.
     fn sorted_eq(&self, py: Python<'_>, other: &Self) -> PyResult<bool> {
         fn sorted_keys(form: &PyFormData, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
             let mut reprs: Vec<(String, String)> = form

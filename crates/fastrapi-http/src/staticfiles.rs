@@ -1,3 +1,7 @@
+//! This module contains the `StaticFiles` class.
+//! The class sends files from a directory or from Python packages.
+//! Some methods send the call to the starlette `StaticFiles` class.
+
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
@@ -54,6 +58,8 @@ impl PyStaticFiles {
         cls.call((), Some(&kwargs))
     }
 
+    /// Given `directory` and `packages` arguments, return a list of all the
+    /// directories that should be used for serving static files from.
     fn get_directories(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(self
             .directories
@@ -63,6 +69,8 @@ impl PyStaticFiles {
             .unbind())
     }
 
+    /// Given the ASGI scope, return the `path` string to serve up,
+    /// with OS specific path separators, and any '..', '.' components removed.
     fn get_path(&self, py: Python<'_>, scope: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(self
             .delegate(py)?
@@ -77,6 +85,7 @@ impl PyStaticFiles {
             .unbind())
     }
 
+    /// Returns an HTTP response, given the incoming path, method and request headers.
     fn get_response<'py>(
         &self,
         py: Python<'py>,
@@ -104,10 +113,15 @@ impl PyStaticFiles {
         }
     }
 
+    /// Perform a one-off configuration check that StaticFiles is actually
+    /// pointed at a directory, so that we can raise loud errors rather than
+    /// just returning 404 responses.
     fn check_config<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.delegate(py)?.call_method0("check_config")
     }
 
+    /// Given the request and response headers, return `True` if an HTTP
+    /// "Not Modified" response could be returned instead.
     fn is_not_modified<'py>(
         &self,
         py: Python<'py>,

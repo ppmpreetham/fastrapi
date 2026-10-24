@@ -1,3 +1,7 @@
+//! The supervisor for automatic reload in development.
+//! It starts the server as a child process and watches Python files for changes.
+//! When a file that is not ignored changes, it stops the child process and starts a new one.
+
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use std::env::current_dir;

@@ -1,3 +1,6 @@
+//! This module contains the Python response classes, for example `JSONResponse`, `RedirectResponse`, and `FileResponse`.
+//! It also finds the kind of a response object and validates the response model.
+
 use super::response_file::guess_mime;
 use axum::http::StatusCode;
 use papaya::HashMap;
@@ -167,8 +170,36 @@ pub fn extract_base_response_data<'py>(
 crate::macros::define_response_class!(PyResponse, "Response", Py<PyAny>, 200);
 crate::macros::define_response_class!(PyHTMLResponse, "HTMLResponse", String, 200);
 crate::macros::define_response_class!(PyJSONResponse, "JSONResponse", Py<PyAny>, 200);
-crate::macros::define_response_class!(PyORJSONResponse, "ORJSONResponse", Py<PyAny>, 200);
-crate::macros::define_response_class!(PyUJSONResponse, "UJSONResponse", Py<PyAny>, 200);
+crate::macros::define_response_class!(
+    /// JSON response using the orjson library to serialize data to JSON.
+    ///
+    /// **Deprecated**: `ORJSONResponse` is deprecated. FastAPI now serializes data
+    /// directly to JSON bytes via Pydantic when a return type or response model is
+    /// set, which is faster and doesn't need a custom response class.
+    ///
+    /// Read more in the
+    /// [FastAPI docs for Custom Response](https://fastapi.tiangolo.com/advanced/custom-response/#orjson-or-response-model)
+    /// and the
+    /// [FastAPI docs for Response Model](https://fastapi.tiangolo.com/tutorial/response-model/).
+    ///
+    /// **Note**: `orjson` is not included with FastAPI and must be installed
+    /// separately, e.g. `pip install orjson`.
+    PyORJSONResponse, "ORJSONResponse", Py<PyAny>, 200);
+crate::macros::define_response_class!(
+    /// JSON response using the ujson library to serialize data to JSON.
+    ///
+    /// **Deprecated**: `UJSONResponse` is deprecated. FastAPI now serializes data
+    /// directly to JSON bytes via Pydantic when a return type or response model is
+    /// set, which is faster and doesn't need a custom response class.
+    ///
+    /// Read more in the
+    /// [FastAPI docs for Custom Response](https://fastapi.tiangolo.com/advanced/custom-response/#orjson-or-response-model)
+    /// and the
+    /// [FastAPI docs for Response Model](https://fastapi.tiangolo.com/tutorial/response-model/).
+    ///
+    /// **Note**: `ujson` is not included with FastAPI and must be installed
+    /// separately, e.g. `pip install ujson`.
+    PyUJSONResponse, "UJSONResponse", Py<PyAny>, 200);
 crate::macros::define_response_class!(PyPlainTextResponse, "PlainTextResponse", String, 200);
 crate::macros::define_response_class!(PyStreamingResponse, "StreamingResponse", Py<PyAny>, 200);
 

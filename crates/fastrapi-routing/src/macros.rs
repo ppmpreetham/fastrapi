@@ -1,7 +1,11 @@
-/// Internal macro used to construct parameter types.
-/// It defines the Python class structure, properties, and methods for a parameter.
+//! Internal macros that make the Python parameter classes.
+//! The `define_param!` macro makes classes such as `Query`, `Path`, and `Header`, with their properties and methods.
+
+/// Internal macro that makes a parameter type.
+/// It defines the Python class, its properties, and its methods for a parameter.
 macro_rules! define_param_internal {
     (
+        $(#[$meta:meta])*
         $struct_name:ident,
         $py_name:literal,
         extra_fields: { $( $extra_field:vis $extra_field_name:ident : $extra_field_type:ty , )* },
@@ -9,6 +13,7 @@ macro_rules! define_param_internal {
         extra_args: { $( $extra_arg_name:ident : $extra_arg_type:ty , )* },
         extra_init: { $( $extra_init_name:ident , )* }
     ) => {
+        $(#[$meta])*
         #[pyo3::prelude::pyclass(name = $py_name, get_all, set_all, from_py_object)]
         #[derive(Clone)]
         pub struct $struct_name {
@@ -148,12 +153,13 @@ macro_rules! define_param_internal {
     };
 }
 
-/// Defines HTTP parameter classes (Query, Path, Header, etc.) for the Python API.
-/// Provides multiple signatures to support aliases, descriptions, constraints, and dependencies.
+/// Defines the HTTP parameter classes (`Query`, `Path`, `Header`, and other classes) for the Python API.
+/// It has different signatures for aliases, descriptions, constraints, and dependencies.
 macro_rules! define_param {
     // Base parameter (Query, Path, Cookie)
-    ($struct_name:ident, $py_name:literal) => {
+    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal) => {
         $crate::macros::define_param_internal!(
+            $(#[$meta])*
             $struct_name,
             $py_name,
             extra_fields: {},
@@ -164,8 +170,9 @@ macro_rules! define_param {
     };
 
     // Header parameter (includes convert_underscores)
-    ($struct_name:ident, $py_name:literal, header) => {
+    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, header) => {
         $crate::macros::define_param_internal!(
+            $(#[$meta])*
             $struct_name,
             $py_name,
             extra_fields: {
@@ -184,8 +191,9 @@ macro_rules! define_param {
     };
 
     // Body parameter (includes embed and media_type)
-    ($struct_name:ident, $py_name:literal, body) => {
+    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, body) => {
         $crate::macros::define_param_internal!(
+            $(#[$meta])*
             $struct_name,
             $py_name,
             extra_fields: {
@@ -208,8 +216,9 @@ macro_rules! define_param {
     };
 
     // Media type parameter (Form, File)
-    ($struct_name:ident, $py_name:literal, media: $default_media:literal) => {
+    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, media: $default_media:literal) => {
         $crate::macros::define_param_internal!(
+            $(#[$meta])*
             $struct_name,
             $py_name,
             extra_fields: {

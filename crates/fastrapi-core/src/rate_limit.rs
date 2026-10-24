@@ -1,3 +1,7 @@
+//! A fixed-window rate limit for each handler and client IP address.
+//! Each window keeps the second and the request count in one atomic value.
+//! The module removes old windows one time each second.
+
 use Ordering::SeqCst;
 use axum::extract::{ConnectInfo, Request};
 use papaya::HashMap;

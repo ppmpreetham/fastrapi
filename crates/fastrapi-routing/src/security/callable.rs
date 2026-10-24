@@ -1,3 +1,7 @@
+//! The Rust logic for the `__call__` methods of the security classes.
+//! The functions read a bearer token, HTTP Basic credentials, or an API key from a request.
+//! When the credentials are missing or not valid, they raise an `HTTPException`.
+
 use base64::Engine as _;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -7,7 +11,8 @@ use crate::security::{HTTPAuthorizationCredentials, HTTPBasicCredentials};
 use base64::engine::general_purpose::STANDARD;
 use fastrapi_http::exceptions::PyHTTPException;
 
-/// rfc 9110 requires a 401 to carry `WWW-Authenticate`
+/// Makes an `HTTPException` error with a status code, a detail, and an optional challenge.
+/// RFC 9110 requires a `WWW-Authenticate` header in a 401 response.
 fn http_exc(py: Python<'_>, status: u16, detail: &str, challenge: Option<&str>) -> PyErr {
     let detail = PyString::new(py, detail);
     let raised = match challenge {
@@ -28,7 +33,7 @@ fn http_exc(py: Python<'_>, status: u16, detail: &str, challenge: Option<&str>) 
     }
 }
 
-/// 401 carrying the challenge for the scheme that was expected.
+/// Makes a 401 error with the challenge for the expected scheme.
 pub(crate) fn unauthorized(py: Python<'_>, challenge: &str) -> PyErr {
     http_exc(py, 401, "Not authenticated", Some(challenge))
 }
@@ -78,7 +83,7 @@ pub(crate) fn source_value(request: &Bound<'_, PyAny>, source: &str, name: &str)
         .ok()
 }
 
-/// Decodes an RFC 7617 `Basic` credential payload into `(user, password)`.
+/// Decodes an RFC 7617 `Basic` credential payload into a `(user, password)` pair.
 fn decode_basic(payload: &str) -> Option<(String, String)> {
     let decoded = STANDARD.decode(payload).ok()?;
     let text = String::from_utf8(decoded).ok()?;

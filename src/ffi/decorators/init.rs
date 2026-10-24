@@ -1,3 +1,7 @@
+//! The construction of route decorators for `APIRouter`.
+//! It reads the route options from the keyword arguments and analyzes the route handler.
+//! It then adds the HTTP route or the WebSocket route to the router.
+
 use super::router::PyAPIRouter;
 use ahash::AHashSet;
 use fastrapi_core::method::HttpMethod;

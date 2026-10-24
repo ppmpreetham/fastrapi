@@ -1,3 +1,6 @@
+//! The dispatch of HTTP requests to the route handlers.
+//! The dispatch finds the route, applies the rate limit and returns a 404 response if no route matches.
+
 use super::payload::extract_payload;
 use super::serve::AppState;
 use fastrapi_core::rate_limit::is_rate_limited;
@@ -19,7 +22,7 @@ use fastrapi_routing::route::{ExecutionMode, RouteHandler};
 use fastrapi_runtime::py_bridge;
 use std::ptr;
 
-/// dispatches requests to the route handler
+/// Sends a request to its route handler.
 pub(crate) async fn dispatch_or_not_found(
     router: &'static FrozenRouter<RouteHandler>,
     state: &'static AppState,

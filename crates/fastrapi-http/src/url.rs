@@ -1,9 +1,7 @@
-//! Starlette-compatible `URL`.
-//!
-//! Port of `starlette.datastructures.URL`: string-backed, components parsed
-//! lazily on first access via `CPython`'s `urlsplit` (ground-truth semantics for
-//! IPv6/userinfo edge cases), cached for the object's lifetime. Construction
-//! from an ASGI scope and query surgery run natively.
+//! This module contains `URL`, a port of `starlette.datastructures.URL`.
+//! The class keeps the URL as a string and parses the parts at the first access with the CPython `urlsplit` function.
+//! `urlsplit` gives the correct result for IPv6 hosts and user information, and the class keeps the parts in a cache.
+//! Rust code makes a URL from an ASGI scope and changes the query string.
 
 use std::fmt::Write as _;
 use std::sync::OnceLock;
@@ -70,7 +68,8 @@ impl SplitUrl {
         }
     }
 
-    /// `SplitResult.geturl()`: empty components are omitted.
+    /// Makes the URL string, as `SplitResult.geturl()` does.
+    /// The string does not include empty components.
     fn geturl(&self) -> String {
         let mut out = String::with_capacity(64);
         if let Some(scheme) = &self.scheme {
@@ -118,9 +117,9 @@ fn split_cached(url: &str) -> PyResult<SplitUrl> {
     })
 }
 
-/// Extract `(hostname, port, username, password)` from a netloc, matching
-/// `urlsplit` semantics (bracketed IPv6 hosts keep their brackets in `host`,
-/// `hostname` drops them and lowercases).
+/// Extracts `(hostname, port, username, password)` from a netloc, as `urlsplit` does.
+/// An IPv6 host keeps its brackets in `host`.
+/// The `hostname` value has no brackets and is in lowercase.
 fn parse_netloc(netloc: &str) -> (Option<String>, Option<u16>, Option<String>, Option<String>) {
     let (userinfo, hostport) = match netloc.rsplit_once('@') {
         Some((userinfo, hostport)) => (Some(userinfo), hostport),
@@ -156,8 +155,9 @@ fn parse_netloc(netloc: &str) -> (Option<String>, Option<u16>, Option<String>, O
     (hostname, port, username, password)
 }
 
-/// Port of `starlette._utils.parse_host_header` (character-set validation in
-/// place of the module's regex). Returns `(authority, port_is_valid)`.
+/// A port of `starlette._utils.parse_host_header`.
+/// It validates the character set instead of the regular expression of the module.
+/// It returns `(authority, port_is_valid)`.
 fn parse_host_header(header: &str) -> Option<(String, bool)> {
     let (host, port) = if let Some(rest) = header.strip_prefix('[') {
         let end = rest.find(']')?;
@@ -211,7 +211,7 @@ const fn is_host_byte(b: u8) -> bool {
         )
 }
 
-/// Port of starlette's scope-based URL construction.
+/// Makes a URL from an ASGI scope, as starlette does.
 fn url_from_scope(scope: &Bound<'_, PyAny>) -> PyResult<String> {
     let get_scope_str = |name: &str| -> PyResult<Option<String>> {
         let value = scope.get_item(name)?;
@@ -289,9 +289,9 @@ fn url_from_scope(scope: &Bound<'_, PyAny>) -> PyResult<String> {
 
 #[pyclass(name = "URL", module = "fastrapi.datastructures", frozen)]
 pub struct PyURL {
-    /// Full URL string; the single source of truth.
+    /// The full URL string. All other values come from this string.
     url: String,
-    /// Lazily-populated parse cache.
+    /// The cache of the parsed parts. The class fills it at the first access.
     parts: OnceLock<SplitUrl>,
 }
 
@@ -303,7 +303,7 @@ impl PyURL {
         }
     }
 
-    /// Build from an ASGI scope, as starlette's `URL(scope=...)` does.
+    /// Makes a URL from an ASGI scope, as the starlette `URL(scope=...)` call does.
     pub(crate) fn from_scope(scope: &Bound<'_, PyAny>) -> PyResult<Self> {
         Ok(Self::from_string(url_from_scope(scope)?))
     }
@@ -321,7 +321,8 @@ fn invalid_component(key: &str) -> PyErr {
     PyTypeError::new_err(format!("Invalid URL component: '{key}'"))
 }
 
-/// `urllib.parse.urlencode` quotes with `quote_plus`: spaces become `+`.
+/// Encodes one key-value pair, as `urllib.parse.urlencode` does.
+/// It uses `quote_plus`, which changes each space to `+`.
 fn encode_pair((key, value): &(String, String)) -> String {
     let key: String = form_urlencoded::byte_serialize(key.as_bytes()).collect();
     let value: String = form_urlencoded::byte_serialize(value.as_bytes()).collect();
@@ -650,7 +651,7 @@ impl PyURL {
     }
 }
 
-/// `urllib.parse.parse_qsl` with `keep_blank_values=True`.
+/// Parses a query string, as `urllib.parse.parse_qsl` with `keep_blank_values=True` does.
 fn parse_qsl_pairs(_py: Python<'_>, query: &str) -> Vec<(String, String)> {
     form_urlencoded::parse(query.as_bytes())
         .map(|(key, value)| (key.into_owned(), value.into_owned()))

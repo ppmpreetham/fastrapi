@@ -1,3 +1,6 @@
+//! This module makes a rate limit layer.
+//! The layer limits the number of requests that each client IP address can send in one second.
+
 use axum_governor::extractor::PeerIp;
 use axum_governor::{GovernorConfigBuilder, GovernorLayer, Quota};
 use std::net::IpAddr;

@@ -1,3 +1,6 @@
+//! The static file mounts and the frontend mounts of the server.
+//! This module serves files from a directory and gives the fallback file for frontend navigation requests.
+
 use crate::engine::config::{FrontendMount, StaticMount};
 use axum::Router;
 use axum::body::Body;

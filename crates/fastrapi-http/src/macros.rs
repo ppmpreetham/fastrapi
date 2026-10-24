@@ -1,7 +1,11 @@
-/// Defines a subclass for a Python validation exception.
-/// This makes it easy to create specific validation exceptions for different types of validation errors.
+//! This module contains the declarative macros of the crate.
+//! The macros make Python validation exception subclasses and Python response classes.
+
+/// Defines a subclass of the Python `ValidationException` class.
+/// Use this macro to make a specific validation exception for each type of validation error.
 macro_rules! define_validation_subclass {
-    ($struct_name:ident, $py_name:literal) => {
+    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal) => {
+        $(#[$meta])*
         #[pyo3::prelude::pyclass(extends = $crate::exceptions::PyValidationException, name = $py_name, get_all)]
         pub struct $struct_name {
             pub body: pyo3::prelude::Py<pyo3::prelude::PyAny>,
@@ -28,9 +32,10 @@ macro_rules! define_validation_subclass {
 }
 
 /// Defines a standard Python response class.
-/// This encapsulates content, status code, headers, and media types into a Python class format.
+/// The class keeps the content, the status code, the headers, and the media type.
 macro_rules! define_response_class {
-    ($struct_name:ident, $py_name:literal, $content_type:ty, $default_status:expr) => {
+    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, $content_type:ty, $default_status:expr) => {
+        $(#[$meta])*
         #[pyo3::prelude::pyclass(name = $py_name, module = "fastrapi.responses", subclass, from_py_object)]
         #[derive(Clone)]
         pub struct $struct_name {

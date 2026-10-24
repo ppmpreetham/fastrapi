@@ -1,3 +1,8 @@
+//! The bridge between tokio futures and Python asyncio tasks.
+//! It keeps the event loop of each request, converts futures between Rust and Python,
+//! and schedules Python awaitables on an asyncio event loop.
+//! When a `PyTaskFuture` is dropped before it completes, the module cancels the Python task.
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

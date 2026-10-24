@@ -1,3 +1,7 @@
+//! Extracts and validates the request data for a route.
+//! This module converts raw path, query, header, cookie, form, and body values into Python arguments for the endpoint.
+//! When a value is not valid, it makes a 422 error response.
+
 use super::annotations::{ScalarCoercion, ScalarKind};
 use super::pydantic::{
     pydantic_error_to_response, validate_json_with_pydantic, validate_python_with_pydantic,

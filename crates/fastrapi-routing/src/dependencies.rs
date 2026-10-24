@@ -1,3 +1,7 @@
+//! The dependency graph and the dependency execution for routes.
+//! This module flattens the `Depends` and `Security` markers of an endpoint into a plan of dependency nodes.
+//! For each request, it runs the plan, keeps the results, and runs the teardown of generator dependencies.
+
 use super::params;
 use super::security::PySecurityScopes;
 use crate::route::ParsedParameter;
@@ -72,7 +76,7 @@ pub struct DependencyNode {
     pub is_async: bool,
     pub is_generator: bool,
     pub is_async_generator: bool,
-    /// Position of this node inside the flattened plan.
+    /// The position of this node in the flattened plan.
     pub index: usize,
     pub param_name: Option<Py<PyString>>,
     pub scopes: Vec<String>,

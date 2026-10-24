@@ -4,6 +4,9 @@ description = "fastrapi's route model: parameters, dependency injection, securit
 version.workspace = true
 edition.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 fastrapi-core.workspace = true
 fastrapi-http.workspace = true

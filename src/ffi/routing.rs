@@ -1,14 +1,6 @@
-//! Native `fastrapi.routing` surface (starlette + fastapi semantics).
+//! The native `fastrapi.routing` Python module, with the behavior of starlette and FastAPI.
 //!
-//! `APIRoute` is a `#[pyclass(subclass, dict)]` base: Python subclasses (e.g.
-//! polar's `VersionedAPIRoute`) can override `__init__` and `matches`, and
-//! instances keep a real `__dict__`. The `#[new]` returns `Self` so pyo3's
-//! `tp_new_impl` allocates the *subtype* Python asked for, keeping
-//! `isinstance()` and overridden methods intact, never `Bound::new` inside
-//! `#[new]`, which would force a base-class allocation.
-//!
-//! Path matching reuses the crate's canonical parameter parser
-//! (`routing::params`) and `HttpMethod`, so there is one source of truth.
+//! Path matching uses the canonical parameter parser of the crate
 
 use std::str::FromStr;
 
@@ -21,7 +13,7 @@ use fastrapi_core::path::extract_path_param_names;
 use fastrapi_pyutil::lazy::LazyPyAttr;
 use pyo3::Bound;
 
-/// Path params extracted from a matched request path, in declaration order.
+/// Gets the path parameters from a matched request path, in declaration order.
 fn path_captures<'py>(
     path: &str,
     request_path: &str,
@@ -48,9 +40,9 @@ fn path_captures<'py>(
     Some(captures)
 }
 
-/// `starlette.routing.Route.matches`, real path/method matching returning
-/// `(Match, child_scope)`, driven by the route's own attributes so Python
-/// subclasses that mutate them in `__init__` get the updated behaviour.
+/// Matches a request path and method against a route, as `starlette.routing.Route.matches` does.
+/// The function returns `(Match, child_scope)`. It reads the attributes of the route at each call.
+/// Thus Python subclasses that change these attributes in `__init__` get the updated behavior.
 pub(crate) fn route_matches<'py>(
     route: &Bound<'py, PyAny>,
     scope: &Bound<'py, PyAny>,
@@ -105,21 +97,21 @@ pub(crate) fn route_matches<'py>(
     Ok(PyTuple::new(py, [full, child_scope.into_any()])?.into_any())
 }
 
-/// starlette's `Match` enum, aliased as `fastrapi.routing.Match` so `is`
-/// checks and annotations in user code behave identically.
+/// Returns the `Match` enum of starlette, which is also available as `fastrapi.routing.Match`.
+/// Thus `is` checks and annotations in user code have the same behavior.
 fn match_enum(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     static MATCH_ENUM: LazyPyAttr = LazyPyAttr::new("starlette.routing", "Match");
     MATCH_ENUM.get(py)
 }
 
-/// `(member, child_scope)` pair starlette's `matches` returns.
+/// Returns the `(member, child_scope)` pair that the `matches` method of starlette returns.
 fn match_result<'py>(py: Python<'py>, member: &str) -> PyResult<Bound<'py, PyAny>> {
     let matched = match_enum(py)?.getattr(member)?;
     Ok(PyTuple::new(py, [matched, PyDict::new(py).into_any()])?.into_any())
 }
 
-/// Validate a `methods` iterable (starlette passes e.g. `["GET"]`) against
-/// the crate's canonical `HttpMethod` set.
+/// Validates a `methods` iterable against the canonical `HttpMethod` set of the crate.
+/// For example, starlette gives `["GET"]`.
 fn validate_http_methods(methods: &Bound<'_, PyAny>) -> PyResult<()> {
     for method in methods.try_iter()? {
         let method: String = method?.extract()?;
@@ -134,18 +126,18 @@ fn validate_http_methods(methods: &Bound<'_, PyAny>) -> PyResult<()> {
 
 #[pyclass(name = "APIRoute", module = "fastrapi.routing", subclass, dict)]
 pub struct PyAPIRoute {
-    /// Route path with `{param}` placeholders; `#[pyo3(get, set)]` keeps it
-    /// visible and mutable from Python (fastapi's `APIRoute` contract).
+    /// The route path with `{param}` placeholders.
+    /// `#[pyo3(get, set)]` lets Python read and change it, as the FastAPI `APIRoute` contract requires.
     #[pyo3(get, set)]
     pub path: String,
 }
 
 #[pymethods]
 impl PyAPIRoute {
-    /// starlette's `Route.__init__`: `tp_new`/`tp_init` receive the full
-    /// argument set, so Python subclasses calling `super().__init__(path,
-    /// endpoint, **kwargs)` work exactly as they do against fastapi. `__new__`
-    /// keeps pyo3's subtype allocation; `__init__` fills the state.
+    /// Creates the route object, as the `Route.__init__` method of starlette does.
+    /// `tp_new` and `tp_init` receive all the arguments. Thus Python subclasses that call
+    /// `super().__init__(path, endpoint, **kwargs)` work the same as with FastAPI.
+    /// `__new__` keeps the subtype allocation of pyo3, and `__init__` sets the state.
     #[new]
     #[pyo3(signature = (*args, **kwargs))]
     const fn py_new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> Self {
@@ -200,7 +192,7 @@ impl PyAPIRoute {
         Ok(())
     }
 
-    /// starlette's `Route.matches`
+    // This method is the same as the `Route.matches` method of starlette.
     fn matches<'py>(
         slf: &Bound<'py, Self>,
         scope: &Bound<'py, PyAny>,
@@ -342,7 +334,7 @@ impl PyAPIWebSocketRoute {
     }
 }
 
-/// `fastapi.routing.RouteContext`
+/// RouteContext(route: starlette.routing.BaseRoute, _route_context: fastapi.routing._EffectiveRouteContext | None = None)
 #[pyclass(name = "RouteContext", module = "fastrapi.routing")]
 pub struct PyRouteContext {
     #[pyo3(get)]
@@ -371,7 +363,7 @@ impl PyRouteContext {
     }
 }
 
-/// `fastapi.routing.iter_route_contexts`.
+// This function is the same as `fastapi.routing.iter_route_contexts`.
 #[pyfunction]
 #[pyo3(signature = (routes))]
 pub fn iter_route_contexts(py: Python<'_>, routes: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -391,7 +383,7 @@ pub fn iter_route_contexts(py: Python<'_>, routes: &Bound<'_, PyAny>) -> PyResul
         .unbind())
 }
 
-/// `fastrapi.routing`.
+/// Adds the classes and functions of the `fastrapi.routing` module to `module`.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyAPIRoute>()?;
     module.add_class::<PyAPIWebSocketRoute>()?;

@@ -1,3 +1,6 @@
+//! Types that describe the parameters of a route handler.
+//! They tell where a value comes from and which constraints the value must satisfy.
+
 use regex::Regex;
 use std::sync::Arc;
 

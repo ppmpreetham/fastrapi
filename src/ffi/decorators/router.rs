@@ -1,3 +1,6 @@
+//! The `APIRouter` Python class and its methods.
+//! A router holds HTTP routes, WebSocket routes and included sub-routers.
+
 use super::init::set_if_some;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_routing::route::{RouteEntry, WebSocketEntry};
@@ -10,6 +13,29 @@ use pyo3::prelude::{Py, PyAny, PyAnyMethods, PyResult, Python, pyclass, pymethod
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// `APIRouter` class, used to group *path operations*, for example to structure
+/// an app in multiple files. It would then be included in the `FastAPI` app, or
+/// in another `APIRouter` (ultimately included in the app).
+///
+/// Read more about it in the
+/// [FastAPI docs for Bigger Applications - Multiple Files](https://fastapi.tiangolo.com/tutorial/bigger-applications/).
+///
+/// ## Example
+///
+/// ```python
+/// from fastrapi import APIRouter, FastAPI
+///
+/// app = FastAPI()
+/// router = APIRouter()
+///
+///
+/// @router.get("/users/", tags=["users"])
+/// async def read_users():
+///     return [{"username": "Rick"}, {"username": "Morty"}]
+///
+///
+/// app.include_router(router)
+/// ```
 #[pyclass(name = "APIRouter", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyAPIRouter {
@@ -165,11 +191,56 @@ impl PyAPIRouter {
         self.add_api_route_impl(py, path, endpoint, methods, &kwargs)
     }
 
+    /// Decorate a WebSocket function.
+    ///
+    /// Read more about it in the
+    /// [FastAPI docs for WebSockets](https://fastapi.tiangolo.com/advanced/websockets/).
+    ///
+    /// **Example**
+    ///
+    /// ## Example
+    ///
+    /// ```python
+    /// from fastrapi import APIRouter, FastAPI, WebSocket
+    ///
+    /// app = FastAPI()
+    /// router = APIRouter()
+    ///
+    /// @router.websocket("/ws")
+    /// async def websocket_endpoint(websocket: WebSocket):
+    ///     await websocket.accept()
+    ///     while True:
+    ///         data = await websocket.receive_text()
+    ///         await websocket.send_text(f"Message text was: {data}")
+    ///
+    /// app.include_router(router)
+    /// ```
     #[pyo3(signature = (path))]
     fn websocket(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
         self.create_ws_decorator(py, path)
     }
 
+    /// Include another `APIRouter` in the same current `APIRouter`.
+    ///
+    /// Read more about it in the
+    /// [FastAPI docs for Bigger Applications](https://fastapi.tiangolo.com/tutorial/bigger-applications/).
+    ///
+    /// ## Example
+    ///
+    /// ```python
+    /// from fastrapi import APIRouter, FastAPI
+    ///
+    /// app = FastAPI()
+    /// internal_router = APIRouter()
+    /// users_router = APIRouter()
+    ///
+    /// @users_router.get("/users/")
+    /// def read_users():
+    ///     return [{"name": "Rick"}, {"name": "Morty"}]
+    ///
+    /// internal_router.include_router(users_router)
+    /// app.include_router(internal_router)
+    /// ```
     #[pyo3(signature = (router, *, prefix="", tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
     pub fn include_router(
         &self,

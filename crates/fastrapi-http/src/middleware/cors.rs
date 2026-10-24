@@ -1,3 +1,6 @@
+//! This module contains the `CORSMiddleware` class.
+//! It reads the CORS configuration from Python keyword arguments and makes a `tower_http` CORS layer.
+
 use axum::http::{HeaderName, HeaderValue, Method};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

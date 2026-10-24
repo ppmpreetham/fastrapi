@@ -1,3 +1,6 @@
+//! Security schemes that are compatible with `fastapi.security`.
+//! This module contains the API key, HTTP, OAuth2, and OpenID Connect classes, the OAuth2 forms, and `SecurityScopes`.
+
 pub mod callable;
 pub mod forms;
 pub mod utils;

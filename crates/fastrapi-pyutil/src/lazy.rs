@@ -1,3 +1,7 @@
+//! Lazy handles to Python modules and attributes.
+//! A handle imports its target one time, on first use, and keeps the result.
+//! The `cached_py_import!` macro declares these handles as statics.
+
 use pyo3::Bound;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;

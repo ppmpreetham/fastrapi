@@ -1,3 +1,6 @@
+//! The lifespan and the startup and shutdown events of the app.
+//! This module also starts and stops the background asyncio event loop.
+
 use crate::engine::config::FastrAPI;
 use fastrapi_runtime::py_bridge::{EventLoop, schedule_task};
 use fastrapi_runtime::server_state::{clear_lifespan_state, set_lifespan_state};

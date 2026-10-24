@@ -1,3 +1,7 @@
+//! The route table that finds the handler for a request.
+//! Static routes use a hash map, and routes with path parameters use a `matchit` router.
+//! Each table is built one time and is not changed after that.
+
 use crate::method::{HTTP_METHOD_COUNT, HttpMethod};
 use ahash::AHashMap;
 use matchit::Router;
@@ -204,7 +208,8 @@ fn normalize_lookup(input: &str) -> &str {
     }
 }
 
-/// checks every typed convertor against its captured value; untyped params pass.
+/// Checks each typed convertor against its captured value.
+/// A parameter without a convertor always passes.
 fn convertors_match(
     convertors: &[(String, PathConvertor)],
     params: &matchit::Params<'_, '_>,

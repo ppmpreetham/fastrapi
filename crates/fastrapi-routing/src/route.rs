@@ -1,3 +1,6 @@
+//! Data types that describe a route after the analysis.
+//! These types hold the parsed parameters, the validators, the execution plan, and the route entries for HTTP and WebSocket routes.
+
 use crate::annotations::ScalarCoercion;
 use crate::dependencies::{DependencyNode, InjectionType};
 use crate::kernel_validation::KernelFastPath;

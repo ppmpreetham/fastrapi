@@ -1,3 +1,6 @@
+//! This module contains the Python exception and warning classes of fastrapi.
+//! These classes are compatible with the FastAPI and starlette exception classes.
+
 use std::borrow::Cow;
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
@@ -11,6 +14,7 @@ use simd_json::json;
 
 // Base Errors
 
+/// A generic, FastAPI-specific error.
 #[pyclass(extends = PyRuntimeError, subclass, name = "FastAPIError")]
 pub struct PyFastAPIError;
 
@@ -24,6 +28,8 @@ impl PyFastAPIError {
 
 pub type PyFastrAPIError = PyFastAPIError;
 
+/// A dependency declared that it depends on another dependency with an invalid
+/// (narrower) scope.
 #[pyclass(extends = PyFastAPIError, subclass, name = "DependencyScopeError")]
 pub struct PyDependencyScopeError;
 
@@ -35,6 +41,7 @@ impl PyDependencyScopeError {
     }
 }
 
+/// A pydantic.v1 model is used, which is no longer supported.
 #[pyclass(extends = PyFastAPIError, subclass, name = "PydanticV1NotSupportedError")]
 pub struct PyPydanticV1NotSupportedError;
 
@@ -46,6 +53,7 @@ impl PyPydanticV1NotSupportedError {
     }
 }
 
+/// Common base class for all non-exit exceptions.
 #[pyclass(extends = PyException, subclass, name = "ValidationException")]
 pub struct PyValidationException {
     #[expect(
@@ -97,15 +105,43 @@ impl PyValidationException {
 
 // Request/Response Validation Errors
 
-crate::macros::define_validation_subclass!(PyRequestValidationError, "RequestValidationError");
+crate::macros::define_validation_subclass!(
+    /// Common base class for all non-exit exceptions.
+    PyRequestValidationError, "RequestValidationError");
 crate::macros::define_validation_subclass!(
     PyWebSocketRequestValidationError,
     "WebSocketRequestValidationError"
 );
-crate::macros::define_validation_subclass!(PyResponseValidationError, "ResponseValidationError");
+crate::macros::define_validation_subclass!(
+    /// Common base class for all non-exit exceptions.
+    PyResponseValidationError, "ResponseValidationError");
 
 // HTTP Exceptions
 
+/// An HTTP exception you can raise in your own code to show errors to the client.
+///
+/// This is for client errors, invalid authentication, invalid data, etc. Not for server
+/// errors in your code.
+///
+/// Read more about it in the
+/// [FastAPI docs for Handling Errors](https://fastapi.tiangolo.com/tutorial/handling-errors/).
+///
+/// ## Example
+///
+/// ```python
+/// from fastrapi import FastAPI, HTTPException
+///
+/// app = FastAPI()
+///
+/// items = {"foo": "The Foo Wrestlers"}
+///
+///
+/// @app.get("/items/{item_id}")
+/// async def read_item(item_id: str):
+///     if item_id not in items:
+///         raise HTTPException(status_code=404, detail="Item not found")
+///     return {"item": items[item_id]}
+/// ```
 #[pyclass(
     extends = PyException,
     name = "HTTPException",
@@ -222,6 +258,44 @@ impl PyHTTPException {
 
 // WebSocket Exceptions
 
+/// A WebSocket exception you can raise in your own code to show errors to the client.
+///
+/// This is for client errors, invalid authentication, invalid data, etc. Not for server
+/// errors in your code.
+///
+/// Read more about it in the
+/// [FastAPI docs for WebSockets](https://fastapi.tiangolo.com/advanced/websockets/).
+///
+/// ## Example
+///
+/// ```python
+/// from typing import Annotated
+///
+/// from fastrapi import (
+///     Cookie,
+///     FastAPI,
+///     WebSocket,
+///     WebSocketException,
+///     status,
+/// )
+///
+/// app = FastAPI()
+///
+/// @app.websocket("/items/{item_id}/ws")
+/// async def websocket_endpoint(
+///     *,
+///     websocket: WebSocket,
+///     session: Annotated[str | None, Cookie()] = None,
+///     item_id: str,
+/// ):
+///     if session is None:
+///         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
+///     await websocket.accept()
+///     while True:
+///         data = await websocket.receive_text()
+///         await websocket.send_text(f"Session cookie is: {session}")
+///         await websocket.send_text(f"Message text was: {data}, for item ID: {item_id}")
+/// ```
 #[pyclass(
     extends = PyException,
     name = "WebSocketException",
@@ -234,6 +308,7 @@ pub struct PyWebSocketException {
     pub reason: Option<String>,
 }
 
+/// Common base class for all non-exit exceptions.
 #[pyclass(
     extends = PyException,
     name = "WebSocketDisconnect",
@@ -281,6 +356,8 @@ impl PyWebSocketException {
     }
 }
 
+/// A custom deprecation warning as DeprecationWarning is ignored
+/// Ref: https://sethmlarson.dev/deprecations-via-warnings-dont-work-for-python-libraries
 #[pyclass(extends = PyUserWarning, name = "FastAPIDeprecationWarning")]
 pub struct PyFastAPIDeprecationWarning;
 

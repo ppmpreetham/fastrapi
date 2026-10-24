@@ -1,8 +1,7 @@
-//! Rust-native request validation, built on `pydantic-core-kernel` (which is the
-//! pure-Rust decoupling of pydantic-core)
-
-//! The kernel keeps pydantic semantics 1:1, so 422 responses
-//! are indistinguishable from pydantic's.
+//! Request validation in Rust with the `pydantic-core-kernel` crate.
+//! This crate is the pure-Rust part of pydantic-core, without the Python layer.
+//! The kernel applies the same validation rules as pydantic.
+//! Thus, the 422 responses are the same as the 422 responses from pydantic.
 
 use std::sync::{Arc, OnceLock};
 
@@ -262,7 +261,7 @@ fn overridden_rules(
     }
 }
 
-/// does any field in the schema carry a validation alias?
+/// Returns `true` if a field in the schema has a validation alias.
 fn schema_has_aliases(schema: &CoreSchema) -> bool {
     match schema {
         CoreSchema::Model { schema, .. }

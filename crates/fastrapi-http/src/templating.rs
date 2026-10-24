@@ -1,7 +1,21 @@
+//! This module contains the `Jinja2Templates` class.
+//! The class renders Jinja2 templates and returns HTML responses.
+
 use pyo3::exceptions::{PyImportError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+/// Jinja2 template renderer.
+///
+/// Example:
+///     ```python
+///     from starlette.templating import Jinja2Templates
+///
+///     templates = Jinja2Templates(directory="templates")
+///
+///     async def homepage(request: Request) -> Response:
+///         return templates.TemplateResponse(request, "index.html")
+///     ```
 #[pyclass(name = "Jinja2Templates", module = "fastrapi.templating")]
 pub struct PyJinja2Templates {
     inner: Py<PyAny>,
@@ -42,6 +56,19 @@ impl PyJinja2Templates {
         Ok(self.inner.bind(py).getattr(name)?.unbind())
     }
 
+    /// Render a template and return an HTML response.
+    ///
+    /// Args:
+    ///     request: The incoming request instance.
+    ///     name: The template file name to render.
+    ///     context: Variables to pass to the template.
+    ///     status_code: HTTP status code for the response.
+    ///     headers: Additional headers to include in the response.
+    ///     media_type: Media type for the response.
+    ///     background: Background task to run after response is sent.
+    ///
+    /// Returns:
+    ///     An HTML response with the rendered template content.
     #[pyo3(signature = (request_or_name, name_or_context=None, context=None, status_code=200, headers=None, media_type=None, background=None))]
     #[pyo3(name = "TemplateResponse")]
     fn template_response(

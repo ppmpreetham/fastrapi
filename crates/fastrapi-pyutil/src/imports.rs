@@ -1,3 +1,6 @@
+//! Cached Python modules and attributes that many crates use.
+//! Each item is imported one time, on first use.
+
 use crate::cached_py_import;
 
 cached_py_import!(pub INSPECT, "inspect");

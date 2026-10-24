@@ -1,3 +1,6 @@
+//! The serde types of an OpenAPI 3.1 document.
+//! It also contains a function that merges two JSON values deeply.
+
 use serde::{Deserialize, Serialize};
 use simd_json::owned::Value as JsonValue;
 use std::collections::HashMap;

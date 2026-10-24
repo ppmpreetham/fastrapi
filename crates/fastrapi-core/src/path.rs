@@ -1,3 +1,6 @@
+//! Functions for route paths.
+//! They find path parameter names, remove type convertors, join two paths, and remove the root path prefix.
+
 use regex::{Captures, Regex};
 use std::sync::LazyLock;
 

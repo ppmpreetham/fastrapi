@@ -1,3 +1,7 @@
+//! This module is the middleware layer of fastrapi.
+//! It contains the built-in middleware classes, the middleware registry, and the support for Python middleware.
+//! Python middleware can be a function or an ASGI middleware class.
+
 pub mod asgi;
 pub mod call_next;
 pub mod cors;

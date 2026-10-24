@@ -1,3 +1,6 @@
+//! The `FastrAPI` application class and its configuration data.
+//! This module also contains the mount types for sub-apps, hosts, static files and frontends.
+
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use smart_default::SmartDefault;
@@ -5,14 +8,14 @@ use smart_default::SmartDefault;
 use crate::ffi::decorators::PyAPIRouter;
 use fastrapi_http::middleware::MiddlewareContainer;
 
-/// sub-FastrAPI` app (`app.mount("/api", sub_api)`).
+/// A sub-`FastrAPI` app that `app.mount("/api", sub_api)` attaches at a path prefix.
 #[derive(Clone)]
 pub struct SubAppMount {
     pub path: String,
     pub app: Py<FastrAPI>,
 }
 
-/// `starlette.routing.Host`
+/// A `FastrAPI` app that serves the requests for one host name, as `starlette.routing.Host` does.
 pub struct HostMount {
     pub host: String,
     pub app: Py<FastrAPI>,
@@ -58,6 +61,18 @@ pub(crate) struct OpenApiCacheEntry {
     pub dict: Py<PyAny>,
 }
 
+/// `FastAPI` app class, the main entrypoint to use FastAPI.
+///
+/// Read more in the
+/// [FastAPI docs for First Steps](https://fastapi.tiangolo.com/tutorial/first-steps/).
+///
+/// ## Example
+///
+/// ```python
+/// from fastrapi import FastAPI
+///
+/// app = FastAPI()
+/// ```
 #[expect(
     clippy::struct_excessive_bools,
     reason = "FastAPI application options require multiple boolean configuration flags"

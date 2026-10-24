@@ -1,3 +1,7 @@
+//! The `fastrapi-http` crate contains the HTTP layer of fastrapi.
+//! It gives the Python classes for requests, responses, WebSockets, forms, files, exceptions, and middleware.
+//! These classes are compatible with FastAPI and starlette.
+
 #![allow(clippy::result_large_err)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::too_many_arguments)]

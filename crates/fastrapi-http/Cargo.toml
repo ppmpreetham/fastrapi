@@ -4,6 +4,9 @@ description = "fastrapi's Python-facing HTTP surface: requests, responses, excep
 version.workspace = true
 edition.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 fastrapi-pyutil.workspace = true
 fastrapi-runtime.workspace = true

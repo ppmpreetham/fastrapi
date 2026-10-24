@@ -1,3 +1,7 @@
+//! This module contains the `UploadFile` class.
+//! The class keeps the data of a file from a request.
+//! Its `read`, `write`, `seek`, and `close` methods are asynchronous in Python.
+
 use bytes::{BufMut, Bytes, BytesMut};
 use fastrapi_runtime::py_bridge;
 use pyo3::Bound;
@@ -9,6 +13,36 @@ fastrapi_pyutil::cached_py_import!(TEMPFILE_MODULE, "tempfile");
 
 const SPOOL_MAX_MEM: usize = 1024 * 1024;
 
+/// A file uploaded in a request.
+///
+/// Define it as a *path operation function* (or dependency) parameter.
+///
+/// If you are using a regular `def` function, you can use the `upload_file.file`
+/// attribute to access the raw standard Python file (blocking, not async), useful and
+/// needed for non-async code.
+///
+/// Read more about it in the
+/// [FastAPI docs for Request Files](https://fastapi.tiangolo.com/tutorial/request-files/).
+///
+/// ## Example
+///
+/// ```python
+/// from typing import Annotated
+///
+/// from fastrapi import FastAPI, File, UploadFile
+///
+/// app = FastAPI()
+///
+///
+/// @app.post("/files/")
+/// async def create_file(file: Annotated[bytes, File()]):
+///     return {"file_size": len(file)}
+///
+///
+/// @app.post("/uploadfile/")
+/// async def create_upload_file(file: UploadFile):
+///     return {"filename": file.filename}
+/// ```
 #[pyclass(name = "UploadFile", module = "fastrapi.datastructures", get_all)]
 pub struct PyUploadFile {
     pub filename: Option<String>,
@@ -84,6 +118,9 @@ impl PyUploadFile {
         }
     }
 
+    /// Read some bytes from the file.
+    ///
+    /// To be awaitable, compatible with async, this is run in threadpool.
     #[pyo3(signature = (size=-1))]
     fn read<'py>(&mut self, py: Python<'py>, size: Option<i64>) -> PyResult<Bound<'py, PyAny>> {
         let size = size.unwrap_or(-1);
@@ -112,6 +149,11 @@ impl PyUploadFile {
         })
     }
 
+    /// Write some bytes to the file.
+    ///
+    /// You normally wouldn't use this from a file you read in a request.
+    ///
+    /// To be awaitable, compatible with async, this is run in threadpool.
     fn write<'py>(&mut self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
         if let Some(file) = &self.file_obj {
             let file = file.clone_ref(py);
@@ -151,6 +193,11 @@ impl PyUploadFile {
         py_bridge::future_into_py(py, async move { Ok(()) })
     }
 
+    /// Move to a position in the file.
+    ///
+    /// Any next read or write will be done from that position.
+    ///
+    /// To be awaitable, compatible with async, this is run in threadpool.
     fn seek<'py>(&mut self, py: Python<'py>, offset: i64) -> PyResult<Bound<'py, PyAny>> {
         if let Some(file) = &self.file_obj {
             let file = file.clone_ref(py);
@@ -166,6 +213,9 @@ impl PyUploadFile {
         py_bridge::future_into_py(py, async move { Ok(()) })
     }
 
+    /// Close the file.
+    ///
+    /// To be awaitable, compatible with async, this is run in threadpool.
     fn close<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if let Some(file) = &self.file_obj {
             let file = file.clone_ref(py);

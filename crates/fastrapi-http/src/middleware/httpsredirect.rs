@@ -1,3 +1,6 @@
+//! This module contains the `HTTPSRedirectMiddleware` class.
+//! This middleware redirects HTTP requests to HTTPS.
+
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 

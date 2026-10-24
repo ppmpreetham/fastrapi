@@ -1,3 +1,7 @@
+//! Helpers that examine Python type annotations.
+//! The functions find scalar kinds (`bool`, `int`, `float`, `str`), get the members of a union, and remove `Optional`.
+//! The request code uses the results to convert raw request values.
+
 use crate::params;
 use fastrapi_pyutil::imports::TYPING;
 use pyo3::prelude::*;

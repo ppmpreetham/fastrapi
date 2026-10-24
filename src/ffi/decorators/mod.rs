@@ -1,3 +1,6 @@
+//! The `APIRouter` Python class and its route decorators.
+//! This module also flattens the router tree into a list of routes.
+
 mod init;
 mod requests;
 mod tree;

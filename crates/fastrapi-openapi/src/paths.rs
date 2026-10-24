@@ -1,3 +1,6 @@
+//! Builds the OpenAPI paths object from the routes.
+//! It makes the operations, parameters, request bodies, responses, callbacks, and security schemes for each route.
+
 use super::document::{
     MediaType, Operation, Parameter, PathItem, RequestBody, Response, deep_merge_json,
 };
@@ -21,7 +24,7 @@ use simd_json::prelude::{ValueAsMutObject, ValueAsObject, ValueObjectAccess};
 use simd_json::serde::to_owned_value;
 use std::collections::HashMap;
 
-/// `OpenAPI` securitySchemes entry
+/// Makes the `OpenAPI` `securitySchemes` entry for a security scheme.
 fn scheme_to_openapi(
     kind: &SecurityKind,
     description: Option<&str>,

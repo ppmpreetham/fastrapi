@@ -1,3 +1,6 @@
+//! Types for the security schemes of routes.
+//! They describe OAuth2, OpenID Connect, HTTP, and API key schemes and the scopes that a route requires.
+
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

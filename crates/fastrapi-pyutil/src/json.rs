@@ -1,3 +1,7 @@
+//! Conversion between Python objects and JSON.
+//! It writes Python values, Pydantic models, and dataclasses as JSON, and it makes axum JSON responses.
+//! It also converts JSON values back into Python objects.
+
 use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response as AxumResponse};
@@ -657,7 +661,7 @@ pub fn owned_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::OwnedGuar
     map.owned_guard()
 }
 
-/// Fast JSON to Python conversion
+/// Converts a JSON value into a Python object.
 #[inline]
 #[must_use]
 pub fn json_to_py_object(py: Python<'_>, value: &Value) -> Py<PyAny> {

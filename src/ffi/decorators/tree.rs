@@ -1,3 +1,6 @@
+//! The flattening of a tree of `APIRouter` objects into one list of routes.
+//! It applies the prefixes and the dependencies of the parent routers to each route.
+
 use crate::ffi::decorators::PyAPIRouter;
 use fastrapi_core::path::join_path;
 use fastrapi_routing::dependencies::{

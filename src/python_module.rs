@@ -1,3 +1,7 @@
+//! The `#[pymodule]` definition of the `fastrapi` Python module.
+//! This module exports the Python classes and functions and builds the submodules.
+//! It also adds the submodules to `sys.modules`, thus Python can import them by name.
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule, PyString};
 use std::collections::HashSet;

@@ -1,23 +1,23 @@
-//! Native `fastrapi.openapi` surface: `constants` plus `utils.get_openapi`.
+//! The native `fastrapi.openapi` Python module: `constants` and `utils.get_openapi`.
 //!
-//! `get_openapi` builds a full schema from arbitrary route objects (anything
-//! with `path`/`methods`/`endpoint` attributes, e.g. our native `APIRoute`
-//! subclasses) by delegating to the app's own router machinery, so the output
-//! matches the served `/openapi.json` and there is only one implementation.
+//! `get_openapi` builds a full schema from route objects. A route object can be any
+//! object with `path`, `methods` and `endpoint` attributes, for example a native `APIRoute` subclass.
+//! The function sends these routes through the router code of the app.
+//! Thus the output is the same as the served `/openapi.json`, and only one implementation exists.
 
 use crate::ffi::compat::register_openapi_helpers;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule};
 
-/// `fastapi.openapi.constants`.
+/// The values of `fastapi.openapi.constants`.
 pub(crate) const REF_TEMPLATE: &str = "#/components/schemas/{model}";
 pub(crate) const METHODS_WITH_BODY: [&str; 6] = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"];
 
-/// `fastapi.openapi.utils.get_openapi`.
-///
-/// `routes` may be `APIRoute` instances, `RouteContext` objects, or any
-/// object exposing `path`, `methods` and `endpoint` attributes, the same
-/// duck-typed contract fastapi accepts.
+// This function is the same as `fastapi.openapi.utils.get_openapi`.
+//
+// `routes` can contain `APIRoute` instances, `RouteContext` objects, or other
+// objects that have `path`, `methods` and `endpoint` attributes.
+// FastAPI accepts the same duck-typed objects.
 #[pyo3::pyfunction]
 #[pyo3(signature = (*, title, version, openapi_version="3.1.0", summary=None, description=None,
     routes, webhooks=None, tags=None, servers=None, terms_of_service=None, contact=None,
@@ -84,8 +84,8 @@ pub fn get_openapi(
     Ok(output.into_any().unbind())
 }
 
-/// Build the `paths` section for a sequence of route-like objects by routing
-/// them through a scratch `FastrAPI` app, reusing the real spec builder.
+/// Builds the `paths` section for a sequence of route objects.
+/// The function adds the routes to a temporary `FastrAPI` app and uses the real schema builder.
 fn paths_from_routes(
     py: Python<'_>,
     routes: &Bound<'_, PyAny>,
@@ -131,7 +131,7 @@ fn paths_from_routes(
     Ok(paths.into_any().unbind())
 }
 
-/// Build a minimal operation entry for one endpoint.
+/// Builds a minimal operation entry for one endpoint.
 fn operation_for(
     py: Python<'_>,
     endpoint: &Bound<'_, PyAny>,
@@ -156,7 +156,7 @@ fn operation_for(
     Ok(operation.into_any().unbind())
 }
 
-/// Register `fastrapi.openapi` (`constants` + `utils`) onto the parent module.
+/// Adds the `fastrapi.openapi` module (`constants` and `utils`) to the parent module.
 pub(crate) fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let openapi_module = PyModule::new(py, "openapi")?;

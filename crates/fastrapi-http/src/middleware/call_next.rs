@@ -1,3 +1,6 @@
+//! This module contains the `call_next` support for starlette-style middleware.
+//! It runs the next layers of the middleware stack and gives the result to Python as a `DownstreamResponse` object.
+
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
 use std::sync::Arc;

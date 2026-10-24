@@ -1,3 +1,6 @@
+//! This module contains the HTTP and WebSocket status code constants.
+//! It also makes the `status` Python submodule, which is compatible with `fastapi.status`.
+
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -83,7 +86,7 @@ pub const WS_1013_TRY_AGAIN_LATER: u16 = 1013;
 pub const WS_1014_BAD_GATEWAY: u16 = 1014;
 pub const WS_1015_TLS_HANDSHAKE: u16 = 1015;
 
-/// for the status submodule
+/// Makes the `status` submodule and adds it to `sys.modules` below the parent package name.
 pub fn create_status_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let status_module = PyModule::new(py, "status")?;

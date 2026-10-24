@@ -1,3 +1,7 @@
+//! Reads the validation constraints from a Python parameter object.
+//! The constraints are `gt`, `ge`, `lt`, `le`, `min_length`, `max_length`, and `pattern`.
+//! The result is a `ParameterConstraints` value that the request validation uses.
+
 use fastrapi_core::params::ParameterConstraints;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;

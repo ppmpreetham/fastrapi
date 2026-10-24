@@ -1,3 +1,7 @@
+//! The Python methods of the `FastrAPI` application class.
+//! These methods add routes, mounts, middleware, exception handlers and routers to the app.
+//! They also start the server and build the OpenAPI schema.
+
 use super::config::{FastrAPI, FrontendMount, HostMount, StaticMount, SubAppMount};
 use super::server::serve::{serve, serve_with_reload};
 use crate::ffi::decorators;
@@ -257,6 +261,25 @@ impl FastrAPI {
             .create_method_decorator_kw(py, HttpMethod::GET, path, None)
     }
 
+    /// Decorate a WebSocket function.
+    ///
+    /// Read more about it in the
+    /// [FastAPI docs for WebSockets](https://fastapi.tiangolo.com/advanced/websockets/).
+    ///
+    /// **Example**
+    ///
+    /// ```python
+    /// from fastrapi import FastAPI, WebSocket
+    ///
+    /// app = FastAPI()
+    ///
+    /// @app.websocket("/ws")
+    /// async def websocket_endpoint(websocket: WebSocket):
+    ///     await websocket.accept()
+    ///     while True:
+    ///         data = await websocket.receive_text()
+    ///         await websocket.send_text(f"Message text was: {data}")
+    /// ```
     #[pyo3(signature = (path))]
     fn websocket(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
         self.router.bind(py).borrow().create_ws_decorator(py, path)
@@ -307,6 +330,12 @@ impl FastrAPI {
         Ok(())
     }
 
+    /// Add an event handler for the application.
+    ///
+    /// `on_event` is deprecated, use `lifespan` event handlers instead.
+    ///
+    /// Read more about it in the
+    /// [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/#alternative-events-deprecated).
     fn on_event(slf: Py<Self>, py: Python<'_>, event_type: &str) -> PyResult<Py<PyAny>> {
         let startup = match event_type {
             "startup" => true,
@@ -338,7 +367,7 @@ impl FastrAPI {
         PyCFunction::new_closure(py, Some(c"on_event"), None, decorator).map(Into::into)
     }
 
-    /// `starlette.applications.host`
+    // This method is the same as `starlette.applications.host`.
     #[pyo3(signature = (host, app, *, name=None))]
     fn host(
         &mut self,
@@ -361,7 +390,7 @@ impl FastrAPI {
         Ok(())
     }
 
-    /// `fastapi.FastAPI.add_exception_handler`
+    // This method is the same as `fastapi.FastAPI.add_exception_handler`.
     fn add_exception_handler(
         &self,
         py: Python<'_>,
@@ -376,7 +405,7 @@ impl FastrAPI {
         Ok(())
     }
 
-    /// `fastapi.FastAPI.add_api_route`
+    // This method is the same as `fastapi.FastAPI.add_api_route`.
     #[pyo3(signature = (path, endpoint, *, methods=None, **kwargs))]
     fn add_api_route(
         &self,
@@ -402,6 +431,34 @@ impl FastrAPI {
             .add_api_route_impl(py, path, endpoint, methods, &route_kwargs)
     }
 
+    /// Serve a static frontend build as low-priority routes.
+    ///
+    /// Use this for frontend tools that build static files into a directory,
+    /// such as `dist`. **FastAPI** path operations are checked first, and
+    /// the frontend files are checked only if no normal route matched.
+    ///
+    /// A typical project could look like this:
+    ///
+    /// ```text
+    /// .
+    /// ├── pyproject.toml
+    /// ├── app
+    /// │   ├── __init__.py
+    /// │   └── main.py
+    /// └── dist
+    ///     ├── index.html
+    ///     └── assets
+    ///         └── app.js
+    /// ```
+    ///
+    /// Then in `app/main.py`:
+    ///
+    /// ```python
+    /// from fastrapi import FastAPI
+    ///
+    /// app = FastAPI()
+    /// app.frontend("/", directory="dist")
+    /// ```
     #[pyo3(signature = (path, *, directory, fallback=Some("auto".to_string()), check_dir=true))]
     fn frontend(
         &mut self,
@@ -434,6 +491,32 @@ impl FastrAPI {
         Ok(())
     }
 
+    /// Add a middleware to the application.
+    ///
+    /// Read more about it in the
+    /// [FastAPI docs for Middleware](https://fastapi.tiangolo.com/tutorial/middleware/).
+    ///
+    /// ## Example
+    ///
+    /// ```python
+    /// import time
+    /// from typing import Awaitable, Callable
+    ///
+    /// from fastrapi import FastAPI, Request, Response
+    ///
+    /// app = FastAPI()
+    ///
+    ///
+    /// @app.middleware("http")
+    /// async def add_process_time_header(
+    ///     request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    /// ) -> Response:
+    ///     start_time = time.time()
+    ///     response = await call_next(request)
+    ///     process_time = time.time() - start_time
+    ///     response.headers["X-Process-Time"] = str(process_time)
+    ///     return response
+    /// ```
     fn middleware(slf: Py<Self>, py: Python<'_>, middleware_type: String) -> PyResult<Py<PyAny>> {
         let decorator = move |args: &Bound<'_, PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
@@ -493,6 +576,22 @@ impl FastrAPI {
         }
     }
 
+    /// Include an `APIRouter` in the same app.
+    ///
+    /// Read more about it in the
+    /// [FastAPI docs for Bigger Applications](https://fastapi.tiangolo.com/tutorial/bigger-applications/).
+    ///
+    /// ## Example
+    ///
+    /// ```python
+    /// from fastrapi import FastAPI
+    ///
+    /// from .users import users_router
+    ///
+    /// app = FastAPI()
+    ///
+    /// app.include_router(users_router)
+    /// ```
     #[pyo3(signature = (router, *, prefix="", tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
     fn include_router(
         &self,
@@ -545,6 +644,17 @@ impl FastrAPI {
         )
     }
 
+    /// Generate the OpenAPI schema of the application. This is called by FastAPI
+    /// internally.
+    ///
+    /// The first time it is called it stores the result in the attribute
+    /// `app.openapi_schema`, and next times it is called, it just returns that same
+    /// result. To avoid the cost of generating the schema every time.
+    ///
+    /// If you need to modify the generated OpenAPI schema, you could modify it.
+    ///
+    /// Read more in the
+    /// [FastAPI docs for OpenAPI](https://fastapi.tiangolo.com/how-to/extending-openapi/).
     #[pyo3(signature = ())]
     fn openapi(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let fingerprint = self.openapi_fingerprint(py);
@@ -571,6 +681,33 @@ impl FastrAPI {
         Ok(dict.unbind())
     }
 
+    /// Add an exception handler to the app.
+    ///
+    /// Read more about it in the
+    /// [FastAPI docs for Handling Errors](https://fastapi.tiangolo.com/tutorial/handling-errors/).
+    ///
+    /// ## Example
+    ///
+    /// ```python
+    /// from fastrapi import FastAPI, Request
+    /// from fastrapi.responses import JSONResponse
+    ///
+    ///
+    /// class UnicornException(Exception):
+    ///     def __init__(self, name: str):
+    ///         self.name = name
+    ///
+    ///
+    /// app = FastAPI()
+    ///
+    ///
+    /// @app.exception_handler(UnicornException)
+    /// async def unicorn_exception_handler(request: Request, exc: UnicornException):
+    ///     return JSONResponse(
+    ///         status_code=418,
+    ///         content={"message": f"Oops! {exc.name} did something. There goes a rainbow..."},
+    ///     )
+    /// ```
     fn exception_handler(
         &self,
         py: Python,
@@ -651,7 +788,130 @@ impl FastrAPI {
         Ok(())
     }
 }
-crate::generate_http_methods!(FastrAPI, router_ref);
+crate::generate_http_methods!(
+    FastrAPI,
+    router_ref,
+    get: {
+        /// Add a *path operation* using an HTTP GET operation.
+        ///
+        /// ## Example
+        ///
+        /// ```python
+        /// from fastrapi import FastAPI
+        ///
+        /// app = FastAPI()
+        ///
+        /// @app.get("/items/")
+        /// def read_items():
+        ///     return [{"name": "Empanada"}, {"name": "Arepa"}]
+        /// ```
+    },
+    post: {
+        /// Add a *path operation* using an HTTP POST operation.
+        ///
+        /// ## Example
+        ///
+        /// ```python
+        /// from fastrapi import FastAPI
+        /// from pydantic import BaseModel
+        ///
+        /// class Item(BaseModel):
+        ///     name: str
+        ///     description: str | None = None
+        ///
+        /// app = FastAPI()
+        ///
+        /// @app.post("/items/")
+        /// def create_item(item: Item):
+        ///     return {"message": "Item created"}
+        /// ```
+    },
+    put: {
+        /// Add a *path operation* using an HTTP PUT operation.
+        ///
+        /// ## Example
+        ///
+        /// ```python
+        /// from fastrapi import FastAPI
+        /// from pydantic import BaseModel
+        ///
+        /// class Item(BaseModel):
+        ///     name: str
+        ///     description: str | None = None
+        ///
+        /// app = FastAPI()
+        ///
+        /// @app.put("/items/{item_id}")
+        /// def replace_item(item_id: str, item: Item):
+        ///     return {"message": "Item replaced", "id": item_id}
+        /// ```
+    },
+    delete: {
+        /// Add a *path operation* using an HTTP DELETE operation.
+        ///
+        /// ## Example
+        ///
+        /// ```python
+        /// from fastrapi import FastAPI
+        ///
+        /// app = FastAPI()
+        ///
+        /// @app.delete("/items/{item_id}")
+        /// def delete_item(item_id: str):
+        ///     return {"message": "Item deleted"}
+        /// ```
+    },
+    patch: {
+        /// Add a *path operation* using an HTTP PATCH operation.
+        ///
+        /// ## Example
+        ///
+        /// ```python
+        /// from fastrapi import FastAPI
+        /// from pydantic import BaseModel
+        ///
+        /// class Item(BaseModel):
+        ///     name: str
+        ///     description: str | None = None
+        ///
+        /// app = FastAPI()
+        ///
+        /// @app.patch("/items/")
+        /// def update_item(item: Item):
+        ///     return {"message": "Item updated in place"}
+        /// ```
+    },
+    options: {
+        /// Add a *path operation* using an HTTP OPTIONS operation.
+        ///
+        /// ## Example
+        ///
+        /// ```python
+        /// from fastrapi import FastAPI
+        ///
+        /// app = FastAPI()
+        ///
+        /// @app.options("/items/")
+        /// def get_item_options():
+        ///     return {"additions": ["Aji", "Guacamole"]}
+        /// ```
+    },
+    head: {
+        /// Add a *path operation* using an HTTP HEAD operation.
+        ///
+        /// ## Example
+        ///
+        /// ```python
+        /// from fastrapi import FastAPI, Response
+        ///
+        /// app = FastAPI()
+        ///
+        /// @app.head("/items/", status_code=204)
+        /// def get_items_headers(response: Response):
+        ///     response.headers["X-Cat-Dog"] = "Alone in the world"
+        /// ```
+    },
+);
 
 impl FastrAPI {
     pub(crate) fn openapi_spec(&self, py: Python<'_>) -> simd_json::OwnedValue {

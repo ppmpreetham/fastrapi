@@ -1,3 +1,6 @@
+//! Converts Python types and Pydantic models into JSON schemas.
+//! It also makes schema titles and operation IDs in the same format as FastAPI.
+
 use fastrapi_core::params::ParameterConstraints;
 use fastrapi_pyutil::imports::{ENUM, TYPING};
 use fastrapi_pyutil::json::{py_any_to_json, py_dict_to_json};
@@ -83,7 +86,7 @@ pub fn extract_pydantic_schema(py: Python, model: &Bound<PyAny>, mode: &str) -> 
     None
 }
 
-/// recursively removes `"default": null` entries from a json schema
+/// Removes all `"default": null` entries from a JSON schema, at all levels.
 fn strip_null_defaults(schema: &mut JsonValue) {
     if schema.is_object() {
         let drop_default = schema.get("default").is_some_and(TypedScalarValue::is_null);
@@ -121,7 +124,8 @@ pub(crate) fn get_schema_name(model: &Bound<PyAny>) -> String {
         })
 }
 
-/// `typing.get_origin(x) is typing.Literal`
+/// Tells if the type hint is a `typing.Literal`.
+/// The check is `typing.get_origin(x) is typing.Literal`.
 fn is_literal(py: Python<'_>, type_hint: &Bound<PyAny>) -> bool {
     TYPING_GET_ORIGIN
         .get(py)
@@ -138,7 +142,7 @@ fn is_literal(py: Python<'_>, type_hint: &Bound<PyAny>) -> bool {
         .unwrap_or(false)
 }
 
-/// is the hint an `enum.Enum` subclass?
+/// Tells if the type hint is a subclass of `enum.Enum`.
 fn is_enum_class(py: Python<'_>, type_hint: &Bound<PyAny>) -> bool {
     type_hint
         .cast::<PyType>()
@@ -153,7 +157,8 @@ fn is_enum_class(py: Python<'_>, type_hint: &Bound<PyAny>) -> bool {
         .unwrap_or(false)
 }
 
-/// pydantic-style field title: `item_id` → "Item Id", `user-agent` → "User-Agent"
+/// Makes a field title in the Pydantic format.
+/// For example, `item_id` becomes "Item Id" and `user-agent` becomes "User-Agent".
 pub(crate) fn schema_title(name: &str) -> String {
     let name = name.replace('_', " ");
     let mut out = String::with_capacity(name.len());
@@ -174,7 +179,8 @@ pub(crate) fn schema_title(name: &str) -> String {
     out
 }
 
-/// fastapi's combined-body schema title: the operation id prefixed with `Body_`
+/// Makes the title of the combined body schema in the FastAPI format.
+/// The title is the operation ID with the prefix `Body_`.
 pub(crate) fn body_model_name(
     handler_func: &Bound<'_, pyo3::PyAny>,
     path: &str,
@@ -188,7 +194,8 @@ pub(crate) fn body_model_name(
     format!("Body_{}", native_operation_id(&func_name, path, method))
 }
 
-/// fastapi's default operation id: `{name}{path with \W → _}_{method}`
+/// Makes the default operation ID in the FastAPI format.
+/// The format is `{name}{path}_{method}`, with each `\W` character changed to `_`.
 pub(crate) fn native_operation_id(name: &str, path: &str, method: &str) -> String {
     let joined = format!("{name}{path}");
     let sanitized: String = joined
@@ -373,7 +380,8 @@ pub(crate) fn apply_parameter_constraints(
     schema
 }
 
-/// converts a python list of dicts to a json array, skipping non-dict entries.
+/// Converts a Python list of dicts into a list of JSON values.
+/// The function ignores items that are not dicts.
 pub(crate) fn py_dicts_to_json_vec(py: Python<'_>, value: &Py<PyAny>) -> Option<Vec<JsonValue>> {
     let list = value.extract::<Vec<Py<PyAny>>>(py).ok()?;
     Some(

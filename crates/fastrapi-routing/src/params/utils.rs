@@ -1,3 +1,6 @@
+//! Helpers that examine parameter annotations and markers.
+//! The functions find `Annotated` markers, the base type of an annotation, and the element type of a list.
+
 use crate::annotations::strip_optional;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyString};

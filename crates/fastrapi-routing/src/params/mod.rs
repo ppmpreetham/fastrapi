@@ -1,3 +1,7 @@
+//! Python parameter classes and the helpers that read endpoint parameters.
+//! This module contains the parameter markers, the dependency markers, and the sentinels.
+//! It also converts each endpoint parameter into a `ParsedParameter`.
+
 mod classes;
 mod constraints;
 mod depends;

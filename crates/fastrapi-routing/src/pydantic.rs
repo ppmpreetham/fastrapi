@@ -1,3 +1,7 @@
+//! Integration with pydantic models.
+//! This module finds pydantic models and validates Python data and JSON data with them.
+//! It also converts pydantic validation errors into 422 responses.
+
 use super::annotations::load_module;
 use crate::kernel_validation::maybe_validate_with_kernel;
 use crate::route::PydanticValidator;

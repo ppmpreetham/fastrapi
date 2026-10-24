@@ -1,3 +1,6 @@
+//! This module contains the `TrustedHostMiddleware` class.
+//! It reads the list of permitted host names from Python keyword arguments.
+
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use smart_default::SmartDefault;

@@ -1,3 +1,6 @@
+//! This module converts a `FileResponse` into an axum response.
+//! It finds the MIME type, streams the file, and supports conditional requests and range requests.
+
 use super::response_convert::{RawHeaders, apply_raw_headers, apply_response_metadata};
 use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode, header};

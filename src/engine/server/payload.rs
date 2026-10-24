@@ -1,3 +1,6 @@
+//! The extraction of the request body for route handlers.
+//! This module parses JSON, URL-encoded forms and multipart forms.
+
 use super::serve::AppState;
 
 use ahash::AHashMap;

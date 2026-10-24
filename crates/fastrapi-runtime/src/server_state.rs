@@ -1,3 +1,6 @@
+//! Global state of the running server.
+//! It keeps the server event loop, the application object, the lifespan state, and the exception handlers.
+
 use parking_lot::RwLock;
 use pyo3::types::PyDict;
 use std::sync::OnceLock;

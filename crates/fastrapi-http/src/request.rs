@@ -1,3 +1,6 @@
+//! This module contains the `HTTPConnection` and `Request` Python classes, which are compatible with starlette.
+//! They give Python access to the URL, headers, cookies, parameters, and body of a request.
+
 use crate::exceptions::PyHTTPException;
 use crate::form;
 use crate::request_input::RequestInput;
@@ -67,6 +70,8 @@ impl PyAppInfo {
     }
 }
 
+/// A base class for incoming HTTP connections, that is used to provide
+/// any functionality that is common to both `Request` and `WebSocket`.
 #[pyclass(
     subclass,
     name = "HTTPConnection",
@@ -525,6 +530,8 @@ pub fn create_stub_request(py: Python<'_>) -> PyResult<Py<PyAny>> {
     Ok(bound_req.into_any().unbind())
 }
 
+/// A base class for incoming HTTP connections, that is used to provide
+/// any functionality that is common to both `Request` and `WebSocket`.
 #[pyclass(
     extends = PyHTTPConnection,
     name = "Request",

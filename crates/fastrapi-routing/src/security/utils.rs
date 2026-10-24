@@ -1,8 +1,9 @@
-//! Port of `fastapi.security.utils`.
+//! A port of the `fastapi.security.utils` module.
+//! It contains `get_authorization_scheme_param` and the function that registers the `utils` submodule.
 
 use pyo3::prelude::*;
 
-/// Split an `Authorization` header into `(scheme, param)`.
+// Splits an `Authorization` header value into `(scheme, param)`.
 #[pyfunction]
 #[must_use]
 pub fn get_authorization_scheme_param(
@@ -17,7 +18,7 @@ pub fn get_authorization_scheme_param(
     }
 }
 
-/// `utils` submodule
+/// Registers the `utils` submodule on the parent module.
 pub fn register_utils_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let utils = PyModule::new(parent.py(), "utils")?;
     utils.add_function(pyo3::wrap_pyfunction!(

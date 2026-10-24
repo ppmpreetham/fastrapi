@@ -1,3 +1,6 @@
+//! This module converts Python return values into axum responses.
+//! It supports the fastrapi response classes, starlette responses, and plain Python values.
+
 use super::response_file::convert_file_response;
 use super::responses::{
     PyFileResponse, PyRedirectResponse, ResponseKind, extract_base_response_data,

@@ -1,3 +1,7 @@
+//! The construction of the axum router from the routes of the app.
+//! It registers the route handlers, the documentation endpoints and the cached responses.
+//! It also contains the 404 and 405 responses.
+
 use super::dispatch::dispatch_or_not_found;
 use super::files::{add_static_mount, serve_frontend_mounts};
 use super::lifecycle::log_python_error;
@@ -256,7 +260,7 @@ fn register_routes(
     })
 }
 
-/// 404
+/// Returns the 404 Not Found response.
 fn not_found_response() -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -265,7 +269,7 @@ fn not_found_response() -> Response {
         .into_response()
 }
 
-/// 405
+/// Returns the 405 Method Not Allowed response.
 fn method_not_allowed_response(
     router: &FrozenRouter<RouteHandler>,
     root: &str,

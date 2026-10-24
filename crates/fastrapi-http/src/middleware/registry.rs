@@ -1,3 +1,7 @@
+//! This module contains the middleware registry.
+//! The registry maps each built-in middleware class name to a builder.
+//! A builder reads the configuration and records the layer that the application adds.
+
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 

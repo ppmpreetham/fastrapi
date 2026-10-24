@@ -1,3 +1,6 @@
+//! Converts a Python security object into a `SchemeSpec` value.
+//! The OpenAPI schema and the route security requirements use this value.
+
 use fastrapi_core::security::SecurityKind;
 use fastrapi_pyutil::json::py_dict_to_json;
 use pyo3::prelude::*;
