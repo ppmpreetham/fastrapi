@@ -33,3 +33,18 @@ def test_version():
     import fastrapi
 
     assert isinstance(fastrapi.__version__, str)
+
+
+def test_oauth2_classes_take_fastapi_argument_names():
+    from fastrapi.security import OAuth2AuthorizationCodeBearer, OAuth2PasswordBearer
+
+    assert OAuth2PasswordBearer(tokenUrl="/token").token_url == "/token"
+    assert OAuth2PasswordBearer(token_url="/token").token_url == "/token"
+    bearer = OAuth2AuthorizationCodeBearer(
+        authorizationUrl="/auth", tokenUrl="/token", refreshUrl="/refresh"
+    )
+    assert (bearer.authorization_url, bearer.token_url, bearer.refresh_url) == (
+        "/auth",
+        "/token",
+        "/refresh",
+    )

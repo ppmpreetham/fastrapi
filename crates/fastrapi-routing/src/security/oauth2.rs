@@ -2,6 +2,7 @@
 //! These classes read a bearer token from the `Authorization` header.
 //! They also hold the OAuth2 flows for the OpenAPI schema.
 
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use smart_default::SmartDefault;
@@ -82,21 +83,23 @@ pub struct OAuth2PasswordBearer {
 #[pymethods]
 impl OAuth2PasswordBearer {
     #[new]
-    #[pyo3(signature = (token_url, scheme_name=None, scopes=None, description=None, auto_error=true))]
-    const fn new(
-        token_url: String,
+    #[pyo3(signature = (tokenUrl=None, scheme_name=None, scopes=None, description=None, auto_error=true, *, token_url=None))]
+    #[expect(non_snake_case, reason = "FastAPI names this argument tokenUrl")]
+    fn new(
+        tokenUrl: Option<String>,
         scheme_name: Option<String>,
         scopes: Option<Py<PyDict>>,
         description: Option<String>,
         auto_error: bool,
-    ) -> Self {
-        Self {
-            token_url,
+        token_url: Option<String>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            token_url: required_url(tokenUrl, token_url, "tokenUrl")?,
             scheme_name,
             scopes,
             description,
             auto_error,
-        }
+        })
     }
 
     /// Call self as a function.
@@ -129,31 +132,64 @@ pub struct OAuth2AuthorizationCodeBearer {
 #[pymethods]
 impl OAuth2AuthorizationCodeBearer {
     #[new]
-    #[pyo3(signature = (authorization_url, token_url, refresh_url=None, scopes=None, *, scheme_name=None, description=None, auto_error=true))]
-    const fn new(
-        authorization_url: String,
-        token_url: String,
-        refresh_url: Option<String>,
-        scopes: Option<Py<PyDict>>,
+    #[pyo3(signature = (
+        authorizationUrl=None,
+        tokenUrl=None,
+        refreshUrl=None,
+        scheme_name=None,
+        scopes=None,
+        description=None,
+        auto_error=true,
+        *,
+        authorization_url=None,
+        token_url=None,
+        refresh_url=None
+    ))]
+    #[expect(
+        non_snake_case,
+        reason = "FastAPI names these arguments authorizationUrl, tokenUrl and refreshUrl"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the signature copies FastAPI and keeps the snake_case names"
+    )]
+    fn new(
+        authorizationUrl: Option<String>,
+        tokenUrl: Option<String>,
+        refreshUrl: Option<String>,
         scheme_name: Option<String>,
+        scopes: Option<Py<PyDict>>,
         description: Option<String>,
         auto_error: bool,
-    ) -> Self {
-        Self {
-            authorization_url,
-            token_url,
-            refresh_url,
+        authorization_url: Option<String>,
+        token_url: Option<String>,
+        refresh_url: Option<String>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            authorization_url: required_url(
+                authorizationUrl,
+                authorization_url,
+                "authorizationUrl",
+            )?,
+            token_url: required_url(tokenUrl, token_url, "tokenUrl")?,
+            refresh_url: refreshUrl.or(refresh_url),
             scopes,
             scheme_name,
             description,
             auto_error,
-        }
+        })
     }
 
     /// Call self as a function.
     fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
         callable::bearer_token(request, self.auto_error)
     }
+}
+
+fn required_url(camel: Option<String>, snake: Option<String>, name: &str) -> PyResult<String> {
+    camel
+        .or(snake)
+        .ok_or_else(|| PyTypeError::new_err(format!("missing required argument: '{name}'")))
 }
 
 /// OpenID Connect authentication class. An instance of it would be used as a
