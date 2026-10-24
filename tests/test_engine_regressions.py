@@ -134,3 +134,22 @@ def test_rate_limit_rejects_requests_over_the_limit(client, app):
     assert statuses[0] == 200
     assert 429 in statuses
     assert set(statuses) <= {200, 429}
+
+
+def test_async_status_and_validation_handlers_are_awaited(client, app):
+    from fastrapi.exceptions import RequestValidationError
+
+    @app.exception_handler(404)
+    async def not_found_handler(request, exc):
+        return {"missing": True}
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_handler(request, exc):
+        return {"invalid": len(exc.errors())}
+
+    @app.get("/needs-int")
+    def needs_int(value: int):
+        return {"value": value}
+
+    assert client.get("/no-such-route").json() == {"missing": True}
+    assert client.get("/needs-int", params={"value": "x"}).json() == {"invalid": 1}

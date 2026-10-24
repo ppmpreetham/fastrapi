@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use pyo3::prelude::Python;
 use smallvec::SmallVec;
 
-use crate::engine::exception_dispatch::dispatch_validation_handler;
+use crate::engine::exception_dispatch::{dispatch_validation_handler, resolve_pending_handler};
 use crate::engine::executor::{run_py_handler, run_py_handler_no_request};
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::params::PathParamRange;
@@ -113,13 +113,14 @@ pub(crate) async fn dispatch_or_not_found(
             handler.execution.execution_mode,
             ExecutionMode::SyncNoArgs | ExecutionMode::AsyncNoArgs
         ) {
-            return Ok(tag(run_py_handler_no_request(
+            let response = run_py_handler_no_request(
                 event_loop,
                 state.sync_to_threadpool,
                 handler,
                 Some(request_parts),
             )
-            .await));
+            .await;
+            return Ok(tag(resolve_pending_handler(response).await));
         }
 
         let needs_body = !handler.payload.body_param_indices.is_empty()
@@ -129,7 +130,9 @@ pub(crate) async fn dispatch_or_not_found(
         let payload = if needs_body {
             match extract_payload(&request_parts.headers, body, handler, state).await {
                 Ok(p) => p,
-                Err(resp) => return Ok(apply_validation_handler(resp)),
+                Err(resp) => {
+                    return Ok(resolve_pending_handler(apply_validation_handler(resp)).await);
+                }
             }
         } else {
             None
@@ -144,7 +147,10 @@ pub(crate) async fn dispatch_or_not_found(
             payload,
         )
         .await;
-        Ok(tag(apply_validation_handler(response)))
+        Ok(tag(resolve_pending_handler(apply_validation_handler(
+            response,
+        ))
+        .await))
     })
     .await
 }

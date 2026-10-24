@@ -25,7 +25,7 @@ use simd_json::OwnedValue as JsonValue;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::engine::exception_dispatch::dispatch_status_handler;
+use crate::engine::exception_dispatch::{dispatch_status_handler, resolve_pending_handler};
 use crate::engine::executor::{
     render_no_request_json_response, render_no_request_response, run_py_handler_no_request,
 };
@@ -241,7 +241,8 @@ fn register_routes(
         });
 
     app = app.method_not_allowed_fallback(move |req: Request| async move {
-        method_not_allowed_response(frozen_router, &app_state.root_path, &req)
+        let allow = allowed_methods_header(frozen_router, &app_state.root_path, &req);
+        method_not_allowed_response(allow).await
     });
 
     app.fallback({
@@ -251,7 +252,7 @@ fn register_routes(
                 Err(req) => {
                     let handler_resp = Python::attach(|py| dispatch_status_handler(py, 404));
                     match handler_resp {
-                        Some(resp) => resp,
+                        Some(resp) => resolve_pending_handler(resp).await,
                         None => serve_frontend_mounts(frontend_mounts, req)
                             .await
                             .unwrap_or_else(not_found_response),
@@ -272,32 +273,36 @@ fn not_found_response() -> Response {
 }
 
 /// Returns the 405 Method Not Allowed response.
-fn method_not_allowed_response(
+fn allowed_methods_header(
     router: &FrozenRouter<RouteHandler>,
     root: &str,
     request: &Request,
-) -> Response {
+) -> String {
     let host = request
         .headers()
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.split(':').next().unwrap_or(value));
     let path = strip_root_path(root, request.uri().path()).unwrap_or_else(|| request.uri().path());
-    let allow = router
+    router
         .allowed_methods(path, host)
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
-        .join(", ");
-    let mut response =
-        Python::attach(|py| dispatch_status_handler(py, StatusCode::METHOD_NOT_ALLOWED.as_u16()))
-            .unwrap_or_else(|| {
-                (
-                    StatusCode::METHOD_NOT_ALLOWED,
-                    axum::Json(simd_json::json!({"detail": "Method Not Allowed"})),
-                )
-                    .into_response()
-            });
+        .join(", ")
+}
+
+async fn method_not_allowed_response(allow: String) -> Response {
+    let handler_resp =
+        Python::attach(|py| dispatch_status_handler(py, StatusCode::METHOD_NOT_ALLOWED.as_u16()));
+    let mut response = match handler_resp {
+        Some(resp) => resolve_pending_handler(resp).await,
+        None => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            axum::Json(simd_json::json!({"detail": "Method Not Allowed"})),
+        )
+            .into_response(),
+    };
     if let Ok(value) = HeaderValue::from_str(&allow) {
         response.headers_mut().insert(ALLOW, value);
     }
@@ -484,7 +489,7 @@ fn no_request_method_router(
     method_router(method, move |request: Request| async move {
         let event_loop = state.event_loop;
         let (request_parts, _) = request.into_parts();
-        py_bridge::scoped_request_loop(
+        let response = py_bridge::scoped_request_loop(
             event_loop,
             run_py_handler_no_request(
                 event_loop,
@@ -493,7 +498,8 @@ fn no_request_method_router(
                 Some(request_parts),
             ),
         )
-        .await
+        .await;
+        resolve_pending_handler(response).await
     })
 }
 
@@ -506,13 +512,14 @@ fn sync_no_request_method_router(
         && matches!(handler.response.response_type, ResponseType::Json);
 
     method_router(method, move || async move {
-        Python::attach(|py| {
+        let response = Python::attach(|py| {
             if use_json_fast_path {
                 render_no_request_json_response(py, handler)
             } else {
                 render_no_request_response(py, handler)
             }
-        })
+        });
+        resolve_pending_handler(response).await
     })
 }
 
