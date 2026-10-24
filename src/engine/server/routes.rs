@@ -31,12 +31,12 @@ use crate::engine::executor::{
 };
 use crate::engine::metrics::prometheus_handle;
 use crate::engine::server::websocket::{WsRouteState, ws_handler, ws_param_names};
+use crate::ffi::docs;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::path::{join_path, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, FrozenRouterBuilder, RoutePattern};
 use fastrapi_http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware};
 use fastrapi_http::response_type::ResponseType;
-use fastrapi_pyutil::json::py_any_to_json;
 use fastrapi_routing::route::{ExecutionMode, RouteEntry, RouteHandler, WebSocketEntry};
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::server_state::set_exception_handlers;
@@ -327,61 +327,82 @@ pub(crate) fn register_docs_endpoints(
     docs_url: Option<&str>,
     openapi_url: Option<&str>,
 ) -> Router {
+    let Some(openapi_url) = openapi_url else {
+        return register_metrics_endpoint(app, app_config);
+    };
     let openapi_json = Arc::new(app_config.openapi_spec(py));
-
-    if let Some(openapi_url) = openapi_url {
-        app = app.route(
-            openapi_url,
-            get({
-                let json = openapi_json;
-                move || {
-                    let json = json.clone();
-                    async move { Json(SharedSpec(json)) }
-                }
-            }),
-        );
-    }
-
+    app = app.route(
+        openapi_url,
+        get(move || {
+            let json = openapi_json.clone();
+            async move { Json(SharedSpec(json)) }
+        }),
+    );
+    let spec_url = format!(
+        "{}{openapi_url}",
+        app_config.root_path.trim_end_matches('/')
+    );
+    let title = &app_config.title;
     if let Some(docs) = docs_url {
-        let swagger_html = if let Some(params) = &app_config.swagger_ui_parameters
-            && let Ok(json_str) = simd_json::to_string(&py_any_to_json(py, params.bind(py)))
-        {
-            include_str!("../../../static/swagger-ui.html")
-                .replace("/* SWAGGER_UI_PARAMS */ {}", &json_str)
-        } else {
-            include_str!("../../../static/swagger-ui.html").to_string()
+        let swagger_ui_parameters = app_config
+            .swagger_ui_parameters
+            .as_ref()
+            .map(|params| params.bind(py));
+        let init_oauth = app_config
+            .swagger_ui_init_oauth
+            .as_ref()
+            .map(|init| init.bind(py));
+        let page = docs::SwaggerPage {
+            openapi_url: &spec_url,
+            title: &format!("{title} - Swagger UI"),
+            swagger_js_url: docs::SWAGGER_JS_URL,
+            swagger_css_url: docs::SWAGGER_CSS_URL,
+            swagger_favicon_url: docs::FAVICON_URL,
+            oauth2_redirect_url: None,
+            init_oauth,
+            swagger_ui_parameters,
         };
-        let swagger_html: Arc<[u8]> = Arc::from(swagger_html.into_bytes());
-        app = app.route(
-            docs,
-            get({
-                let html = swagger_html;
-                move || {
-                    let html = html.clone();
-                    async move { Html(Bytes::from_owner(html)) }
-                }
-            }),
-        );
+        match docs::swagger_ui_page(py, &page) {
+            Ok(html) => app = html_route(app, docs, html),
+            Err(err) => log_python_error("Swagger UI page setup failed", &err),
+        }
     }
     if let Some(redoc) = &app_config.redoc_url {
-        app = app.route(
-            redoc,
-            get(|| async { Html(include_str!("../../../static/redoc.html")) }),
+        let html = docs::redoc_page(
+            &spec_url,
+            &format!("{title} - ReDoc"),
+            docs::REDOC_JS_URL,
+            docs::FAVICON_URL,
+            true,
         );
+        app = html_route(app, redoc, html);
     }
     if let Some(scalar) = &app_config.scalar_url {
-        app = app.route(
-            scalar,
-            get(|| async { Html(include_str!("../../../static/scalar.html")) }),
-        );
+        let html = include_str!("../../../static/scalar.html").replace(DOCS_SPEC_URL, &spec_url);
+        app = html_route(app, scalar, html);
     }
     if let Some(elements) = &app_config.elements_url {
-        app = app.route(
-            elements,
-            get(|| async { Html(include_str!("../../../static/elements.html")) }),
-        );
+        let html = include_str!("../../../static/elements.html").replace(DOCS_SPEC_URL, &spec_url);
+        app = html_route(app, elements, html);
     }
 
+    register_metrics_endpoint(app, app_config)
+}
+
+const DOCS_SPEC_URL: &str = "/api-docs/openapi.json";
+
+fn html_route(app: Router, path: &str, html: String) -> Router {
+    let html: Arc<[u8]> = Arc::from(html.into_bytes());
+    app.route(
+        path,
+        get(move || {
+            let html = html.clone();
+            async move { Html(Bytes::from_owner(html)) }
+        }),
+    )
+}
+
+fn register_metrics_endpoint(mut app: Router, app_config: &FastrAPI) -> Router {
     if let Some(config) = &app_config.prometheus_config {
         let handle = prometheus_handle();
         app = app.route(
