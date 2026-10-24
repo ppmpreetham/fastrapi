@@ -432,6 +432,25 @@ fn raw_values_for_list<'a>(
     }
 }
 
+/// Puts one handler argument into `kwargs`. If Python cannot store it, the request fails with a 500 response.
+fn set_argument<'py, V>(
+    kwargs: &Bound<'py, PyDict>,
+    name: &Bound<'py, PyString>,
+    value: V,
+) -> Result<(), Response>
+where
+    V: IntoPyObject<'py>,
+{
+    kwargs.set_item(name, value).map_err(|err| {
+        err.print(kwargs.py());
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to set a handler argument",
+        )
+            .into_response()
+    })
+}
+
 fn resolve_list_parameter(
     py: Python<'_>,
     param: &ParsedParameter,
@@ -596,16 +615,16 @@ fn apply_body_and_validation(
                 simd_json::json!(null),
             ));
         }
-        handler.payload.body_param_indices.iter().for_each(|&idx| {
+        for &idx in &handler.payload.body_param_indices {
             let param = &handler.payload.parsed_params[idx];
             if param.has_default {
                 let value = param
                     .default_value
                     .as_ref()
                     .map_or_else(|| py.None(), |d| d.clone_ref(py));
-                _ = kwargs.set_item(param.name_py.bind(py), value);
+                set_argument(kwargs, param.name_py.bind(py), value)?;
             }
-        });
+        }
 
         return Ok(());
     };
@@ -647,12 +666,12 @@ fn apply_body_and_validation(
                     })?;
                 let validated =
                     validate_python_with_pydantic(py, validator.validate_python.bind(py), inner)?;
-                kwargs.set_item(param.name_py.bind(py), validated).ok();
+                set_argument(kwargs, param.name_py.bind(py), validated)?;
                 return Ok(());
             }
 
             let validated = validate_json_with_pydantic(py, validator, raw)?;
-            kwargs.set_item(param.name_py.bind(py), validated).ok();
+            set_argument(kwargs, param.name_py.bind(py), validated)?;
             return Ok(());
         }
     }
@@ -683,7 +702,7 @@ fn apply_body_and_validation(
                             .default_value
                             .as_ref()
                             .map_or_else(|| py.None(), |d| d.clone_ref(py));
-                        kwargs.set_item(param.name_py.bind(py), default_value).ok();
+                        set_argument(kwargs, param.name_py.bind(py), default_value)?;
                     } else if param.required {
                         return Err(validation_error(
                             &["body", &param.external_name],
@@ -717,7 +736,7 @@ fn apply_body_and_validation(
                     validate_scalar_constraints(py, param, value.bind(py))?;
                     value
                 };
-                kwargs.set_item(param.name_py.bind(py), value).ok();
+                set_argument(kwargs, param.name_py.bind(py), value)?;
             }
 
             return Ok(());
@@ -727,9 +746,11 @@ fn apply_body_and_validation(
     if handler.payload.body_param_indices.len() == 1 {
         let param = &handler.payload.parsed_params[handler.payload.body_param_indices[0]];
 
-        kwargs
-            .set_item(param.name_py.bind(py), json_to_py_object(py, json_payload))
-            .ok();
+        set_argument(
+            kwargs,
+            param.name_py.bind(py),
+            json_to_py_object(py, json_payload),
+        )?;
         return Ok(());
     }
 
@@ -762,11 +783,9 @@ fn apply_body_and_validation(
                 let validator = &handler.validation.param_validators[idx];
                 let validated =
                     validate_python_with_pydantic(py, validator.validate_python.bind(py), value)?;
-                kwargs.set_item(param.name_py.bind(py), validated).ok();
+                set_argument(kwargs, param.name_py.bind(py), validated)?;
             } else {
-                kwargs
-                    .set_item(param.name_py.bind(py), json_to_py_object(py, value))
-                    .ok();
+                set_argument(kwargs, param.name_py.bind(py), json_to_py_object(py, value))?;
             }
             continue;
         }
@@ -776,7 +795,7 @@ fn apply_body_and_validation(
                 .default_value
                 .as_ref()
                 .map_or_else(|| py.None(), |d| d.clone_ref(py));
-            kwargs.set_item(param.name_py.bind(py), default_value).ok();
+            set_argument(kwargs, param.name_py.bind(py), default_value)?;
         } else if param.required {
             return Err(validation_error_response(format!(
                 "Missing field: {}",
@@ -846,12 +865,12 @@ pub fn apply_request_data(
                     bg_tasks_instance = Some(bg.clone());
                     bg
                 };
-                _ = kwargs.set_item(param.name_py.bind(py), instance);
+                set_argument(kwargs, param.name_py.bind(py), instance)?;
                 return Ok(());
             }
 
             if let Some(value) = resolve_parameter_value(py, param, request_input)? {
-                _ = kwargs.set_item(param.name_py.bind(py), value);
+                set_argument(kwargs, param.name_py.bind(py), value)?;
             }
 
             Ok(())
