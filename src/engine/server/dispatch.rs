@@ -18,6 +18,7 @@ use fastrapi_core::method::HttpMethod;
 use fastrapi_core::params::PathParamRange;
 use fastrapi_core::path::strip_root_path;
 use fastrapi_core::router::{FrozenRouter, RouteMatch, RoutePattern};
+use fastrapi_routing::request_data::ValidationErrorDetails;
 use fastrapi_routing::route::{ExecutionMode, RouteHandler};
 use fastrapi_runtime::py_bridge;
 use std::ptr;
@@ -128,11 +129,7 @@ pub(crate) async fn dispatch_or_not_found(
         let payload = if needs_body {
             match extract_payload(&request_parts.headers, body, handler, state).await {
                 Ok(p) => p,
-                Err(resp) => {
-                    return Ok(Python::attach(|py| {
-                        dispatch_validation_handler(py, resp, None)
-                    }));
-                }
+                Err(resp) => return Ok(apply_validation_handler(resp)),
             }
         } else {
             None
@@ -147,11 +144,22 @@ pub(crate) async fn dispatch_or_not_found(
             payload,
         )
         .await;
-        Ok(tag(Python::attach(|py| {
-            dispatch_validation_handler(py, response, None)
-        })))
+        Ok(tag(apply_validation_handler(response)))
     })
     .await
+}
+
+/// Runs the user's `RequestValidationError` handler for a 422 response.
+/// Other responses do not need Python, so the GIL is not taken for them.
+fn apply_validation_handler(response: Response) -> Response {
+    if response
+        .extensions()
+        .get::<ValidationErrorDetails>()
+        .is_none()
+    {
+        return response;
+    }
+    Python::attach(|py| dispatch_validation_handler(py, response, None))
 }
 
 pub(crate) fn dispatch_path<'a>(state: &AppState, original_path: &'a str) -> Option<&'a str> {
