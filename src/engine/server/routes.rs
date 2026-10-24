@@ -338,10 +338,8 @@ pub(crate) fn register_docs_endpoints(
             async move { Json(SharedSpec(json)) }
         }),
     );
-    let spec_url = format!(
-        "{}{openapi_url}",
-        app_config.root_path.trim_end_matches('/')
-    );
+    let root_path = app_config.root_path.trim_end_matches('/');
+    let spec_url = format!("{root_path}{openapi_url}");
     let title = &app_config.title;
     if let Some(docs) = docs_url {
         let swagger_ui_parameters = app_config
@@ -352,19 +350,26 @@ pub(crate) fn register_docs_endpoints(
             .swagger_ui_init_oauth
             .as_ref()
             .map(|init| init.bind(py));
+        let oauth2_redirect_url = app_config
+            .swagger_ui_oauth2_redirect_url
+            .as_deref()
+            .map(|url| format!("{root_path}{url}"));
         let page = docs::SwaggerPage {
             openapi_url: &spec_url,
             title: &format!("{title} - Swagger UI"),
             swagger_js_url: docs::SWAGGER_JS_URL,
             swagger_css_url: docs::SWAGGER_CSS_URL,
             swagger_favicon_url: docs::FAVICON_URL,
-            oauth2_redirect_url: None,
+            oauth2_redirect_url: oauth2_redirect_url.as_deref(),
             init_oauth,
             swagger_ui_parameters,
         };
         match docs::swagger_ui_page(py, &page) {
             Ok(html) => app = html_route(app, docs, html),
             Err(err) => log_python_error("Swagger UI page setup failed", &err),
+        }
+        if let Some(redirect) = &app_config.swagger_ui_oauth2_redirect_url {
+            app = html_route(app, redirect, docs::OAUTH2_REDIRECT_HTML.to_owned());
         }
     }
     if let Some(redoc) = &app_config.redoc_url {

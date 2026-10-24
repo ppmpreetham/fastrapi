@@ -10,3 +10,10 @@ def test_docs_pages_load_the_served_spec(client, app):
     assert "url: '/openapi.json'" in docs
     assert "<title>FastAPI - Swagger UI</title>" in docs
     assert 'spec-url="/openapi.json"' in client.get("/redoc").text
+
+
+def test_swagger_oauth2_redirect_page(client, app):
+    assert "oauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect'" in client.get("/docs").text
+    response = client.get("/docs/oauth2-redirect")
+    assert response.status_code == 200
+    assert "swaggerUIRedirectOauth2" in response.text
