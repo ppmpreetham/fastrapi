@@ -680,6 +680,13 @@ impl PyRequest {
         Ok(PyClassInitializer::from(conn).add_subclass(req))
     }
 
+    /// The HTTP method of the request, for example `"GET"`.
+    #[getter]
+    pub fn method<'py>(self_: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let conn: &Bound<'py, PyHTTPConnection> = self_.as_super();
+        conn.borrow().scope.bind(py).get_item(intern!(py, "method"))
+    }
+
     #[getter]
     pub fn headers<'py>(self_: &Bound<'_, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let conn: &Bound<'_, PyHTTPConnection> = self_.as_super();

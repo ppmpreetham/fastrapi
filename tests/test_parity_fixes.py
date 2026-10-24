@@ -17,3 +17,13 @@ def test_swagger_oauth2_redirect_page(client, app):
     response = client.get("/docs/oauth2-redirect")
     assert response.status_code == 200
     assert "swaggerUIRedirectOauth2" in response.text
+
+
+def test_request_method(client, app):
+    from fastrapi import Request
+
+    @app.post("/m")
+    def m(request: Request):
+        return {"method": request.method}
+
+    assert client.post("/m").json() == {"method": "POST"}
