@@ -10,6 +10,7 @@ use pyo3::types::{PyAny, PyBytes, PyDict};
 use std::cmp::min;
 
 fastrapi_pyutil::cached_py_import!(TEMPFILE_MODULE, "tempfile");
+fastrapi_pyutil::cached_py_import!(IO_MODULE, "io");
 fastrapi_pyutil::cached_py_import!(STARLETTE_DATASTRUCTURES, "starlette.datastructures");
 
 const SPOOL_MAX_MEM: usize = 1024 * 1024;
@@ -131,6 +132,25 @@ impl PyUploadFile {
             file_obj: (!file.is_none(py)).then_some(file),
             headers: headers.filter(|headers| !headers.is_none(py)),
         })
+    }
+
+    /// The file object that holds the data, as a standard Python file.
+    ///
+    /// Use it in a regular `def` function. Its methods block, they are not async.
+    #[getter]
+    fn file(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(file) = &self.file_obj {
+            return Ok(file.clone_ref(py));
+        }
+        let file = IO_MODULE
+            .get(py)?
+            .getattr(pyo3::intern!(py, "BytesIO"))?
+            .call1((PyBytes::new(py, &self.file_content),))?;
+        file.call_method1(pyo3::intern!(py, "seek"), (self.cursor,))?;
+        let file = file.unbind();
+        self.file_content = Bytes::new();
+        self.file_obj = Some(file.clone_ref(py));
+        Ok(file)
     }
 
     /// The headers of this part of the multipart request.

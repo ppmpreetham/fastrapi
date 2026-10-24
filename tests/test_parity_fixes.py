@@ -97,3 +97,14 @@ def test_upload_file_headers_argument():
     upload = UploadFile(io.BytesIO(b"x"), headers=Headers({"content-type": "image/png"}))
     assert upload.content_type == "image/png"
     assert upload.headers["content-type"] == "image/png"
+
+
+def test_upload_file_file_attribute(client, app):
+    from fastrapi import UploadFile
+
+    @app.post("/upload-sync")
+    def upload(file: UploadFile):
+        return {"data": file.file.read().decode()}
+
+    response = client.post("/upload-sync", files={"file": ("a.txt", b"hello", "text/plain")})
+    assert response.json() == {"data": "hello"}
