@@ -10,6 +10,7 @@ use pyo3::types::{PyAny, PyBytes, PyDict};
 use std::cmp::min;
 
 fastrapi_pyutil::cached_py_import!(TEMPFILE_MODULE, "tempfile");
+fastrapi_pyutil::cached_py_import!(STARLETTE_DATASTRUCTURES, "starlette.datastructures");
 
 const SPOOL_MAX_MEM: usize = 1024 * 1024;
 
@@ -43,14 +44,18 @@ const SPOOL_MAX_MEM: usize = 1024 * 1024;
 /// async def create_upload_file(file: UploadFile):
 ///     return {"filename": file.filename}
 /// ```
-#[pyclass(name = "UploadFile", module = "fastrapi.datastructures", get_all)]
+#[pyclass(name = "UploadFile", module = "fastrapi.datastructures")]
 pub struct PyUploadFile {
+    #[pyo3(get)]
     pub filename: Option<String>,
+    #[pyo3(get)]
     pub content_type: Option<String>,
+    #[pyo3(get)]
     pub size: Option<u64>,
     file_content: Bytes,
     cursor: usize,
     file_obj: Option<Py<PyAny>>,
+    headers: Option<Py<PyAny>>,
 }
 
 impl PyUploadFile {
@@ -80,6 +85,7 @@ impl PyUploadFile {
             file_content,
             cursor: 0,
             file_obj,
+            headers: None,
         }
     }
 }
@@ -99,23 +105,51 @@ fn spool_to_file(py: Python<'_>, content: &[u8]) -> PyResult<Py<PyAny>> {
 #[pymethods]
 impl PyUploadFile {
     #[new]
-    #[pyo3(signature = (file, *, size=None, filename=None, _headers=None, content_type=None))]
+    #[pyo3(signature = (file, *, size=None, filename=None, headers=None, content_type=None))]
     fn py_new(
         py: Python<'_>,
         file: Py<PyAny>,
         size: Option<u64>,
         filename: Option<String>,
-        _headers: Option<Py<PyAny>>,
+        headers: Option<Py<PyAny>>,
         content_type: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        let content_type = match (content_type, &headers) {
+            (Some(content_type), _) => Some(content_type),
+            (None, Some(headers)) => headers
+                .bind(py)
+                .call_method1(pyo3::intern!(py, "get"), ("content-type",))?
+                .extract()?,
+            (None, None) => None,
+        };
+        Ok(Self {
             filename,
             content_type,
             size,
             file_content: Bytes::new(),
             cursor: 0,
             file_obj: (!file.is_none(py)).then_some(file),
+            headers: headers.filter(|headers| !headers.is_none(py)),
+        })
+    }
+
+    /// The headers of this part of the multipart request.
+    #[getter]
+    fn headers(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(headers) = &self.headers {
+            return Ok(headers.clone_ref(py));
         }
+        let raw = PyDict::new(py);
+        if let Some(content_type) = &self.content_type {
+            raw.set_item("content-type", content_type)?;
+        }
+        let headers = STARLETTE_DATASTRUCTURES
+            .get(py)?
+            .getattr(pyo3::intern!(py, "Headers"))?
+            .call1((raw,))?
+            .unbind();
+        self.headers = Some(headers.clone_ref(py));
+        Ok(headers)
     }
 
     /// Read some bytes from the file.

@@ -74,3 +74,26 @@ def test_http_bearer_takes_fastapi_argument_name():
     from fastrapi.security import HTTPBearer
 
     assert HTTPBearer(bearerFormat="JWT").bearer_format == "JWT"
+
+
+def test_upload_file_headers(client, app):
+    from fastrapi import UploadFile
+
+    @app.post("/upload")
+    async def upload(file: UploadFile):
+        return {"content_type": file.headers.get("content-type")}
+
+    response = client.post("/upload", files={"file": ("a.txt", b"hi", "text/plain")})
+    assert response.json() == {"content_type": "text/plain"}
+
+
+def test_upload_file_headers_argument():
+    import io
+
+    from starlette.datastructures import Headers
+
+    from fastrapi import UploadFile
+
+    upload = UploadFile(io.BytesIO(b"x"), headers=Headers({"content-type": "image/png"}))
+    assert upload.content_type == "image/png"
+    assert upload.headers["content-type"] == "image/png"
