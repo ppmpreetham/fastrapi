@@ -12,12 +12,12 @@ use bytes::{Bytes, BytesMut};
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::server_state::serve_app;
+use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyList};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Sender, channel};
 use tracing::error;
 
@@ -235,10 +235,10 @@ impl PyAsgiReceive {
     fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let body = self.body.clone();
         py_bridge::future_into_py(py, async move {
-            let mut guard = body.lock().await;
+            let body = body.lock().take();
             Python::attach(|py| {
                 let msg = PyDict::new(py);
-                match guard.take() {
+                match body {
                     Some(body) => {
                         msg.set_item(intern!(py, "type"), intern!(py, "http.request"))?;
                         msg.set_item(intern!(py, "body"), PyBytes::new(py, &body))?;
