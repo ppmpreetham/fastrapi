@@ -61,7 +61,7 @@ globset = "0.4"
 notify = "8"
 papaya = { version = "0.2.3" }
 parking_lot = "0.12.5"
-fastwebsockets = { version = "0.10.0", features = ["upgrade", "with_axum"] }
+fastwebsockets = { version = "0.10.0", features = ["upgrade", "with_axum", "unstable-split"] }
 
 bytes = "1.12.1"
 regex = "1"

@@ -1,4 +1,5 @@
 import socket
+import time
 import uuid
 
 import pytest
@@ -67,3 +68,58 @@ def test_datastructures_submodule_exports():
         "FormData",
         "UploadFile",
     }
+
+
+def test_websocket_frame_split_across_server_sends_is_received_intact():
+    import asyncio
+    import base64
+    import os
+    import struct
+
+    from test_websocket_smoke import _free_port, _recv_frame, _serve
+
+    app = FastrAPI()
+
+    @app.websocket("/ws")
+    async def ws_endpoint(ws):
+        await ws.accept()
+
+        async def ticker():
+            for _ in range(40):
+                await ws.send_text("tick")
+                await asyncio.sleep(0.01)
+
+        ticks = asyncio.ensure_future(ticker())
+        message = await ws.receive_text()
+        await ws.send_text(f"got:{len(message)}")
+        await ticks
+
+    port = _free_port()
+    _serve(app, port)
+    key = base64.b64encode(os.urandom(16)).decode()
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(
+            (
+                "GET /ws HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{port}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode()
+        )
+        assert b" 101 " in sock.recv(4096)
+
+        payload = b"x" * 300
+        mask = os.urandom(4)
+        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        frame = bytes([0x81, 0x80 | 126]) + struct.pack("!H", len(payload)) + mask + masked
+        sock.sendall(frame[:2])
+        time.sleep(0.15)
+        sock.sendall(frame[2:])
+
+        replies = []
+        while "got:300" not in replies:
+            opcode, data = _recv_frame(sock)
+            assert opcode == 0x1, f"unexpected opcode {opcode}"
+            replies.append(data.decode())

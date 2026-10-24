@@ -9,13 +9,16 @@ use fastrapi_core::params::PathParamRange;
 use fastrapi_routing::dependencies::{self, DependencyExecutionError, execute_teardowns_async};
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
-use fastwebsockets::{FragmentCollector, Frame, OpCode, Payload, upgrade};
+use fastwebsockets::{
+    FragmentCollectorRead, Frame, OpCode, Payload, WebSocketError, WebSocketWrite, upgrade,
+};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 use tracing::error;
@@ -197,14 +200,16 @@ async fn handle_connection(
     mut rx_from_python: mpsc::Receiver<WSMessage>,
 ) -> Result<(), SocketPumpError> {
     let ws_stream = fut.await?;
-    let mut ws = FragmentCollector::new(ws_stream);
+    let (read_half, write_half) = ws_stream.split(tokio::io::split);
+    let reader = FragmentCollectorRead::new(read_half);
+    let writer = tokio::sync::Mutex::new(write_half);
     tokio::select! {
         result = python_handler_future => {
             if let Err(error) = result {
                 error!("Python handler error: {error}");
             }
         }
-        result = socket_pump(&mut ws, tx_to_python, &mut rx_from_python) => {
+        result = socket_pump(reader, &writer, tx_to_python, &mut rx_from_python) => {
             if let Err(error) = result {
                 error!("Socket pump error: {error}");
             }
@@ -293,59 +298,79 @@ fn build_scope(py: Python<'_>, parts: &Parts, input: &RequestInput<'_>) -> Py<Py
     scope.unbind()
 }
 
+type SocketReader = FragmentCollectorRead<ReadHalf<TokioIo<Upgraded>>>;
+type SocketWriter = tokio::sync::Mutex<WebSocketWrite<WriteHalf<TokioIo<Upgraded>>>>;
+
+/// Moves frames between the socket and the Python handler until either side closes.
+///
+/// The read loop and the write loop are separate futures. `read_frame` is not
+/// cancel safe, so it must never be one branch of a `select!` that restarts.
 async fn socket_pump(
-    ws: &mut FragmentCollector<TokioIo<Upgraded>>,
+    reader: SocketReader,
+    writer: &SocketWriter,
     tx_to_python: mpsc::Sender<WSMessage>,
     rx_from_python: &mut mpsc::Receiver<WSMessage>,
 ) -> Result<(), SocketPumpError> {
-    loop {
-        tokio::select! {
-            frame = ws.read_frame() => {
-                let frame = frame?;
-                match frame.opcode {
-                    OpCode::Close => {
-                        let code = close_code(&frame);
-                        _ = tx_to_python.send(WSMessage::Close(code)).await;
-                        break;
-                    }
-                    OpCode::Text | OpCode::Binary => {
-                        let bytes = payload_into_bytes(frame.payload);
-                        let msg = if frame.opcode == OpCode::Text {
-                            WSMessage::Text(bytes)
-                        } else {
-                            WSMessage::Binary(bytes)
-                        };
-                        if tx_to_python.send(msg).await.is_err() {
-                            break;
-                        }
-                    }
-                    OpCode::Ping => {
-                        ws.write_frame(Frame::pong(payload_into_owned(frame.payload)))
-                            .await?;
-                    }
-                    OpCode::Pong | OpCode::Continuation => {}
-                }
-            }
+    tokio::select! {
+        result = read_loop(reader, writer, tx_to_python) => result,
+        result = write_loop(writer, rx_from_python) => result,
+    }
+}
 
-            Some(msg) = rx_from_python.recv() => {
-                match msg {
-                    WSMessage::Text(bytes) => {
-                        ws.write_frame(Frame::text(bytes_into_payload(bytes))).await?;
-                    }
-                    WSMessage::Binary(data) => {
-                        ws.write_frame(Frame::binary(bytes_into_payload(data)))
-                            .await?;
-                    }
-                    WSMessage::Close(code) => {
-                        ws.write_frame(Frame::close(code, &[])).await?;
-                        break;
-                    }
+async fn read_loop(
+    mut reader: SocketReader,
+    writer: &SocketWriter,
+    tx_to_python: mpsc::Sender<WSMessage>,
+) -> Result<(), SocketPumpError> {
+    let mut send_reply =
+        |frame: Frame<'static>| async move { writer.lock().await.write_frame(frame).await };
+    loop {
+        let frame = reader
+            .read_frame::<_, WebSocketError>(&mut send_reply)
+            .await?;
+        match frame.opcode {
+            OpCode::Close => {
+                let code = close_code(&frame);
+                _ = tx_to_python.send(WSMessage::Close(code)).await;
+                return Ok(());
+            }
+            OpCode::Text | OpCode::Binary => {
+                let bytes = payload_into_bytes(frame.payload);
+                let msg = if frame.opcode == OpCode::Text {
+                    WSMessage::Text(bytes)
+                } else {
+                    WSMessage::Binary(bytes)
+                };
+                if tx_to_python.send(msg).await.is_err() {
+                    return Ok(());
                 }
             }
+            OpCode::Ping => {
+                let pong = Frame::pong(payload_into_owned(frame.payload));
+                writer.lock().await.write_frame(pong).await?;
+            }
+            OpCode::Pong | OpCode::Continuation => {}
         }
     }
+}
 
-    Ok(())
+async fn write_loop(
+    writer: &SocketWriter,
+    rx_from_python: &mut mpsc::Receiver<WSMessage>,
+) -> Result<(), SocketPumpError> {
+    // A dropped Python sender only stops this loop; reading goes on, as before.
+    while let Some(msg) = rx_from_python.recv().await {
+        let (frame, close) = match msg {
+            WSMessage::Text(bytes) => (Frame::text(bytes_into_payload(bytes)), false),
+            WSMessage::Binary(data) => (Frame::binary(bytes_into_payload(data)), false),
+            WSMessage::Close(code) => (Frame::close(code, &[]), true),
+        };
+        writer.lock().await.write_frame(frame).await?;
+        if close {
+            return Ok(());
+        }
+    }
+    std::future::pending().await
 }
 
 fn close_code(frame: &Frame<'_>) -> u16 {
