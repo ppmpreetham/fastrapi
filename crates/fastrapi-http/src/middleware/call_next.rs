@@ -209,11 +209,10 @@ fn drive(
                     }
                 })
             }
-            _ => Python::attach(|py| {
+            _ => {
                 tracing::error!("call_next middleware returned no response");
-                _ = py;
                 middleware_error()
-            }),
+            }
         }
     })
 }

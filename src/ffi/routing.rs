@@ -140,8 +140,15 @@ impl PyAPIRoute {
     /// `__new__` keeps the subtype allocation of pyo3, and `__init__` sets the state.
     #[new]
     #[pyo3(signature = (*args, **kwargs))]
-    const fn py_new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> Self {
-        let _ = (args, kwargs);
+    const fn py_new(
+        #[expect(unused_variables, reason = "`__init__` reads the arguments")] args: &Bound<
+            '_,
+            PyTuple,
+        >,
+        #[expect(unused_variables, reason = "`__init__` reads the arguments")] kwargs: Option<
+            &Bound<'_, PyDict>,
+        >,
+    ) -> Self {
         Self {
             path: String::new(),
         }
@@ -262,8 +269,15 @@ pub struct PyAPIWebSocketRoute {
 impl PyAPIWebSocketRoute {
     #[new]
     #[pyo3(signature = (*args, **kwargs))]
-    const fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> Self {
-        let _ = (args, kwargs);
+    const fn new(
+        #[expect(unused_variables, reason = "`__init__` reads the arguments")] args: &Bound<
+            '_,
+            PyTuple,
+        >,
+        #[expect(unused_variables, reason = "`__init__` reads the arguments")] kwargs: Option<
+            &Bound<'_, PyDict>,
+        >,
+    ) -> Self {
         Self {
             path: String::new(),
         }

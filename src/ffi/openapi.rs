@@ -89,9 +89,8 @@ pub fn get_openapi(
 fn paths_from_routes(
     py: Python<'_>,
     routes: &Bound<'_, PyAny>,
-    separate_input_output_schemas: bool,
+    _separate_input_output_schemas: bool,
 ) -> PyResult<Py<PyAny>> {
-    let _ = separate_input_output_schemas;
     let paths = PyDict::new(py);
     for context in routes.try_iter()? {
         let context = context?;

@@ -33,9 +33,12 @@ fn jsonable_encoder(
     exclude_defaults: bool,
     exclude_none: bool,
     custom_encoder: Option<Py<PyAny>>,
+    #[expect(
+        unused_variables,
+        reason = "part of the FastAPI `jsonable_encoder` signature"
+    )]
     sqlalchemy_safe: bool,
 ) -> PyResult<Py<PyAny>> {
-    _ = sqlalchemy_safe;
     if let Some(encoder) = custom_encoder
         && let Ok(dict) = encoder.bind(py).cast::<PyDict>()
         && let Ok(Some(callback)) = dict.get_item(obj.get_type())

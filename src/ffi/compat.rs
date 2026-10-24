@@ -81,7 +81,7 @@ fn get_flat_dependant(
 
 #[pyfunction]
 #[pyo3(signature = (route))]
-fn generate_unique_id(py: Python<'_>, route: &Bound<'_, PyAny>) -> String {
+fn generate_unique_id(_py: Python<'_>, route: &Bound<'_, PyAny>) -> String {
     let name = route
         .getattr("name")
         .ok()
@@ -100,7 +100,6 @@ fn generate_unique_id(py: Python<'_>, route: &Bound<'_, PyAny>) -> String {
         .and_then(|mut it| it.next().transpose().ok().flatten())
         .and_then(|v| v.extract().ok())
         .unwrap_or_else(|| "get".to_owned());
-    let _ = py;
     format!(
         "{}_{}_{}",
         name,

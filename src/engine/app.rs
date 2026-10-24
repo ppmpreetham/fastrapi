@@ -374,12 +374,13 @@ impl FastrAPI {
         _py: Python<'_>,
         host: String,
         app: &Bound<'_, PyAny>,
-        name: Option<&str>,
+        #[expect(unused_variables, reason = "part of the starlette `host` signature")] name: Option<
+            &str,
+        >,
     ) -> PyResult<()> {
         if host.starts_with('/') {
             return Err(PyValueError::new_err("Host must not start with '/'"));
         }
-        let _ = name;
         let owned = app
             .clone()
             .into_any()

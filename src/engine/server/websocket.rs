@@ -160,8 +160,7 @@ pub async fn ws_handler(
     };
 
     match decision {
-        WSDecision::Reject(code) => {
-            let _ = code;
+        WSDecision::Reject(_) => {
             execute_teardowns_async(route.event_loop, teardowns).await;
             StatusCode::FORBIDDEN.into_response()
         }
