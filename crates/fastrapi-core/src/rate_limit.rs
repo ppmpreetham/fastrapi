@@ -2,7 +2,7 @@
 //! Each window keeps the second and the request count in one atomic value.
 //! The module removes old windows one time each second.
 
-use Ordering::SeqCst;
+use Ordering::Relaxed;
 use axum::extract::{ConnectInfo, Request};
 use papaya::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -23,7 +23,7 @@ struct RateLimitWindow {
 
 impl RateLimitWindow {
     fn is_live(&self, now_secs: u32) -> bool {
-        (self.data.load(SeqCst) >> 32) as u32 >= now_secs
+        (self.data.load(Relaxed) >> 32) as u32 >= now_secs
     }
 }
 
@@ -47,7 +47,7 @@ pub fn is_rate_limited(req: &Request, handler: usize, limit: NonZeroU32) -> bool
     let now_secs = Instant::now().duration_since(*start_time).as_secs() as u32;
 
     let pinned = limits.pin();
-    if LAST_SWEEP.swap(u64::from(now_secs), SeqCst) != u64::from(now_secs) {
+    if LAST_SWEEP.swap(u64::from(now_secs), Relaxed) != u64::from(now_secs) {
         pinned.retain(|_, window| window.is_live(now_secs));
     }
 
@@ -55,7 +55,7 @@ pub fn is_rate_limited(req: &Request, handler: usize, limit: NonZeroU32) -> bool
         data: AtomicU64::new(u64::from(now_secs) << 32),
     });
 
-    let result = bucket.data.try_update(SeqCst, SeqCst, |val| {
+    let result = bucket.data.try_update(Relaxed, Relaxed, |val| {
         let window_time = (val >> 32) as u32;
         let count = (val & 0xFFFFFFFF) as u32;
 

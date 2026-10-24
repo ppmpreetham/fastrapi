@@ -123,3 +123,14 @@ def test_websocket_frame_split_across_server_sends_is_received_intact():
             opcode, data = _recv_frame(sock)
             assert opcode == 0x1, f"unexpected opcode {opcode}"
             replies.append(data.decode())
+
+
+def test_rate_limit_rejects_requests_over_the_limit(client, app):
+    @app.get("/limited", rate_limit=2)
+    def limited():
+        return {"ok": True}
+
+    statuses = [client.get("/limited").status_code for _ in range(5)]
+    assert statuses[0] == 200
+    assert 429 in statuses
+    assert set(statuses) <= {200, 429}
