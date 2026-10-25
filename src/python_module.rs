@@ -205,12 +205,33 @@ mod fastrapi {
 
     #[pymodule]
     mod params {
+        use pyo3::prelude::*;
+        use pyo3::types::PyDict;
+
         #[pymodule_export]
         use fastrapi_routing::params::{
             PyBody as Body, PyCookie as Cookie, PyDepends as Depends, PyFile as File,
             PyForm as Form, PyHeader as Header, PyPath as Path, PyQuery as Query,
             PySecurity as Security, Undefined, Unset,
         };
+
+        #[pymodule_init]
+        fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            let py = m.py();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("module", "fastrapi.params")?;
+            let members = [
+                ("query", "query"),
+                ("header", "header"),
+                ("path", "path"),
+                ("cookie", "cookie"),
+            ];
+            let param_types = py
+                .import("enum")?
+                .getattr("Enum")?
+                .call(("ParamTypes", members), Some(&kwargs))?;
+            m.add("ParamTypes", param_types)
+        }
     }
 
     #[pymodule]

@@ -194,3 +194,9 @@ def test_openapi_constants():
     assert METHODS_WITH_BODY == {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}
     assert REF_PREFIX == "#/components/schemas/"
     assert REF_TEMPLATE == "#/components/schemas/{model}"
+
+
+def test_param_types_enum():
+    from fastrapi.params import ParamTypes
+
+    assert [member.value for member in ParamTypes] == ["query", "header", "path", "cookie"]
