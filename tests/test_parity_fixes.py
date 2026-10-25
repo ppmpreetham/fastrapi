@@ -166,3 +166,12 @@ def test_deep_dict_update_merges_lists():
     main = {"a": {"b": 1}, "tags": ["x"]}
     assert deep_dict_update(main, {"a": {"c": 2}, "tags": ["y"]}) is None
     assert main == {"a": {"b": 1, "c": 2}, "tags": ["x", "y"]}
+
+
+def test_generate_unique_id_matches_fastapi():
+    from types import SimpleNamespace
+
+    from fastrapi.utils import generate_unique_id
+
+    route = SimpleNamespace(name="read_item", path_format="/items/{item_id}", methods={"GET"})
+    assert generate_unique_id(route) == "read_item_items__item_id__get"

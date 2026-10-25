@@ -102,11 +102,23 @@ fn generate_unique_id(_py: Python<'_>, route: &Bound<'_, PyAny>) -> String {
         .and_then(|v| v.extract().ok())
         .unwrap_or_else(|| "get".to_owned());
     format!(
-        "{}_{}_{}",
-        name,
-        path.replace('/', "_").replace(['{', '}'], ""),
+        "{}_{}",
+        word_characters(&format!("{name}{path}")),
         method.to_ascii_lowercase()
     )
+}
+
+/// Changes each character that is not a letter, a digit or `_` to `_`, as `re.sub(r"\W", "_", text)` does.
+fn word_characters(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// You shouldn't use this class directly.
