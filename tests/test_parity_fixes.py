@@ -133,3 +133,13 @@ def test_middleware_submodules():
     from fastrapi.middleware.wsgi import WSGIMiddleware
 
     assert all((GZipMiddleware, HTTPSRedirectMiddleware, TrustedHostMiddleware, WSGIMiddleware))
+
+
+def test_default_placeholder():
+    from fastrapi.datastructures import Default, DefaultPlaceholder
+
+    placeholder = Default(0)
+    assert isinstance(placeholder, DefaultPlaceholder)
+    assert placeholder.value == 0
+    assert not placeholder
+    assert placeholder == Default(0)

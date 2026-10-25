@@ -108,6 +108,53 @@ fn generate_unique_id(_py: Python<'_>, route: &Bound<'_, PyAny>) -> String {
     )
 }
 
+/// You shouldn't use this class directly.
+///
+/// It's used internally to recognize when a default value has been overwritten, even
+/// if the overridden default value was truthy.
+#[pyclass(
+    name = "DefaultPlaceholder",
+    module = "fastrapi.datastructures",
+    frozen
+)]
+pub(crate) struct DefaultPlaceholder {
+    #[pyo3(get)]
+    value: Py<PyAny>,
+}
+
+#[pymethods]
+impl DefaultPlaceholder {
+    #[new]
+    const fn new(value: Py<PyAny>) -> Self {
+        Self { value }
+    }
+
+    fn __bool__(&self, py: Python<'_>) -> PyResult<bool> {
+        self.value.bind(py).is_truthy()
+    }
+
+    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        match other.cast::<Self>() {
+            Ok(other) => self.value.bind(py).eq(other.get().value.bind(py)),
+            Err(_) => Ok(false),
+        }
+    }
+}
+
+/// You shouldn't use this function directly.
+///
+/// It's used internally to recognize when a default value has been overwritten, even
+/// if the overridden default value was truthy.
+#[pyfunction(name = "Default")]
+const fn default_placeholder(value: Py<PyAny>) -> DefaultPlaceholder {
+    DefaultPlaceholder::new(value)
+}
+
+pub(crate) fn register_default_placeholder(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<DefaultPlaceholder>()?;
+    module.add_function(wrap_pyfunction!(default_placeholder, module)?)
+}
+
 /// Pass items or `DefaultPlaceholder`s by descending priority.
 ///
 /// The first one to _not_ be a `DefaultPlaceholder` will be returned.

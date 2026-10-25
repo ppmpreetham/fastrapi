@@ -272,6 +272,7 @@ mod fastrapi {
 
         #[pymodule_init]
         fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            crate::ffi::compat::register_default_placeholder(m)?;
             let py = m.py();
             let module = py.import("starlette.datastructures")?;
             for name in [
