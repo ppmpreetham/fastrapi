@@ -143,3 +143,12 @@ def test_default_placeholder():
     assert placeholder.value == 0
     assert not placeholder
     assert placeholder == Default(0)
+
+
+def test_get_value_or_default_skips_placeholders():
+    from fastrapi.datastructures import Default
+    from fastrapi.utils import get_value_or_default
+
+    first = Default(1)
+    assert get_value_or_default(first, Default(2), None, 3) is None
+    assert get_value_or_default(first, Default(2)) is first

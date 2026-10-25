@@ -167,15 +167,13 @@ fn get_value_or_default(
     first_item: Py<PyAny>,
     extra_items: &Bound<'_, PyTuple>,
 ) -> Py<PyAny> {
-    if !first_item.bind(py).is_none() {
+    if !first_item.bind(py).is_instance_of::<DefaultPlaceholder>() {
         return first_item;
     }
-    for item in extra_items.iter() {
-        if !item.is_none() {
-            return item.unbind();
-        }
-    }
-    py.None()
+    extra_items
+        .iter()
+        .find(|item| !item.is_instance_of::<DefaultPlaceholder>())
+        .map_or(first_item, Bound::unbind)
 }
 
 pub(crate) fn register_dependencies(parent: &Bound<'_, PyModule>) -> PyResult<()> {
