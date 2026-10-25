@@ -158,3 +158,11 @@ def test_get_path_param_names_returns_a_set():
     from fastrapi.utils import get_path_param_names
 
     assert get_path_param_names("/a/{x}/{y}/{x}") == {"x", "y"}
+
+
+def test_deep_dict_update_merges_lists():
+    from fastrapi.utils import deep_dict_update
+
+    main = {"a": {"b": 1}, "tags": ["x"]}
+    assert deep_dict_update(main, {"a": {"c": 2}, "tags": ["y"]}) is None
+    assert main == {"a": {"b": 1, "c": 2}, "tags": ["x", "y"]}
