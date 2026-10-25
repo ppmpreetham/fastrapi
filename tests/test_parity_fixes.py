@@ -124,3 +124,12 @@ def test_background_tasks_list():
         (job, (1,), {"b": 2}),
         (job, (3,), {}),
     ]
+
+
+def test_middleware_submodules():
+    from fastrapi.middleware.gzip import GZipMiddleware
+    from fastrapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+    from fastrapi.middleware.trustedhost import TrustedHostMiddleware
+    from fastrapi.middleware.wsgi import WSGIMiddleware
+
+    assert all((GZipMiddleware, HTTPSRedirectMiddleware, TrustedHostMiddleware, WSGIMiddleware))

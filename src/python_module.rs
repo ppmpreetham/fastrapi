@@ -420,6 +420,39 @@ mod fastrapi {
             #[pymodule_export]
             use fastrapi_http::middleware::CORSMiddleware;
         }
+
+        #[pymodule]
+        mod gzip {
+            #[pymodule_export]
+            use fastrapi_http::middleware::GZipMiddleware;
+        }
+
+        #[pymodule]
+        mod httpsredirect {
+            #[pymodule_export]
+            use fastrapi_http::middleware::HTTPSRedirectMiddleware;
+        }
+
+        #[pymodule]
+        mod trustedhost {
+            #[pymodule_export]
+            use fastrapi_http::middleware::TrustedHostMiddleware;
+        }
+
+        #[pymodule]
+        mod wsgi {
+            use pyo3::prelude::*;
+
+            #[pymodule_init]
+            fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+                m.add(
+                    "WSGIMiddleware",
+                    m.py()
+                        .import("starlette.middleware.wsgi")?
+                        .getattr("WSGIMiddleware")?,
+                )
+            }
+        }
     }
 
     #[pymodule]
