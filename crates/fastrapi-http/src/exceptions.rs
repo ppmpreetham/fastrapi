@@ -182,6 +182,7 @@ crate::macros::define_validation_subclass!(
 /// ```
 #[pyclass(
     extends = PyException,
+    subclass,
     name = "HTTPException",
     get_all,
     from_py_object
@@ -196,29 +197,31 @@ pub struct PyHTTPException {
 #[pymethods]
 impl PyHTTPException {
     #[new]
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        let argument = |index: usize, name: &str| {
+            args.get_item(index)
+                .ok()
+                .or_else(|| kwargs.and_then(|kwargs| kwargs.get_item(name).ok().flatten()))
+        };
+        let status_code = argument(0, "status_code")
+            .and_then(|code| code.extract().ok())
+            .unwrap_or(500);
+        let detail = argument(1, "detail").filter(|detail| !detail.is_none());
+        let headers = argument(2, "headers").and_then(|headers| headers.cast_into().ok());
+        Self::with_detail(py, status_code, detail, headers)
+    }
+
     #[pyo3(signature = (status_code, detail=None, headers=None))]
-    fn new(
+    fn __init__(
+        &mut self,
         py: Python<'_>,
         status_code: u16,
         detail: Option<Bound<'_, PyAny>>,
         headers: Option<Bound<'_, PyDict>>,
-    ) -> Self {
-        let default_detail = StatusCode::from_u16(status_code)
-            .ok()
-            .and_then(|status| status.canonical_reason())
-            .unwrap_or("Internal Server Error");
-        Self {
-            status_code,
-            detail: detail.map_or_else(
-                || PyString::new(py, default_detail).into_any().unbind(),
-                Into::into,
-            ),
-            headers: headers.map(Into::into),
-        }
+    ) {
+        *self = Self::with_detail(py, status_code, detail, headers);
     }
-
-    #[pyo3(signature = (*_args, **_kwargs))]
-    const fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
 
     fn __str__(&self, py: Python<'_>) -> String {
         let detail = self.detail.bind(py);
@@ -267,6 +270,26 @@ const fn body_allowed(status: StatusCode) -> bool {
 }
 
 impl PyHTTPException {
+    fn with_detail(
+        py: Python<'_>,
+        status_code: u16,
+        detail: Option<Bound<'_, PyAny>>,
+        headers: Option<Bound<'_, PyDict>>,
+    ) -> Self {
+        let default_detail = StatusCode::from_u16(status_code)
+            .ok()
+            .and_then(|status| status.canonical_reason())
+            .unwrap_or("Internal Server Error");
+        Self {
+            status_code,
+            detail: detail.map_or_else(
+                || PyString::new(py, default_detail).into_any().unbind(),
+                Into::into,
+            ),
+            headers: headers.map(Into::into),
+        }
+    }
+
     pub(crate) fn bad_request(py: Python<'_>, detail: &str) -> PyErr {
         let exc = Self {
             status_code: 400,

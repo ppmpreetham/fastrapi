@@ -218,3 +218,20 @@ def test_exception_error_models():
     assert EndpointContext(function="f") == {"function": "f"}
     assert issubclass(RequestErrorModel, BaseModel)
     assert WebSocketErrorModel.__name__ == "WebSocket"
+
+
+def test_http_exception_subclass(client, app):
+    from fastrapi import HTTPException
+
+    class TeapotError(HTTPException):
+        def __init__(self):
+            super().__init__(status_code=418, detail="teapot")
+
+    @app.get("/teapot")
+    def teapot():
+        raise TeapotError()
+
+    response = client.get("/teapot")
+    assert response.status_code == 418
+    assert response.json() == {"detail": "teapot"}
+    assert HTTPException(404, "missing").detail == "missing"
