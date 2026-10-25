@@ -208,3 +208,13 @@ def test_validation_error_endpoint_context():
     exc = RequestValidationError([], body={"a": 1}, endpoint_ctx={"function": "f", "path": "/p", "line": 3})
     assert exc.body == {"a": 1}
     assert (exc.endpoint_function, exc.endpoint_path, exc.endpoint_file, exc.endpoint_line) == ("f", "/p", None, 3)
+
+
+def test_exception_error_models():
+    from pydantic import BaseModel
+
+    from fastrapi.exceptions import EndpointContext, RequestErrorModel, WebSocketErrorModel
+
+    assert EndpointContext(function="f") == {"function": "f"}
+    assert issubclass(RequestErrorModel, BaseModel)
+    assert WebSocketErrorModel.__name__ == "WebSocket"

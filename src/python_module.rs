@@ -201,6 +201,30 @@ mod fastrapi {
             PyWebSocketException as WebSocketException,
             PyWebSocketRequestValidationError as WebSocketRequestValidationError,
         };
+        use pyo3::prelude::*;
+        use pyo3::types::PyDict;
+
+        #[pymodule_init]
+        fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            let py = m.py();
+            let builtins = py.import("builtins")?;
+            let fields = PyDict::new(py);
+            fields.set_item("function", builtins.getattr("str")?)?;
+            fields.set_item("path", builtins.getattr("str")?)?;
+            fields.set_item("file", builtins.getattr("str")?)?;
+            fields.set_item("line", builtins.getattr("int")?)?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("total", false)?;
+            m.add(
+                "EndpointContext",
+                py.import("typing")?
+                    .getattr("TypedDict")?
+                    .call(("EndpointContext", fields), Some(&kwargs))?,
+            )?;
+            let create_model = py.import("pydantic")?.getattr("create_model")?;
+            m.add("RequestErrorModel", create_model.call1(("Request",))?)?;
+            m.add("WebSocketErrorModel", create_model.call1(("WebSocket",))?)
+        }
     }
 
     #[pymodule]
