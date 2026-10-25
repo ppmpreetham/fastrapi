@@ -62,15 +62,53 @@ pub struct PyValidationException {
     )]
     #[pyo3(get)]
     pub _errors: Py<PyAny>,
+    #[pyo3(get)]
+    pub endpoint_ctx: Option<Py<PyAny>>,
+}
+
+impl PyValidationException {
+    fn context_value(&self, py: Python<'_>, key: &str) -> Option<Py<PyAny>> {
+        let ctx = self.endpoint_ctx.as_ref()?.bind(py);
+        ctx.call_method1("get", (key,))
+            .ok()
+            .filter(|value| !value.is_none())
+            .map(Bound::unbind)
+    }
 }
 
 #[pymethods]
 impl PyValidationException {
     #[new]
-    fn new(errors: Bound<'_, PyAny>) -> Self {
+    #[pyo3(signature = (errors, *, endpoint_ctx=None))]
+    pub fn new(errors: Bound<'_, PyAny>, endpoint_ctx: Option<Bound<'_, PyAny>>) -> Self {
         Self {
             _errors: errors.into(),
+            endpoint_ctx: endpoint_ctx.filter(|ctx| !ctx.is_none()).map(Bound::unbind),
         }
+    }
+
+    /// The name of the endpoint function that raised the error.
+    #[getter]
+    fn endpoint_function(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.context_value(py, "function")
+    }
+
+    /// The path of the endpoint that raised the error.
+    #[getter]
+    fn endpoint_path(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.context_value(py, "path")
+    }
+
+    /// The source file of the endpoint function.
+    #[getter]
+    fn endpoint_file(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.context_value(py, "file")
+    }
+
+    /// The line of the endpoint function in its source file.
+    #[getter]
+    fn endpoint_line(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.context_value(py, "line")
     }
 
     #[pyo3(signature = (*_args, **_kwargs))]

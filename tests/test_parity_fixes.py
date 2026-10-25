@@ -200,3 +200,11 @@ def test_param_types_enum():
     from fastrapi.params import ParamTypes
 
     assert [member.value for member in ParamTypes] == ["query", "header", "path", "cookie"]
+
+
+def test_validation_error_endpoint_context():
+    from fastrapi.exceptions import RequestValidationError
+
+    exc = RequestValidationError([], body={"a": 1}, endpoint_ctx={"function": "f", "path": "/p", "line": 3})
+    assert exc.body == {"a": 1}
+    assert (exc.endpoint_function, exc.endpoint_path, exc.endpoint_file, exc.endpoint_line) == ("f", "/p", None, 3)

@@ -14,14 +14,15 @@ macro_rules! define_validation_subclass {
         #[pyo3::prelude::pymethods]
         impl $struct_name {
             #[new]
-            #[pyo3(signature = (errors, *, body=None))]
+            #[pyo3(signature = (errors, *, body=None, endpoint_ctx=None))]
             fn new(
                 py: pyo3::prelude::Python<'_>,
                 errors: pyo3::prelude::Bound<'_, pyo3::prelude::PyAny>,
                 body: Option<pyo3::prelude::Bound<'_, pyo3::prelude::PyAny>>,
+                endpoint_ctx: Option<pyo3::prelude::Bound<'_, pyo3::prelude::PyAny>>,
             ) -> pyo3::prelude::PyClassInitializer<Self> {
                 let body_py = body.map(|b| b.into()).unwrap_or_else(|| py.None());
-                pyo3::prelude::PyClassInitializer::from($crate::exceptions::PyValidationException::new(errors))
+                pyo3::prelude::PyClassInitializer::from($crate::exceptions::PyValidationException::new(errors, endpoint_ctx))
                     .add_subclass(Self { body: body_py })
             }
 
