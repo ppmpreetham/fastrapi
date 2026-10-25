@@ -7,6 +7,7 @@ use fastrapi_routing::dependencies::parse_dependencies;
 use pyo3::Bound;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
+use std::collections::HashSet;
 
 fn python_type<'py>(
     py: Python<'py>,
@@ -66,8 +67,8 @@ fn get_dependant(
 }
 
 #[pyfunction]
-fn get_path_param_names(path: &str) -> Vec<String> {
-    extract_path_param_names(path)
+fn get_path_param_names(path: &str) -> HashSet<String> {
+    extract_path_param_names(path).into_iter().collect()
 }
 
 #[pyfunction]

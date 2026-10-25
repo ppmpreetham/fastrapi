@@ -152,3 +152,9 @@ def test_get_value_or_default_skips_placeholders():
     first = Default(1)
     assert get_value_or_default(first, Default(2), None, 3) is None
     assert get_value_or_default(first, Default(2)) is first
+
+
+def test_get_path_param_names_returns_a_set():
+    from fastrapi.utils import get_path_param_names
+
+    assert get_path_param_names("/a/{x}/{y}/{x}") == {"x", "y"}
