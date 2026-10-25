@@ -2,6 +2,7 @@
 //! This module builds the `fastrapi` submodules for dependencies, security, exception handlers, OpenAPI and docs.
 
 use fastrapi_core::path::extract_path_param_names;
+use fastrapi_http::exceptions::PyFastAPIDeprecationWarning;
 use fastrapi_http::responses::PyJSONResponse;
 use fastrapi_routing::dependencies::parse_dependencies;
 use pyo3::Bound;
@@ -545,13 +546,24 @@ pub(crate) fn register_openapi_helpers(module: &Bound<'_, PyModule>) -> PyResult
 }
 
 #[pyfunction]
-fn generate_operation_id_for_path(name: &str, path: &str, method: &str) -> String {
-    format!(
-        "{}_{}_{}",
-        name,
-        path.replace('/', "_"),
+#[pyo3(signature = (*, name, path, method))]
+fn generate_operation_id_for_path(
+    py: Python<'_>,
+    name: &str,
+    path: &str,
+    method: &str,
+) -> PyResult<String> {
+    PyErr::warn(
+        py,
+        &py.get_type::<PyFastAPIDeprecationWarning>(),
+        c"fastapi.utils.generate_operation_id_for_path() was deprecated, it is not used internally, and will be removed soon",
+        2,
+    )?;
+    Ok(format!(
+        "{}_{}",
+        word_characters(&format!("{name}{path}")),
         method.to_ascii_lowercase()
-    )
+    ))
 }
 
 #[pyfunction]

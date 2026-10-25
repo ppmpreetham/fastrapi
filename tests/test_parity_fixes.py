@@ -175,3 +175,14 @@ def test_generate_unique_id_matches_fastapi():
 
     route = SimpleNamespace(name="read_item", path_format="/items/{item_id}", methods={"GET"})
     assert generate_unique_id(route) == "read_item_items__item_id__get"
+
+
+def test_generate_operation_id_for_path_matches_fastapi():
+    import pytest
+
+    from fastrapi.exceptions import FastAPIDeprecationWarning
+    from fastrapi.utils import generate_operation_id_for_path
+
+    with pytest.warns(FastAPIDeprecationWarning):
+        operation_id = generate_operation_id_for_path(name="read", path="/items/{id}", method="GET")
+    assert operation_id == "read_items__id__get"
