@@ -7,9 +7,10 @@
 
 use crate::ffi::compat::register_openapi_helpers;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyModule};
+use pyo3::types::{PyAny, PyDict, PyModule, PySet};
 
 /// The values of `fastapi.openapi.constants`.
+pub(crate) const REF_PREFIX: &str = "#/components/schemas/";
 pub(crate) const REF_TEMPLATE: &str = "#/components/schemas/{model}";
 pub(crate) const METHODS_WITH_BODY: [&str; 6] = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"];
 
@@ -162,7 +163,8 @@ pub(crate) fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
 
     let constants = PyModule::new(py, "constants")?;
     constants.add("REF_TEMPLATE", REF_TEMPLATE)?;
-    constants.add("METHODS_WITH_BODY", METHODS_WITH_BODY)?;
+    constants.add("METHODS_WITH_BODY", PySet::new(py, METHODS_WITH_BODY)?)?;
+    constants.add("REF_PREFIX", REF_PREFIX)?;
     openapi_module.add_submodule(&constants)?;
 
     let utils = PyModule::new(py, "utils")?;

@@ -186,3 +186,11 @@ def test_generate_operation_id_for_path_matches_fastapi():
     with pytest.warns(FastAPIDeprecationWarning):
         operation_id = generate_operation_id_for_path(name="read", path="/items/{id}", method="GET")
     assert operation_id == "read_items__id__get"
+
+
+def test_openapi_constants():
+    from fastrapi.openapi.constants import METHODS_WITH_BODY, REF_PREFIX, REF_TEMPLATE
+
+    assert METHODS_WITH_BODY == {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}
+    assert REF_PREFIX == "#/components/schemas/"
+    assert REF_TEMPLATE == "#/components/schemas/{model}"
