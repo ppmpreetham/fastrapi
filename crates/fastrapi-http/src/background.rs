@@ -8,7 +8,7 @@ use fastrapi_runtime::tokio_runtime::spawn;
 use parking_lot::Mutex;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyList, PyTuple};
 use std::mem::take;
 use std::sync::Arc;
 use tracing::error;
@@ -53,11 +53,59 @@ impl Default for PyBackgroundTasks {
 #[pymethods]
 impl PyBackgroundTasks {
     #[new]
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            tasks: Arc::new(Mutex::new(Vec::new())),
+    #[pyo3(signature = (tasks=None))]
+    fn py_new(tasks: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let mut stored = Vec::new();
+        if let Some(tasks) = tasks {
+            for task in tasks.try_iter()? {
+                let task = task?;
+                let py = task.py();
+                let kwargs = task.getattr(intern!(py, "kwargs"))?;
+                let kwargs = if kwargs.is_none() {
+                    None
+                } else {
+                    Some(kwargs.cast_into::<PyDict>()?.unbind())
+                };
+                stored.push((
+                    task.getattr(intern!(py, "func"))?.unbind(),
+                    task.getattr(intern!(py, "args"))?.extract()?,
+                    kwargs,
+                ));
+            }
         }
+        Ok(Self {
+            tasks: Arc::new(Mutex::new(stored)),
+        })
+    }
+
+    /// The tasks to run after the response is sent, as `BackgroundTask` objects.
+    #[getter]
+    fn tasks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let task_class = py
+            .import(intern!(py, "starlette.background"))?
+            .getattr(intern!(py, "BackgroundTask"))?;
+        let snapshot: Vec<Task> = self
+            .tasks
+            .lock()
+            .iter()
+            .map(|(func, args, kwargs)| {
+                (
+                    func.clone_ref(py),
+                    args.iter().map(|arg| arg.clone_ref(py)).collect(),
+                    kwargs.as_ref().map(|kwargs| kwargs.clone_ref(py)),
+                )
+            })
+            .collect();
+        let tasks = PyList::empty(py);
+        for (func, args, kwargs) in &snapshot {
+            let mut call_args = vec![func.clone_ref(py)];
+            call_args.extend(args.iter().map(|arg| arg.clone_ref(py)));
+            tasks.append(task_class.call(
+                PyTuple::new(py, call_args)?,
+                kwargs.as_ref().map(|kwargs| kwargs.bind(py)),
+            )?)?;
+        }
+        Ok(tasks)
     }
 
     /// Add a function to be called in the background after the response is sent.
@@ -133,6 +181,13 @@ impl PendingTasks {
 }
 
 impl PyBackgroundTasks {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            tasks: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
     #[must_use]
     pub fn execute_all(&self, event_loop: EventLoop) -> PendingTasks {
         PendingTasks {

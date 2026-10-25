@@ -108,3 +108,19 @@ def test_upload_file_file_attribute(client, app):
 
     response = client.post("/upload-sync", files={"file": ("a.txt", b"hello", "text/plain")})
     assert response.json() == {"data": "hello"}
+
+
+def test_background_tasks_list():
+    from starlette.background import BackgroundTask
+
+    from fastrapi import BackgroundTasks
+
+    def job(a, b=0):
+        return a + b
+
+    tasks = BackgroundTasks(tasks=[BackgroundTask(job, 1, b=2)])
+    tasks.add_task(job, 3)
+    assert [(task.func, task.args, task.kwargs) for task in tasks.tasks] == [
+        (job, (1,), {"b": 2}),
+        (job, (3,), {}),
+    ]
