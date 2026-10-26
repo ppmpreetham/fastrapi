@@ -209,9 +209,9 @@ fn session_layer(app: Router, container: &MiddlewareContainer) -> Router {
 
 fn gzip_layer(app: Router, container: &MiddlewareContainer) -> Router {
     match &container.gzip {
-        Some(config) => app.layer(
-            CompressionLayer::new().compress_when(SizeAbove::new(config.minimum_size as u16)),
-        ),
+        Some(config) => app.layer(CompressionLayer::new().compress_when(SizeAbove::new(
+            u16::try_from(config.minimum_size).unwrap_or(u16::MAX),
+        ))),
         None => app,
     }
 }
