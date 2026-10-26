@@ -251,3 +251,31 @@ def test_cors_default_methods_are_get_only(client, app):
         headers={"Origin": "https://a.example", "Access-Control-Request-Method": "GET"},
     )
     assert response.headers["access-control-allow-methods"] == "GET"
+
+
+def test_cors_wildcards_with_credentials(client, app):
+    from fastrapi.middleware import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.get("/c")
+    def c():
+        return {}
+
+    response = client.options(
+        "/c",
+        headers={
+            "Origin": "https://a.example",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "x-token",
+        },
+    )
+    assert response.headers["access-control-allow-origin"] == "https://a.example"
+    assert response.headers["access-control-allow-credentials"] == "true"
+    assert response.headers["access-control-allow-headers"] == "x-token"

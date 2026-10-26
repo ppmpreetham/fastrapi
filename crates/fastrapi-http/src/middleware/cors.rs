@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashSet;
 use std::str::FromStr;
-use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 
 use smart_default::SmartDefault;
 use std::time::Duration;
@@ -108,13 +108,9 @@ pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
         false,
     )?;
 
-    if config.allow_credentials && has_wildcard_origin {
-        return Err(PyValueError::new_err(
-            "CORS configuration error: allow_credentials=True cannot be used with allow_origins=['*'].",
-        ));
-    }
-
-    if has_wildcard_origin {
+    if has_wildcard_origin && config.allow_credentials {
+        layer = layer.allow_origin(AllowOrigin::mirror_request());
+    } else if has_wildcard_origin {
         layer = layer.allow_origin(AllowOrigin::any());
     } else if !config.allow_origins.is_empty() {
         layer = layer.allow_origin(origins);
@@ -129,7 +125,15 @@ pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
     )?;
 
     if has_wildcard_method {
-        layer = layer.allow_methods(AllowMethods::any());
+        layer = layer.allow_methods([
+            Method::DELETE,
+            Method::GET,
+            Method::HEAD,
+            Method::OPTIONS,
+            Method::PATCH,
+            Method::POST,
+            Method::PUT,
+        ]);
     } else {
         layer = layer.allow_methods(methods);
     }
@@ -143,7 +147,7 @@ pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
     )?;
 
     if has_wildcard_header {
-        layer = layer.allow_headers(AllowHeaders::any());
+        layer = layer.allow_headers(AllowHeaders::mirror_request());
     } else if !config.allow_headers.is_empty() {
         layer = layer.allow_headers(headers);
     }
