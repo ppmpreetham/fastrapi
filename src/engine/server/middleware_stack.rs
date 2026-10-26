@@ -16,7 +16,7 @@ use pyo3::types::PyAnyMethods as _;
 use pyo3::{Bound, Py, PyAny, Python};
 use sha2::{Digest, Sha256};
 use tower_http::compression::CompressionLayer;
-use tower_http::compression::predicate::SizeAbove;
+use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
 use tower_http::normalize_path::NormalizePathLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -209,9 +209,12 @@ fn session_layer(app: Router, container: &MiddlewareContainer) -> Router {
 
 fn gzip_layer(app: Router, container: &MiddlewareContainer) -> Router {
     match &container.gzip {
-        Some(config) => app.layer(CompressionLayer::new().compress_when(SizeAbove::new(
-            u16::try_from(config.minimum_size).unwrap_or(u16::MAX),
-        ))),
+        Some(config) => app.layer(
+            CompressionLayer::new().compress_when(
+                SizeAbove::new(u16::try_from(config.minimum_size).unwrap_or(u16::MAX))
+                    .and(NotForContentType::SSE),
+            ),
+        ),
         None => app,
     }
 }
