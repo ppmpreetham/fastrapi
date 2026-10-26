@@ -283,12 +283,12 @@ fn trusted_host_layer(app: Router, container: &MiddlewareContainer) -> Router {
             }
 
             if redirect
-                && let Some(base) = host.strip_prefix("www.")
-                && host_matches(&allowed, base)
+                && allowed
+                    .iter()
+                    .any(|pattern| pattern.strip_prefix("www.") == Some(host))
             {
-                let port = authority.strip_prefix(host).unwrap_or_default();
                 let scheme = req.uri().scheme().cloned().unwrap_or(Scheme::HTTP);
-                return redirect_to(&req, scheme, &format!("{base}{port}"));
+                return redirect_to(&req, scheme, &format!("www.{authority}"));
             }
 
             (StatusCode::BAD_REQUEST, "Invalid host header").into_response()

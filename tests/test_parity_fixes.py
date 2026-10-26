@@ -294,3 +294,18 @@ def test_https_redirect_uses_https(client, app):
     assert response.status_code == 307
     assert response.headers["location"].startswith("https://127.0.0.1")
     assert response.headers["location"].endswith("/r?x=1")
+
+
+def test_trusted_host_redirects_to_www(client, app):
+    from fastrapi.middleware import TrustedHostMiddleware
+
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["www.example.com"])
+
+    @app.get("/t")
+    def t():
+        return {}
+
+    response = client.get("/t", headers={"Host": "example.com"}, follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "http://www.example.com/t"
+    assert client.get("/t", headers={"Host": "other.com"}).status_code == 400
