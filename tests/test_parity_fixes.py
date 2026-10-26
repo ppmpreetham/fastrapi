@@ -322,3 +322,32 @@ def test_request_url_inside_http_middleware(client, app):
         return {}
 
     assert client.get("/u?a=1").json() == {"path": "/u", "query": "a=1", "status": 200}
+
+
+def test_middleware_early_return_skips_endpoint(client, app):
+    import time
+
+    from fastrapi.responses import JSONResponse
+
+    calls = []
+
+    @app.middleware("http")
+    async def guard(request, call_next):
+        if request.url.path == "/blocked":
+            return JSONResponse({"blocked": True}, status_code=403)
+        return await call_next(request)
+
+    @app.get("/blocked")
+    def blocked():
+        calls.append("blocked")
+        return {}
+
+    @app.get("/open")
+    def open_route():
+        calls.append("open")
+        return {"ok": True}
+
+    assert client.get("/blocked").status_code == 403
+    assert client.get("/open").json() == {"ok": True}
+    time.sleep(0.2)
+    assert calls == ["open"]

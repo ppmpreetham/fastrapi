@@ -13,14 +13,13 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use fastrapi_runtime::blocking::run_python;
-use fastrapi_runtime::tokio_runtime::spawn;
 use futures_util::future::BoxFuture;
+use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
 use pyo3::{Bound, intern};
 use pyo3_async_runtimes::TaskLocals;
-use tokio::sync::oneshot::{Receiver, channel};
 
 #[pyclass(
     frozen,
@@ -56,17 +55,42 @@ impl PyDownstreamResponse {
     skip_from_py_object
 )]
 pub struct PyCallNext {
-    future: Py<PyAny>,
+    downstream: Mutex<Option<Downstream>>,
+    event_loop: EventLoop,
+}
+
+struct Downstream {
+    middlewares: Arc<Vec<Arc<super::PyMiddleware>>>,
+    idx: usize,
+    request: Request,
+    next: Next,
 }
 
 #[pymethods]
 impl PyCallNext {
-    fn __call__<'py>(&self, py: Python<'py>, _request: &Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        self.future.bind(py).clone()
-    }
-
-    fn __await<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
-        self.future.bind(py).clone()
+    fn __call__<'py>(
+        &self,
+        py: Python<'py>,
+        _request: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let Some(downstream) = self.downstream.lock().take() else {
+            return Err(PyRuntimeError::new_err("call_next was already called"));
+        };
+        let event_loop = self.event_loop;
+        let bridged = async move {
+            let Downstream {
+                middlewares,
+                idx,
+                request,
+                next,
+            } = downstream;
+            let response = drive(middlewares, idx + 1, request, next, event_loop).await;
+            let (parts, body) = split_response(response);
+            let body_bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
+            Python::attach(|py| Ok(parts_to_py(py, &parts, body_bytes)?.unbind()))
+        };
+        let locals = TaskLocals::new(event_loop.bind(py).clone());
+        py_bridge::future_into_py_with_locals(py, locals, bridged)
     }
 }
 
@@ -170,18 +194,12 @@ fn drive(
         let method = parts.method.clone();
         let uri = parts.uri.clone();
         let headers = Arc::new(parts.headers.clone());
-        let downstream_request = Request::from_parts(parts, body);
-
-        let (tx, rx) = channel::<Response>();
-        {
-            let inner_mws = middlewares.clone();
-            let inner_loop = event_loop;
-            spawn(async move {
-                let response =
-                    drive(inner_mws, idx + 1, downstream_request, next, inner_loop).await;
-                _ = tx.send(response);
-            });
-        }
+        let downstream = Downstream {
+            middlewares,
+            idx,
+            request: Request::from_parts(parts, body),
+            next,
+        };
 
         let outcome = run_python(move |py| -> Result<Outcome, Response> {
             invoke(
@@ -191,7 +209,7 @@ fn drive(
                 uri.path(),
                 uri.query().unwrap_or(""),
                 headers,
-                rx,
+                downstream,
                 event_loop,
             )
         })
@@ -225,7 +243,7 @@ fn invoke(
     path: &str,
     query: &str,
     headers: Arc<HeaderMap>,
-    downstream: Receiver<Response>,
+    downstream: Downstream,
     event_loop: EventLoop,
 ) -> Result<Outcome, Response> {
     let fail = |err: PyErr| -> Response {
@@ -247,23 +265,16 @@ fn invoke(
         .into_any()
         .unbind();
 
-    let bridged = async move {
-        let response = downstream
-            .await
-            .map_err(|_| PyRuntimeError::new_err("call_next pipeline terminated"))?;
-        let (parts, body) = split_response(response);
-        let body_bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
-        Python::attach(|py| Ok(parts_to_py(py, &parts, body_bytes)?.unbind()))
-    };
-    let locals = TaskLocals::new(event_loop.bind(py).clone());
-    let future = py_bridge::future_into_py_with_locals(py, locals, bridged)
-        .map_err(fail)?
-        .unbind();
-
-    let call_next = Bound::new(py, PyCallNext { future })
-        .map_err(fail)?
-        .into_any()
-        .unbind();
+    let call_next = Bound::new(
+        py,
+        PyCallNext {
+            downstream: Mutex::new(Some(downstream)),
+            event_loop,
+        },
+    )
+    .map_err(fail)?
+    .into_any()
+    .unbind();
 
     let result = mw.func.bind(py).call1((req_obj, call_next)).map_err(fail)?;
 
