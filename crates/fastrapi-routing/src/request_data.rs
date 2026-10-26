@@ -75,13 +75,13 @@ impl ParsedParameter {
 }
 
 fn parse_bool(raw: &str) -> Option<bool> {
-    if ["1", "true", "on", "yes"]
+    if ["1", "true", "t", "on", "yes", "y"]
         .iter()
         .any(|s| raw.eq_ignore_ascii_case(s))
     {
         Some(true)
     } else {
-        ["0", "false", "off", "no"]
+        ["0", "false", "f", "off", "no", "n"]
             .iter()
             .any(|s| raw.eq_ignore_ascii_case(s))
             .then_some(false)

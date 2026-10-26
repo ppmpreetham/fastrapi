@@ -387,3 +387,11 @@ def test_declared_middleware_receives_kwargs():
     threading.Thread(target=app.serve, args=("127.0.0.1", port), daemon=True).start()
     time.sleep(0.5)
     assert httpx.get(f"http://127.0.0.1:{port}/m").headers["x-tag"] == "set"
+
+
+def test_bool_query_accepts_pydantic_strings(client, app):
+    @app.get("/flag")
+    def flag(on: bool):
+        return {"on": on}
+
+    assert [client.get("/flag", params={"on": v}).json()["on"] for v in ("t", "Y", "f", "n")] == [True, True, False, False]
