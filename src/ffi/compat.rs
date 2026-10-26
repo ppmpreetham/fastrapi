@@ -109,7 +109,6 @@ fn generate_unique_id(_py: Python<'_>, route: &Bound<'_, PyAny>) -> String {
     )
 }
 
-/// Changes each character that is not a letter, a digit or `_` to `_`, as `re.sub(r"\W", "_", text)` does.
 fn word_characters(text: &str) -> String {
     text.chars()
         .map(|c| {
@@ -122,10 +121,6 @@ fn word_characters(text: &str) -> String {
         .collect()
 }
 
-/// You shouldn't use this class directly.
-///
-/// It's used internally to recognize when a default value has been overwritten, even
-/// if the overridden default value was truthy.
 #[pyclass(
     name = "DefaultPlaceholder",
     module = "fastrapi.datastructures",
@@ -155,10 +150,6 @@ impl DefaultPlaceholder {
     }
 }
 
-/// You shouldn't use this function directly.
-///
-/// It's used internally to recognize when a default value has been overwritten, even
-/// if the overridden default value was truthy.
 #[pyfunction(name = "Default")]
 const fn default_placeholder(value: Py<PyAny>) -> DefaultPlaceholder {
     DefaultPlaceholder::new(value)

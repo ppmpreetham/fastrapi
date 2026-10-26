@@ -134,9 +134,6 @@ impl PyUploadFile {
         })
     }
 
-    /// The file object that holds the data, as a standard Python file.
-    ///
-    /// Use it in a regular `def` function. Its methods block, they are not async.
     #[getter]
     fn file(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(file) = &self.file_obj {
@@ -153,7 +150,6 @@ impl PyUploadFile {
         Ok(file)
     }
 
-    /// The headers of this part of the multipart request.
     #[getter]
     fn headers(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(headers) = &self.headers {

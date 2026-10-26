@@ -1,6 +1,3 @@
-//! The HTML pages of the interactive API docs: Swagger UI, ReDoc and the Swagger UI OAuth2 redirect.
-//! The Python functions copy `fastapi.openapi.docs`, and the server uses the same builders for its docs routes.
-
 use fastrapi_http::responses::PyHTMLResponse;
 use fastrapi_pyutil::json::write_py_json;
 use pyo3::prelude::*;
@@ -15,7 +12,6 @@ pub(crate) const FAVICON_URL: &str = "https://fastapi.tiangolo.com/img/favicon.p
 pub(crate) const REDOC_JS_URL: &str =
     "https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js";
 
-/// The HTML page that Swagger UI opens after an OAuth2 login.
 pub(crate) const OAUTH2_REDIRECT_HTML: &str = r#"
     <!doctype html>
     <html lang="en-US">
@@ -98,7 +94,6 @@ pub(crate) const OAUTH2_REDIRECT_HTML: &str = r#"
     </html>
         "#;
 
-/// The settings that FastAPI gives to Swagger UI when the app does not change them.
 pub(crate) fn swagger_ui_default_parameters(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     let params = PyDict::new(py);
     params.set_item("dom_id", "#swagger-ui")?;
@@ -118,7 +113,6 @@ fn html_safe_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> 
         .replace('&', "\\u0026"))
 }
 
-/// The Swagger UI page settings, in the order of `get_swagger_ui_html`.
 pub(crate) struct SwaggerPage<'a, 'py> {
     pub openapi_url: &'a str,
     pub title: &'a str,
@@ -130,7 +124,6 @@ pub(crate) struct SwaggerPage<'a, 'py> {
     pub swagger_ui_parameters: Option<&'a Bound<'py, PyAny>>,
 }
 
-/// Builds the Swagger UI HTML page.
 pub(crate) fn swagger_ui_page(py: Python<'_>, page: &SwaggerPage<'_, '_>) -> PyResult<String> {
     let parameters = swagger_ui_default_parameters(py)?;
     if let Some(custom) = page.swagger_ui_parameters
@@ -206,7 +199,6 @@ pub(crate) fn swagger_ui_page(py: Python<'_>, page: &SwaggerPage<'_, '_>) -> PyR
     Ok(html)
 }
 
-/// Builds the ReDoc HTML page.
 pub(crate) fn redoc_page(
     openapi_url: &str,
     title: &str,
@@ -258,15 +250,6 @@ fn html_response(py: Python<'_>, html: String) -> PyResult<Py<PyAny>> {
     Ok(py.get_type::<PyHTMLResponse>().call1((html,))?.unbind())
 }
 
-/// Generate and return the HTML that loads Swagger UI for the interactive
-/// API docs (normally served at `/docs`).
-///
-/// You would only call this function yourself if you needed to override some parts,
-/// for example the URLs to use to load Swagger UI's JavaScript and CSS.
-///
-/// Read more about it in the
-/// [FastAPI docs for Configure Swagger UI](https://fastapi.tiangolo.com/how-to/configure-swagger-ui/)
-/// and the [FastAPI docs for Custom Docs UI Static Assets (Self-Hosting)](https://fastapi.tiangolo.com/how-to/custom-docs-ui-assets/).
 #[pyfunction]
 #[pyo3(signature = (
     *,
@@ -310,14 +293,6 @@ fn get_swagger_ui_html(
     html_response(py, html)
 }
 
-/// Generate and return the HTML response that loads ReDoc for the alternative
-/// API docs (normally served at `/redoc`).
-///
-/// You would only call this function yourself if you needed to override some parts,
-/// for example the URLs to use to load ReDoc's JavaScript and CSS.
-///
-/// Read more about it in the
-/// [FastAPI docs for Custom Docs UI Static Assets (Self-Hosting)](https://fastapi.tiangolo.com/how-to/custom-docs-ui-assets/).
 #[pyfunction]
 #[pyo3(signature = (
     *,
@@ -347,9 +322,6 @@ fn get_redoc_html(
     )
 }
 
-/// Generate the HTML response with the OAuth2 redirection for Swagger UI.
-///
-/// You normally don't need to use or change this.
 #[pyfunction]
 fn get_swagger_ui_oauth2_redirect_html(py: Python<'_>) -> PyResult<Py<PyAny>> {
     html_response(py, OAUTH2_REDIRECT_HTML.to_owned())

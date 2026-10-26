@@ -680,7 +680,6 @@ impl PyRequest {
         Ok(PyClassInitializer::from(conn).add_subclass(req))
     }
 
-    /// The HTTP method of the request, for example `"GET"`.
     #[getter]
     pub fn method<'py>(self_: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let conn: &Bound<'py, PyHTTPConnection> = self_.as_super();

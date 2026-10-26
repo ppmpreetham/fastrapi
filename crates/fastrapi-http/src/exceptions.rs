@@ -87,25 +87,21 @@ impl PyValidationException {
         }
     }
 
-    /// The name of the endpoint function that raised the error.
     #[getter]
     fn endpoint_function(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         self.context_value(py, "function")
     }
 
-    /// The path of the endpoint that raised the error.
     #[getter]
     fn endpoint_path(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         self.context_value(py, "path")
     }
 
-    /// The source file of the endpoint function.
     #[getter]
     fn endpoint_file(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         self.context_value(py, "file")
     }
 
-    /// The line of the endpoint function in its source file.
     #[getter]
     fn endpoint_line(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         self.context_value(py, "line")

@@ -78,7 +78,6 @@ impl PyBackgroundTasks {
         })
     }
 
-    /// The tasks to run after the response is sent, as `BackgroundTask` objects.
     #[getter]
     fn tasks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let task_class = py
