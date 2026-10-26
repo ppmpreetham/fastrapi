@@ -235,3 +235,19 @@ def test_http_exception_subclass(client, app):
     assert response.status_code == 418
     assert response.json() == {"detail": "teapot"}
     assert HTTPException(404, "missing").detail == "missing"
+
+
+def test_cors_default_methods_are_get_only(client, app):
+    from fastrapi.middleware import CORSMiddleware
+
+    app.add_middleware(CORSMiddleware, allow_origins=["https://a.example"])
+
+    @app.get("/c")
+    def c():
+        return {}
+
+    response = client.options(
+        "/c",
+        headers={"Origin": "https://a.example", "Access-Control-Request-Method": "GET"},
+    )
+    assert response.headers["access-control-allow-methods"] == "GET"

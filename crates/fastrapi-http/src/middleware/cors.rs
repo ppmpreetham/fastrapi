@@ -13,13 +13,7 @@ use smart_default::SmartDefault;
 use std::time::Duration;
 
 fn default_methods() -> Vec<String> {
-    vec![
-        "GET".into(),
-        "POST".into(),
-        "PUT".into(),
-        "DELETE".into(),
-        "PATCH".into(),
-    ]
+    vec!["GET".into()]
 }
 
 #[pyclass(
