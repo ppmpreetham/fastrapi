@@ -351,3 +351,39 @@ def test_middleware_early_return_skips_endpoint(client, app):
     assert client.get("/open").json() == {"ok": True}
     time.sleep(0.2)
     assert calls == ["open"]
+
+
+def test_declared_middleware_receives_kwargs():
+    import socket
+    import threading
+    import time
+
+    import httpx
+
+    from fastrapi.middleware import Middleware
+
+    class AddHeader:
+        def __init__(self, app, value):
+            self.app = app
+            self.value = value
+
+        async def __call__(self, scope, receive, send):
+            async def send_with_header(message):
+                if message["type"] == "http.response.start":
+                    message["headers"] = list(message.get("headers", [])) + [(b"x-tag", self.value.encode())]
+                await send(message)
+
+            await self.app(scope, receive, send_with_header)
+
+    app = FastrAPI(middleware=[Middleware(AddHeader, value="set")])
+
+    @app.get("/m")
+    def m():
+        return {}
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    threading.Thread(target=app.serve, args=("127.0.0.1", port), daemon=True).start()
+    time.sleep(0.5)
+    assert httpx.get(f"http://127.0.0.1:{port}/m").headers["x-tag"] == "set"

@@ -35,7 +35,9 @@ use crate::ffi::docs;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::path::{join_path, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, FrozenRouterBuilder, RoutePattern};
-use fastrapi_http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware};
+use fastrapi_http::middleware::{
+    DeclaredLayer, MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware,
+};
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_routing::route::{ExecutionMode, RouteEntry, RouteHandler, WebSocketEntry};
 use fastrapi_runtime::py_bridge;
@@ -471,8 +473,10 @@ pub(crate) fn apply_declared_middleware(
         builder.parse_kwargs(kwargs, container)?;
         container.record_layer(&class_name);
     } else {
-        let py_middleware = PyMiddleware::new(py, cls.clone().unbind());
-        container.py_middlewares.push(Arc::new(py_middleware));
+        let py_middleware = PyMiddleware::from_custom(py, &cls, Some(kwargs))?;
+        container
+            .order
+            .push(DeclaredLayer::Custom(Arc::new(py_middleware)));
     }
 
     Ok(())
