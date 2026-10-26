@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::sync::OnceLock;
 
 use pyo3::class::basic::CompareOp;
-use pyo3::exceptions::{PyAssertionError, PyTypeError};
+use pyo3::exceptions::{PyAssertionError, PyKeyError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyTuple};
 use std::collections::hash_map::DefaultHasher;
@@ -213,20 +213,24 @@ const fn is_host_byte(b: u8) -> bool {
 
 /// Makes a URL from an ASGI scope, as starlette does.
 fn url_from_scope(scope: &Bound<'_, PyAny>) -> PyResult<String> {
-    let get_scope_str = |name: &str| -> PyResult<Option<String>> {
-        let value = scope.get_item(name)?;
-        if value.is_none() {
-            Ok(None)
-        } else {
-            Ok(Some(value.extract()?))
+    let get_scope_item = |name: &str| -> PyResult<Option<Bound<'_, PyAny>>> {
+        match scope.get_item(name) {
+            Ok(value) if value.is_none() => Ok(None),
+            Ok(value) => Ok(Some(value)),
+            Err(err) if err.is_instance_of::<PyKeyError>(scope.py()) => Ok(None),
+            Err(err) => Err(err),
         }
+    };
+    let get_scope_str = |name: &str| -> PyResult<Option<String>> {
+        get_scope_item(name)?
+            .map(|value| value.extract())
+            .transpose()
     };
     let scheme: String = get_scope_str("scheme")?.unwrap_or_else(|| "http".to_string());
     let path: String = get_scope_str("path")?.unwrap_or_else(|| "/".to_string());
-    let query_string: Vec<u8> = match scope.get_item("query_string")? {
-        v if !v.is_none() => v.extract().unwrap_or_default(),
-        _ => Vec::new(),
-    };
+    let query_string: Vec<u8> = get_scope_item("query_string")?
+        .and_then(|value| value.extract().ok())
+        .unwrap_or_default();
 
     let mut host_header: Option<String> = None;
     if let Ok(headers) = scope.get_item("headers") {
@@ -245,10 +249,8 @@ fn url_from_scope(scope: &Bound<'_, PyAny>) -> PyResult<String> {
     {
         Some(authority)
     } else {
-        let server: Option<(String, u16)> = match scope.get_item("server")? {
-            v if !v.is_none() => v.extract().ok(),
-            _ => None,
-        };
+        let server: Option<(String, u16)> =
+            get_scope_item("server")?.and_then(|value| value.extract().ok());
         server.map(|(host, port)| {
             let default_port = match scheme.as_str() {
                 "https" | "wss" => 443,

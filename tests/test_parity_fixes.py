@@ -309,3 +309,16 @@ def test_trusted_host_redirects_to_www(client, app):
     assert response.status_code == 307
     assert response.headers["location"] == "http://www.example.com/t"
     assert client.get("/t", headers={"Host": "other.com"}).status_code == 400
+
+
+def test_request_url_inside_http_middleware(client, app):
+    @app.middleware("http")
+    async def tag(request, call_next):
+        response = await call_next(request)
+        return {"path": request.url.path, "query": request.url.query, "status": response.status_code}
+
+    @app.get("/u")
+    def u():
+        return {}
+
+    assert client.get("/u?a=1").json() == {"path": "/u", "query": "a=1", "status": 200}

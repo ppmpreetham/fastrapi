@@ -237,7 +237,10 @@ fn invoke(
     _ = scope.set_item(intern!(py, "type"), intern!(py, "http"));
     _ = scope.set_item(intern!(py, "method"), method);
     _ = scope.set_item(intern!(py, "path"), path);
-    _ = scope.set_item(intern!(py, "query_string"), query);
+    _ = scope.set_item(
+        intern!(py, "query_string"),
+        PyBytes::new(py, query.as_bytes()),
+    );
 
     let req_obj = PyRequest::create_bound(py, scope.into_any().unbind(), Some(headers), None)
         .map_err(fail)?
