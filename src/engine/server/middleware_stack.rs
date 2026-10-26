@@ -238,10 +238,10 @@ fn host_matches(allowed: &[String], host: &str) -> bool {
         })
 }
 
-fn redirect_to(req: &Request, netloc: &str) -> Response {
+fn redirect_to(req: &Request, scheme: Scheme, netloc: &str) -> Response {
     let uri = req.uri();
     let target = Uri::builder()
-        .scheme(uri.scheme().cloned().unwrap_or(Scheme::HTTP))
+        .scheme(scheme)
         .authority(netloc)
         .path_and_query(uri.path_and_query().map_or("/", PathAndQuery::as_str))
         .build();
@@ -287,7 +287,8 @@ fn trusted_host_layer(app: Router, container: &MiddlewareContainer) -> Router {
                 && host_matches(&allowed, base)
             {
                 let port = authority.strip_prefix(host).unwrap_or_default();
-                return redirect_to(&req, &format!("{base}{port}"));
+                let scheme = req.uri().scheme().cloned().unwrap_or(Scheme::HTTP);
+                return redirect_to(&req, scheme, &format!("{base}{port}"));
             }
 
             (StatusCode::BAD_REQUEST, "Invalid host header").into_response()
@@ -324,7 +325,7 @@ fn https_redirect_layer(app: Router) -> Router {
                 return StatusCode::BAD_REQUEST.into_response();
             };
 
-            redirect_to(&req, &drop_default_port(&authority))
+            redirect_to(&req, Scheme::HTTPS, &drop_default_port(&authority))
         },
     ))
 }

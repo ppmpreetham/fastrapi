@@ -279,3 +279,18 @@ def test_cors_wildcards_with_credentials(client, app):
     assert response.headers["access-control-allow-origin"] == "https://a.example"
     assert response.headers["access-control-allow-credentials"] == "true"
     assert response.headers["access-control-allow-headers"] == "x-token"
+
+
+def test_https_redirect_uses_https(client, app):
+    from fastrapi.middleware import HTTPSRedirectMiddleware
+
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+    @app.get("/r")
+    def r():
+        return {}
+
+    response = client.get("/r?x=1", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("https://127.0.0.1")
+    assert response.headers["location"].endswith("/r?x=1")
