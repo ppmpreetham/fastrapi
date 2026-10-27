@@ -454,3 +454,13 @@ def test_empty_form_value_uses_default(client, app):
         return {"name": name}
 
     assert client.post("/form", data={"name": ""}).json() == {"name": "anon"}
+
+
+def test_float_keeps_its_fraction(client, app):
+    @app.get("/float")
+    def number():
+        return {"value": 1.0, "big": 1e20}
+
+    response = client.get("/float")
+    assert '"value":1.0' in response.text.replace(" ", "")
+    assert response.json() == {"value": 1.0, "big": 1e20}

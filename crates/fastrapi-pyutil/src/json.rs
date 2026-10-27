@@ -481,7 +481,7 @@ pub fn write_py_json<W: Write>(
         }
 
         PyJsonKind::Float(f) => match f.extract::<f64>() {
-            Ok(v) if v.is_finite() => write!(writer, "{v}").map_err(json_io_error),
+            Ok(v) if v.is_finite() => write!(writer, "{v:?}").map_err(json_io_error),
             Ok(_) => Err(PyValueError::new_err(
                 "Out of range float values are not JSON compliant",
             )),
