@@ -421,7 +421,8 @@ pub struct PyFastAPIDeprecationWarning;
 #[pymethods]
 impl PyFastAPIDeprecationWarning {
     #[new]
-    const fn new() -> Self {
+    #[pyo3(signature = (*_args, **_kwargs))]
+    const fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
         Self
     }
 }
