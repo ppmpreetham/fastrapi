@@ -450,12 +450,17 @@ pub fn build_paths_from_routes(
             }
         }
 
-        // Default 200 response
+        let success_status = handler
+            .response
+            .default_status
+            .map_or(200, |status| status.as_u16());
+        let body_allowed =
+            !(100..200).contains(&success_status) && success_status != 204 && success_status != 304;
         operation.responses.insert(
-            "200".to_string(),
+            success_status.to_string(),
             Response {
                 description: response_desc,
-                content: Some({
+                content: body_allowed.then(|| {
                     let mut content = HashMap::new();
                     content.insert(
                         "application/json".to_string(),

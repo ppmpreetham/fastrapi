@@ -474,3 +474,18 @@ def test_decimal_is_encoded_as_a_number(client, app):
         return {"whole": Decimal("3"), "fraction": Decimal("1.5")}
 
     assert client.get("/decimal").json() == {"whole": 3, "fraction": 1.5}
+
+
+def test_openapi_success_response_uses_status_code(client, app):
+    @app.post("/created", status_code=201)
+    def created():
+        return {}
+
+    @app.delete("/gone", status_code=204)
+    def gone():
+        return None
+
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "201" in paths["/created"]["post"]["responses"]
+    assert "200" not in paths["/created"]["post"]["responses"]
+    assert "content" not in paths["/gone"]["delete"]["responses"]["204"]
