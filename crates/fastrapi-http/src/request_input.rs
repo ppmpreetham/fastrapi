@@ -40,7 +40,7 @@ impl<'a> RequestInput<'a> {
     pub fn get_query_param(&self, key: &str) -> Option<Cow<'a, str>> {
         self.get_all_query_params()
             .iter()
-            .find(|(k, _)| k == key)
+            .rfind(|(k, _)| k == key)
             .map(|(_, v)| v.clone())
     }
 
@@ -60,7 +60,7 @@ impl<'a> RequestInput<'a> {
     pub fn get_cookie(&self, key: &str) -> Option<&'a str> {
         self.get_all_cookies()
             .iter()
-            .find(|(k, _)| *k == key)
+            .rfind(|(k, _)| *k == key)
             .map(|(_, v)| *v)
     }
 

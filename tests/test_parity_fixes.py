@@ -406,3 +406,11 @@ def test_max_length_counts_characters(client, app):
 
     assert client.get("/name", params={"value": "äöü"}).json() == {"value": "äöü"}
     assert client.get("/name", params={"value": "äöüx"}).status_code == 422
+
+
+def test_repeated_query_key_uses_last_value(client, app):
+    @app.get("/last")
+    def last(q: str):
+        return {"q": q}
+
+    assert client.get("/last?q=a&q=b").json() == {"q": "b"}
