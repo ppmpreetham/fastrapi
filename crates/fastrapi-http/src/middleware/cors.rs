@@ -16,14 +16,7 @@ fn default_methods() -> Vec<String> {
     vec!["GET".into()]
 }
 
-#[pyclass(
-    frozen,
-    name = "CORSMiddleware",
-    get_all,
-    from_py_object,
-    eq,
-    new = "from_fields"
-)]
+#[pyclass(frozen, name = "CORSMiddleware", get_all, from_py_object, eq)]
 #[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct CORSMiddleware {
     #[default(vec![])]
@@ -43,6 +36,37 @@ pub struct CORSMiddleware {
 
     #[default(600)]
     pub max_age: u64,
+}
+
+#[pymethods]
+impl CORSMiddleware {
+    #[new]
+    #[pyo3(signature = (
+        *,
+        allow_origins=Vec::new(),
+        allow_methods=default_methods(),
+        allow_headers=Vec::new(),
+        allow_credentials=false,
+        expose_headers=Vec::new(),
+        max_age=600
+    ))]
+    const fn new(
+        allow_origins: Vec<String>,
+        allow_methods: Vec<String>,
+        allow_headers: Vec<String>,
+        allow_credentials: bool,
+        expose_headers: Vec<String>,
+        max_age: u64,
+    ) -> Self {
+        Self {
+            allow_origins,
+            allow_methods,
+            allow_headers,
+            allow_credentials,
+            expose_headers,
+            max_age,
+        }
+    }
 }
 
 fn parse_and_validate_vec<T, E, F>(
@@ -94,7 +118,12 @@ where
 }
 
 pub fn parse_cors_params(kwargs: &Bound<'_, PyDict>) -> PyResult<CORSMiddleware> {
-    kwargs.extract::<CORSMiddleware>().map_err(Into::into)
+    kwargs
+        .py()
+        .get_type::<CORSMiddleware>()
+        .call((), Some(kwargs))?
+        .extract()
+        .map_err(Into::into)
 }
 
 pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
