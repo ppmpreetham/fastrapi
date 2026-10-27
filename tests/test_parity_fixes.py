@@ -500,3 +500,10 @@ def test_openapi_response_media_type_follows_response_class(client, app):
 
     content = client.get("/openapi.json").json()["paths"]["/page"]["get"]["responses"]["200"]["content"]
     assert content == {"text/html": {"schema": {"type": "string"}}}
+
+
+def test_security_credentials_can_be_created():
+    from fastrapi.security import HTTPAuthorizationCredentials, HTTPBasicCredentials
+
+    assert HTTPBasicCredentials(username="u", password="p").username == "u"
+    assert HTTPAuthorizationCredentials(scheme="Bearer", credentials="t").credentials == "t"

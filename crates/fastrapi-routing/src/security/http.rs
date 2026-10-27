@@ -268,6 +268,18 @@ pub struct HTTPAuthorizationCredentials {
     pub credentials: String,
 }
 
+#[pymethods]
+impl HTTPAuthorizationCredentials {
+    #[new]
+    #[pyo3(signature = (*, scheme, credentials))]
+    const fn new(scheme: String, credentials: String) -> Self {
+        Self {
+            scheme,
+            credentials,
+        }
+    }
+}
+
 /// The HTTP Basic credentials given as the result of using `HTTPBasic` in a
 /// dependency.
 ///
@@ -285,4 +297,13 @@ pub struct HTTPAuthorizationCredentials {
 pub struct HTTPBasicCredentials {
     pub username: String,
     pub password: String,
+}
+
+#[pymethods]
+impl HTTPBasicCredentials {
+    #[new]
+    #[pyo3(signature = (*, username, password))]
+    const fn new(username: String, password: String) -> Self {
+        Self { username, password }
+    }
 }
