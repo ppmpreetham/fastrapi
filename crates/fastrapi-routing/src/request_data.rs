@@ -18,6 +18,7 @@ use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::upload_file::PyUploadFile;
 use fastrapi_pyutil::imports::{ENUM, TYPING};
 use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
+use percent_encoding::percent_decode_str;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyDict, PyList, PyString, PyType};
 use pyo3::{Bound, Py, intern};
@@ -394,7 +395,7 @@ fn raw_value_for_parameter<'a>(
         ParameterSource::Path => request_input
             .get_path_param(&param.external_name)
             .or_else(|| request_input.get_path_param(&param.name))
-            .map(Cow::Borrowed),
+            .map(|value| percent_decode_str(value).decode_utf8_lossy()),
         ParameterSource::Query => request_input
             .get_query_param(&param.external_name)
             .or_else(|| request_input.get_query_param(&param.name)),

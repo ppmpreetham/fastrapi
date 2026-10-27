@@ -17,6 +17,7 @@ axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
 parking_lot.workspace = true
+percent-encoding.workspace = true
 pydantic-core-kernel.workspace = true
 pyo3.workspace = true
 regex.workspace = true

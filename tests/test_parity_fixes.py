@@ -414,3 +414,11 @@ def test_repeated_query_key_uses_last_value(client, app):
         return {"q": q}
 
     assert client.get("/last?q=a&q=b").json() == {"q": "b"}
+
+
+def test_path_params_are_percent_decoded(client, app):
+    @app.get("/items/{name}")
+    def item(name: str):
+        return {"name": name}
+
+    assert client.get("/items/a%20b").json() == {"name": "a b"}

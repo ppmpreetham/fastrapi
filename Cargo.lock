@@ -677,6 +677,7 @@ dependencies = [
  "fastrapi-pyutil",
  "fastrapi-runtime",
  "parking_lot",
+ "percent-encoding",
  "pydantic-core-kernel",
  "pyo3",
  "regex",
