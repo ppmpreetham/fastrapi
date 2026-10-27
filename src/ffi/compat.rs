@@ -32,6 +32,11 @@ pub(crate) fn register_security(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     for name in ["SecurityBase", "APIKeyBase", "HTTPBase"] {
         base.add(name, python_type(py, name, &bases)?)?;
     }
+    for (submodule, name) in [("api_key", "APIKeyBase"), ("http", "HTTPBase")] {
+        if let Ok(module) = parent.getattr(submodule) {
+            module.setattr(name, base.getattr(name)?)?;
+        }
+    }
     parent.add_submodule(&base)?;
     py.import("sys")?
         .getattr("modules")?

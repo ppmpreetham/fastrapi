@@ -381,6 +381,7 @@ mod fastrapi {
             use fastrapi_routing::security::{
                 OAuth2, OAuth2AuthorizationCodeBearer, OAuth2PasswordBearer,
                 OAuth2PasswordRequestForm, OAuth2PasswordRequestFormStrict,
+                PySecurityScopes as SecurityScopes,
             };
         }
 

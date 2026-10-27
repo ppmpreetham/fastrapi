@@ -507,3 +507,11 @@ def test_security_credentials_can_be_created():
 
     assert HTTPBasicCredentials(username="u", password="p").username == "u"
     assert HTTPAuthorizationCredentials(scheme="Bearer", credentials="t").credentials == "t"
+
+
+def test_security_submodules_export_base_classes():
+    from fastrapi.security.api_key import APIKeyBase
+    from fastrapi.security.http import HTTPBase
+    from fastrapi.security.oauth2 import SecurityScopes
+
+    assert all((APIKeyBase, HTTPBase, SecurityScopes))
