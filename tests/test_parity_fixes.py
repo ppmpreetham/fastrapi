@@ -433,3 +433,14 @@ def test_ellipsis_default_is_required(client, app):
     response = client.get("/required")
     assert response.status_code == 422
     assert response.json()["detail"][0]["type"] == "missing"
+
+
+def test_list_header_gets_every_value(client, app):
+    from fastrapi import Header
+
+    @app.get("/tokens")
+    def tokens(x_token: list[str] = Header()):
+        return {"tokens": x_token}
+
+    response = client.get("/tokens", headers=[("x-token", "a"), ("x-token", "b")])
+    assert response.json() == {"tokens": ["a", "b"]}

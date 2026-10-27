@@ -424,7 +424,15 @@ fn raw_values_for_list<'a>(
             .filter(|(k, _)| matches_name(k))
             .map(|(_, v)| v.clone())
             .collect(),
-        ParameterSource::Header | ParameterSource::Cookie | ParameterSource::Path => {
+        ParameterSource::Header => {
+            let values = request_input.get_header_values(&param.external_name);
+            if values.is_empty() {
+                request_input.get_header_values(&param.name)
+            } else {
+                values
+            }
+        }
+        ParameterSource::Cookie | ParameterSource::Path => {
             raw_value_for_parameter(param, request_input)
                 .into_iter()
                 .collect()

@@ -67,4 +67,13 @@ impl<'a> RequestInput<'a> {
     pub fn get_header(&self, key: &str) -> Option<&'a str> {
         self.headers.get(key).and_then(|v| v.to_str().ok())
     }
+
+    pub fn get_header_values<'s>(&'s self, key: &str) -> SmallVec<[Cow<'s, str>; 4]> {
+        self.headers
+            .get_all(key)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(Cow::Borrowed)
+            .collect()
+    }
 }
