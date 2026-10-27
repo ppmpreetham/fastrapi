@@ -352,7 +352,7 @@ fn validate_scalar_constraints(
 
     if let Ok(text) = value.extract::<&str>() {
         if let Some(min_length) = param.constraints.min_length
-            && text.len() < min_length
+            && text.chars().count() < min_length
         {
             return Err(validation_error(
                 &loc,
@@ -362,7 +362,7 @@ fn validate_scalar_constraints(
             ));
         }
         if let Some(max_length) = param.constraints.max_length
-            && text.len() > max_length
+            && text.chars().count() > max_length
         {
             return Err(validation_error(
                 &loc,

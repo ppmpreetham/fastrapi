@@ -395,3 +395,14 @@ def test_bool_query_accepts_pydantic_strings(client, app):
         return {"on": on}
 
     assert [client.get("/flag", params={"on": v}).json()["on"] for v in ("t", "Y", "f", "n")] == [True, True, False, False]
+
+
+def test_max_length_counts_characters(client, app):
+    from fastrapi import Query
+
+    @app.get("/name")
+    def name(value: str = Query(max_length=3)):
+        return {"value": value}
+
+    assert client.get("/name", params={"value": "äöü"}).json() == {"value": "äöü"}
+    assert client.get("/name", params={"value": "äöüx"}).status_code == 422
