@@ -703,7 +703,11 @@ fn apply_body_and_validation(
                 let param = &handler.payload.parsed_params[idx];
                 let values = form
                     .get(param.external_name.as_str())
-                    .or_else(|| form.get(param.name.as_str()));
+                    .or_else(|| form.get(param.name.as_str()))
+                    .filter(|values| {
+                        param.is_list
+                            || !matches!(values.last(), Some(BodyField::Text(text)) if text.is_empty())
+                    });
 
                 let Some(values) = values else {
                     if param.has_default {

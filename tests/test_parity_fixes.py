@@ -444,3 +444,13 @@ def test_list_header_gets_every_value(client, app):
 
     response = client.get("/tokens", headers=[("x-token", "a"), ("x-token", "b")])
     assert response.json() == {"tokens": ["a", "b"]}
+
+
+def test_empty_form_value_uses_default(client, app):
+    from fastrapi import Form
+
+    @app.post("/form")
+    def form(name: str = Form("anon")):
+        return {"name": name}
+
+    assert client.post("/form", data={"name": ""}).json() == {"name": "anon"}
