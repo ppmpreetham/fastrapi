@@ -13,6 +13,7 @@ use fastrapi_core::method::HttpMethod;
 use fastrapi_core::params::ParameterSource;
 use fastrapi_core::path::strip_path_convertors;
 use fastrapi_core::security::SecurityKind;
+use fastrapi_http::response_type::ResponseType;
 use fastrapi_pyutil::json::py_any_to_json;
 use fastrapi_routing::route::{RouteEntry, RouteHandler};
 use pyo3::intern;
@@ -456,14 +457,25 @@ pub fn build_paths_from_routes(
             .map_or(200, |status| status.as_u16());
         let body_allowed =
             !(100..200).contains(&success_status) && success_status != 204 && success_status != 304;
+        let media_type = match handler.response.response_type {
+            ResponseType::Html => Some("text/html"),
+            ResponseType::PlainText => Some("text/plain"),
+            ResponseType::Redirect | ResponseType::File => None,
+            ResponseType::Json | ResponseType::Auto => Some("application/json"),
+        };
+        let response_schema = if media_type == Some("application/json") {
+            response_schema
+        } else {
+            json!({ "type": "string" })
+        };
         operation.responses.insert(
             success_status.to_string(),
             Response {
                 description: response_desc,
-                content: body_allowed.then(|| {
+                content: media_type.filter(|_| body_allowed).map(|media_type| {
                     let mut content = HashMap::new();
                     content.insert(
-                        "application/json".to_string(),
+                        media_type.to_string(),
                         MediaType {
                             schema: response_schema,
                         },

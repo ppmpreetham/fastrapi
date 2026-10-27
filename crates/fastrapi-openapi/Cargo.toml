@@ -6,6 +6,7 @@ edition.workspace = true
 
 [dependencies]
 fastrapi-core.workspace = true
+fastrapi-http.workspace = true
 fastrapi-pyutil.workspace = true
 fastrapi-routing.workspace = true
 pyo3.workspace = true

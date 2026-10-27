@@ -489,3 +489,14 @@ def test_openapi_success_response_uses_status_code(client, app):
     assert "201" in paths["/created"]["post"]["responses"]
     assert "200" not in paths["/created"]["post"]["responses"]
     assert "content" not in paths["/gone"]["delete"]["responses"]["204"]
+
+
+def test_openapi_response_media_type_follows_response_class(client, app):
+    from fastrapi.responses import HTMLResponse
+
+    @app.get("/page", response_class=HTMLResponse)
+    def page():
+        return HTMLResponse("<p>hi</p>")
+
+    content = client.get("/openapi.json").json()["paths"]["/page"]["get"]["responses"]["200"]["content"]
+    assert content == {"text/html": {"schema": {"type": "string"}}}

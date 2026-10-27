@@ -644,6 +644,7 @@ name = "fastrapi-openapi"
 version = "0.3.4"
 dependencies = [
  "fastrapi-core",
+ "fastrapi-http",
  "fastrapi-pyutil",
  "fastrapi-routing",
  "pyo3",
