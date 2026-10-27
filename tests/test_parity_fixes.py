@@ -524,3 +524,10 @@ def test_concurrency_exports_contextlib_helpers():
 
     assert concurrency.asynccontextmanager is contextlib.asynccontextmanager
     assert concurrency.AsyncExitStack is contextlib.AsyncExitStack
+
+
+def test_types_aliases():
+    from fastrapi.types import DecoratedCallable, DependencyCacheKey, IncEx, ModelNameMap, UnionType
+
+    assert DecoratedCallable.__name__ == "DecoratedCallable"
+    assert all((DependencyCacheKey, IncEx, ModelNameMap, UnionType))

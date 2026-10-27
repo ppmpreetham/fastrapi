@@ -186,6 +186,47 @@ fn get_value_or_default(
         .map_or(first_item, Bound::unbind)
 }
 
+pub(crate) fn register_types(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = module.py();
+    let builtins = py.import("builtins")?;
+    let typing = py.import("typing")?;
+    let any = typing.getattr("Any")?;
+    let callable = py
+        .import("collections.abc")?
+        .getattr("Callable")?
+        .get_item((builtins.getattr("Ellipsis")?, &any))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("bound", &callable)?;
+    module.add(
+        "DecoratedCallable",
+        typing
+            .getattr("TypeVar")?
+            .call(("DecoratedCallable",), Some(&kwargs))?,
+    )?;
+    module.add("IncEx", py.import("pydantic.main")?.getattr("IncEx")?)?;
+    module.add("UnionType", py.import("types")?.getattr("UnionType")?)?;
+    let type_of = builtins.getattr("type")?;
+    let model_or_enum = type_of
+        .get_item(py.import("pydantic")?.getattr("BaseModel")?)?
+        .bitor(type_of.get_item(py.import("enum")?.getattr("Enum")?)?)?;
+    let str_type = builtins.getattr("str")?;
+    module.add(
+        "ModelNameMap",
+        builtins
+            .getattr("dict")?
+            .get_item((model_or_enum, &str_type))?,
+    )?;
+    let tuple = builtins.getattr("tuple")?;
+    module.add(
+        "DependencyCacheKey",
+        tuple.get_item((
+            callable.bitor(py.None())?,
+            tuple.get_item((&str_type, builtins.getattr("Ellipsis")?))?,
+            &str_type,
+        ))?,
+    )
+}
+
 pub(crate) fn register_dependencies(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     parent.add_function(wrap_pyfunction!(get_dependant, parent)?)?;

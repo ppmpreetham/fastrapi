@@ -599,6 +599,7 @@ mod fastrapi {
         let logger = PyModule::new(py, "logger")?;
         m.add_submodule(&logger)?;
         let types = PyModule::new(py, "types")?;
+        crate::ffi::compat::register_types(&types)?;
         m.add_submodule(&types)?;
         let middleware_exit = PyModule::new(py, "asyncexitstack")?;
         middleware_exit.add(
