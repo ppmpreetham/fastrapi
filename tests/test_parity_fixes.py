@@ -515,3 +515,12 @@ def test_security_submodules_export_base_classes():
     from fastrapi.security.oauth2 import SecurityScopes
 
     assert all((APIKeyBase, HTTPBase, SecurityScopes))
+
+
+def test_concurrency_exports_contextlib_helpers():
+    import contextlib
+
+    from fastrapi import concurrency
+
+    assert concurrency.asynccontextmanager is contextlib.asynccontextmanager
+    assert concurrency.AsyncExitStack is contextlib.AsyncExitStack

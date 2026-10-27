@@ -606,6 +606,10 @@ pub(crate) fn register_compat_modules(parent: &Bound<'_, PyModule>) -> PyResult<
             concurrency.add(name, value)?;
         }
     }
+    let contextlib = py.import("contextlib")?;
+    for name in ["asynccontextmanager", "AsyncExitStack"] {
+        concurrency.add(name, contextlib.getattr(name)?)?;
+    }
     parent.add_submodule(&concurrency)?;
 
     let utils = PyModule::new(py, "utils")?;
