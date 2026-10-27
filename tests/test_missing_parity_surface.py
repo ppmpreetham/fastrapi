@@ -172,7 +172,7 @@ def test_dependency_helpers_capture_cache_scopes_and_path_names():
     assert dependant.dependencies[0].use_cache is True
     security_scopes = getattr(dependant.dependencies[1], "security_scopes", None)
     assert security_scopes == ["read"] or getattr(dependant.dependencies[1], "scopes", None) == ["read"]
-    assert get_path_param_names("/a/{x}/b/{tail:path}/{x}") == ["x", "tail", "x"]
+    assert get_path_param_names("/a/{x}/b/{tail:path}/{x}") == {"x", "tail"}
 
 
 def test_security_base_and_handler_contracts():
@@ -220,7 +220,9 @@ def test_compatibility_modules_and_function_behavior():
     assert asyncio.run(collect()) == [1, 2, 3]
     assert utils.is_body_allowed_for_status_code(200)
     assert not utils.is_body_allowed_for_status_code(204)
-    assert utils.deep_dict_update({"a": {"x": 1}}, {"a": {"y": 2}}) == {"a": {"x": 1, "y": 2}}
+    merged = {"a": {"x": 1}}
+    utils.deep_dict_update(merged, {"a": {"y": 2}})
+    assert merged == {"a": {"x": 1, "y": 2}}
     assert params.Query(alias="q", ge=1).alias == "q"
     assert params.Body(embed=True).embed is True
 

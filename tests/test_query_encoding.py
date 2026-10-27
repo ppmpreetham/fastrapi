@@ -52,7 +52,7 @@ def test_repeated_and_no_value(client, app):
     def items(q: str | None = None):
         return {"q": q}
 
-    # repeated key: the first occurrence wins (same as before)
-    assert client.get("/items/?q=one&q=two").json() == {"q": "one"}
+    # repeated key: the last occurrence wins, as in Starlette
+    assert client.get("/items/?q=one&q=two").json() == {"q": "two"}
     # key with no '=' at all
     assert client.get("/items/?q").json() == {"q": ""}
