@@ -162,7 +162,7 @@ pub fn parse_parameter_spec(
                 cons,
                 Some(marker.unbind()),
             )
-        } else if has_plain_default {
+        } else if has_plain_default && !is_ellipsis(&default) {
             (
                 initial_source,
                 Some(default.unbind()),

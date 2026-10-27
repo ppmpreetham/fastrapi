@@ -422,3 +422,14 @@ def test_path_params_are_percent_decoded(client, app):
         return {"name": name}
 
     assert client.get("/items/a%20b").json() == {"name": "a b"}
+
+
+def test_ellipsis_default_is_required(client, app):
+    @app.get("/required")
+    def required(q: int = ...):
+        return {"q": q}
+
+    assert client.get("/required", params={"q": 2}).json() == {"q": 2}
+    response = client.get("/required")
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "missing"
