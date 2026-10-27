@@ -464,3 +464,13 @@ def test_float_keeps_its_fraction(client, app):
     response = client.get("/float")
     assert '"value":1.0' in response.text.replace(" ", "")
     assert response.json() == {"value": 1.0, "big": 1e20}
+
+
+def test_decimal_is_encoded_as_a_number(client, app):
+    from decimal import Decimal
+
+    @app.get("/decimal")
+    def decimal():
+        return {"whole": Decimal("3"), "fraction": Decimal("1.5")}
+
+    assert client.get("/decimal").json() == {"whole": 3, "fraction": 1.5}

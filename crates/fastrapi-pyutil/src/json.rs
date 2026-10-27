@@ -276,6 +276,7 @@ pub enum PyJsonKind<'py> {
     HasIsoformat, // date / time / datetime
     Timedelta,
     UuidOrDecimal,
+    Decimal,
     Path,
     IpAddress,
     Enum,
@@ -290,6 +291,7 @@ enum ObjKind {
     Timedelta,
     Enum,
     UuidOrDecimal,
+    Decimal,
     Path,
     IpAddress,
     FallbackStr,
@@ -345,7 +347,10 @@ fn probe_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
 
     if let Ok(type_obj) = value.get_type().name() {
         let type_name = type_obj.to_str().unwrap_or_default();
-        if type_name == "UUID" || type_name == "Decimal" {
+        if type_name == "Decimal" {
+            return ObjKind::Decimal;
+        }
+        if type_name == "UUID" {
             return ObjKind::UuidOrDecimal;
         }
         if type_name.ends_with("Path") {
@@ -357,6 +362,22 @@ fn probe_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
     }
 
     ObjKind::FallbackStr
+}
+
+fn decimal_number<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let exponent = value
+        .call_method0(intern!(py, "as_tuple"))?
+        .getattr(intern!(py, "exponent"))?;
+    let builtins = py.import(intern!(py, "builtins"))?;
+    let target = if exponent
+        .extract::<i64>()
+        .is_ok_and(|exponent| exponent >= 0)
+    {
+        "int"
+    } else {
+        "float"
+    };
+    builtins.getattr(target)?.call1((value,))
 }
 
 #[inline]
@@ -419,6 +440,7 @@ pub fn classify_py_value<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyJ
         ObjKind::Timedelta => PyJsonKind::Timedelta,
         ObjKind::Enum => PyJsonKind::Enum,
         ObjKind::UuidOrDecimal => PyJsonKind::UuidOrDecimal,
+        ObjKind::Decimal => PyJsonKind::Decimal,
         ObjKind::Path => PyJsonKind::Path,
         ObjKind::IpAddress => PyJsonKind::IpAddress,
         ObjKind::FallbackStr => PyJsonKind::FallbackStr,
@@ -547,6 +569,11 @@ pub fn write_py_json<W: Write>(
                 writer.write_all(b"null").map_err(json_io_error)
             }
         }
+
+        PyJsonKind::Decimal => match decimal_number(py, value) {
+            Ok(number) => write_py_json(py, &number, writer),
+            Err(_) => writer.write_all(b"null").map_err(json_io_error),
+        },
 
         PyJsonKind::UuidOrDecimal
         | PyJsonKind::Path
@@ -827,6 +854,11 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
                 |s| simd_json::json!(lossy_text(&s)),
             )
         }
+
+        PyJsonKind::Decimal => decimal_number(py, value).map_or_else(
+            |_| simd_json::json!(null),
+            |number| py_any_to_json(py, &number),
+        ),
 
         PyJsonKind::UuidOrDecimal
         | PyJsonKind::Path
