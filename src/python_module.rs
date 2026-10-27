@@ -597,6 +597,12 @@ mod fastrapi {
         }
         m.add_submodule(&websockets)?;
         let logger = PyModule::new(py, "logger")?;
+        logger.add(
+            "logger",
+            py.import("logging")?
+                .getattr("getLogger")?
+                .call1(("fastapi",))?,
+        )?;
         m.add_submodule(&logger)?;
         let types = PyModule::new(py, "types")?;
         crate::ffi::compat::register_types(&types)?;

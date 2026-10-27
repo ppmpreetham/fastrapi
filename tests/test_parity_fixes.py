@@ -531,3 +531,11 @@ def test_types_aliases():
 
     assert DecoratedCallable.__name__ == "DecoratedCallable"
     assert all((DependencyCacheKey, IncEx, ModelNameMap, UnionType))
+
+
+def test_logger_module():
+    import logging
+
+    from fastrapi.logger import logger
+
+    assert logger is logging.getLogger("fastapi")
