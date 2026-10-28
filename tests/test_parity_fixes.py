@@ -626,3 +626,22 @@ def test_html_response_class_with_string_return(client, app):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert response.text == "<h1>hi</h1>"
+
+
+def test_redirect_response_class_with_string_return(client, app):
+    from fastrapi.responses import RedirectResponse
+
+    @app.get("/go", response_class=RedirectResponse)
+    def go():
+        return "https://example.com/target"
+
+    @app.get("/go-permanent", response_class=RedirectResponse, status_code=301)
+    def go_permanent():
+        return "/elsewhere"
+
+    response = client.get("/go", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "https://example.com/target"
+    response = client.get("/go-permanent", follow_redirects=False)
+    assert response.status_code == 301
+    assert response.headers["location"] == "/elsewhere"

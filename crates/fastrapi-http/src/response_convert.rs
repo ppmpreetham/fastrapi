@@ -264,6 +264,18 @@ pub fn convert_response_by_type(
 
         ResponseType::Html => convert_html_response(py, final_result),
 
+        ResponseType::Redirect if final_result.is_instance_of::<PyString>() => {
+            let location = HeaderValue::from_str(final_result.extract::<&str>()?)
+                .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+            (
+                formatter
+                    .default_status
+                    .unwrap_or(StatusCode::TEMPORARY_REDIRECT),
+                [(header::LOCATION, location)],
+            )
+                .into_response()
+        }
+
         ResponseType::Redirect => convert_redirect_response(py, final_result),
 
         ResponseType::File => convert_file_response(py, final_result, request_headers),
