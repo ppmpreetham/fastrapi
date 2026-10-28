@@ -546,3 +546,14 @@ def test_routing_exports_starlette_helpers():
 
     assert compile_path("/items/{item_id}")[1] == "/items/{item_id}"
     assert all((Match, Route, get_name))
+
+
+def test_add_event_handler(client, app):
+    events = []
+    app.add_event_handler("startup", lambda: events.append("started"))
+
+    @app.get("/events")
+    def read_events():
+        return {"events": events}
+
+    assert client.get("/events").json() == {"events": ["started"]}

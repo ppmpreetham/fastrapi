@@ -26,6 +26,38 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tracing::info;
 
+fn is_startup_event(event_type: &str) -> PyResult<bool> {
+    match event_type {
+        "startup" => Ok(true),
+        "shutdown" => Ok(false),
+        _ => Err(PyValueError::new_err(
+            "event_type must be 'startup' or 'shutdown'",
+        )),
+    }
+}
+
+impl FastrAPI {
+    fn push_event_handler(
+        &mut self,
+        py: Python<'_>,
+        startup: bool,
+        func: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let target = if startup {
+            &mut self.on_startup
+        } else {
+            &mut self.on_shutdown
+        };
+        let list = match target.as_ref() {
+            Some(value) => value.bind(py).cast::<PyList>()?.clone(),
+            None => PyList::empty(py),
+        };
+        list.append(func)?;
+        *target = Some(list.unbind().into_any());
+        Ok(())
+    }
+}
+
 #[pymethods]
 impl FastrAPI {
     #[new]
@@ -337,34 +369,26 @@ impl FastrAPI {
     /// Read more about it in the
     /// [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/#alternative-events-deprecated).
     fn on_event(slf: Py<Self>, py: Python<'_>, event_type: &str) -> PyResult<Py<PyAny>> {
-        let startup = match event_type {
-            "startup" => true,
-            "shutdown" => false,
-            _ => {
-                return Err(PyValueError::new_err(
-                    "event_type must be 'startup' or 'shutdown'",
-                ));
-            }
-        };
+        let startup = is_startup_event(event_type)?;
         let decorator = move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| {
             let func = args.get_item(0)?.unbind();
             Python::attach(|py| -> PyResult<Py<PyAny>> {
-                let mut app = slf.borrow_mut(py);
-                let target = if startup {
-                    &mut app.on_startup
-                } else {
-                    &mut app.on_shutdown
-                };
-                let list = match target.as_ref() {
-                    Some(value) => value.bind(py).cast::<PyList>()?.clone(),
-                    None => PyList::empty(py),
-                };
-                list.append(func.bind(py))?;
-                *target = Some(list.unbind().into_any());
+                slf.borrow_mut(py)
+                    .push_event_handler(py, startup, func.bind(py))?;
                 Ok(func)
             })
         };
         PyCFunction::new_closure(py, Some(c"on_event"), None, decorator).map(Into::into)
+    }
+
+    fn add_event_handler(
+        &mut self,
+        py: Python<'_>,
+        event_type: &str,
+        func: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let startup = is_startup_event(event_type)?;
+        self.push_event_handler(py, startup, func)
     }
 
     // This method is the same as `starlette.applications.host`.
