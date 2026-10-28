@@ -568,3 +568,8 @@ def test_openapi_version_attribute(client, app):
     assert app.openapi_version == "3.1.0"
     app.openapi_version = "3.0.2"
     assert app.openapi()["openapi"] == "3.0.2"
+
+
+def test_app_keeps_extra_keyword_arguments():
+    assert FastrAPI(team="core").extra == {"team": "core"}
+    assert FastrAPI().extra == {}

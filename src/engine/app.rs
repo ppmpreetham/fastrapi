@@ -112,6 +112,7 @@ impl FastrAPI {
         request_timeout=None,
         request_id_header=None,
         powered_by_header=None,
+        **extra,
     ))]
     #[expect(
         clippy::fn_params_excessive_bools,
@@ -168,6 +169,7 @@ impl FastrAPI {
         request_timeout: Option<u64>,
         request_id_header: Option<String>,
         powered_by_header: Option<String>,
+        extra: Option<Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let default_response_class = match default_response_class {
             Some(c) => c,
@@ -253,6 +255,7 @@ impl FastrAPI {
             middlewares: MiddlewareContainer::default(),
             openapi_cache: Mutex::new(None),
             openapi_version: "3.1.0".to_string(),
+            extra: extra.map_or_else(|| PyDict::new(py).unbind(), Bound::unbind),
             router: base_router,
         })
     }

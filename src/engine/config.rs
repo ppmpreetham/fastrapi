@@ -2,7 +2,7 @@
 //! This module also contains the mount types for sub-apps, hosts, static files and frontends.
 
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyDict};
 use smart_default::SmartDefault;
 
 use crate::ffi::decorators::PyAPIRouter;
@@ -182,6 +182,8 @@ pub struct FastrAPI {
     pub powered_by_header: Option<String>,
     #[pyo3(get, set)]
     pub openapi_version: String,
+    #[pyo3(get)]
+    pub extra: Py<PyDict>,
     #[pyo3(get, set)]
     pub router: Py<PyAPIRouter>,
 
