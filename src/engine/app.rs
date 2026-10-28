@@ -219,8 +219,12 @@ impl FastrAPI {
             terms_of_service,
             contact,
             license_info,
+            root_path: if root_path.is_empty() {
+                openapi_prefix.clone()
+            } else {
+                root_path
+            },
             openapi_prefix,
-            root_path,
             root_path_in_servers,
             responses,
             callbacks,

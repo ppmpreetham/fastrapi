@@ -557,3 +557,8 @@ def test_add_event_handler(client, app):
         return {"events": events}
 
     assert client.get("/events").json() == {"events": ["started"]}
+
+
+def test_openapi_prefix_sets_root_path():
+    assert FastrAPI(openapi_prefix="/api").root_path == "/api"
+    assert FastrAPI(openapi_prefix="/api", root_path="/v1").root_path == "/v1"
