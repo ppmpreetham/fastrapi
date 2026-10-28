@@ -601,3 +601,15 @@ def test_starlette_http_exception_handler_catches_http_exception(client, app):
     response = client.get("/missing")
     assert response.status_code == 404
     assert response.json() == {"handled": 404}
+
+
+def test_raised_starlette_http_exception_becomes_a_response(client, app):
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    @app.get("/teapot-starlette")
+    def teapot():
+        raise StarletteHTTPException(status_code=418, detail="short and stout")
+
+    response = client.get("/teapot-starlette")
+    assert response.status_code == 418
+    assert response.json() == {"detail": "short and stout"}
