@@ -4,11 +4,11 @@
 
 use axum::response::{IntoResponse, Response};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyInt, PyString};
+use pyo3::types::{PyDict, PyInt};
 use pyo3::{Py, intern};
 
 use axum::http::StatusCode;
-use fastrapi_http::exceptions::{PyHTTPException, PyRequestValidationError};
+use fastrapi_http::exceptions::{PyHTTPException, PyRequestValidationError, status_phrase};
 use fastrapi_http::request::{create_py_request, create_stub_request};
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::response_convert::convert_auto_response;
@@ -176,15 +176,7 @@ pub(crate) fn dispatch_status_handler(py: Python<'_>, status: u16) -> Option<Res
         py,
         PyHTTPException {
             status_code: status,
-            detail: PyString::new(
-                py,
-                StatusCode::from_u16(status)
-                    .ok()
-                    .and_then(|status| status.canonical_reason())
-                    .unwrap_or("Internal Server Error"),
-            )
-            .into_any()
-            .unbind(),
+            detail: status_phrase(py, status),
             headers: None,
         },
     )

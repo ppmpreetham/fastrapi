@@ -573,3 +573,12 @@ def test_openapi_version_attribute(client, app):
 def test_app_keeps_extra_keyword_arguments():
     assert FastrAPI(team="core").extra == {"team": "core"}
     assert FastrAPI().extra == {}
+
+
+def test_http_exception_default_detail_uses_http_status_phrase():
+    import http
+
+    from fastrapi import HTTPException
+
+    assert HTTPException(413).detail == http.HTTPStatus(413).phrase
+    assert HTTPException(422).detail == http.HTTPStatus(422).phrase

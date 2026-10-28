@@ -260,6 +260,22 @@ fn response_headers(py: Python<'_>, headers: Option<&Py<PyDict>>) -> HeaderMap {
     map
 }
 
+pub fn status_phrase(py: Python<'_>, status_code: u16) -> Py<PyAny> {
+    py.import("http")
+        .and_then(|http| http.getattr("HTTPStatus")?.call1((status_code,)))
+        .and_then(|status| status.getattr("phrase"))
+        .map_or_else(
+            |_| {
+                let phrase = StatusCode::from_u16(status_code)
+                    .ok()
+                    .and_then(|status| status.canonical_reason())
+                    .unwrap_or("Internal Server Error");
+                PyString::new(py, phrase).into_any().unbind()
+            },
+            Bound::unbind,
+        )
+}
+
 const fn body_allowed(status: StatusCode) -> bool {
     let code = status.as_u16();
     code >= 200 && !matches!(code, 204 | 205 | 304)
@@ -272,16 +288,13 @@ impl PyHTTPException {
         detail: Option<Bound<'_, PyAny>>,
         headers: Option<Bound<'_, PyDict>>,
     ) -> Self {
-        let default_detail = StatusCode::from_u16(status_code)
-            .ok()
-            .and_then(|status| status.canonical_reason())
-            .unwrap_or("Internal Server Error");
+        let detail = match detail {
+            Some(detail) => detail.unbind(),
+            None => status_phrase(py, status_code),
+        };
         Self {
             status_code,
-            detail: detail.map_or_else(
-                || PyString::new(py, default_detail).into_any().unbind(),
-                Into::into,
-            ),
+            detail,
             headers: headers.map(Into::into),
         }
     }
