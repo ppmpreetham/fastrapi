@@ -17,6 +17,7 @@ use tracing::debug;
 pub type RouteCollector = fn(Python<'_>, &Bound<'_, PyAny>) -> Option<Vec<RouteEntry>>;
 
 pub struct AppDocument<'a> {
+    pub openapi_version: &'a str,
     pub title: &'a str,
     pub version: &'a str,
     pub summary: Option<&'a str>,
@@ -42,6 +43,7 @@ pub fn build_openapi_spec(
     collect: RouteCollector,
 ) -> JsonValue {
     let mut spec = OpenApiSpec::default();
+    app.openapi_version.clone_into(&mut spec.openapi);
 
     app.title.clone_into(&mut spec.info.title);
     app.version.clone_into(&mut spec.info.version);

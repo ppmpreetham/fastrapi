@@ -252,6 +252,7 @@ impl FastrAPI {
             prometheus_config: None,
             middlewares: MiddlewareContainer::default(),
             openapi_cache: Mutex::new(None),
+            openapi_version: "3.1.0".to_string(),
             router: base_router,
         })
     }
@@ -689,6 +690,7 @@ impl FastrAPI {
         let fingerprint = self.openapi_fingerprint(py);
         if let Some(entry) = self.openapi_cache.lock().as_ref()
             && entry.fingerprint == fingerprint
+            && entry.openapi_version == self.openapi_version
             && entry.title == self.title
             && entry.version == self.version
             && entry.description == self.description
@@ -702,6 +704,7 @@ impl FastrAPI {
         let dict = json_module.call_method1(pyo3::intern!(py, "loads"), (json_str,))?;
         *self.openapi_cache.lock() = Some(super::config::OpenApiCacheEntry {
             fingerprint,
+            openapi_version: self.openapi_version.clone(),
             title: self.title.clone(),
             version: self.version.clone(),
             description: self.description.clone(),
@@ -946,6 +949,7 @@ impl FastrAPI {
     pub(crate) fn openapi_spec(&self, py: Python<'_>) -> simd_json::OwnedValue {
         let routes = self.router.bind(py).borrow().flatten(py).0.clone();
         let document = AppDocument {
+            openapi_version: &self.openapi_version,
             title: &self.title,
             version: &self.version,
             summary: self.summary.as_deref(),

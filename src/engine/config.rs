@@ -55,6 +55,7 @@ pub struct PrometheusConfig {
 
 pub(crate) struct OpenApiCacheEntry {
     pub fingerprint: u64,
+    pub openapi_version: String,
     pub title: String,
     pub version: String,
     pub description: String,
@@ -179,6 +180,8 @@ pub struct FastrAPI {
     pub request_id_header: Option<String>,
     #[pyo3(get, set)]
     pub powered_by_header: Option<String>,
+    #[pyo3(get, set)]
+    pub openapi_version: String,
     #[pyo3(get, set)]
     pub router: Py<PyAPIRouter>,
 

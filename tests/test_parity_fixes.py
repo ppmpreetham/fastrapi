@@ -562,3 +562,9 @@ def test_add_event_handler(client, app):
 def test_openapi_prefix_sets_root_path():
     assert FastrAPI(openapi_prefix="/api").root_path == "/api"
     assert FastrAPI(openapi_prefix="/api", root_path="/v1").root_path == "/v1"
+
+
+def test_openapi_version_attribute(client, app):
+    assert app.openapi_version == "3.1.0"
+    app.openapi_version = "3.0.2"
+    assert app.openapi()["openapi"] == "3.0.2"
