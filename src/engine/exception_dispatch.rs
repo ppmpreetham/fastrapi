@@ -154,11 +154,25 @@ fn find_handler<'py>(
         return None;
     };
 
+    let http_exception = py.get_type::<PyHTTPException>();
     mro.try_iter().ok()?.find_map(|entry| {
         let entry = entry.ok()?;
-        registry.get_item(entry).ok().flatten()
+        if let Ok(Some(handler)) = registry.get_item(&entry) {
+            return Some(handler);
+        }
+        if entry.is(&http_exception) {
+            let starlette = STARLETTE_EXCEPTIONS
+                .get(py)
+                .ok()?
+                .getattr(intern!(py, "HTTPException"))
+                .ok()?;
+            return registry.get_item(starlette).ok().flatten();
+        }
+        None
     })
 }
+
+fastrapi_pyutil::cached_py_import!(STARLETTE_EXCEPTIONS, "starlette.exceptions");
 
 fn build_request_arg(py: Python<'_>, request_input: Option<&RequestInput<'_>>) -> Py<PyAny> {
     request_input

@@ -582,3 +582,22 @@ def test_http_exception_default_detail_uses_http_status_phrase():
 
     assert HTTPException(413).detail == http.HTTPStatus(413).phrase
     assert HTTPException(422).detail == http.HTTPStatus(422).phrase
+
+
+def test_starlette_http_exception_handler_catches_http_exception(client, app):
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    from fastrapi import HTTPException
+    from fastrapi.responses import JSONResponse
+
+    @app.exception_handler(StarletteHTTPException)
+    def handler(request, exc):
+        return JSONResponse({"handled": exc.status_code}, status_code=exc.status_code)
+
+    @app.get("/missing")
+    def missing():
+        raise HTTPException(404)
+
+    response = client.get("/missing")
+    assert response.status_code == 404
+    assert response.json() == {"handled": 404}
