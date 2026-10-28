@@ -613,3 +613,16 @@ def test_raised_starlette_http_exception_becomes_a_response(client, app):
     response = client.get("/teapot-starlette")
     assert response.status_code == 418
     assert response.json() == {"detail": "short and stout"}
+
+
+def test_html_response_class_with_string_return(client, app):
+    from fastrapi.responses import HTMLResponse
+
+    @app.get("/html-text", response_class=HTMLResponse)
+    def html_text():
+        return "<h1>hi</h1>"
+
+    response = client.get("/html-text")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.text == "<h1>hi</h1>"

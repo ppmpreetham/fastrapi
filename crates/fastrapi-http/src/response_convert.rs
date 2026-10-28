@@ -258,6 +258,10 @@ pub fn convert_response_by_type(
             formatter.dump_options.as_ref().map(|d| d.bind(py)),
         )?,
 
+        ResponseType::Html if final_result.is_instance_of::<PyString>() => {
+            (default_status, Html(final_result.extract::<String>()?)).into_response()
+        }
+
         ResponseType::Html => convert_html_response(py, final_result),
 
         ResponseType::Redirect => convert_redirect_response(py, final_result),
