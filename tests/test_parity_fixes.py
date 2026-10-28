@@ -539,3 +539,10 @@ def test_logger_module():
     from fastrapi.logger import logger
 
     assert logger is logging.getLogger("fastapi")
+
+
+def test_routing_exports_starlette_helpers():
+    from fastrapi.routing import Match, Route, compile_path, get_name
+
+    assert compile_path("/items/{item_id}")[1] == "/items/{item_id}"
+    assert all((Match, Route, get_name))

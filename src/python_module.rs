@@ -295,7 +295,17 @@ mod fastrapi {
             register(m)?;
             let py = m.py();
             let routing = py.import("starlette.routing")?;
-            for name in ["BaseRoute", "Mount", "WebSocketRoute"] {
+            for name in [
+                "BaseRoute",
+                "Match",
+                "Mount",
+                "Route",
+                "WebSocketRoute",
+                "compile_path",
+                "get_name",
+                "request_response",
+                "websocket_session",
+            ] {
                 if let Ok(value) = routing.getattr(name) {
                     m.add(name, value)?;
                 }
