@@ -13,7 +13,7 @@ use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
 use pyo3::exceptions::{PyKeyError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyIterator, PyList, PyString, PyType};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyIterator, PyList, PyString, PyTuple, PyType};
 use pyo3::{Bound, intern};
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -38,6 +38,7 @@ pub struct PyMiddleware {
     pub is_async: bool,
     pub kind: PyMiddlewareKind,
     pub init_kwargs: Option<Py<PyDict>>,
+    pub init_args: Py<PyTuple>,
 }
 
 impl PyMiddleware {
@@ -64,6 +65,7 @@ impl PyMiddleware {
             is_async,
             kind,
             init_kwargs: None,
+            init_args: PyTuple::empty(py).unbind(),
         }
     }
 
@@ -90,6 +92,7 @@ impl PyMiddleware {
     pub fn from_custom(
         py: Python<'_>,
         obj: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         if obj.is_instance_of::<PyType>() && Self::call_param_count(py, obj) == Some(3) {
@@ -105,11 +108,12 @@ impl PyMiddleware {
                 is_async,
                 kind: PyMiddlewareKind::Asgi,
                 init_kwargs: kwargs.map(|kw| kw.clone().unbind()),
+                init_args: args.clone().unbind(),
             });
         }
 
         let instance: Bound<'_, PyAny> = if obj.is_instance_of::<PyType>() {
-            match obj.call((), kwargs) {
+            match obj.call(args, kwargs) {
                 Ok(instance) => instance,
                 Err(_) => obj.call0()?,
             }
@@ -154,6 +158,7 @@ impl PyMiddleware {
             is_async,
             kind,
             init_kwargs: None,
+            init_args: PyTuple::empty(py).unbind(),
         })
     }
 }

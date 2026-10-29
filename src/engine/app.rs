@@ -260,10 +260,11 @@ impl FastrAPI {
         })
     }
 
-    #[pyo3(signature = (middleware_class, **kwargs))]
+    #[pyo3(signature = (middleware_class, *args, **kwargs))]
     fn add_middleware(
         &mut self,
         middleware_class: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let class_name =
@@ -284,7 +285,7 @@ impl FastrAPI {
             info!("Enabled {class_name}");
         } else {
             let py = middleware_class.py();
-            let mw = PyMiddleware::from_custom(py, middleware_class, Some(opts))?;
+            let mw = PyMiddleware::from_custom(py, middleware_class, args, Some(opts))?;
             info!("Enabled custom {:?} middleware", mw.kind);
             self.middlewares
                 .order

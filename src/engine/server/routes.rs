@@ -44,7 +44,7 @@ use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::server_state::set_exception_handlers;
 use fastrapi_runtime::tokio_runtime::PYTHON_RUNTIME;
 use metrics::SharedString;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::{PyDict, PyString, PyTuple};
 
 pub(crate) fn build_router(
     py: Python,
@@ -473,7 +473,11 @@ pub(crate) fn apply_declared_middleware(
         builder.parse_kwargs(kwargs, container)?;
         container.record_layer(&class_name);
     } else {
-        let py_middleware = PyMiddleware::from_custom(py, &cls, Some(kwargs))?;
+        let args = middleware_item
+            .getattr("args")
+            .and_then(|args| args.cast_into::<PyTuple>().map_err(Into::into))
+            .unwrap_or_else(|_| PyTuple::empty(py));
+        let py_middleware = PyMiddleware::from_custom(py, &cls, &args, Some(kwargs))?;
         container
             .order
             .push(DeclaredLayer::Custom(Arc::new(py_middleware)));

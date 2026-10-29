@@ -12,7 +12,7 @@ use axum::http::{HeaderName, StatusCode, header};
 use axum::middleware::{self as axum_middleware, Next};
 use axum::response::{IntoResponse, Response};
 use pyo3::prelude::PyResult;
-use pyo3::types::PyAnyMethods as _;
+use pyo3::types::{PyAnyMethods as _, PyTuple, PyTupleMethods as _};
 use pyo3::{Bound, Py, PyAny, Python};
 use sha2::{Digest, Sha256};
 use tower_http::compression::CompressionLayer;
@@ -360,11 +360,11 @@ fn asgi_layer(
     let instance = Python::attach(|py| -> PyResult<Py<PyAny>> {
         let downstream = Py::new(py, asgi::PyScopeDownstream)?.into_any();
         let cls = mw.func.bind(py);
-        match &mw.init_kwargs {
-            Some(kwargs) => cls.call((downstream,), Some(kwargs.bind(py))),
-            None => cls.call1((downstream,)),
-        }
-        .map(Bound::unbind)
+        let mut args = vec![downstream.bind(py).clone()];
+        args.extend(mw.init_args.bind(py).iter());
+        let args = PyTuple::new(py, args)?;
+        cls.call(args, mw.init_kwargs.as_ref().map(|kwargs| kwargs.bind(py)))
+            .map(Bound::unbind)
     });
 
     match instance {

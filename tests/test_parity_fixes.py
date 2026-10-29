@@ -784,3 +784,26 @@ def test_class_dependency_with_async_call_is_instantiated(client, app):
         return {"name": value.name}
 
     assert client.get("/settings").json() == {"name": "prod"}
+
+
+def test_add_middleware_passes_positional_arguments(client, app):
+    class Tag:
+        def __init__(self, app, value):
+            self.app = app
+            self.value = value
+
+        async def __call__(self, scope, receive, send):
+            async def send_with_header(message):
+                if message["type"] == "http.response.start":
+                    message["headers"] = list(message.get("headers", [])) + [(b"x-tag", self.value.encode())]
+                await send(message)
+
+            await self.app(scope, receive, send_with_header)
+
+    app.add_middleware(Tag, "positional")
+
+    @app.get("/tagged")
+    def tagged():
+        return {}
+
+    assert client.get("/tagged").headers["x-tag"] == "positional"
