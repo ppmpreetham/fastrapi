@@ -677,3 +677,18 @@ def test_file_response_content_disposition_type(client, app, tmp_path):
 
     response = client.get("/inline")
     assert response.headers["content-disposition"] == 'inline; filename="report.txt"'
+
+
+def test_scalar_validation_errors_carry_ctx(client, app):
+    from fastrapi import Query
+
+    @app.get("/limits")
+    def limits(n: int = Query(gt=0), s: str = Query("abc", min_length=3)):
+        return {}
+
+    error = client.get("/limits", params={"n": 0}).json()["detail"][0]
+    assert error["ctx"] == {"gt": 0}
+    error = client.get("/limits", params={"n": 1, "s": "a"}).json()["detail"][0]
+    assert error["type"] == "string_too_short"
+    assert error["ctx"] == {"min_length": 3}
+    assert error["msg"] == "String should have at least 3 characters"

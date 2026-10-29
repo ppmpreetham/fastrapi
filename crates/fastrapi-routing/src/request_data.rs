@@ -23,26 +23,40 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyDict, PyList, PyString, PyType};
 use pyo3::{Bound, Py, intern};
 use simd_json::OwnedValue as Value;
-use simd_json::prelude::ValueAsObject;
+use simd_json::prelude::{ValueAsMutObject, ValueAsObject};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::fmt;
 
-#[expect(clippy::needless_pass_by_value)]
 pub(crate) fn validation_error(
     loc: &[&str],
     msg: impl fmt::Display,
     kind: &str,
     input: simd_json::OwnedValue,
 ) -> Response {
-    let detail = simd_json::json!({
-        "detail": [{
-            "type": kind,
-            "loc": loc,
-            "msg": msg.to_string(),
-            "input": input
-        }]
+    validation_error_with_ctx(loc, msg, kind, input, None)
+}
+
+#[expect(clippy::needless_pass_by_value)]
+fn validation_error_with_ctx(
+    loc: &[&str],
+    msg: impl fmt::Display,
+    kind: &str,
+    input: simd_json::OwnedValue,
+    ctx: Option<simd_json::OwnedValue>,
+) -> Response {
+    let mut error = simd_json::json!({
+        "type": kind,
+        "loc": loc,
+        "msg": msg.to_string(),
+        "input": input
     });
+    if let Some(ctx) = ctx
+        && let Some(object) = error.as_object_mut()
+    {
+        object.insert("ctx".into(), ctx);
+    }
+    let detail = simd_json::json!({ "detail": [error] });
     let mut response = (StatusCode::UNPROCESSABLE_ENTITY, Json(detail.clone())).into_response();
     response
         .extensions_mut()
@@ -315,14 +329,23 @@ fn validate_scalar_constraints(
     let loc = param.error_loc();
 
     if let Ok(number) = value.extract::<f64>() {
-        let numeric =
-            |kind: &str, msg: String| validation_error(&loc, msg, kind, py_any_to_json(py, value));
+        let numeric = |kind: &str, msg: String, key: &str, limit: f64| {
+            validation_error_with_ctx(
+                &loc,
+                msg,
+                kind,
+                py_any_to_json(py, value),
+                Some(simd_json::json!({ key: limit_json(limit) })),
+            )
+        };
         if let Some(gt) = param.constraints.gt
             && number <= gt
         {
             return Err(numeric(
                 "greater_than",
                 format!("Input should be greater than {gt}"),
+                "gt",
+                gt,
             ));
         }
         if let Some(ge) = param.constraints.ge
@@ -331,6 +354,8 @@ fn validate_scalar_constraints(
             return Err(numeric(
                 "greater_than_equal",
                 format!("Input should be greater than or equal to {ge}"),
+                "ge",
+                ge,
             ));
         }
         if let Some(lt) = param.constraints.lt
@@ -339,6 +364,8 @@ fn validate_scalar_constraints(
             return Err(numeric(
                 "less_than",
                 format!("Input should be less than {lt}"),
+                "lt",
+                lt,
             ));
         }
         if let Some(le) = param.constraints.le
@@ -347,6 +374,8 @@ fn validate_scalar_constraints(
             return Err(numeric(
                 "less_than_equal",
                 format!("Input should be less than or equal to {le}"),
+                "le",
+                le,
             ));
         }
     }
@@ -355,36 +384,57 @@ fn validate_scalar_constraints(
         if let Some(min_length) = param.constraints.min_length
             && text.chars().count() < min_length
         {
-            return Err(validation_error(
+            return Err(validation_error_with_ctx(
                 &loc,
-                format!("String should have at least {min_length} characters"),
-                "too_short",
+                format!(
+                    "String should have at least {min_length} character{}",
+                    plural(min_length)
+                ),
+                "string_too_short",
                 py_any_to_json(py, value),
+                Some(simd_json::json!({ "min_length": min_length })),
             ));
         }
         if let Some(max_length) = param.constraints.max_length
             && text.chars().count() > max_length
         {
-            return Err(validation_error(
+            return Err(validation_error_with_ctx(
                 &loc,
-                format!("String should have at most {max_length} characters"),
-                "too_long",
+                format!(
+                    "String should have at most {max_length} character{}",
+                    plural(max_length)
+                ),
+                "string_too_long",
                 py_any_to_json(py, value),
+                Some(simd_json::json!({ "max_length": max_length })),
             ));
         }
         if let Some(pattern) = &param.constraints.pattern
             && !pattern.is_match(text)
         {
-            return Err(validation_error(
+            return Err(validation_error_with_ctx(
                 &loc,
-                "String should match pattern",
+                format!("String should match pattern '{}'", pattern.as_str()),
                 "string_pattern_mismatch",
                 py_any_to_json(py, value),
+                Some(simd_json::json!({ "pattern": pattern.as_str() })),
             ));
         }
     }
 
     Ok(())
+}
+
+fn limit_json(limit: f64) -> simd_json::OwnedValue {
+    if limit.fract() == 0.0 && limit.abs() < 9.0e15 {
+        simd_json::json!(limit as i64)
+    } else {
+        simd_json::json!(limit)
+    }
+}
+
+const fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
 
 fn raw_value_for_parameter<'a>(
