@@ -716,3 +716,26 @@ def test_invalid_json_error_shape(client, app):
     assert error["loc"][0] == "body" and isinstance(error["loc"][1], int)
     assert error["input"] == {}
     assert "error" in error["ctx"]
+
+
+def test_missing_field_among_body_params(client, app):
+    from pydantic import BaseModel
+
+    class Item(BaseModel):
+        name: str
+
+    class User(BaseModel):
+        username: str
+
+    @app.post("/pair")
+    def pair(item: Item, user: User):
+        return {}
+
+    response = client.post("/pair", json={"item": {"name": "x"}})
+    assert response.status_code == 422
+    assert response.json()["detail"][0] == {
+        "type": "missing",
+        "loc": ["body", "user"],
+        "msg": "Field required",
+        "input": None,
+    }

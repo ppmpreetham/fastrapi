@@ -67,15 +67,6 @@ fn validation_error_with_ctx(
 #[derive(Clone)]
 pub struct ValidationErrorDetails(pub simd_json::OwnedValue);
 
-fn validation_error_response(detail: impl Into<String>) -> Response {
-    validation_error(
-        &["body"],
-        detail.into(),
-        "value_error",
-        simd_json::json!(null),
-    )
-}
-
 impl ParsedParameter {
     pub(crate) fn error_loc(&self) -> [&str; 2] {
         let source = match self.source {
@@ -860,10 +851,12 @@ fn apply_body_and_validation(
                 .map_or_else(|| py.None(), |d| d.clone_ref(py));
             set_argument(kwargs, param.name_py.bind(py), default_value)?;
         } else if param.required {
-            return Err(validation_error_response(format!(
-                "Missing field: {}",
-                param.external_name
-            )));
+            return Err(validation_error(
+                &["body", &param.external_name],
+                "Field required",
+                "missing",
+                simd_json::json!(null),
+            ));
         }
     }
 
