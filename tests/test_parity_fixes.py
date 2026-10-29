@@ -692,3 +692,27 @@ def test_scalar_validation_errors_carry_ctx(client, app):
     assert error["type"] == "string_too_short"
     assert error["ctx"] == {"min_length": 3}
     assert error["msg"] == "String should have at least 3 characters"
+
+
+def test_invalid_json_error_shape(client, app):
+    from pydantic import BaseModel
+
+    class Item(BaseModel):
+        name: str
+
+    class Owner(BaseModel):
+        email: str
+
+    @app.post("/items-json")
+    def create(item: Item, owner: Owner):
+        return item
+
+    response = client.post(
+        "/items-json", content=b'{"name": ', headers={"content-type": "application/json"}
+    )
+    error = response.json()["detail"][0]
+    assert response.status_code == 422
+    assert error["type"] == "json_invalid"
+    assert error["loc"][0] == "body" and isinstance(error["loc"][1], int)
+    assert error["input"] == {}
+    assert "error" in error["ctx"]

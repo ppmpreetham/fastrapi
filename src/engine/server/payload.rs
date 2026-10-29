@@ -64,9 +64,10 @@ pub(crate) async fn extract_payload(
         let detail = simd_json::json!({
             "detail": [{
                 "type": "json_invalid",
-                "loc": ["body", err.to_string()],
+                "loc": ["body", err.index()],
                 "msg": "JSON decode error",
-                "input": null,
+                "input": {},
+                "ctx": { "error": format!("{:?}", err.error()) },
             }]
         });
         let mut response =
