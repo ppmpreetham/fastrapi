@@ -807,3 +807,40 @@ def test_add_middleware_passes_positional_arguments(client, app):
         return {}
 
     assert client.get("/tagged").headers["x-tag"] == "positional"
+
+
+def test_websocket_iter_bytes():
+    import base64
+    import os
+    import socket
+
+    from test_websocket_smoke import _free_port, _recv_frame, _serve
+
+    app = FastrAPI()
+
+    @app.websocket("/bytes")
+    async def echo_bytes(websocket):
+        await websocket.accept()
+        async for chunk in websocket.iter_bytes():
+            await websocket.send_bytes(chunk[::-1])
+
+    port = _free_port()
+    _serve(app, port)
+    key = base64.b64encode(os.urandom(16)).decode()
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(
+            (
+                "GET /bytes HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{port}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode()
+        )
+        assert b" 101 " in sock.recv(4096)
+        payload = b"abc"
+        mask = os.urandom(4)
+        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        sock.sendall(bytes([0x82, 0x80 | len(payload)]) + mask + masked)
+        assert _recv_frame(sock) == (0x2, b"cba")

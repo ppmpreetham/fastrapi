@@ -6,7 +6,7 @@ use fastrapi_pyutil::imports::{STARLETTE_HEADERS, TYPES};
 use fastrapi_runtime::py_bridge;
 use parking_lot::Mutex;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyString};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyString};
 use std::str::from_utf8;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -253,6 +253,10 @@ impl PyWebSocket {
     fn iter_json(self_: Py<Self>, py: Python<'_>) -> PyResult<Py<WSIterator>> {
         Py::new(py, WSIterator::new(self_, WsPayload::Json))
     }
+
+    fn iter_bytes(self_: Py<Self>, py: Python<'_>) -> PyResult<Py<WSIterator>> {
+        Py::new(py, WSIterator::new(self_, WsPayload::Bytes))
+    }
 }
 
 fn closed() -> PyErr {
@@ -282,6 +286,7 @@ fn scope_value(scope: Option<&Py<PyDict>>, py: Python<'_>, key: &str) -> Py<PyAn
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WsPayload {
     Text,
+    Bytes,
     Json,
 }
 
@@ -317,6 +322,14 @@ impl WSIterator {
                     Ok(Python::attach(|py| {
                         PyString::new(py, text).into_any().unbind()
                     }))
+                }
+                Ok(WSMessage::Binary(data)) if payload == WsPayload::Bytes => {
+                    Ok(Python::attach(|py| {
+                        PyBytes::new(py, &data).into_any().unbind()
+                    }))
+                }
+                Ok(WSMessage::Text(_)) if payload == WsPayload::Bytes => {
+                    Err(expected("binary", "text"))
                 }
                 Ok(WSMessage::Text(bytes)) => parse_json_bytes(&bytes),
                 Ok(WSMessage::Binary(_)) => Err(expected("text", "binary")),
