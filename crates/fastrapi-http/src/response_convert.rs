@@ -278,6 +278,14 @@ pub fn convert_response_by_type(
 
         ResponseType::Redirect => convert_redirect_response(py, final_result),
 
+        ResponseType::File
+            if final_result.is_instance_of::<PyString>()
+                || final_result.hasattr(intern!(py, "__fspath__"))? =>
+        {
+            let file = py.get_type::<PyFileResponse>().call1((final_result,))?;
+            convert_file_response(py, &file, request_headers)
+        }
+
         ResponseType::File => convert_file_response(py, final_result, request_headers),
 
         ResponseType::Auto => {

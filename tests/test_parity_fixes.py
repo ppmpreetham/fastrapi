@@ -645,3 +645,21 @@ def test_redirect_response_class_with_string_return(client, app):
     response = client.get("/go-permanent", follow_redirects=False)
     assert response.status_code == 301
     assert response.headers["location"] == "/elsewhere"
+
+
+def test_file_response_class_with_path_return(client, app, tmp_path):
+    from fastrapi.responses import FileResponse
+
+    target = tmp_path / "hello.txt"
+    target.write_text("hello file")
+
+    @app.get("/file-path", response_class=FileResponse)
+    def file_path():
+        return str(target)
+
+    @app.get("/file-pathlib", response_class=FileResponse)
+    def file_pathlib():
+        return target
+
+    assert client.get("/file-path").text == "hello file"
+    assert client.get("/file-pathlib").text == "hello file"
