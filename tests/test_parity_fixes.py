@@ -739,3 +739,14 @@ def test_missing_field_among_body_params(client, app):
         "msg": "Field required",
         "input": None,
     }
+
+
+def test_quoted_cookie_values_are_unquoted(client, app):
+    from fastrapi import Cookie
+
+    @app.get("/cookie")
+    def cookie(session: str = Cookie()):
+        return {"session": session}
+
+    response = client.get("/cookie", headers={"cookie": r'session="a b\073c"'})
+    assert response.json() == {"session": "a b;c"}

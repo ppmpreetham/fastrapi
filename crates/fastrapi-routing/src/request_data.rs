@@ -428,6 +428,41 @@ const fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
+fn unquote_cookie(value: &str) -> Cow<'_, str> {
+    let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return Cow::Borrowed(value);
+    };
+    if !inner.contains('\\') {
+        return Cow::Borrowed(inner);
+    }
+    let bytes = inner.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        let Some(&next) = bytes.get(index + 1).filter(|_| byte == b'\\') else {
+            decoded.push(byte);
+            index += 1;
+            continue;
+        };
+        let octal = bytes
+            .get(index + 1..index + 4)
+            .filter(|digits| digits.iter().all(|digit| (b'0'..=b'7').contains(digit)));
+        if let Some(digits) = octal {
+            decoded.push(digits.iter().fold(0u8, |acc, digit| {
+                acc.wrapping_mul(8).wrapping_add(digit - b'0')
+            }));
+            index += 4;
+        } else {
+            decoded.push(next);
+            index += 2;
+        }
+    }
+    Cow::Owned(String::from_utf8_lossy(&decoded).into_owned())
+}
+
 fn raw_value_for_parameter<'a>(
     param: &ParsedParameter,
     request_input: &'a RequestInput<'_>,
@@ -447,7 +482,7 @@ fn raw_value_for_parameter<'a>(
         ParameterSource::Cookie => request_input
             .get_cookie(&param.external_name)
             .or_else(|| request_input.get_cookie(&param.name))
-            .map(Cow::Borrowed),
+            .map(unquote_cookie),
         ParameterSource::Body | ParameterSource::BackgroundTasks => None,
     }
 }
