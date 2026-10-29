@@ -767,3 +767,20 @@ def test_async_partial_and_callable_endpoints(client, app):
 
     assert client.get("/partial").json() == {"hello": "world"}
     assert client.get("/callable").json() == {"from": "callable"}
+
+
+def test_class_dependency_with_async_call_is_instantiated(client, app):
+    from fastrapi import Depends
+
+    class Settings:
+        def __init__(self):
+            self.name = "prod"
+
+        async def __call__(self):
+            return "not used"
+
+    @app.get("/settings")
+    def settings(value: Settings = Depends(Settings)):
+        return {"name": value.name}
+
+    assert client.get("/settings").json() == {"name": "prod"}

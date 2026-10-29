@@ -312,6 +312,13 @@ fn get_signature<'py>(
     inspect.call_method1(intern!(py, "signature"), (func,))
 }
 
+fn is_class(py: Python<'_>, inspect: &Bound<'_, PyModule>, func: &Bound<'_, PyAny>) -> bool {
+    inspect
+        .call_method1(intern!(py, "isclass"), (func,))
+        .and_then(|result| result.is_truthy())
+        .unwrap_or(false)
+}
+
 fn is_async_callable(
     py: Python<'_>,
     inspect: &Bound<'_, PyModule>,
@@ -321,6 +328,9 @@ fn is_async_callable(
         && is_coroutine.is_truthy().unwrap_or(false)
     {
         return true;
+    }
+    if is_class(py, inspect, func) {
+        return false;
     }
     if let Ok(call_method) = func.getattr(intern!(py, "__call__"))
         && let Ok(is_coroutine) =
@@ -342,6 +352,9 @@ fn is_generator_callable(
     {
         return true;
     }
+    if is_class(py, inspect, func) {
+        return false;
+    }
     if let Ok(call_method) = func.getattr(intern!(py, "__call__"))
         && let Ok(is_gen) = inspect.call_method1(intern!(py, "isgeneratorfunction"), (call_method,))
         && is_gen.is_truthy().unwrap_or(false)
@@ -360,6 +373,9 @@ fn is_async_generator_callable(
         && is_gen.is_truthy().unwrap_or(false)
     {
         return true;
+    }
+    if is_class(py, inspect, func) {
+        return false;
     }
     if let Ok(call_method) = func.getattr(intern!(py, "__call__"))
         && let Ok(is_gen) = inspect.call_method1(intern!(py, "isasyncgenfunction"), (call_method,))
