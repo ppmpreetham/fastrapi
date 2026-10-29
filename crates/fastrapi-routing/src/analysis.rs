@@ -33,16 +33,42 @@ pub struct ParsedRouteMetadata {
     pub is_fast_path: bool,
 }
 
+fn is_coroutine_callable(py: Python<'_>, func: &Bound<'_, PyAny>) -> bool {
+    if let Ok(code) = func.getattr("__code__") {
+        return code
+            .getattr("co_flags")
+            .and_then(|flags| flags.extract::<u32>())
+            .is_ok_and(|flags| (flags & 0x80) != 0);
+    }
+    let Ok(inspect) = py.import("inspect") else {
+        return false;
+    };
+    let is_coroutine = |target: &Bound<'_, PyAny>| {
+        inspect
+            .call_method1("iscoroutinefunction", (target,))
+            .and_then(|result| result.is_truthy())
+            .unwrap_or(false)
+    };
+    if is_coroutine(func) {
+        return true;
+    }
+    if inspect
+        .call_method1("isclass", (func,))
+        .and_then(|result| result.is_truthy())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    func.getattr("__call__")
+        .is_ok_and(|call| is_coroutine(&call))
+}
+
 #[must_use]
 pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> ParsedRouteMetadata {
     let response_type = get_response_type(py, func);
     let serialization_hint = get_serialization_hint(py, func);
 
-    let is_async = func
-        .getattr("__code__")
-        .and_then(|code| code.getattr("co_flags"))
-        .and_then(|flags| flags.extract::<u32>())
-        .is_ok_and(|f| (f & 0x80) != 0);
+    let is_async = is_coroutine_callable(py, func);
 
     let path_param_names = fastrapi_core::path::extract_path_param_names(path);
     let dependencies =

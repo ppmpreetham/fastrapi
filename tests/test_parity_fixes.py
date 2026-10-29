@@ -750,3 +750,20 @@ def test_quoted_cookie_values_are_unquoted(client, app):
 
     response = client.get("/cookie", headers={"cookie": r'session="a b\073c"'})
     assert response.json() == {"session": "a b;c"}
+
+
+def test_async_partial_and_callable_endpoints(client, app):
+    import functools
+
+    async def greet(name):
+        return {"hello": name}
+
+    class Handler:
+        async def __call__(self):
+            return {"from": "callable"}
+
+    app.add_api_route("/partial", functools.partial(greet, "world"), methods=["GET"])
+    app.add_api_route("/callable", Handler(), methods=["GET"])
+
+    assert client.get("/partial").json() == {"hello": "world"}
+    assert client.get("/callable").json() == {"from": "callable"}
