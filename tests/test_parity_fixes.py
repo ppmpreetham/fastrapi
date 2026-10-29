@@ -663,3 +663,17 @@ def test_file_response_class_with_path_return(client, app, tmp_path):
 
     assert client.get("/file-path").text == "hello file"
     assert client.get("/file-pathlib").text == "hello file"
+
+
+def test_file_response_content_disposition_type(client, app, tmp_path):
+    from fastrapi.responses import FileResponse
+
+    target = tmp_path / "report.txt"
+    target.write_text("data")
+
+    @app.get("/inline")
+    def inline():
+        return FileResponse(target, filename="report.txt", content_disposition_type="inline")
+
+    response = client.get("/inline")
+    assert response.headers["content-disposition"] == 'inline; filename="report.txt"'

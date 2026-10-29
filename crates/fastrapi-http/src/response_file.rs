@@ -235,9 +235,11 @@ pub fn convert_file_response(
     }
     if let Some(filename) = get_str("filename") {
         let escaped = filename.replace(['"', '\\'], "");
+        let disposition_type =
+            get_str("content_disposition_type").unwrap_or_else(|| "attachment".to_owned());
         builder = builder.header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{escaped}\""),
+            format!("{disposition_type}; filename=\"{escaped}\""),
         );
     }
     let response = builder

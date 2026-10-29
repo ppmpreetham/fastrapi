@@ -247,6 +247,10 @@ pub struct PyFileResponse {
     pub body: Py<PyAny>,
     #[pyo3(get, set)]
     pub charset: String,
+    #[pyo3(get, set)]
+    pub stat_result: Option<Py<PyAny>>,
+    #[pyo3(get, set)]
+    pub content_disposition_type: String,
 }
 
 crate::macros::response_api_methods!(PyRedirectResponse, "RedirectResponse");
@@ -255,7 +259,21 @@ crate::macros::response_api_methods!(PyFileResponse, "FileResponse");
 #[pymethods]
 impl PyFileResponse {
     #[new]
-    #[pyo3(signature = (path, status_code=200, headers=None, media_type=None, background=None, filename=None))]
+    #[pyo3(signature = (
+        path,
+        status_code=200,
+        headers=None,
+        media_type=None,
+        background=None,
+        filename=None,
+        stat_result=None,
+        method=None,
+        content_disposition_type="attachment".to_owned()
+    ))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the signature copies Starlette's FileResponse"
+    )]
     fn new(
         py: Python<'_>,
         path: &Bound<'_, PyAny>,
@@ -264,6 +282,13 @@ impl PyFileResponse {
         media_type: Option<String>,
         background: Option<Py<PyAny>>,
         filename: Option<String>,
+        stat_result: Option<Py<PyAny>>,
+        #[expect(
+            unused_variables,
+            reason = "part of Starlette's FileResponse signature"
+        )]
+        method: Option<&str>,
+        content_disposition_type: String,
     ) -> PyResult<Self> {
         let path = py
             .import("os")?
@@ -289,9 +314,9 @@ impl PyFileResponse {
                 .call1((filename,))?
                 .extract::<String>()?;
             let disposition = if encoded == *filename {
-                format!("attachment; filename=\"{filename}\"")
+                format!("{content_disposition_type}; filename=\"{filename}\"")
             } else {
-                format!("attachment; filename*=utf-8''{encoded}")
+                format!("{content_disposition_type}; filename*=utf-8''{encoded}")
             };
             let headers = crate::response_api::headers(py, &raw_headers)?;
             if !headers.contains("content-disposition")? {
@@ -308,6 +333,8 @@ impl PyFileResponse {
             raw_headers,
             body: py.None(),
             charset: "utf-8".to_owned(),
+            stat_result,
+            content_disposition_type,
         })
     }
 
