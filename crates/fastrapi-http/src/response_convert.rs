@@ -338,7 +338,12 @@ pub fn convert_response_by_type(
         }
     };
 
-    Ok(response)
+    if body_allowed(default_status) {
+        return Ok(response);
+    }
+    let (mut parts, _) = response.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Ok(Response::from_parts(parts, Body::empty()))
 }
 
 #[inline(always)]

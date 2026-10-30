@@ -921,3 +921,14 @@ def test_none_result_is_json_null(client, app):
     response = client.post("/created")
     assert response.status_code == 201
     assert response.json() is None
+
+
+def test_no_content_status_strips_body(client, app):
+    @app.delete("/gone-body", status_code=204)
+    def gone():
+        return {"deleted": True}
+
+    response = client.delete("/gone-body")
+    assert response.status_code == 204
+    assert response.content == b""
+    assert response.headers.get("content-length") in (None, "0")
