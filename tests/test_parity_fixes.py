@@ -876,3 +876,21 @@ def test_request_url_inside_endpoint(client, app):
     response = client.get("/where?x=1")
     assert response.json()["url"].endswith("/where?x=1")
     assert response.json()["url"].startswith("http://127.0.0.1")
+
+
+def test_dependency_param_named_like_request(client, app):
+    from enum import Enum
+
+    from fastrapi import Depends, Request
+
+    class RequestKind(str, Enum):
+        read = "read"
+
+    def current(kind: RequestKind, request: Request):
+        return {"kind": getattr(kind, "value", kind), "path": request.url.path}
+
+    @app.get("/kind")
+    def kind(data: dict = Depends(current)):
+        return data
+
+    assert client.get("/kind?kind=read").json() == {"kind": "read", "path": "/kind"}

@@ -5,7 +5,9 @@
 use super::params;
 use super::security::PySecurityScopes;
 use crate::route::ParsedParameter;
+use fastrapi_http::request::PyHTTPConnection;
 use fastrapi_http::request_input::RequestInput;
+use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_pyutil::imports::INSPECT;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::{blocking, py_bridge};
@@ -31,6 +33,7 @@ fastrapi_pyutil::cached_py_import!(CONTEXT_MANAGER, "contextlib", "contextmanage
 fastrapi_pyutil::cached_py_import!(ASYNC_CONTEXT_MANAGER, "contextlib", "asynccontextmanager");
 fastrapi_pyutil::cached_py_import!(TO_THREAD, "asyncio", "to_thread");
 fastrapi_pyutil::cached_py_import!(PARTIAL, "functools", "partial");
+fastrapi_pyutil::cached_py_import!(STARLETTE_CONNECTION, "starlette.requests", "HTTPConnection");
 
 struct ParserKeys<'py> {
     parameters: &'py Bound<'py, PyString>,
@@ -399,6 +402,18 @@ fn annotation_display_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Opt
         })
 }
 
+fn is_connection_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
+    let annotation = params::base_annotation(py, annotation);
+    let Ok(class) = annotation.cast::<PyType>() else {
+        return false;
+    };
+    class.is_subclass_of::<PyHTTPConnection>().unwrap_or(false)
+        || class.is_subclass_of::<PyWebSocket>().unwrap_or(false)
+        || STARLETTE_CONNECTION
+            .get(py)
+            .is_ok_and(|base| class.is_subclass(base).unwrap_or(false))
+}
+
 pub(crate) fn is_response_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
     let annotation = params::base_annotation(py, annotation);
     annotation_display_name(py, &annotation)
@@ -697,24 +712,20 @@ fn build_injection_plan(
             continue;
         }
 
-        let special_injection = param
-            .getattr(keys.annotation)
-            .ok()
-            .and_then(|ann| annotation_display_name(py, &ann))
-            .and_then(|ann_name| {
+        let special_injection = param.getattr(keys.annotation).ok().and_then(|ann| {
+            if is_connection_annotation(py, &ann) {
+                return Some(InjectionType::Request);
+            }
+            annotation_display_name(py, &ann).and_then(|ann_name| {
                 if ann_name == "Response" || ann_name == "PyResponse" {
                     Some(InjectionType::Response)
-                } else if ann_name.contains("Request")
-                    || ann_name.contains("HTTPConnection")
-                    || ann_name.contains("WebSocket")
-                {
-                    Some(InjectionType::Request)
                 } else if ann_name.contains("SecurityScopes") {
                     Some(InjectionType::SecurityScopes)
                 } else {
                     None
                 }
-            });
+            })
+        });
 
         match special_injection {
             Some(InjectionType::Request) => {
