@@ -959,3 +959,9 @@ def test_plain_objects_encode_their_fields(client, app):
         return {"point": Point(), "pairs": Pairs()}
 
     assert client.get("/objects").json() == {"point": {"x": 1, "y": 2}, "pairs": {"a": 1}}
+
+
+def test_app_accepts_custom_attributes():
+    app = FastrAPI()
+    app.db_pool = "pool"
+    assert app.db_pool == "pool"
