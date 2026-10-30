@@ -94,7 +94,7 @@ def test_generic_optional_list_and_orm_response_models(client, app):
         return None
 
     assert client.get("/items").json() == [{"name": "one"}]
-    assert client.get("/maybe").status_code == 204
+    assert client.get("/maybe").json() is None
 
 
 def test_oauth_form_class_dependency_multipart(client, app):

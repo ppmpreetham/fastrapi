@@ -904,3 +904,20 @@ def test_str_return_annotation_is_json(client, app):
     response = client.get("/hi")
     assert response.headers["content-type"] == "application/json"
     assert response.json() == "hi"
+
+
+def test_none_result_is_json_null(client, app):
+    @app.get("/nothing")
+    def nothing():
+        return None
+
+    @app.post("/created", status_code=201)
+    def created():
+        return None
+
+    response = client.get("/nothing")
+    assert response.status_code == 200
+    assert response.content == b"null"
+    response = client.post("/created")
+    assert response.status_code == 201
+    assert response.json() is None

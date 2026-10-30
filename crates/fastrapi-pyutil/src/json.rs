@@ -698,15 +698,6 @@ pub fn json_to_py_object(py: Python<'_>, value: &Value) -> Py<PyAny> {
 #[inline]
 #[must_use]
 pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>, status: StatusCode) -> AxumResponse {
-    if obj.is_none() {
-        let final_status = if status == StatusCode::OK {
-            StatusCode::NO_CONTENT
-        } else {
-            status
-        };
-        return final_status.into_response();
-    }
-
     py_json_response_with_status(py, status, obj).unwrap_or_else(|err| {
         err.print(py);
         StatusCode::INTERNAL_SERVER_ERROR.into_response()

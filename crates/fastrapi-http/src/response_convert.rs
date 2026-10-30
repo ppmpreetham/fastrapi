@@ -126,6 +126,19 @@ fn rendered_response(result: &Bound<'_, PyAny>) -> Option<Response> {
     Some(apply_raw_headers(response, result, RawHeaders::All))
 }
 
+const fn body_allowed(status: StatusCode) -> bool {
+    !matches!(status.as_u16(), 100..=199 | 204 | 304)
+}
+
+fn null_json_response(status: StatusCode) -> Response {
+    (
+        status,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        Bytes::from_static(b"null"),
+    )
+        .into_response()
+}
+
 #[inline(always)]
 pub fn convert_response_by_type(
     py: Python,
@@ -134,10 +147,18 @@ pub fn convert_response_by_type(
     request_headers: Option<&HeaderMap>,
 ) -> PyResult<Response> {
     if result.is_none() {
-        return Ok(formatter
-            .default_status
-            .unwrap_or(StatusCode::NO_CONTENT)
-            .into_response());
+        let status = formatter.default_status.unwrap_or(StatusCode::OK);
+        return Ok(
+            if matches!(
+                formatter.response_type,
+                ResponseType::Json | ResponseType::Auto
+            ) && body_allowed(status)
+            {
+                null_json_response(status)
+            } else {
+                status.into_response()
+            },
+        );
     }
 
     let default_status = formatter.default_status.unwrap_or(StatusCode::OK);
@@ -653,7 +674,7 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
         return response;
     }
     if result.is_none() {
-        return StatusCode::NO_CONTENT.into_response();
+        return null_json_response(StatusCode::OK);
     }
 
     let kind = response_kind(result);

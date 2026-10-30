@@ -477,7 +477,8 @@ class TestStatusCodes:
     
     def test_empty_response(self, client):
         response = client.get("/empty")
-        assert response.status_code == 204  # No Content
+        assert response.status_code == 200
+        assert response.content == b"null"
 
 
 class TestOpenAPISpec:
