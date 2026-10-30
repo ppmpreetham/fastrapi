@@ -864,3 +864,15 @@ def test_request_subclasses_and_starlette_request_are_injected(client, app):
 
     assert client.get("/sub").json() == {"path": "/sub"}
     assert client.get("/starlette").json() == {"path": "/starlette"}
+
+
+def test_request_url_inside_endpoint(client, app):
+    from fastrapi import Request
+
+    @app.get("/where")
+    def where(request: Request):
+        return {"url": str(request.url)}
+
+    response = client.get("/where?x=1")
+    assert response.json()["url"].endswith("/where?x=1")
+    assert response.json()["url"].startswith("http://127.0.0.1")

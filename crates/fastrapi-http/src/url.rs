@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use pyo3::class::basic::CompareOp;
 use pyo3::exceptions::{PyAssertionError, PyKeyError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyTuple};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyTuple};
 use std::collections::hash_map::DefaultHasher;
 
 struct SplitUrl {
@@ -229,11 +229,24 @@ fn url_from_scope(scope: &Bound<'_, PyAny>) -> PyResult<String> {
     let scheme: String = get_scope_str("scheme")?.unwrap_or_else(|| "http".to_string());
     let path: String = get_scope_str("path")?.unwrap_or_else(|| "/".to_string());
     let query_string: Vec<u8> = get_scope_item("query_string")?
-        .and_then(|value| value.extract().ok())
+        .and_then(|value| {
+            value
+                .extract::<Vec<u8>>()
+                .ok()
+                .or_else(|| value.extract::<String>().ok().map(String::into_bytes))
+        })
         .unwrap_or_default();
 
     let mut host_header: Option<String> = None;
-    if let Ok(headers) = scope.get_item("headers") {
+    if let Ok(headers) = scope.get_item("headers")
+        && let Ok(headers) = headers.cast::<PyDict>()
+    {
+        host_header = headers
+            .get_item(PyBytes::new(scope.py(), b"host"))?
+            .map(|value| value.extract::<Vec<u8>>())
+            .transpose()?
+            .map(|value| String::from_utf8_lossy(&value).into_owned());
+    } else if let Ok(headers) = scope.get_item("headers") {
         for pair in headers.try_iter()? {
             let pair = pair?;
             let key: Vec<u8> = pair.get_item(0)?.extract()?;
