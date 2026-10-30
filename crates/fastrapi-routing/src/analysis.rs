@@ -7,7 +7,7 @@ use crate::dependencies::{self, DependencyNode};
 use crate::params;
 use crate::route::{ParsedParameter, PydanticValidator};
 use fastrapi_core::params::ParameterSource;
-use fastrapi_http::request::PyRequest;
+use fastrapi_http::request::PyHTTPConnection;
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_http::responses::{
     PyFileResponse, PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse,
@@ -15,7 +15,7 @@ use fastrapi_http::responses::{
 use fastrapi_pyutil::imports::INSPECT;
 use fastrapi_pyutil::json::SerializationHint;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyString, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyString, PyTuple, PyType};
 use pyo3::{Bound, Py, intern};
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -31,6 +31,26 @@ pub struct ParsedRouteMetadata {
     pub parsed_params: Vec<ParsedParameter>,
     pub is_async: bool,
     pub is_fast_path: bool,
+}
+
+fn is_request_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
+    let Ok(class) = annotation.cast::<PyType>() else {
+        return false;
+    };
+    if class.is_subclass_of::<PyHTTPConnection>().unwrap_or(false) {
+        return true;
+    }
+    let starlette_class = |module: &str, name: &str| {
+        py.import(module)
+            .and_then(|module| module.getattr(name))
+            .ok()
+            .and_then(|class| class.cast_into::<PyType>().ok())
+    };
+    let is_starlette_connection = starlette_class("starlette.requests", "HTTPConnection")
+        .is_some_and(|base| class.is_subclass(&base).unwrap_or(false));
+    let is_starlette_websocket = starlette_class("starlette.websockets", "WebSocket")
+        .is_some_and(|base| class.is_subclass(&base).unwrap_or(false));
+    is_starlette_connection && !is_starlette_websocket
 }
 
 fn is_coroutine_callable(py: Python<'_>, func: &Bound<'_, PyAny>) -> bool {
@@ -85,8 +105,6 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     let mut request_param: Option<Py<PyString>> = None;
     let mut response_param = None;
 
-    let request_cls: Py<PyAny> = py.get_type::<PyRequest>().into_any().unbind();
-
     _ = (|| -> PyResult<()> {
         let inspect = INSPECT.get(py)?;
         let signature = inspect.call_method1("signature", (func,))?;
@@ -115,8 +133,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                     response_param = Some(PyString::new(py, &param_name).unbind());
                     continue;
                 }
-                let ann_ref: &Bound<'_, PyAny> = ann;
-                if ann_ref.is(request_cls.bind(py)) {
+                if is_request_annotation(py, ann) {
                     request_param = Some(PyString::new(py, &param_name).unbind());
                     continue;
                 }

@@ -844,3 +844,23 @@ def test_websocket_iter_bytes():
         masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
         sock.sendall(bytes([0x82, 0x80 | len(payload)]) + mask + masked)
         assert _recv_frame(sock) == (0x2, b"cba")
+
+
+def test_request_subclasses_and_starlette_request_are_injected(client, app):
+    from starlette.requests import Request as StarletteRequest
+
+    from fastrapi import Request
+
+    class MyRequest(Request):
+        pass
+
+    @app.get("/sub")
+    def sub(request: MyRequest):
+        return {"path": request.url.path}
+
+    @app.get("/starlette")
+    def starlette_request(request: StarletteRequest):
+        return {"path": request.url.path}
+
+    assert client.get("/sub").json() == {"path": "/sub"}
+    assert client.get("/starlette").json() == {"path": "/starlette"}

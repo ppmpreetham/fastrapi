@@ -532,6 +532,7 @@ pub fn create_stub_request(py: Python<'_>) -> PyResult<Py<PyAny>> {
 /// any functionality that is common to both `Request` and `WebSocket`.
 #[pyclass(
     extends = PyHTTPConnection,
+    subclass,
     name = "Request",
     module = "fastrapi.request",
     skip_from_py_object
