@@ -270,28 +270,9 @@ pub fn get_response_type(py: Python<'_>, func: &Bound<'_, PyAny>) -> ResponseTyp
             return Ok(ResponseType::Json);
         };
 
-        if ann.is(py.get_type::<PyJSONResponse>()) {
-            return Ok(ResponseType::Json);
-        } else if ann.is(py.get_type::<PyPlainTextResponse>()) {
-            return Ok(ResponseType::PlainText);
-        } else if ann.is(py.get_type::<PyHTMLResponse>()) {
-            return Ok(ResponseType::Html);
-        } else if ann.is(py.get_type::<PyRedirectResponse>()) {
-            return Ok(ResponseType::Redirect);
-        } else if ann.is(py.get_type::<PyFileResponse>()) {
-            return Ok(ResponseType::File);
-        }
-
-        let type_name = ann
-            .getattr(intern!(py, "__name__"))
-            .or_else(|_| ann.str().map(Bound::into_any))?;
-        let name_str = type_name.cast::<PyString>()?.to_str()?;
-
-        Ok(match name_str {
-            "dict" | "list" | "set" => ResponseType::Json,
-            "str" => ResponseType::PlainText,
-            _ if self::is_pydantic_model(py, &ann) => ResponseType::Json,
-            _ => ResponseType::Json,
+        Ok(match get_response_type_from_class(py, &ann) {
+            ResponseType::Auto => ResponseType::Json,
+            response_type => response_type,
         })
     })();
 

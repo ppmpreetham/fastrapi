@@ -894,3 +894,13 @@ def test_dependency_param_named_like_request(client, app):
         return data
 
     assert client.get("/kind?kind=read").json() == {"kind": "read", "path": "/kind"}
+
+
+def test_str_return_annotation_is_json(client, app):
+    @app.get("/hi")
+    def hi() -> str:
+        return "hi"
+
+    response = client.get("/hi")
+    assert response.headers["content-type"] == "application/json"
+    assert response.json() == "hi"
