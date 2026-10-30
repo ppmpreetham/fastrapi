@@ -942,3 +942,20 @@ def test_generators_and_deques_are_lists(client, app):
         return {"gen": (n * 2 for n in range(3)), "dq": deque([1, 2])}
 
     assert client.get("/seq").json() == {"gen": [0, 2, 4], "dq": [1, 2]}
+
+
+def test_plain_objects_encode_their_fields(client, app):
+    class Point:
+        def __init__(self):
+            self.x = 1
+            self.y = 2
+
+    class Pairs:
+        def __iter__(self):
+            return iter([("a", 1)])
+
+    @app.get("/objects")
+    def objects():
+        return {"point": Point(), "pairs": Pairs()}
+
+    assert client.get("/objects").json() == {"point": {"x": 1, "y": 2}, "pairs": {"a": 1}}

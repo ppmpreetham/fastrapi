@@ -281,6 +281,7 @@ pub enum PyJsonKind<'py> {
     IpAddress,
     Enum,
     Iterable,
+    Object,
     FallbackStr,
 }
 
@@ -296,6 +297,7 @@ enum ObjKind {
     Path,
     IpAddress,
     Iterable,
+    Object,
     FallbackStr,
 }
 
@@ -369,7 +371,22 @@ fn probe_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
         }
     }
 
-    ObjKind::FallbackStr
+    let is_pydantic_type = value
+        .get_type()
+        .module()
+        .is_ok_and(|module| module.to_str().unwrap_or_default().starts_with("pydantic"));
+    if is_pydantic_type {
+        ObjKind::FallbackStr
+    } else {
+        ObjKind::Object
+    }
+}
+
+fn object_fields<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
+    py.get_type::<PyDict>()
+        .call1((value,))
+        .or_else(|_| value.getattr(intern!(py, "__dict__")))
+        .ok()
 }
 
 fn decimal_number<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
@@ -452,6 +469,7 @@ pub fn classify_py_value<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyJ
         ObjKind::Path => PyJsonKind::Path,
         ObjKind::IpAddress => PyJsonKind::IpAddress,
         ObjKind::Iterable => PyJsonKind::Iterable,
+        ObjKind::Object => PyJsonKind::Object,
         ObjKind::FallbackStr => PyJsonKind::FallbackStr,
     }
 }
@@ -585,6 +603,14 @@ pub fn write_py_json<W: Write>(
                 .collect::<PyResult<Vec<Bound<'_, PyAny>>>>()?;
             write_json_array(py, writer, items)
         }
+
+        PyJsonKind::Object => match object_fields(py, value) {
+            Some(fields) => write_py_json(py, &fields, writer),
+            None => match json_text_of(value) {
+                Ok(s) => write_json_string(writer, &s),
+                Err(_) => writer.write_all(b"null").map_err(json_io_error),
+            },
+        },
 
         PyJsonKind::Decimal => match decimal_number(py, value) {
             Ok(number) => write_py_json(py, &number, writer),
@@ -871,6 +897,16 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
                         .collect(),
                 ))
             },
+        ),
+
+        PyJsonKind::Object => object_fields(py, value).map_or_else(
+            || {
+                value.str().map_or_else(
+                    |_| simd_json::json!(null),
+                    |s| simd_json::json!(lossy_text(&s)),
+                )
+            },
+            |fields| py_any_to_json(py, &fields),
         ),
 
         PyJsonKind::Decimal => decimal_number(py, value).map_or_else(
