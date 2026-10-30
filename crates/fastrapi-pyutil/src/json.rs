@@ -280,6 +280,7 @@ pub enum PyJsonKind<'py> {
     Path,
     IpAddress,
     Enum,
+    Iterable,
     FallbackStr,
 }
 
@@ -294,6 +295,7 @@ enum ObjKind {
     Decimal,
     Path,
     IpAddress,
+    Iterable,
     FallbackStr,
 }
 
@@ -317,6 +319,12 @@ fn classify_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
 }
 
 fn probe_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
+    if let Ok(type_obj) = value.get_type().name()
+        && matches!(type_obj.to_str().unwrap_or_default(), "generator" | "deque")
+    {
+        return ObjKind::Iterable;
+    }
+
     if let Ok(has_model_dump) = value.hasattr(intern!(py, "model_dump_json"))
         && has_model_dump
     {
@@ -443,6 +451,7 @@ pub fn classify_py_value<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyJ
         ObjKind::Decimal => PyJsonKind::Decimal,
         ObjKind::Path => PyJsonKind::Path,
         ObjKind::IpAddress => PyJsonKind::IpAddress,
+        ObjKind::Iterable => PyJsonKind::Iterable,
         ObjKind::FallbackStr => PyJsonKind::FallbackStr,
     }
 }
@@ -568,6 +577,13 @@ pub fn write_py_json<W: Write>(
             } else {
                 writer.write_all(b"null").map_err(json_io_error)
             }
+        }
+
+        PyJsonKind::Iterable => {
+            let items = value
+                .try_iter()?
+                .collect::<PyResult<Vec<Bound<'_, PyAny>>>>()?;
+            write_json_array(py, writer, items)
         }
 
         PyJsonKind::Decimal => match decimal_number(py, value) {
@@ -845,6 +861,17 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
                 |s| simd_json::json!(lossy_text(&s)),
             )
         }
+
+        PyJsonKind::Iterable => value.try_iter().map_or_else(
+            |_| simd_json::json!(null),
+            |iter| {
+                Value::Array(Box::new(
+                    iter.filter_map(Result::ok)
+                        .map(|item| py_any_to_json(py, &item))
+                        .collect(),
+                ))
+            },
+        ),
 
         PyJsonKind::Decimal => decimal_number(py, value).map_or_else(
             |_| simd_json::json!(null),

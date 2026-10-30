@@ -932,3 +932,13 @@ def test_no_content_status_strips_body(client, app):
     assert response.status_code == 204
     assert response.content == b""
     assert response.headers.get("content-length") in (None, "0")
+
+
+def test_generators_and_deques_are_lists(client, app):
+    from collections import deque
+
+    @app.get("/seq")
+    def seq():
+        return {"gen": (n * 2 for n in range(3)), "dq": deque([1, 2])}
+
+    assert client.get("/seq").json() == {"gen": [0, 2, 4], "dq": [1, 2]}
