@@ -196,6 +196,9 @@ impl PyBackgroundTasks {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct OwnBackground;
+
 pub fn spawn_response_background(py: Python<'_>, result: &Bound<'_, PyAny>) {
     let Ok(background) = result.getattr(intern!(py, "background")) else {
         return;

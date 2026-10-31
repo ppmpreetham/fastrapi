@@ -22,7 +22,7 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PySet, PyString};
 use smallvec::SmallVec;
 use std::sync::{Arc, OnceLock};
 
-use fastrapi_http::background::PyBackgroundTasks;
+use fastrapi_http::background::{OwnBackground, PyBackgroundTasks};
 use fastrapi_http::request::create_py_request;
 use fastrapi_http::response_convert::convert_response_by_type;
 use fastrapi_pyutil::json::py_json_response_with_dump_options;
@@ -96,8 +96,11 @@ pub(crate) fn build_request_input_from_parts<'a>(
 pub(crate) fn spawn_background_tasks(
     event_loop: EventLoop,
     bg_tasks: Option<Py<PyBackgroundTasks>>,
+    response: &Response,
 ) {
-    if let Some(tasks) = bg_tasks {
+    if let Some(tasks) = bg_tasks
+        && response.extensions().get::<OwnBackground>().is_none()
+    {
         spawn(async move {
             let pending = Python::attach(|py| match tasks.try_borrow(py) {
                 Ok(bg) => Some(bg.execute_all(event_loop)),
@@ -485,7 +488,7 @@ fn run_sync_route<const NEEDS_REQ: bool>(
     };
     match run_sync_gil_section(py, &section) {
         Ok((response, bg_tasks)) => {
-            spawn_background_tasks(event_loop, bg_tasks);
+            spawn_background_tasks(event_loop, bg_tasks, &response);
             response
         }
         Err(response) => response,
@@ -526,7 +529,7 @@ async fn core_async_no_deps(
 
     match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
-            spawn_background_tasks(event_loop, bg_tasks);
+            spawn_background_tasks(event_loop, bg_tasks, &response);
             response
         }
         Err(err_resp) => err_resp,
@@ -579,7 +582,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
 
     match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
-            spawn_background_tasks(event_loop, bg_tasks);
+            spawn_background_tasks(event_loop, bg_tasks, &response);
             response
         }
         Err(err_resp) => err_resp,
@@ -696,7 +699,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
 
     let response = match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
-            spawn_background_tasks(event_loop, bg_tasks);
+            spawn_background_tasks(event_loop, bg_tasks, &response);
             response
         }
         Err(err_resp) => err_resp,

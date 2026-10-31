@@ -6,7 +6,7 @@ use super::responses::{
     PyFileResponse, PyRedirectResponse, ResponseKind, extract_base_response_data,
     is_starlette_response, response_kind, response_status, validate_response_model,
 };
-use crate::background::{spawn_response_background, spawn_response_background_value};
+use crate::background::{OwnBackground, spawn_response_background_value};
 use crate::response_type::{ResponseFormatter, ResponseType};
 use crate::responses::{
     PyHTMLResponse, PyJSONResponse, PyORJSONResponse, PyPlainTextResponse, PyStreamingResponse,
@@ -146,6 +146,37 @@ pub fn convert_response_by_type(
     formatter: &ResponseFormatter,
     request_headers: Option<&HeaderMap>,
 ) -> PyResult<Response> {
+    let background = if result.is_none() {
+        None
+    } else {
+        result
+            .getattr(intern!(py, "background"))
+            .ok()
+            .filter(|background| !background.is_none())
+    };
+    let mut response = convert_response_value(py, result, formatter, request_headers)?;
+    if let Some(background) = background {
+        let deferred = result.is_instance_of::<PyStreamingResponse>()
+            || result.is_instance_of::<PyEventSourceResponse>()
+            || matches!(
+                response_kind(result),
+                ResponseKind::Streaming | ResponseKind::Sse
+            );
+        if !deferred {
+            spawn_response_background_value(background.unbind());
+        }
+        response.extensions_mut().insert(OwnBackground);
+    }
+    Ok(response)
+}
+
+#[inline(always)]
+fn convert_response_value(
+    py: Python,
+    result: &Bound<PyAny>,
+    formatter: &ResponseFormatter,
+    request_headers: Option<&HeaderMap>,
+) -> PyResult<Response> {
     if result.is_none() {
         let status = formatter.default_status.unwrap_or(StatusCode::OK);
         return Ok(
@@ -164,15 +195,6 @@ pub fn convert_response_by_type(
     let default_status = formatter.default_status.unwrap_or(StatusCode::OK);
     let mut final_result = result;
     let validated_storage;
-    let defer_background = result.is_instance_of::<PyStreamingResponse>()
-        || result.is_instance_of::<PyEventSourceResponse>()
-        || matches!(
-            response_kind(result),
-            ResponseKind::Streaming | ResponseKind::Sse
-        );
-    if !defer_background {
-        spawn_response_background(py, result);
-    }
 
     if response_kind(final_result) == ResponseKind::File
         || (final_result.hasattr("path").unwrap_or(false)

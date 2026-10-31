@@ -232,7 +232,7 @@ fn finish_managed_response(
             if !explicit && let Err(err) = apply_response_metadata(py, metadata, &mut response) {
                 return python_error_to_response_in(py, &err, Some(input));
             }
-            spawn_background_tasks(event_loop, background);
+            spawn_background_tasks(event_loop, background, &response);
             response
         }
     }

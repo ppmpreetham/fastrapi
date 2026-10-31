@@ -1100,3 +1100,22 @@ def test_api_route_registers_each_method(client, app):
     assert client.get("/multi").json() == {"ok": True}
     assert client.post("/multi").json() == {"ok": True}
     assert client.put("/routed").json() == {"routed": True}
+
+
+def test_response_background_replaces_injected_tasks(client, app):
+    import time
+
+    from fastrapi import BackgroundTasks
+    from starlette.background import BackgroundTask
+    from fastrapi.responses import JSONResponse
+
+    ran = []
+
+    @app.get("/bg-own")
+    def bg_own(tasks: BackgroundTasks):
+        tasks.add_task(ran.append, "injected")
+        return JSONResponse({"ok": True}, background=BackgroundTask(ran.append, "own"))
+
+    assert client.get("/bg-own").json() == {"ok": True}
+    time.sleep(0.3)
+    assert ran == ["own"]
