@@ -90,6 +90,18 @@ class Param(abc.ABC):
     pass
 
 
+class SecurityBase(abc.ABC):
+    pass
+
+
+class APIKeyBase(SecurityBase):
+    pass
+
+
+class HTTPBase(SecurityBase):
+    pass
+
+
 @asynccontextmanager
 async def contextmanager_in_threadpool(cm):
     exit_limiter = anyio.CapacityLimiter(1)
@@ -142,14 +154,49 @@ fn str_type(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
 pub(crate) fn register_security(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let base = PyModule::new(py, "base")?;
-    let object = py.import("builtins")?.getattr("object")?;
-    let bases = PyTuple::new(py, [object])?;
+    let helpers = py_helpers(py)?;
     for name in ["SecurityBase", "APIKeyBase", "HTTPBase"] {
-        base.add(name, python_type(py, name, &bases)?)?;
+        let class = helpers.getattr(name)?;
+        class.setattr("__module__", "fastrapi.security.base")?;
+        base.add(name, class)?;
     }
-    for (submodule, name) in [("api_key", "APIKeyBase"), ("http", "HTTPBase")] {
-        if let Ok(module) = parent.getattr(submodule) {
-            module.setattr(name, base.getattr(name)?)?;
+    for (submodule, name, classes) in [
+        (
+            "api_key",
+            "APIKeyBase",
+            &["APIKeyQuery", "APIKeyHeader", "APIKeyCookie"][..],
+        ),
+        (
+            "http",
+            "HTTPBase",
+            &["HTTPBasic", "HTTPBearer", "HTTPDigest"][..],
+        ),
+        (
+            "oauth2",
+            "SecurityBase",
+            &[
+                "OAuth2",
+                "OAuth2PasswordBearer",
+                "OAuth2AuthorizationCodeBearer",
+            ][..],
+        ),
+        (
+            "open_id_connect_url",
+            "SecurityBase",
+            &["OpenIdConnect"][..],
+        ),
+    ] {
+        let Ok(module) = parent.getattr(submodule) else {
+            continue;
+        };
+        let base_class = base.getattr(name)?;
+        if name != "SecurityBase" {
+            module.setattr(name, &base_class)?;
+        }
+        for class in classes {
+            if let Ok(class) = module.getattr(*class) {
+                base_class.call_method1("register", (class,))?;
+            }
         }
     }
     parent.add_submodule(&base)?;

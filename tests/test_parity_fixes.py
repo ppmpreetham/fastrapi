@@ -1038,3 +1038,15 @@ def test_params_param_base():
         assert issubclass(cls, Param)
     assert isinstance(Query(), Param)
     assert not issubclass(Body, Param)
+
+
+def test_security_classes_share_bases():
+    from fastrapi.security import APIKeyHeader, HTTPBearer, OAuth2PasswordBearer
+    from fastrapi.security.api_key import APIKeyBase
+    from fastrapi.security.base import SecurityBase
+    from fastrapi.security.http import HTTPBase
+
+    assert isinstance(APIKeyHeader(name="x-key"), APIKeyBase)
+    assert isinstance(HTTPBearer(), HTTPBase)
+    assert isinstance(OAuth2PasswordBearer(tokenUrl="token"), SecurityBase)
+    assert issubclass(APIKeyBase, SecurityBase)
