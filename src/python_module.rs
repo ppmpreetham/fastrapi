@@ -624,10 +624,10 @@ mod fastrapi {
         crate::ffi::compat::register_types(&types)?;
         m.add_submodule(&types)?;
         let middleware_exit = PyModule::new(py, "asyncexitstack")?;
-        middleware_exit.add(
-            "AsyncExitStackMiddleware",
-            py.import("builtins")?.getattr("object")?,
-        )?;
+        let exit_stack_middleware =
+            crate::ffi::compat::py_helpers(py)?.getattr("AsyncExitStackMiddleware")?;
+        exit_stack_middleware.setattr("__module__", "fastrapi.middleware.asyncexitstack")?;
+        middleware_exit.add("AsyncExitStackMiddleware", exit_stack_middleware)?;
         py.import("sys")?
             .getattr("modules")?
             .set_item("fastrapi.middleware.asyncexitstack", &middleware_exit)?;

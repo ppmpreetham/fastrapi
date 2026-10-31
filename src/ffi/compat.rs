@@ -14,7 +14,7 @@ const PY_HELPERS: &std::ffi::CStr = c"import abc
 import datetime
 import re
 from collections import defaultdict, deque
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from decimal import Decimal
 from enum import Enum
 from ipaddress import (
@@ -100,6 +100,17 @@ class APIKeyBase(SecurityBase):
 
 class HTTPBase(SecurityBase):
     pass
+
+
+class AsyncExitStackMiddleware:
+    def __init__(self, app, context_name=\"fastapi_middleware_astack\"):
+        self.app = app
+        self.context_name = context_name
+
+    async def __call__(self, scope, receive, send):
+        async with AsyncExitStack() as stack:
+            scope[self.context_name] = stack
+            await self.app(scope, receive, send)
 
 
 @asynccontextmanager

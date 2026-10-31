@@ -1119,3 +1119,18 @@ def test_response_background_replaces_injected_tasks(client, app):
     assert client.get("/bg-own").json() == {"ok": True}
     time.sleep(0.3)
     assert ran == ["own"]
+
+
+def test_async_exit_stack_middleware():
+    import asyncio
+    from contextlib import AsyncExitStack
+
+    from fastrapi.middleware.asyncexitstack import AsyncExitStackMiddleware
+
+    seen = {}
+
+    async def inner(scope, receive, send):
+        seen["stack"] = scope["fastapi_middleware_astack"]
+
+    asyncio.run(AsyncExitStackMiddleware(inner)({}, None, None))
+    assert isinstance(seen["stack"], AsyncExitStack)
