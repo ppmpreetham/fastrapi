@@ -172,8 +172,6 @@ fn session_key(secret: &str) -> Key {
     Key::derive_from(&Sha256::digest(secret.as_bytes()))
 }
 
-static X_FORWARDED_PROTO: header::HeaderName = header::HeaderName::from_static("x-forwarded-proto");
-
 fn same_site(value: &str) -> SameSite {
     match value {
         "strict" => SameSite::Strict,
@@ -309,13 +307,7 @@ fn drop_default_port(authority: &Authority) -> String {
 fn https_redirect_layer(app: Router) -> Router {
     app.layer(axum_middleware::from_fn(
         move |req: Request, next: Next| async move {
-            let is_https = req.uri().scheme() == Some(&Scheme::HTTPS)
-                || req
-                    .headers()
-                    .get(&X_FORWARDED_PROTO)
-                    .is_some_and(|proto| proto == "https");
-
-            if is_https {
+            if req.uri().scheme() == Some(&Scheme::HTTPS) {
                 return next.run(req).await;
             }
 

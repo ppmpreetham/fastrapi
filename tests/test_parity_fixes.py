@@ -1050,3 +1050,18 @@ def test_security_classes_share_bases():
     assert isinstance(HTTPBearer(), HTTPBase)
     assert isinstance(OAuth2PasswordBearer(tokenUrl="token"), SecurityBase)
     assert issubclass(APIKeyBase, SecurityBase)
+
+
+def test_https_redirect_ignores_forwarded_proto(client, app):
+    from fastrapi.middleware import HTTPSRedirectMiddleware
+
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+    @app.get("/secure-only")
+    def secure_only():
+        return {}
+
+    response = client.get(
+        "/secure-only", headers={"X-Forwarded-Proto": "https"}, follow_redirects=False
+    )
+    assert response.status_code == 307
