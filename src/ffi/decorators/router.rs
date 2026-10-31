@@ -191,6 +191,17 @@ impl PyAPIRouter {
         self.add_api_route_impl(py, path, endpoint, methods, &kwargs)
     }
 
+    #[pyo3(signature = (path, methods=None, **kwargs))]
+    fn api_route(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        methods: Option<Vec<String>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.create_api_route_decorator(py, path, methods, kwargs)
+    }
+
     /// Decorate a WebSocket function.
     ///
     /// Read more about it in the

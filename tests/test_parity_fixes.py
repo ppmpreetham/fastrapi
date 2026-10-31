@@ -1081,3 +1081,22 @@ def test_sync_generator_lifespan(client, app):
         return {"events": events}
 
     assert client.get("/life").json() == {"events": ["enter"]}
+
+
+def test_api_route_registers_each_method(client, app):
+    from fastrapi import APIRouter
+
+    @app.api_route("/multi", methods=["GET", "POST"])
+    def multi():
+        return {"ok": True}
+
+    router = APIRouter()
+
+    @router.api_route("/routed", methods=["PUT"])
+    def routed():
+        return {"routed": True}
+
+    app.include_router(router)
+    assert client.get("/multi").json() == {"ok": True}
+    assert client.post("/multi").json() == {"ok": True}
+    assert client.put("/routed").json() == {"routed": True}

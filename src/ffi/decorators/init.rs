@@ -574,6 +574,34 @@ impl PyAPIRouter {
         PyCFunction::new_closure(py, None, None, closure).map(Into::into)
     }
 
+    pub(crate) fn create_api_route_decorator(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        methods: Option<Vec<String>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let decorators = methods
+            .unwrap_or_else(|| vec!["GET".to_owned()])
+            .into_iter()
+            .map(|method| {
+                let http_method = HttpMethod::from_str(&method.to_ascii_uppercase())
+                    .map_err(|_| PyValueError::new_err(format!("Invalid HTTP method: {method}")))?;
+                self.create_method_decorator_kw(py, http_method, path.to_owned(), kwargs)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let closure = move |args: &Bound<'_, PyTuple>,
+                            _kwargs: Option<&Bound<'_, PyDict>>|
+              -> PyResult<Py<PyAny>> {
+            let func = args.get_item(0)?;
+            for decorator in &decorators {
+                decorator.bind(args.py()).call1((&func,))?;
+            }
+            Ok(func.unbind())
+        };
+        PyCFunction::new_closure(py, None, None, closure).map(Into::into)
+    }
+
     pub(crate) fn add_api_route_impl(
         &self,
         py: Python<'_>,

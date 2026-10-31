@@ -466,6 +466,20 @@ impl FastrAPI {
             .add_api_route_impl(py, path, endpoint, methods, &route_kwargs)
     }
 
+    #[pyo3(signature = (path, methods=None, **kwargs))]
+    fn api_route(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        methods: Option<Vec<String>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.router
+            .bind(py)
+            .borrow()
+            .create_api_route_decorator(py, path, methods, kwargs)
+    }
+
     /// Serve a static frontend build as low-priority routes.
     ///
     /// Use this for frontend tools that build static files into a directory,
