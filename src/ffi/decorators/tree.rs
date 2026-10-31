@@ -2,18 +2,85 @@
 //! It applies the prefixes and the dependencies of the parent routers to each route.
 
 use crate::ffi::decorators::PyAPIRouter;
-use fastrapi_core::path::join_path;
+use fastrapi_core::path::{extract_path_param_names, join_path};
 use fastrapi_routing::dependencies::{
     DependencyNode, collect_dependency_callables, parse_external_dependencies,
     shift_dependency_indices,
 };
 use fastrapi_routing::route::{RouteEntry, RouteHandler, WebSocketEntry};
 use pyo3::Py;
-use pyo3::prelude::Python;
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+fn fill_path(template: &str, params: &HashMap<String, String>) -> String {
+    let mut filled = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        let Some(len) = rest[start..].find('}') else {
+            break;
+        };
+        filled.push_str(&rest[..start]);
+        let inner = &rest[start + 1..start + len];
+        let key = inner.split(':').next().unwrap_or(inner);
+        filled.push_str(params.get(key).map_or("", String::as_str));
+        rest = &rest[start + len + 1..];
+    }
+    filled.push_str(rest);
+    filled
+}
+
 impl PyAPIRouter {
+    pub(crate) fn url_path_for_name(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        path_params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let mut params = HashMap::new();
+        if let Some(path_params) = path_params {
+            for (key, value) in path_params.iter() {
+                params.insert(key.extract::<String>()?, value.str()?.to_string());
+            }
+        }
+        let mut stack = vec![(self.clone(), String::new())];
+        while let Some((router, prefix)) = stack.pop() {
+            let full_prefix = join_path(&prefix, &router.prefix);
+            let candidates: Vec<(String, &str)> = router
+                .route_entries
+                .lock()
+                .iter()
+                .filter(|entry| entry.name == name)
+                .map(|entry| (entry.path.clone(), "http"))
+                .collect();
+            for (path, protocol) in candidates {
+                let template = join_path(&full_prefix, &path);
+                let expected = extract_path_param_names(&template);
+                if expected.len() == params.len()
+                    && expected.iter().all(|param| params.contains_key(param))
+                {
+                    let url_path = py
+                        .import("starlette.datastructures")?
+                        .getattr("URLPath")?
+                        .call1((fill_path(&template, &params), protocol))?;
+                    return Ok(url_path.unbind());
+                }
+            }
+            for sub in router.sub_routers.lock().iter() {
+                let sub_router = sub.router.bind(py).borrow().clone();
+                stack.push((sub_router, join_path(&full_prefix, &sub.prefix)));
+            }
+        }
+        let no_match = py.import("starlette.routing")?.getattr("NoMatchFound")?;
+        let params_dict = PyDict::new(py);
+        for (key, value) in &params {
+            params_dict.set_item(key, value)?;
+        }
+        Err(PyErr::from_value(no_match.call1((name, params_dict))?))
+    }
+
     pub fn mark_frozen(&self) {
         self.frozen.store(true, Ordering::Release);
     }

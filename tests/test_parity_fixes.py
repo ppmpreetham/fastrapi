@@ -1149,3 +1149,28 @@ def test_cors_origin_regex(client, app):
     assert allowed.headers["access-control-allow-origin"] == "https://app.example.org"
     denied = client.get("/rx", headers={"Origin": "https://evil.example.com"})
     assert "access-control-allow-origin" not in denied.headers
+
+
+def test_url_path_for_named_routes():
+    import pytest
+    from starlette.routing import NoMatchFound
+
+    from fastrapi import APIRouter
+
+    app = FastrAPI()
+    router = APIRouter(prefix="/users")
+
+    @router.get("/{user_id}", name="read_user")
+    def read_user(user_id: int):
+        return {}
+
+    @app.get("/items/{item_id}")
+    def read_item(item_id: int):
+        return {}
+
+    app.include_router(router)
+    assert app.url_path_for("read_item", item_id=3) == "/items/3"
+    assert app.url_path_for("read_user", user_id=7) == "/users/7"
+    assert router.url_path_for("read_user", user_id=7) == "/users/7"
+    with pytest.raises(NoMatchFound):
+        app.url_path_for("read_item")

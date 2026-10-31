@@ -191,6 +191,16 @@ impl PyAPIRouter {
         self.add_api_route_impl(py, path, endpoint, methods, &kwargs)
     }
 
+    #[pyo3(signature = (name, /, **path_params))]
+    fn url_path_for(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        path_params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.url_path_for_name(py, name, path_params)
+    }
+
     #[pyo3(signature = (path, methods=None, **kwargs))]
     fn api_route(
         &self,

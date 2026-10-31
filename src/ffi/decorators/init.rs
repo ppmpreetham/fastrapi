@@ -95,6 +95,7 @@ fn func_name(_py: Python<'_>, func: &Bound<'_, PyAny>) -> String {
 }
 
 struct RouteOptions {
+    name: Option<String>,
     dependencies: Option<Py<PyAny>>,
     default_status: Option<StatusCode>,
     response_model: Option<Py<PyAny>>,
@@ -122,6 +123,7 @@ impl RouteOptions {
         parent_tags: &[String],
         parent_deprecated: Option<bool>,
     ) -> PyResult<Self> {
+        let name = extract::<String>(kwargs, "name");
         let dependencies = extract_py(kwargs, "dependencies");
         let status_code = extract::<u16>(kwargs, "status_code");
         let summary = extract::<String>(kwargs, "summary");
@@ -178,6 +180,7 @@ impl RouteOptions {
         let resolved_deprecated = deprecated.or(parent_deprecated);
 
         Ok(Self {
+            name,
             dependencies,
             default_status,
             response_model,
@@ -435,6 +438,7 @@ impl PyAPIRouter {
             handler.payload.refresh_dependency_flags();
             handler.assign_execution_mode();
 
+            let route_name = opts.name.clone().unwrap_or_else(|| func_name(py, &func));
             let route_instance = router_route_class
                 .as_ref()
                 .map(|rc| -> PyResult<Py<PyAny>> {
@@ -442,7 +446,7 @@ impl PyAPIRouter {
                         v.map(|value| json_to_py_object(py, value))
                     };
                     let call_kwargs = PyDict::new(py);
-                    call_kwargs.set_item("name", func_name(py, &func))?;
+                    call_kwargs.set_item("name", &route_name)?;
                     call_kwargs.set_item("response_model", opts.response_model.as_ref())?;
                     call_kwargs.set_item("status_code", opts.default_status.map(|s| s.as_u16()))?;
                     call_kwargs.set_item("tags", opts.merged_tags.clone())?;
@@ -518,6 +522,7 @@ impl PyAPIRouter {
             routes.lock().push(RouteEntry {
                 method,
                 path: path_for_closure.clone(),
+                name: route_name,
                 handler: Arc::new(handler),
                 route_instance,
                 tags: opts.merged_tags.clone(),
