@@ -12,6 +12,7 @@ use fastrapi_http::response_type::ResponseType;
 use fastrapi_http::responses::{
     PyFileResponse, PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse,
 };
+use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_pyutil::imports::INSPECT;
 use fastrapi_pyutil::json::SerializationHint;
 use pyo3::prelude::*;
@@ -37,6 +38,9 @@ fn is_request_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool 
     let Ok(class) = annotation.cast::<PyType>() else {
         return false;
     };
+    if class.is_subclass_of::<PyWebSocket>().unwrap_or(false) {
+        return false;
+    }
     if class.is_subclass_of::<PyHTTPConnection>().unwrap_or(false) {
         return true;
     }

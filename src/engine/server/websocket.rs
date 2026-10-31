@@ -15,7 +15,7 @@ use fastwebsockets::{
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{IntoPyDict, PyDict, PyList};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{ReadHalf, WriteHalf};
@@ -33,6 +33,7 @@ enum SocketPumpError {
 
 use axum::http::StatusCode;
 use axum::http::request::Parts;
+use fastrapi_http::request::PyHTTPConnection;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_http::websocket::{WSDecision, WSMessage};
@@ -96,16 +97,19 @@ pub async fn ws_handler(
         };
 
     let (py_ws_obj, mut python_handler_future) = match Python::attach(|py| {
+        let connection = PyHTTPConnection {
+            scope: build_scope(py, &parts, &request_input).into_any(),
+            receive: py.None(),
+        };
         let py_ws_obj = Py::new(
             py,
-            PyWebSocket {
+            PyClassInitializer::from(connection).add_subclass(PyWebSocket {
                 tx: tx_to_rust,
                 rx: Arc::new(Mutex::new(Some(rx_from_rust))),
                 is_connected: Arc::new(AtomicBool::new(true)),
-                scope: Some(build_scope(py, &parts, &request_input)),
                 decision: Arc::new(Mutex::new(Some(decision_tx))),
                 handshake_state: Arc::new(AtomicU8::new(0)),
-            },
+            }),
         )?;
 
         let kwargs = PyDict::new(py);
@@ -267,7 +271,22 @@ fn match_path_params(
 fn build_scope(py: Python<'_>, parts: &Parts, input: &RequestInput<'_>) -> Py<PyDict> {
     let scope = PyDict::new(py);
     _ = scope.set_item("type", "websocket");
+    _ = scope.set_item("asgi", [("version", "3.0")].into_py_dict(py).ok());
+    _ = scope.set_item("http_version", "1.1");
+    _ = scope.set_item("scheme", "ws");
+    _ = scope.set_item("root_path", "");
     _ = scope.set_item("path", parts.uri.path());
+    _ = scope.set_item("raw_path", parts.uri.path().as_bytes());
+    let subprotocols = parts
+        .headers
+        .get_all("sec-websocket-protocol")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    _ = scope.set_item("subprotocols", subprotocols);
     _ = scope.set_item(
         "query_string",
         parts.uri.query().unwrap_or_default().as_bytes(),

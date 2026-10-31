@@ -1,12 +1,12 @@
 //! This module contains the `WebSocket` Python class, which is compatible with starlette.
 //! The class accepts the connection, sends and receives text, bytes, and JSON messages, and closes the connection.
 
+use crate::request::PyHTTPConnection;
 use bytes::{BufMut, Bytes, BytesMut};
-use fastrapi_pyutil::imports::{STARLETTE_HEADERS, TYPES};
 use fastrapi_runtime::py_bridge;
 use parking_lot::Mutex;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyString};
+use pyo3::types::{PyAny, PyBytes, PyString};
 use std::str::from_utf8;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -15,12 +15,6 @@ use crate::exceptions::PyWebSocketDisconnect;
 use fastrapi_pyutil::json::{json_to_py_object, write_py_json};
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTypeError, PyValueError};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-
-fastrapi_pyutil::cached_py_import!(
-    WS_STARLETTE_QUERY_PARAMS,
-    "starlette.datastructures",
-    "QueryParams"
-);
 
 pub enum WSMessage {
     Text(Bytes),
@@ -78,14 +72,11 @@ async fn next_message(rx_arc: SharedRx) -> PyResult<WSMessage> {
     received.ok_or_else(disconnected)
 }
 
-/// A base class for incoming HTTP connections, that is used to provide
-/// any functionality that is common to both `Request` and `WebSocket`.
-#[pyclass(name = "WebSocket")]
+#[pyclass(name = "WebSocket", extends = PyHTTPConnection)]
 pub struct PyWebSocket {
     pub tx: mpsc::Sender<WSMessage>,
     pub rx: SharedRx,
     pub is_connected: Arc<AtomicBool>,
-    pub scope: Option<Py<PyDict>>,
     pub decision: Arc<Mutex<Option<oneshot::Sender<WSDecision>>>>,
     pub handshake_state: Arc<AtomicU8>,
 }
@@ -209,43 +200,6 @@ impl PyWebSocket {
         }
     }
 
-    #[getter]
-    fn headers(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        starlette(STARLETTE_HEADERS.get(py)?, "raw", &raw_headers(self, py))
-    }
-
-    #[getter]
-    fn query_params(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        starlette(
-            WS_STARLETTE_QUERY_PARAMS.get(py)?,
-            "query_string",
-            &scope_value(self.scope.as_ref(), py, "query_string"),
-        )
-    }
-
-    #[getter]
-    fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(scope) = &self.scope {
-            let bound = scope.bind(py);
-            if !bound.contains("state")? {
-                let namespace = TYPES.get(py)?.call_method0("SimpleNamespace")?;
-                bound.set_item("state", namespace)?;
-            }
-            return bound
-                .get_item("state")?
-                .map(Bound::unbind)
-                .ok_or_else(closed);
-        }
-        Err(closed())
-    }
-
-    #[getter]
-    fn scope(&self, py: Python<'_>) -> Py<PyAny> {
-        self.scope
-            .as_ref()
-            .map_or_else(|| py.None(), |scope| scope.clone_ref(py).into_any())
-    }
-
     fn iter_text(self_: Py<Self>, py: Python<'_>) -> PyResult<Py<WSIterator>> {
         Py::new(py, WSIterator::new(self_, WsPayload::Text))
     }
@@ -261,26 +215,6 @@ impl PyWebSocket {
 
 fn closed() -> PyErr {
     PyRuntimeError::new_err("WebSocket closed")
-}
-
-/// Makes an instance of a starlette class from one keyword argument.
-fn starlette(cls: &Bound<'_, PyAny>, arg_name: &str, value: &Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let kwargs = PyDict::new(cls.py());
-    kwargs.set_item(arg_name, value.bind(cls.py()))?;
-    Ok(cls.call((), Some(&kwargs))?.unbind())
-}
-
-/// Returns the raw `(bytes, bytes)` header list.
-/// The list is empty until the upgrade metadata is available.
-fn raw_headers(ws: &PyWebSocket, py: Python<'_>) -> Py<PyAny> {
-    scope_value(ws.scope.as_ref(), py, "headers")
-}
-
-fn scope_value(scope: Option<&Py<PyDict>>, py: Python<'_>, key: &str) -> Py<PyAny> {
-    scope
-        .and_then(|s| s.bind(py).get_item(key).ok())
-        .flatten()
-        .map_or_else(|| py.None(), Bound::unbind)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
