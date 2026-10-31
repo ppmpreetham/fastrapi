@@ -194,4 +194,5 @@ pub struct FastrAPI {
     pub(crate) prometheus_config: Option<PrometheusConfig>,
     pub(crate) middlewares: MiddlewareContainer,
     pub(crate) openapi_cache: parking_lot::Mutex<Option<OpenApiCacheEntry>>,
+    pub(crate) openapi_schema: parking_lot::Mutex<Option<Py<PyAny>>>,
 }

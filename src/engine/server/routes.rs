@@ -334,7 +334,12 @@ pub(crate) fn register_docs_endpoints(
     let Some(openapi_url) = openapi_url else {
         return register_metrics_endpoint(app, app_config);
     };
-    let openapi_json = Arc::new(custom_openapi.unwrap_or_else(|| app_config.openapi_spec(py)));
+    let openapi_json = Arc::new(custom_openapi.unwrap_or_else(|| {
+        app_config.openapi_schema.lock().as_ref().map_or_else(
+            || app_config.openapi_spec(py),
+            |schema| fastrapi_pyutil::json::py_any_to_json(py, schema.bind(py)),
+        )
+    }));
     app = app.route(
         openapi_url,
         get(move || {

@@ -254,6 +254,7 @@ impl FastrAPI {
             prometheus_config: None,
             middlewares: MiddlewareContainer::default(),
             openapi_cache: Mutex::new(None),
+            openapi_schema: Mutex::new(None),
             openapi_version: "3.1.0".to_string(),
             extra: extra.map_or_else(|| PyDict::new(py).unbind(), Bound::unbind),
             router: base_router,
@@ -691,6 +692,9 @@ impl FastrAPI {
     /// [FastAPI docs for OpenAPI](https://fastapi.tiangolo.com/how-to/extending-openapi/).
     #[pyo3(signature = ())]
     fn openapi(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(schema) = self.openapi_schema.lock().as_ref() {
+            return Ok(schema.clone_ref(py));
+        }
         let fingerprint = self.openapi_fingerprint(py);
         if let Some(entry) = self.openapi_cache.lock().as_ref()
             && entry.fingerprint == fingerprint
@@ -715,6 +719,22 @@ impl FastrAPI {
             dict: dict.clone().unbind(),
         });
         Ok(dict.unbind())
+    }
+
+    #[getter]
+    fn get_openapi_schema(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        if let Some(schema) = self.openapi_schema.lock().as_ref() {
+            return Some(schema.clone_ref(py));
+        }
+        self.openapi_cache
+            .lock()
+            .as_ref()
+            .map(|entry| entry.dict.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_openapi_schema(&self, schema: Option<Py<PyAny>>) {
+        *self.openapi_schema.lock() = schema;
     }
 
     /// Add an exception handler to the app.

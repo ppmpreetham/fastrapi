@@ -974,3 +974,16 @@ def test_openapi_override_is_served(client, app):
     app.openapi = custom_openapi
     assert app.openapi()["info"]["title"] == "custom"
     assert client.get("/openapi.json").json()["info"]["title"] == "custom"
+
+
+def test_openapi_schema_attribute(client, app):
+    @app.get("/s")
+    def s():
+        return {}
+
+    assert app.openapi_schema is None
+    schema = app.openapi()
+    assert app.openapi_schema == schema
+    app.openapi_schema = {"openapi": "3.1.0", "info": {"title": "set", "version": "1"}, "paths": {}}
+    assert app.openapi()["info"]["title"] == "set"
+    assert client.get("/openapi.json").json()["info"]["title"] == "set"
