@@ -987,3 +987,25 @@ def test_openapi_schema_attribute(client, app):
     app.openapi_schema = {"openapi": "3.1.0", "info": {"title": "set", "version": "1"}, "paths": {}}
     assert app.openapi()["info"]["title"] == "set"
     assert client.get("/openapi.json").json()["info"]["title"] == "set"
+
+
+def test_contextmanager_in_threadpool():
+    import asyncio
+    from contextlib import contextmanager
+
+    from fastrapi.concurrency import contextmanager_in_threadpool
+
+    events = []
+
+    @contextmanager
+    def resource():
+        events.append("enter")
+        yield "value"
+        events.append("exit")
+
+    async def main():
+        async with contextmanager_in_threadpool(resource()) as value:
+            events.append(value)
+
+    asyncio.run(main())
+    assert events == ["enter", "value", "exit"]

@@ -10,6 +10,40 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
 use std::collections::HashSet;
 
+const PY_HELPERS: &std::ffi::CStr = c"import anyio
+import anyio.to_thread
+from contextlib import asynccontextmanager
+from starlette.concurrency import run_in_threadpool
+
+
+@asynccontextmanager
+async def contextmanager_in_threadpool(cm):
+    exit_limiter = anyio.CapacityLimiter(1)
+    try:
+        yield await run_in_threadpool(cm.__enter__)
+    except Exception as e:
+        ok = bool(
+            await anyio.to_thread.run_sync(
+                cm.__exit__, type(e), e, e.__traceback__, limiter=exit_limiter
+            )
+        )
+        if not ok:
+            raise e
+    else:
+        await anyio.to_thread.run_sync(
+            cm.__exit__, None, None, None, limiter=exit_limiter
+        )
+";
+
+pub(crate) fn py_helpers(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
+    PyModule::from_code(
+        py,
+        PY_HELPERS,
+        c"fastrapi/_helpers.py",
+        c"fastrapi._helpers",
+    )
+}
+
 fn python_type<'py>(
     py: Python<'py>,
     name: &str,
@@ -641,7 +675,6 @@ pub(crate) fn register_compat_modules(parent: &Bound<'_, PyModule>) -> PyResult<
         "run_in_threadpool",
         "iterate_in_threadpool",
         "run_until_first_complete",
-        "contextmanager_in_threadpool",
     ] {
         if let Ok(value) = starlette.getattr(name) {
             concurrency.add(name, value)?;
@@ -651,6 +684,11 @@ pub(crate) fn register_compat_modules(parent: &Bound<'_, PyModule>) -> PyResult<
     for name in ["asynccontextmanager", "AsyncExitStack"] {
         concurrency.add(name, contextlib.getattr(name)?)?;
     }
+    let helpers = py_helpers(py)?;
+    concurrency.add(
+        "contextmanager_in_threadpool",
+        helpers.getattr("contextmanager_in_threadpool")?,
+    )?;
     parent.add_submodule(&concurrency)?;
 
     let utils = PyModule::new(py, "utils")?;
