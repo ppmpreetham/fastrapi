@@ -1,3 +1,4 @@
+from fastrapi.security.base import HTTPBase as HTTPBase
 from typing import Any, final
 
 @final

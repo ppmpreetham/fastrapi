@@ -2,7 +2,7 @@ from _typeshed import Incomplete
 from collections.abc import Sequence
 from fastrapi.requests import Request
 from fastrapi.security.api_key import APIKeyCookie as APIKeyCookie2, APIKeyHeader as APIKeyHeader2, APIKeyQuery as APIKeyQuery2
-from fastrapi.security.base import OAuth2 as OAuth3, SecurityScopes as SecurityScopes2
+from fastrapi.security.oauth2 import OAuth2 as OAuth3, SecurityScopes as SecurityScopes2
 from fastrapi.security.http import HTTPAuthorizationCredentials as HTTPAuthorizationCredentials2, HTTPBasic as HTTPBasic2, HTTPBasicCredentials as HTTPBasicCredentials2, HTTPBearer as HTTPBearer2, HTTPDigest as HTTPDigest2
 from fastrapi.security.oauth2 import OAuth2AuthorizationCodeBearer as OAuth2AuthorizationCodeBearer2, OAuth2PasswordBearer as OAuth2PasswordBearer2, OAuth2PasswordRequestForm as OAuth2PasswordRequestForm2, OAuth2PasswordRequestFormStrict as OAuth2PasswordRequestFormStrict2
 from fastrapi.security.open_id_connect_url import OpenIdConnect as OpenIdConnect2

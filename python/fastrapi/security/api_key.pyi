@@ -1,3 +1,4 @@
+from fastrapi.security.base import APIKeyBase as APIKeyBase
 from typing import Any, final
 
 @final
