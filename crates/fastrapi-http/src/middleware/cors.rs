@@ -5,6 +5,7 @@ use axum::http::{HeaderName, HeaderValue, Method};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use regex::Regex;
 use std::collections::HashSet;
 use std::str::FromStr;
 use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
@@ -21,6 +22,9 @@ fn default_methods() -> Vec<String> {
 pub struct CORSMiddleware {
     #[default(vec![])]
     pub allow_origins: Vec<String>,
+
+    #[default(None)]
+    pub allow_origin_regex: Option<String>,
 
     #[default(_code = "default_methods()")]
     pub allow_methods: Vec<String>,
@@ -45,6 +49,7 @@ impl CORSMiddleware {
         *,
         allow_origins=Vec::new(),
         allow_methods=default_methods(),
+        allow_origin_regex=None,
         allow_headers=Vec::new(),
         allow_credentials=false,
         expose_headers=Vec::new(),
@@ -53,6 +58,7 @@ impl CORSMiddleware {
     const fn new(
         allow_origins: Vec<String>,
         allow_methods: Vec<String>,
+        allow_origin_regex: Option<String>,
         allow_headers: Vec<String>,
         allow_credentials: bool,
         expose_headers: Vec<String>,
@@ -60,6 +66,7 @@ impl CORSMiddleware {
     ) -> Self {
         Self {
             allow_origins,
+            allow_origin_regex,
             allow_methods,
             allow_headers,
             allow_credentials,
@@ -141,6 +148,12 @@ pub fn build_cors_layer(config: &CORSMiddleware) -> PyResult<CorsLayer> {
         layer = layer.allow_origin(AllowOrigin::mirror_request());
     } else if has_wildcard_origin {
         layer = layer.allow_origin(AllowOrigin::any());
+    } else if let Some(pattern) = &config.allow_origin_regex {
+        let regex = Regex::new(&format!("^(?:{pattern})$"))
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        layer = layer.allow_origin(AllowOrigin::predicate(move |origin, _| {
+            origins.contains(origin) || origin.to_str().is_ok_and(|value| regex.is_match(value))
+        }));
     } else if !config.allow_origins.is_empty() {
         layer = layer.allow_origin(origins);
     }

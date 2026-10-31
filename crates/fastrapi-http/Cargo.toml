@@ -24,6 +24,7 @@ papaya.workspace = true
 parking_lot.workspace = true
 pyo3.workspace = true
 pyo3-async-runtimes.workspace = true
+regex.workspace = true
 simd-json.workspace = true
 smallvec.workspace = true
 smart-default.workspace = true

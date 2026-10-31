@@ -1134,3 +1134,18 @@ def test_async_exit_stack_middleware():
 
     asyncio.run(AsyncExitStackMiddleware(inner)({}, None, None))
     assert isinstance(seen["stack"], AsyncExitStack)
+
+
+def test_cors_origin_regex(client, app):
+    from fastrapi.middleware import CORSMiddleware
+
+    app.add_middleware(CORSMiddleware, allow_origin_regex="https://[a-z]+[.]example[.]org")
+
+    @app.get("/rx")
+    def rx():
+        return {}
+
+    allowed = client.get("/rx", headers={"Origin": "https://app.example.org"})
+    assert allowed.headers["access-control-allow-origin"] == "https://app.example.org"
+    denied = client.get("/rx", headers={"Origin": "https://evil.example.com"})
+    assert "access-control-allow-origin" not in denied.headers
