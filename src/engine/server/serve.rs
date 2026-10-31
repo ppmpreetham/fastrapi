@@ -97,6 +97,7 @@ pub fn serve(
     set_server_loop(event_loop);
     set_serve_app(app.clone_ref(py).into_any());
     let app_bound = app.bind(py);
+    let custom_openapi = super::routes::custom_openapi_spec(py, app_bound.as_any());
     let app_config = app_bound.borrow();
     let app_state = AppState {
         event_loop,
@@ -135,6 +136,7 @@ pub fn serve(
         docs_url.as_deref(),
         openapi_url.as_deref(),
         &app_config,
+        custom_openapi,
     );
     drop(app_config);
 

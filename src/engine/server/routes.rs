@@ -52,6 +52,7 @@ pub(crate) fn build_router(
     docs_url: Option<&str>,
     openapi_url: Option<&str>,
     app_config: &FastrAPI,
+    custom_openapi: Option<JsonValue>,
 ) -> Router {
     let mut middlewares = app_config.middlewares.clone();
     merge_declared_middlewares(py, app_config, &mut middlewares);
@@ -162,7 +163,7 @@ pub(crate) fn build_router(
         &ws_routes,
         frozen_router,
     );
-    let app = register_docs_endpoints(app, py, app_config, docs_url, openapi_url);
+    let app = register_docs_endpoints(app, py, app_config, docs_url, openapi_url, custom_openapi);
     middleware_stack::build_stack(app, app_config, &middlewares, app_state.event_loop)
 }
 
@@ -328,11 +329,12 @@ pub(crate) fn register_docs_endpoints(
     app_config: &FastrAPI,
     docs_url: Option<&str>,
     openapi_url: Option<&str>,
+    custom_openapi: Option<JsonValue>,
 ) -> Router {
     let Some(openapi_url) = openapi_url else {
         return register_metrics_endpoint(app, app_config);
     };
-    let openapi_json = Arc::new(app_config.openapi_spec(py));
+    let openapi_json = Arc::new(custom_openapi.unwrap_or_else(|| app_config.openapi_spec(py)));
     app = app.route(
         openapi_url,
         get(move || {
@@ -394,6 +396,21 @@ pub(crate) fn register_docs_endpoints(
     }
 
     register_metrics_endpoint(app, app_config)
+}
+
+pub(crate) fn custom_openapi_spec(py: Python<'_>, app: &Bound<'_, PyAny>) -> Option<JsonValue> {
+    let openapi = app
+        .getattr(pyo3::intern!(py, "__dict__"))
+        .ok()?
+        .get_item("openapi")
+        .ok()?;
+    match openapi.call0() {
+        Ok(schema) => Some(fastrapi_pyutil::json::py_any_to_json(py, &schema)),
+        Err(err) => {
+            log_python_error("Custom openapi() failed", &err);
+            None
+        }
+    }
 }
 
 const DOCS_SPEC_URL: &str = "/api-docs/openapi.json";

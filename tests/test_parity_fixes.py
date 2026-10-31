@@ -965,3 +965,12 @@ def test_app_accepts_custom_attributes():
     app = FastrAPI()
     app.db_pool = "pool"
     assert app.db_pool == "pool"
+
+
+def test_openapi_override_is_served(client, app):
+    def custom_openapi():
+        return {"openapi": "3.1.0", "info": {"title": "custom", "version": "1"}, "paths": {}}
+
+    app.openapi = custom_openapi
+    assert app.openapi()["info"]["title"] == "custom"
+    assert client.get("/openapi.json").json()["info"]["title"] == "custom"
