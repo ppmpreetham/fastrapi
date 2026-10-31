@@ -1029,3 +1029,12 @@ def test_encoder_tables():
     assert isoformat(datetime.date(2024, 1, 2)) == "2024-01-02"
     assert set in encoders_by_class_tuples[list]
     assert generate_encoders_by_class_tuples({int: str})[str] == (int,)
+
+
+def test_params_param_base():
+    from fastrapi.params import Body, Cookie, Header, Param, Path, Query
+
+    for cls in (Query, Header, Path, Cookie):
+        assert issubclass(cls, Param)
+    assert isinstance(Query(), Param)
+    assert not issubclass(Body, Param)

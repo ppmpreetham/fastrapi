@@ -10,7 +10,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
 use std::collections::HashSet;
 
-const PY_HELPERS: &std::ffi::CStr = c"import datetime
+const PY_HELPERS: &std::ffi::CStr = c"import abc
+import datetime
 import re
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -85,6 +86,10 @@ def generate_encoders_by_class_tuples(type_encoder_map):
 encoders_by_class_tuples = generate_encoders_by_class_tuples(ENCODERS_BY_TYPE)
 
 
+class Param(abc.ABC):
+    pass
+
+
 @asynccontextmanager
 async def contextmanager_in_threadpool(cm):
     exit_limiter = anyio.CapacityLimiter(1)
@@ -104,13 +109,20 @@ async def contextmanager_in_threadpool(cm):
         )
 ";
 
+static PY_HELPERS_MODULE: pyo3::sync::PyOnceLock<Py<PyModule>> = pyo3::sync::PyOnceLock::new();
+
 pub(crate) fn py_helpers(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
-    PyModule::from_code(
-        py,
-        PY_HELPERS,
-        c"fastrapi/_helpers.py",
-        c"fastrapi._helpers",
-    )
+    PY_HELPERS_MODULE
+        .get_or_try_init(py, || {
+            PyModule::from_code(
+                py,
+                PY_HELPERS,
+                c"fastrapi/_helpers.py",
+                c"fastrapi._helpers",
+            )
+            .map(Bound::unbind)
+        })
+        .map(|module| module.bind(py).clone())
 }
 
 fn python_type<'py>(

@@ -254,7 +254,13 @@ mod fastrapi {
                 .import("enum")?
                 .getattr("Enum")?
                 .call(("ParamTypes", members), Some(&kwargs))?;
-            m.add("ParamTypes", param_types)
+            m.add("ParamTypes", param_types)?;
+            let param = crate::ffi::compat::py_helpers(py)?.getattr("Param")?;
+            param.setattr("__module__", "fastrapi.params")?;
+            for name in ["Query", "Header", "Path", "Cookie"] {
+                param.call_method1("register", (m.getattr(name)?,))?;
+            }
+            m.add("Param", param)
         }
     }
 
