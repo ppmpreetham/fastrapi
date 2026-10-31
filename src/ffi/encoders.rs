@@ -67,3 +67,17 @@ fn jsonable_encoder(
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(jsonable_encoder, module)?)
 }
+
+pub(crate) fn register_tables(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    let helpers = super::compat::py_helpers(module.py())?;
+    for name in [
+        "ENCODERS_BY_TYPE",
+        "encoders_by_class_tuples",
+        "generate_encoders_by_class_tuples",
+        "isoformat",
+        "decimal_encoder",
+    ] {
+        module.add(name, helpers.getattr(name)?)?;
+    }
+    Ok(())
+}

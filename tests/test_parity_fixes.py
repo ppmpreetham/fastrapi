@@ -1009,3 +1009,23 @@ def test_contextmanager_in_threadpool():
 
     asyncio.run(main())
     assert events == ["enter", "value", "exit"]
+
+
+def test_encoder_tables():
+    import datetime
+    from decimal import Decimal
+
+    from fastrapi.encoders import (
+        ENCODERS_BY_TYPE,
+        decimal_encoder,
+        encoders_by_class_tuples,
+        generate_encoders_by_class_tuples,
+        isoformat,
+    )
+
+    assert ENCODERS_BY_TYPE[bytes](b"x") == "x"
+    assert decimal_encoder(Decimal("2")) == 2
+    assert decimal_encoder(Decimal("2.5")) == 2.5
+    assert isoformat(datetime.date(2024, 1, 2)) == "2024-01-02"
+    assert set in encoders_by_class_tuples[list]
+    assert generate_encoders_by_class_tuples({int: str})[str] == (int,)

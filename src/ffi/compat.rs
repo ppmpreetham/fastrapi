@@ -10,10 +10,79 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
 use std::collections::HashSet;
 
-const PY_HELPERS: &std::ffi::CStr = c"import anyio
-import anyio.to_thread
+const PY_HELPERS: &std::ffi::CStr = c"import datetime
+import re
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from decimal import Decimal
+from enum import Enum
+from ipaddress import (
+    IPv4Address,
+    IPv4Interface,
+    IPv4Network,
+    IPv6Address,
+    IPv6Interface,
+    IPv6Network,
+)
+from pathlib import Path
+from types import GeneratorType
+from uuid import UUID
+
+import anyio
+import anyio.to_thread
+from pydantic import AnyUrl, NameEmail, SecretBytes, SecretStr
+from pydantic_core import Url
 from starlette.concurrency import run_in_threadpool
+
+
+def isoformat(o):
+    return o.isoformat()
+
+
+def decimal_encoder(dec_value):
+    exponent = dec_value.as_tuple().exponent
+    if isinstance(exponent, int) and exponent >= 0:
+        return int(dec_value)
+    return float(dec_value)
+
+
+ENCODERS_BY_TYPE = {
+    bytes: lambda o: o.decode(),
+    datetime.date: isoformat,
+    datetime.datetime: isoformat,
+    datetime.time: isoformat,
+    datetime.timedelta: lambda td: td.total_seconds(),
+    Decimal: decimal_encoder,
+    Enum: lambda o: o.value,
+    frozenset: list,
+    deque: list,
+    GeneratorType: list,
+    IPv4Address: str,
+    IPv4Interface: str,
+    IPv4Network: str,
+    IPv6Address: str,
+    IPv6Interface: str,
+    IPv6Network: str,
+    NameEmail: str,
+    Path: str,
+    re.Pattern: lambda o: o.pattern,
+    SecretBytes: str,
+    SecretStr: str,
+    set: list,
+    UUID: str,
+    Url: str,
+    AnyUrl: str,
+}
+
+
+def generate_encoders_by_class_tuples(type_encoder_map):
+    encoders_by_class_tuples = defaultdict(tuple)
+    for type_, encoder in type_encoder_map.items():
+        encoders_by_class_tuples[encoder] += (type_,)
+    return encoders_by_class_tuples
+
+
+encoders_by_class_tuples = generate_encoders_by_class_tuples(ENCODERS_BY_TYPE)
 
 
 @asynccontextmanager

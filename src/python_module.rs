@@ -641,6 +641,7 @@ mod fastrapi {
         m.add_function(wrap_pyfunction!(kernel_validation_count, m)?)?;
         let encoders = PyModule::new(py, "encoders")?;
         encoders::register(&encoders)?;
+        encoders::register_tables(&encoders)?;
         m.add("encoders", encoders)?;
         super::register_submodules_in_sys_modules(m)?;
 
