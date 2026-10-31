@@ -1065,3 +1065,19 @@ def test_https_redirect_ignores_forwarded_proto(client, app):
         "/secure-only", headers={"X-Forwarded-Proto": "https"}, follow_redirects=False
     )
     assert response.status_code == 307
+
+
+def test_sync_generator_lifespan(client, app):
+    events = []
+
+    def lifespan(app):
+        events.append("enter")
+        yield
+
+    app.lifespan = lifespan
+
+    @app.get("/life")
+    def life():
+        return {"events": events}
+
+    assert client.get("/life").json() == {"events": ["enter"]}

@@ -15,6 +15,7 @@ fastrapi_pyutil::cached_py_import!(ASYNCIO_MODULE, "asyncio");
 pub(crate) struct EnteredLifespan {
     manager: Py<PyAny>,
     event_loop: EventLoop,
+    is_async: bool,
 }
 
 pub(crate) fn start_background_asyncio_loop(py: Python<'_>) -> PyResult<EventLoop> {
@@ -150,29 +151,60 @@ pub(crate) fn enter_lifespan(
     lifespan: &Py<PyAny>,
     event_loop: EventLoop,
 ) -> PyResult<EnteredLifespan> {
-    let manager = lifespan.bind(py).call1((app.clone_ref(py),))?;
-    let awaitable = manager.call_method0("__aenter__")?;
-
-    let state = run_awaitable_in_loop(py, event_loop, awaitable)?;
+    let manager = lifespan_factory(py, lifespan.bind(py))?.call1((app.clone_ref(py),))?;
+    let is_async = manager.hasattr("__aenter__")?;
+    let state = if is_async {
+        let awaitable = manager.call_method0("__aenter__")?;
+        run_awaitable_in_loop(py, event_loop, awaitable)?
+    } else {
+        manager.call_method0("__enter__")?.unbind()
+    };
     if !state.bind(py).is_none() {
         set_lifespan_state(state.clone_ref(py));
     }
     Ok(EnteredLifespan {
         manager: manager.unbind(),
         event_loop,
+        is_async,
     })
 }
 
-pub(crate) fn exit_lifespan(py: Python<'_>, entered_lifespan: &EnteredLifespan) -> PyResult<()> {
-    let awaitable = entered_lifespan
-        .manager
-        .bind(py)
-        .call_method1("__aexit__", (py.None(), py.None(), py.None()))?;
+fn lifespan_factory<'py>(
+    py: Python<'py>,
+    lifespan: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let inspect = py.import("inspect")?;
+    let wrapper = if inspect
+        .call_method1("isasyncgenfunction", (lifespan,))?
+        .is_truthy()?
+    {
+        "asynccontextmanager"
+    } else if inspect
+        .call_method1("isgeneratorfunction", (lifespan,))?
+        .is_truthy()?
+    {
+        "contextmanager"
+    } else {
+        return Ok(lifespan.clone());
+    };
+    py.import("contextlib")?
+        .getattr(wrapper)?
+        .call1((lifespan,))
+}
 
-    let result = run_awaitable_in_loop(py, entered_lifespan.event_loop, awaitable);
+pub(crate) fn exit_lifespan(py: Python<'_>, entered_lifespan: &EnteredLifespan) -> PyResult<()> {
+    let manager = entered_lifespan.manager.bind(py);
+    let result = if entered_lifespan.is_async {
+        let awaitable = manager.call_method1("__aexit__", (py.None(), py.None(), py.None()))?;
+        run_awaitable_in_loop(py, entered_lifespan.event_loop, awaitable).map(|_| ())
+    } else {
+        manager
+            .call_method1("__exit__", (py.None(), py.None(), py.None()))
+            .map(|_| ())
+    };
     clear_lifespan_state();
 
-    result.map(|_| ())
+    result
 }
 
 pub(crate) fn run_awaitable_in_loop(
