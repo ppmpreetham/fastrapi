@@ -1174,3 +1174,17 @@ def test_url_path_for_named_routes():
     assert router.url_path_for("read_user", user_id=7) == "/users/7"
     with pytest.raises(NoMatchFound):
         app.url_path_for("read_item")
+
+
+def test_openapi_documents_head_and_options(client, app):
+    @app.head("/probe")
+    def probe_head():
+        return None
+
+    @app.options("/probe")
+    def probe_options():
+        return {}
+
+    paths = client.get("/openapi.json").json()["paths"]
+    assert paths["/probe"]["head"]["operationId"] == "probe_head_probe_head"
+    assert paths["/probe"]["options"]["operationId"] == "probe_options_probe_options"

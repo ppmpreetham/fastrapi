@@ -546,6 +546,8 @@ pub fn build_paths_from_routes(
             put: None,
             delete: None,
             patch: None,
+            head: None,
+            options: None,
             parameters: None,
         });
 
@@ -588,7 +590,8 @@ pub fn build_paths_from_routes(
             HttpMethod::PUT => path_item.put = Some(operation_val),
             HttpMethod::DELETE => path_item.delete = Some(operation_val),
             HttpMethod::PATCH => path_item.patch = Some(operation_val),
-            _ => {}
+            HttpMethod::HEAD => path_item.head = Some(operation_val),
+            HttpMethod::OPTIONS => path_item.options = Some(operation_val),
         }
     }
     paths
