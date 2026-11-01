@@ -105,6 +105,7 @@ pub async fn ws_handler(
                 is_connected: Arc::new(AtomicBool::new(true)),
                 decision: Arc::new(Mutex::new(Some(decision_tx))),
                 handshake_state: Arc::new(AtomicU8::new(0)),
+                connect_delivered: Arc::new(AtomicBool::new(false)),
             }),
         )
     }) {

@@ -274,3 +274,32 @@ def test_websocket_route_name_and_dependencies():
     assert status == 101
     assert _recv_frame(sock) == (0x1, f"ws://127.0.0.1:{port}/chat/b".encode())
     assert calls == ["/chat/a"]
+
+
+def test_websocket_raw_asgi_messages_and_states():
+    from starlette.websockets import WebSocketState
+
+    from fastrapi import WebSocket
+
+    app = FastrAPI()
+
+    @app.websocket("/raw")
+    async def raw(websocket: WebSocket):
+        states = [websocket.client_state.name, websocket.application_state.name]
+        connect = await websocket.receive()
+        await websocket.send({"type": "websocket.accept"})
+        states.append(websocket.application_state.name)
+        message = await websocket.receive()
+        await websocket.send({"type": "websocket.send", "text": f"{connect['type']}|{message['text']}|{','.join(states)}"})
+        await websocket.send({"type": "websocket.send", "bytes": b"raw"})
+        disconnect = await websocket.receive()
+        assert disconnect["type"] == "websocket.disconnect"
+        assert websocket.client_state == WebSocketState.DISCONNECTED
+
+    port = _app_with_port(app)
+    status, _, _, sock = _connect(port, "/raw")
+    assert status == 101
+    _send(sock, "ping")
+    assert _recv_frame(sock) == (0x1, b"websocket.connect|ping|CONNECTING,CONNECTING,CONNECTED")
+    assert _recv_frame(sock) == (0x2, b"raw")
+    _send(sock, struct.pack("!H", 1000), opcode=0x8)

@@ -6,7 +6,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use fastrapi_runtime::py_bridge;
 use parking_lot::Mutex;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyString};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyString};
 use std::str::from_utf8;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -79,6 +79,36 @@ pub struct PyWebSocket {
     pub is_connected: Arc<AtomicBool>,
     pub decision: Arc<Mutex<Option<oneshot::Sender<WSDecision>>>>,
     pub handshake_state: Arc<AtomicU8>,
+    pub connect_delivered: Arc<AtomicBool>,
+}
+
+fastrapi_pyutil::cached_py_import!(WEBSOCKET_STATE, "starlette.websockets", "WebSocketState");
+
+fn websocket_state(py: Python<'_>, value: u8) -> PyResult<Py<PyAny>> {
+    Ok(WEBSOCKET_STATE.get(py)?.call1((value,))?.unbind())
+}
+
+fn asgi_message(py: Python<'_>, message: WSMessage) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    match message {
+        WSMessage::Text(bytes) => {
+            dict.set_item("type", "websocket.receive")?;
+            dict.set_item(
+                "text",
+                from_utf8(&bytes).map_err(|e| PyValueError::new_err(e.to_string()))?,
+            )?;
+        }
+        WSMessage::Binary(data) => {
+            dict.set_item("type", "websocket.receive")?;
+            dict.set_item("bytes", PyBytes::new(py, &data))?;
+        }
+        WSMessage::Close(code, reason) => {
+            dict.set_item("type", "websocket.disconnect")?;
+            dict.set_item("code", code)?;
+            dict.set_item("reason", reason)?;
+        }
+    }
+    Ok(dict.into_any().unbind())
 }
 
 #[pymethods]
@@ -170,6 +200,65 @@ impl PyWebSocket {
         })
     }
 
+    fn receive<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let connect = self.handshake_state.load(Ordering::Acquire) == 0
+            && !self.connect_delivered.swap(true, Ordering::AcqRel);
+        let rx = self.rx.clone();
+        let connected = self.is_connected.clone();
+        py_bridge::future_into_py(py, async move {
+            if connect {
+                return Python::attach(|py| -> PyResult<Py<PyAny>> {
+                    let dict = PyDict::new(py);
+                    dict.set_item("type", "websocket.connect")?;
+                    Ok(dict.into_any().unbind())
+                });
+            }
+            let message = next_message(rx).await?;
+            if matches!(message, WSMessage::Close(..)) {
+                connected.store(false, Ordering::Release);
+            }
+            Python::attach(|py| asgi_message(py, message))
+        })
+    }
+
+    fn send<'py>(
+        &self,
+        py: Python<'py>,
+        message: &Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kind: String = message
+            .get_item("type")?
+            .ok_or_else(|| PyValueError::new_err("ASGI message has no 'type'"))?
+            .extract()?;
+        let field = |key: &str| -> PyResult<Option<Bound<'py, PyAny>>> {
+            Ok(message.get_item(key)?.filter(|value| !value.is_none()))
+        };
+        match kind.as_str() {
+            "websocket.accept" => self.accept(py),
+            "websocket.send" => {
+                if let Some(text) = field("text")? {
+                    self.send_text(py, text.extract()?)
+                } else if let Some(data) = field("bytes")? {
+                    self.send_bytes(py, data.extract()?)
+                } else {
+                    Err(PyValueError::new_err(
+                        "websocket.send needs a 'text' or 'bytes' key",
+                    ))
+                }
+            }
+            "websocket.close" => {
+                let code = field("code")?.map_or(Ok(1000), |code| code.extract())?;
+                let reason = field("reason")?
+                    .map(|reason| reason.extract())
+                    .transpose()?;
+                self.close(py, code, reason)
+            }
+            other => Err(PyRuntimeError::new_err(format!(
+                "Unexpected ASGI message '{other}'"
+            ))),
+        }
+    }
+
     #[pyo3(signature = (code = 1000, reason = None))]
     fn close<'py>(
         &self,
@@ -189,6 +278,7 @@ impl PyWebSocket {
                 let _ = sender.send(WSDecision::Reject(code));
                 return Ok(());
             }
+            _ = state.compare_exchange(1, 3, Ordering::AcqRel, Ordering::Acquire);
             tx.send(WSMessage::Close(code, reason.unwrap_or_default()))
                 .await
                 .map_err(|_| closed())?;
@@ -197,12 +287,28 @@ impl PyWebSocket {
     }
 
     #[getter]
-    fn client_state(&self) -> u8 {
-        if self.is_connected.load(Ordering::Relaxed) {
-            1 // Connected
+    fn client_state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let value = if self.handshake_state.load(Ordering::Acquire) == 0
+            && !self.connect_delivered.load(Ordering::Acquire)
+        {
+            0
+        } else if self.is_connected.load(Ordering::Acquire) {
+            1
         } else {
-            3 // Disconnected
-        }
+            2
+        };
+        websocket_state(py, value)
+    }
+
+    #[getter]
+    fn application_state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let value = match self.handshake_state.load(Ordering::Acquire) {
+            0 => 0,
+            1 => 1,
+            4 => 3,
+            _ => 2,
+        };
+        websocket_state(py, value)
     }
 
     fn iter_text(self_: Py<Self>, py: Python<'_>) -> PyResult<Py<WSIterator>> {
