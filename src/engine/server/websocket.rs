@@ -46,7 +46,6 @@ use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_http::websocket::{WSDecision, WSMessage};
 use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
 use fastrapi_runtime::server_state::exception_handlers;
-use fastrapi_runtime::server_state::serve_app;
 use fastrapi_runtime::tokio_runtime::spawn;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
@@ -57,6 +56,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 pub struct WsRouteState {
     pub handler: Arc<Py<PyAny>>,
     pub websocket_arg: Option<Py<PyString>>,
+    pub app: Py<PyAny>,
     pub params: Arc<[ParsedParameter]>,
     pub deps: Arc<Vec<dependencies::DependencyNode>>,
     pub template: Arc<str>,
@@ -94,7 +94,7 @@ pub async fn ws_handler(
     };
     let py_ws_obj = match Python::attach(|py| {
         let connection = PyHTTPConnection {
-            scope: build_scope(py, &parts, &request_input).into_any(),
+            scope: build_scope(py, &parts, &request_input, route.app.bind(py)).into_any(),
             receive: py.None(),
         };
         Py::new(
@@ -469,7 +469,12 @@ fn match_path_params(
     ranges
 }
 
-fn build_scope(py: Python<'_>, parts: &Parts, input: &RequestInput<'_>) -> Py<PyDict> {
+fn build_scope(
+    py: Python<'_>,
+    parts: &Parts,
+    input: &RequestInput<'_>,
+    app: &Bound<'_, PyAny>,
+) -> Py<PyDict> {
     let scope = PyDict::new(py);
     _ = scope.set_item("type", "websocket");
     _ = scope.set_item("asgi", [("version", "3.0")].into_py_dict(py).ok());
@@ -507,11 +512,7 @@ fn build_scope(py: Python<'_>, parts: &Parts, input: &RequestInput<'_>) -> Py<Py
         }
     }
     _ = scope.set_item("path_params", path_params);
-    if let Some(app) = serve_app() {
-        _ = scope.set_item("app", app.bind(py));
-    } else {
-        _ = scope.set_item("app", py.None());
-    }
+    _ = scope.set_item("app", app);
     if let Some(connect) = parts.extensions.get::<ConnectInfo<SocketAddr>>() {
         _ = scope.set_item("client", (connect.0.ip().to_string(), connect.0.port()));
     } else {

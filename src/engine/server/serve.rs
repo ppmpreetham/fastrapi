@@ -67,6 +67,7 @@ pub struct AppState {
     pub reject_unknown_multipart_fields: bool,
     pub root_path: Box<str>,
     pub metrics_enabled: bool,
+    pub app: Py<PyAny>,
 }
 
 impl AppState {
@@ -108,6 +109,7 @@ pub fn serve(
         reject_unknown_multipart_fields: app_config.reject_unknown_multipart_fields,
         root_path: app_config.root_path.trim_end_matches('/').into(),
         metrics_enabled: app_config.prometheus_config.is_some(),
+        app: app.clone_ref(py).into_any(),
     }
     .leak();
 
