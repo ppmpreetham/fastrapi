@@ -12,6 +12,7 @@ use fastrapi_openapi::paths::parse_callbacks_to_json;
 use fastrapi_pyutil::json::{SerializationHint, json_to_py_object, py_any_to_json};
 use fastrapi_routing::analysis::{
     ParsedRouteMetadata, get_response_type_from_class, parse_route_metadata,
+    parse_websocket_signature,
 };
 use fastrapi_routing::dependencies::{
     DependencyNode, collect_dependency_callables, parse_dependencies, parse_external_dependencies,
@@ -566,10 +567,13 @@ impl PyAPIRouter {
                 parse_dependencies(py, func.bind(py), &path_param_names)
                     .unwrap_or_default()
                     .into();
+            let signature = parse_websocket_signature(py, func.bind(py), &path, &deps)?;
 
             let entry = WebSocketEntry {
                 path: path.clone(),
                 handler: func.clone_ref(py),
+                websocket_arg: signature.websocket_arg,
+                params: signature.params,
                 deps,
                 dependency_overrides: None,
             };

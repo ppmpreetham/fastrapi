@@ -144,6 +144,8 @@ pub struct RouteEntry {
 pub struct WebSocketEntry {
     pub path: String,
     pub handler: Py<PyAny>,
+    pub websocket_arg: Option<Py<PyString>>,
+    pub params: Vec<ParsedParameter>,
     pub deps: SmallVec<[DependencyNode; 4]>,
     pub dependency_overrides: Option<Py<PyAny>>,
 }

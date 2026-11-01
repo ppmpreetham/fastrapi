@@ -97,3 +97,31 @@ def test_websocket_connection_attributes():
         "query": "1",
         "header": "t",
     }
+
+
+def test_websocket_typed_params_and_keyword_websocket():
+    from typing import Annotated
+
+    from fastrapi import Cookie, Header, WebSocket
+
+    app = FastrAPI()
+
+    @app.websocket("/items/{item_id}")
+    async def ws(
+        item_id: int,
+        q: int,
+        token: Annotated[str, Header()],
+        session: Annotated[str | None, Cookie()] = None,
+        *,
+        websocket: WebSocket,
+    ):
+        await websocket.accept()
+        await websocket.send_json({"item_id": item_id, "q": q, "token": token, "session": session})
+        await websocket.close()
+
+    port = _app_with_port(app)
+    status, _, _, sock = _connect(port, "/items/5?q=2", ["Token: abc", "Cookie: session=s1"])
+    assert status == 101
+    assert json.loads(_recv_frame(sock)[1]) == {"item_id": 5, "q": 2, "token": "abc", "session": "s1"}
+    status, _, _, _ = _connect(port, "/items/five?q=2", ["Token: abc"])
+    assert status == 403

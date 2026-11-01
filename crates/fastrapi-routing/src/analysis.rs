@@ -213,6 +213,75 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     }
 }
 
+pub struct WebSocketSignature {
+    pub websocket_arg: Option<Py<PyString>>,
+    pub params: Vec<ParsedParameter>,
+}
+
+fn is_websocket_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
+    let annotation = params::base_annotation(py, annotation);
+    let Ok(class) = annotation.cast::<PyType>() else {
+        return false;
+    };
+    class.is_subclass_of::<PyWebSocket>().unwrap_or(false)
+        || py
+            .import("starlette.websockets")
+            .and_then(|module| module.getattr("WebSocket"))
+            .ok()
+            .and_then(|base| base.cast_into::<PyType>().ok())
+            .is_some_and(|base| class.is_subclass(&base).unwrap_or(false))
+}
+
+pub fn parse_websocket_signature(
+    py: Python<'_>,
+    func: &Bound<'_, PyAny>,
+    path: &str,
+    dependencies: &[DependencyNode],
+) -> PyResult<WebSocketSignature> {
+    let path_param_names = fastrapi_core::path::extract_path_param_names(path);
+    let dep_param_names: HashSet<String> = dependencies
+        .iter()
+        .filter_map(|d| d.param_name.as_ref().map(|n| n.bind(py).to_string()))
+        .collect();
+    let signature = INSPECT.get(py)?.call_method1("signature", (func,))?;
+    let mut parameters = Vec::new();
+    for item in signature
+        .getattr("parameters")?
+        .call_method0("items")?
+        .try_iter()?
+    {
+        let (name, param) = item?.extract::<(String, Bound<'_, PyAny>)>()?;
+        parameters.push((name, param));
+    }
+    let keyword = parameters.iter().find_map(|(name, param)| {
+        param
+            .getattr("annotation")
+            .ok()
+            .filter(|ann| !params::is_inspect_empty(py, ann))
+            .filter(|ann| is_websocket_annotation(py, ann))
+            .map(|_| name.clone())
+    });
+    let mut parsed = Vec::new();
+    for (index, (name, param)) in parameters.iter().enumerate() {
+        if dep_param_names.contains(name)
+            || keyword.as_deref() == Some(name.as_str())
+            || (keyword.is_none() && index == 0)
+        {
+            continue;
+        }
+        parsed.push(params::parse_parameter_spec(
+            py,
+            name,
+            param,
+            &path_param_names,
+        )?);
+    }
+    Ok(WebSocketSignature {
+        websocket_arg: keyword.map(|name| PyString::new(py, &name).unbind()),
+        params: parsed,
+    })
+}
+
 #[must_use]
 pub fn get_response_type_from_class(py: Python<'_>, cls: &Bound<'_, PyAny>) -> ResponseType {
     if cls.is(py.get_type::<PyJSONResponse>()) {

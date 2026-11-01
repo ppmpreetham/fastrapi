@@ -220,6 +220,8 @@ fn register_routes(
     app = ws_routes.iter().fold(app, |current_app, ws| {
         let state = Arc::new(WsRouteState {
             handler: Arc::new(ws.handler.clone_ref(py)),
+            websocket_arg: ws.websocket_arg.as_ref().map(|name| name.clone_ref(py)),
+            params: Arc::from(ws.params.clone()),
             deps: Arc::new(ws.deps.to_vec()),
             template: Arc::from(ws.path.as_str()),
             param_names: ws_param_names(&ws.path),

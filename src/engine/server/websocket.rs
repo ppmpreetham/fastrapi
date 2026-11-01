@@ -7,6 +7,8 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use fastrapi_core::params::PathParamRange;
 use fastrapi_routing::dependencies::{self, DependencyExecutionError, execute_teardowns_async};
+use fastrapi_routing::request_data::{ValidationErrorDetails, resolve_parameter_value};
+use fastrapi_routing::route::ParsedParameter;
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastwebsockets::{
@@ -15,7 +17,9 @@ use fastwebsockets::{
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyDict, PyList};
+use pyo3::types::{IntoPyDict, PyDict, PyList, PyString};
+use simd_json::OwnedValue as JsonValue;
+use simd_json::prelude::{ValueAsArray, ValueAsObject};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{ReadHalf, WriteHalf};
@@ -47,6 +51,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[derive(Clone)]
 pub struct WsRouteState {
     pub handler: Arc<Py<PyAny>>,
+    pub websocket_arg: Option<Py<PyString>>,
+    pub params: Arc<[ParsedParameter]>,
     pub deps: Arc<Vec<dependencies::DependencyNode>>,
     pub template: Arc<str>,
     pub param_names: Arc<[Arc<str>]>,
@@ -116,29 +122,38 @@ pub async fn ws_handler(
         for (name, value) in dependency_results {
             kwargs.set_item(name, value.bind(py))?;
         }
-        let parameters = py
-            .import("inspect")?
-            .call_method1("signature", (route.handler.bind(py),))?
-            .getattr("parameters")?;
-        for name in route.param_names.iter() {
-            if parameters.contains(&**name)?
-                && let Some(value) = request_input.get_path_param(name)
-            {
-                kwargs.set_item(&**name, value)?;
+        let mut errors = Vec::new();
+        for param in route.params.iter() {
+            match resolve_parameter_value(py, param, &request_input) {
+                Ok(Some(value)) => kwargs.set_item(param.name_py.bind(py), value)?,
+                Ok(None) => {}
+                Err(response) => errors.extend(validation_errors(&response)),
             }
         }
+        if !errors.is_empty() {
+            return Ok(Err(errors));
+        }
 
-        let coroutine = route
-            .handler
-            .bind(py)
-            .call((py_ws_obj.clone_ref(py),), Some(&kwargs))?;
+        let coroutine = if let Some(name) = &route.websocket_arg {
+            kwargs.set_item(name.bind(py), py_ws_obj.clone_ref(py))?;
+            route.handler.bind(py).call((), Some(&kwargs))?
+        } else {
+            route
+                .handler
+                .bind(py)
+                .call((py_ws_obj.clone_ref(py),), Some(&kwargs))?
+        };
 
         let fut: py_bridge::PyTaskFuture =
             schedule_python_coroutine(py, route.event_loop, coroutine)?;
 
-        Ok::<_, PyErr>((py_ws_obj, fut))
+        Ok::<_, PyErr>(Ok((py_ws_obj, fut)))
     }) {
-        Ok(value) => value,
+        Ok(Ok(value)) => value,
+        Ok(Err(_errors)) => {
+            execute_teardowns_async(route.event_loop, teardowns).await;
+            return StatusCode::FORBIDDEN.into_response();
+        }
         Err(_error) => {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
@@ -225,6 +240,14 @@ async fn handle_connection(
     });
     execute_teardowns_async(route.event_loop, teardowns).await;
     Ok(())
+}
+
+fn validation_errors(response: &Response) -> Vec<JsonValue> {
+    response
+        .extensions()
+        .get::<ValidationErrorDetails>()
+        .and_then(|details| details.0.as_object()?.get("detail")?.as_array().cloned())
+        .unwrap_or_default()
 }
 
 #[must_use]
