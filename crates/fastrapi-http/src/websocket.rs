@@ -19,13 +19,13 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 pub enum WSMessage {
     Text(Bytes),
     Binary(Bytes),
-    Close(u16),
+    Close(u16, String),
 }
 
 type SharedRx = Arc<Mutex<Option<mpsc::Receiver<WSMessage>>>>;
 
 fn disconnected() -> PyErr {
-    disconnected_with_code(1000)
+    disconnected_with_code(1000, String::new())
 }
 
 pub enum WSDecision {
@@ -33,11 +33,11 @@ pub enum WSDecision {
     Reject(u16),
 }
 
-fn disconnected_with_code(code: u16) -> PyErr {
+fn disconnected_with_code(code: u16, reason: String) -> PyErr {
     Python::attach(|py| {
         PyErr::from_type(
             py.get_type::<PyWebSocketDisconnect>(),
-            (code, Option::<String>::None),
+            (code, (!reason.is_empty()).then_some(reason)),
         )
     })
 }
@@ -143,7 +143,7 @@ impl PyWebSocket {
                 WSMessage::Text(bytes) => String::from_utf8(bytes.to_vec())
                     .map_err(|e| PyValueError::new_err(e.to_string())),
                 WSMessage::Binary(_) => Err(expected("text", "binary")),
-                WSMessage::Close(code) => Err(disconnected_with_code(code)),
+                WSMessage::Close(code, reason) => Err(disconnected_with_code(code, reason)),
             }
         })
     }
@@ -154,7 +154,7 @@ impl PyWebSocket {
             match next_message(rx).await? {
                 WSMessage::Binary(data) => Ok(data.to_vec()),
                 WSMessage::Text(_) => Err(expected("binary", "text")),
-                WSMessage::Close(code) => Err(disconnected_with_code(code)),
+                WSMessage::Close(code, reason) => Err(disconnected_with_code(code, reason)),
             }
         })
     }
@@ -165,13 +165,18 @@ impl PyWebSocket {
             match next_message(rx).await? {
                 WSMessage::Text(bytes) => parse_json_bytes(&bytes),
                 WSMessage::Binary(_) => Err(expected("text", "binary")),
-                WSMessage::Close(code) => Err(disconnected_with_code(code)),
+                WSMessage::Close(code, reason) => Err(disconnected_with_code(code, reason)),
             }
         })
     }
 
-    #[pyo3(signature = (code = 1000))]
-    fn close<'py>(&self, py: Python<'py>, code: u16) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (code = 1000, reason = None))]
+    fn close<'py>(
+        &self,
+        py: Python<'py>,
+        code: u16,
+        reason: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.tx.clone();
         let decision = self.decision.clone();
         let state = self.handshake_state.clone();
@@ -184,7 +189,7 @@ impl PyWebSocket {
                 let _ = sender.send(WSDecision::Reject(code));
                 return Ok(());
             }
-            tx.send(WSMessage::Close(code))
+            tx.send(WSMessage::Close(code, reason.unwrap_or_default()))
                 .await
                 .map_err(|_| closed())?;
             Ok(())
@@ -267,7 +272,7 @@ impl WSIterator {
                 }
                 Ok(WSMessage::Text(bytes)) => parse_json_bytes(&bytes),
                 Ok(WSMessage::Binary(_)) => Err(expected("text", "binary")),
-                Ok(WSMessage::Close(_)) | Err(_) => Err(PyStopAsyncIteration::new_err(())),
+                Ok(WSMessage::Close(..)) | Err(_) => Err(PyStopAsyncIteration::new_err(())),
             }
         })
     }

@@ -34,12 +34,18 @@ enum SocketPumpError {
     Python(#[from] PyErr),
 }
 
+use crate::engine::exception_dispatch::find_handler;
 use axum::http::StatusCode;
 use axum::http::request::Parts;
+use fastrapi_http::exceptions::{
+    PyWebSocketDisconnect, PyWebSocketException, PyWebSocketRequestValidationError,
+};
 use fastrapi_http::request::PyHTTPConnection;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_http::websocket::{WSDecision, WSMessage};
+use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
+use fastrapi_runtime::server_state::exception_handlers;
 use fastrapi_runtime::server_state::serve_app;
 use fastrapi_runtime::tokio_runtime::spawn;
 use parking_lot::Mutex;
@@ -120,12 +126,16 @@ pub async fn ws_handler(
     {
         Ok(result) => result,
         Err(DependencyExecutionError::Python(error)) => {
-            error!("WebSocket dependency error: {error}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return rejected(&route, &py_ws_obj, error, &mut decision_rx, None).await;
         }
-        Err(DependencyExecutionError::Response(_)) => {
-            error!("WebSocket dependency returned a response");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        Err(DependencyExecutionError::Response(response)) => {
+            let errors = validation_errors(&response);
+            if errors.is_empty() {
+                error!("WebSocket dependency returned a response");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            let error = Python::attach(|py| validation_exception(py, &errors));
+            return rejected(&route, &py_ws_obj, error, &mut decision_rx, None).await;
         }
     };
 
@@ -162,29 +172,38 @@ pub async fn ws_handler(
         Ok::<_, PyErr>(Ok(fut))
     }) {
         Ok(Ok(value)) => value,
-        Ok(Err(_errors)) => {
-            execute_teardowns_async(route.event_loop, teardowns).await;
-            return StatusCode::FORBIDDEN.into_response();
+        Ok(Err(errors)) => {
+            let error = Python::attach(|py| validation_exception(py, &errors));
+            return rejected(&route, &py_ws_obj, error, &mut decision_rx, Some(teardowns)).await;
         }
-        Err(_error) => {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        Err(error) => {
+            return rejected(&route, &py_ws_obj, error, &mut decision_rx, Some(teardowns)).await;
         }
     };
 
-    let decision = tokio::select! {
-        decision = &mut decision_rx => decision.ok(),
-        result = &mut python_handler_future => {
-            if let Err(error) = result {
-                error!("Python websocket handler error: {error}");
-            } else {
-                error!("Python websocket handler returned before handshake");
-            }
-            None
-        }
+    let handshake = tokio::select! {
+        decision = &mut decision_rx => Handshake::Decision(decision.ok()),
+        result = &mut python_handler_future => Handshake::Finished(result),
     };
-    let Some(decision) = decision else {
-        execute_teardowns_async(route.event_loop, teardowns).await;
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    let (decision, handler_run) = match handshake {
+        Handshake::Decision(Some(decision)) => {
+            (decision, HandlerRun::Running(python_handler_future))
+        }
+        Handshake::Decision(None) => {
+            execute_teardowns_async(route.event_loop, teardowns).await;
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        Handshake::Finished(Err(error)) => {
+            return rejected(&route, &py_ws_obj, error, &mut decision_rx, Some(teardowns)).await;
+        }
+        Handshake::Finished(Ok(value)) => {
+            let Ok(decision) = decision_rx.try_recv() else {
+                error!("Python websocket handler returned before handshake");
+                execute_teardowns_async(route.event_loop, teardowns).await;
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            (decision, HandlerRun::Finished(Ok(value)))
+        }
     };
 
     match decision {
@@ -201,7 +220,7 @@ pub async fn ws_handler(
                 if let Err(error) = handle_connection(
                     fut,
                     py_ws_obj,
-                    python_handler_future,
+                    handler_run,
                     teardowns,
                     connection_route,
                     tx_to_python,
@@ -217,10 +236,139 @@ pub async fn ws_handler(
     }
 }
 
+enum Handshake {
+    Decision(Option<WSDecision>),
+    Finished(PyResult<Py<PyAny>>),
+}
+
+enum HandlerRun {
+    Running(py_bridge::PyTaskFuture),
+    Finished(PyResult<Py<PyAny>>),
+}
+
+enum HandlerOutcome {
+    Disconnected,
+    Handled,
+    Close(u16, String),
+    Unhandled,
+}
+
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_WEBSOCKET_EXCEPTION,
+    "starlette.exceptions",
+    "WebSocketException"
+);
+
+fn validation_exception(py: Python<'_>, errors: &[JsonValue]) -> PyErr {
+    let list = PyList::empty(py);
+    for error in errors {
+        _ = list.append(json_to_py_object(py, error));
+    }
+    match py
+        .get_type::<PyWebSocketRequestValidationError>()
+        .call1((list,))
+    {
+        Ok(value) => PyErr::from_value(value),
+        Err(error) => error,
+    }
+}
+
+fn websocket_exception_close(py: Python<'_>, value: &Bound<'_, PyAny>) -> Option<(u16, String)> {
+    let is_websocket_exception = value.is_instance_of::<PyWebSocketException>()
+        || STARLETTE_WEBSOCKET_EXCEPTION
+            .get(py)
+            .is_ok_and(|class| value.is_instance(class).unwrap_or(false));
+    if !is_websocket_exception {
+        return None;
+    }
+    let code = value.getattr("code").ok()?.extract::<u16>().ok()?;
+    let reason = value
+        .getattr("reason")
+        .ok()
+        .and_then(|reason| reason.extract::<Option<String>>().ok())
+        .flatten()
+        .unwrap_or_default();
+    Some((code, reason))
+}
+
+async fn handle_error(
+    route: &WsRouteState,
+    websocket: &Py<PyWebSocket>,
+    error: PyErr,
+) -> HandlerOutcome {
+    let pending = Python::attach(|py| -> Result<py_bridge::PyTaskFuture, HandlerOutcome> {
+        let value = error.value(py);
+        if value.is_instance_of::<PyWebSocketDisconnect>() {
+            return Err(HandlerOutcome::Disconnected);
+        }
+        let handler =
+            exception_handlers().and_then(|registry| find_handler(py, registry.bind(py), &error));
+        let Some(handler) = handler else {
+            if let Some((code, reason)) = websocket_exception_close(py, value) {
+                return Err(HandlerOutcome::Close(code, reason));
+            }
+            if value.is_instance_of::<PyWebSocketRequestValidationError>() {
+                let reason = value
+                    .call_method0("errors")
+                    .ok()
+                    .and_then(|errors| simd_json::to_string(&py_any_to_json(py, &errors)).ok())
+                    .unwrap_or_default();
+                return Err(HandlerOutcome::Close(1008, reason));
+            }
+            error.print(py);
+            return Err(HandlerOutcome::Unhandled);
+        };
+        match handler.call1((websocket.clone_ref(py), value)) {
+            Ok(result) if result.hasattr("__await__").unwrap_or(false) => {
+                schedule_python_coroutine(py, route.event_loop, result).map_err(|error| {
+                    error.print(py);
+                    HandlerOutcome::Unhandled
+                })
+            }
+            Ok(_) => Err(HandlerOutcome::Handled),
+            Err(handler_error) => {
+                handler_error.print(py);
+                Err(HandlerOutcome::Unhandled)
+            }
+        }
+    });
+    match pending {
+        Ok(future) => match future.await {
+            Ok(_) => HandlerOutcome::Handled,
+            Err(error) => {
+                Python::attach(|py| error.print(py));
+                HandlerOutcome::Unhandled
+            }
+        },
+        Err(outcome) => outcome,
+    }
+}
+
+async fn rejected(
+    route: &WsRouteState,
+    websocket: &Py<PyWebSocket>,
+    error: PyErr,
+    decision_rx: &mut oneshot::Receiver<WSDecision>,
+    teardowns: Option<dependencies::TeardownTasks>,
+) -> Response {
+    let outcome = handle_error(route, websocket, error).await;
+    if let Some(teardowns) = teardowns {
+        execute_teardowns_async(route.event_loop, teardowns).await;
+    }
+    match decision_rx.try_recv() {
+        Ok(WSDecision::Reject(_)) => StatusCode::FORBIDDEN.into_response(),
+        Ok(WSDecision::Accept) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => match outcome {
+            HandlerOutcome::Close(..) => StatusCode::FORBIDDEN.into_response(),
+            _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        },
+    }
+}
+
 async fn handle_connection(
     fut: upgrade::UpgradeFut,
     py_ws_obj: Py<PyWebSocket>,
-    python_handler_future: py_bridge::PyTaskFuture,
+    handler_run: HandlerRun,
     teardowns: dependencies::TeardownTasks,
     route: Arc<WsRouteState>,
     tx_to_python: mpsc::Sender<WSMessage>,
@@ -230,16 +378,30 @@ async fn handle_connection(
     let (read_half, write_half) = ws_stream.split(tokio::io::split);
     let reader = FragmentCollectorRead::new(read_half);
     let writer = tokio::sync::Mutex::new(write_half);
-    tokio::select! {
-        result = python_handler_future => {
-            if let Err(error) = result {
-                error!("Python handler error: {error}");
+    let handler_result = match handler_run {
+        HandlerRun::Finished(result) => Some(result),
+        HandlerRun::Running(future) => tokio::select! {
+            result = future => Some(result),
+            result = socket_pump(reader, &writer, tx_to_python, &mut rx_from_python) => {
+                if let Err(error) = result {
+                    error!("Socket pump error: {error}");
+                }
+                None
             }
-        }
-        result = socket_pump(reader, &writer, tx_to_python, &mut rx_from_python) => {
-            if let Err(error) = result {
-                error!("Socket pump error: {error}");
-            }
+        },
+    };
+    if let Some(result) = handler_result {
+        let close = match result {
+            Ok(_) => Some((1000, String::new())),
+            Err(error) => match handle_error(&route, &py_ws_obj, error).await {
+                HandlerOutcome::Disconnected => None,
+                HandlerOutcome::Handled => Some((1000, String::new())),
+                HandlerOutcome::Close(code, reason) => Some((code, reason)),
+                HandlerOutcome::Unhandled => Some((1011, String::new())),
+            },
+        };
+        if let Err(error) = flush_and_close(&writer, &mut rx_from_python, close).await {
+            error!("WebSocket close error: {error}");
         }
     }
     Python::attach(|py| {
@@ -380,8 +542,8 @@ async fn read_loop(
             .await?;
         match frame.opcode {
             OpCode::Close => {
-                let code = close_code(&frame);
-                _ = tx_to_python.send(WSMessage::Close(code)).await;
+                let (code, reason) = close_code(&frame);
+                _ = tx_to_python.send(WSMessage::Close(code, reason)).await;
                 return Ok(());
             }
             OpCode::Text | OpCode::Binary => {
@@ -410,11 +572,7 @@ async fn write_loop(
 ) -> Result<(), SocketPumpError> {
     // A dropped Python sender only stops this loop; reading goes on, as before.
     while let Some(msg) = rx_from_python.recv().await {
-        let (frame, close) = match msg {
-            WSMessage::Text(bytes) => (Frame::text(bytes_into_payload(bytes)), false),
-            WSMessage::Binary(data) => (Frame::binary(bytes_into_payload(data)), false),
-            WSMessage::Close(code) => (Frame::close(code, &[]), true),
-        };
+        let (frame, close) = message_frame(msg);
         writer.lock().await.write_frame(frame).await?;
         if close {
             return Ok(());
@@ -423,11 +581,54 @@ async fn write_loop(
     std::future::pending().await
 }
 
-fn close_code(frame: &Frame<'_>) -> u16 {
+fn close_code(frame: &Frame<'_>) -> (u16, String) {
     let payload: &[u8] = frame.payload.as_ref();
-    payload
+    let code = payload
         .first_chunk::<2>()
-        .map_or(1000, |prefix| u16::from_be_bytes(*prefix))
+        .map_or(1000, |prefix| u16::from_be_bytes(*prefix));
+    let reason = payload
+        .get(2..)
+        .map(|reason| String::from_utf8_lossy(reason).into_owned())
+        .unwrap_or_default();
+    (code, reason)
+}
+
+fn close_reason(reason: &str) -> &[u8] {
+    let mut end = reason.len().min(123);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    &reason.as_bytes()[..end]
+}
+
+fn message_frame(message: WSMessage) -> (Frame<'static>, bool) {
+    match message {
+        WSMessage::Text(bytes) => (Frame::text(bytes_into_payload(bytes)), false),
+        WSMessage::Binary(data) => (Frame::binary(bytes_into_payload(data)), false),
+        WSMessage::Close(code, reason) => (Frame::close(code, close_reason(&reason)), true),
+    }
+}
+
+async fn flush_and_close(
+    writer: &SocketWriter,
+    rx_from_python: &mut mpsc::Receiver<WSMessage>,
+    close: Option<(u16, String)>,
+) -> Result<(), SocketPumpError> {
+    while let Ok(message) = rx_from_python.try_recv() {
+        let (frame, is_close) = message_frame(message);
+        writer.lock().await.write_frame(frame).await?;
+        if is_close {
+            return Ok(());
+        }
+    }
+    if let Some((code, reason)) = close {
+        writer
+            .lock()
+            .await
+            .write_frame(Frame::close(code, close_reason(&reason)))
+            .await?;
+    }
+    Ok(())
 }
 
 fn payload_into_bytes(payload: Payload<'_>) -> Bytes {

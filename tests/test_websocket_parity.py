@@ -163,3 +163,89 @@ def test_websocket_slow_accept_is_not_timed_out():
     status, _, _, sock = _connect(port, "/slow", timeout=15)
     assert status == 101
     assert _recv_frame(sock) == (0x1, b"late")
+
+
+def test_websocket_errors_map_to_close_codes():
+    from fastrapi import Depends, WebSocket, WebSocketException
+
+    app = FastrAPI()
+
+    def guard(token: str = ""):
+        if token != "ok":
+            raise WebSocketException(code=1008)
+        return token
+
+    @app.websocket("/guarded")
+    async def guarded(websocket: WebSocket, token: str = Depends(guard)):
+        await websocket.accept()
+        await websocket.close()
+
+    @app.websocket("/raises")
+    async def raises(websocket: WebSocket):
+        await websocket.accept()
+        await websocket.send_text("hi")
+        raise WebSocketException(code=4000, reason="bye")
+
+    @app.websocket("/crash")
+    async def crash(websocket: WebSocket):
+        await websocket.accept()
+        raise RuntimeError("boom")
+
+    @app.websocket("/returns")
+    async def returns(websocket: WebSocket):
+        await websocket.accept()
+        await websocket.send_text("done")
+
+    port = _app_with_port(app)
+    assert _connect(port, "/guarded")[0] == 403
+    assert _connect(port, "/guarded?token=ok")[0] == 101
+    status, _, _, sock = _connect(port, "/raises")
+    assert status == 101
+    assert _recv_frame(sock) == (0x1, b"hi")
+    opcode, payload = _recv_frame(sock)
+    assert opcode == 0x8
+    assert _close_code(payload) == (4000, "bye")
+    status, _, _, sock = _connect(port, "/crash")
+    opcode, payload = _recv_frame(sock)
+    assert (opcode, _close_code(payload)[0]) == (0x8, 1011)
+    status, _, _, sock = _connect(port, "/returns")
+    assert _recv_frame(sock) == (0x1, b"done")
+    opcode, payload = _recv_frame(sock)
+    assert (opcode, _close_code(payload)[0]) == (0x8, 1000)
+
+
+def test_websocket_exception_handler_and_validation_error():
+    from fastrapi import WebSocket
+    from fastrapi.exceptions import WebSocketRequestValidationError
+
+    app = FastrAPI()
+    seen = []
+
+    class Boom(Exception):
+        pass
+
+    @app.exception_handler(Boom)
+    async def on_boom(websocket, exc):
+        seen.append(type(exc).__name__)
+        await websocket.close(code=4001)
+
+    @app.exception_handler(WebSocketRequestValidationError)
+    async def on_invalid(websocket, exc):
+        seen.append(exc.errors()[0]["loc"])
+        await websocket.close(code=1008)
+
+    @app.websocket("/boom")
+    async def boom(websocket: WebSocket):
+        await websocket.accept()
+        raise Boom()
+
+    @app.websocket("/typed")
+    async def typed(websocket: WebSocket, count: int):
+        await websocket.accept()
+
+    port = _app_with_port(app)
+    status, _, _, sock = _connect(port, "/boom")
+    opcode, payload = _recv_frame(sock)
+    assert (opcode, _close_code(payload)[0]) == (0x8, 4001)
+    assert _connect(port, "/typed?count=x")[0] == 403
+    assert seen == ["Boom", ["query", "count"]]

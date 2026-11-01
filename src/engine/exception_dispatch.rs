@@ -144,7 +144,7 @@ fn handler_response(py: Python<'_>, result: Bound<'_, PyAny>) -> Option<HandlerR
     Some(HandlerResult::Ready(convert_auto_response(py, &result)))
 }
 
-fn find_handler<'py>(
+pub(crate) fn find_handler<'py>(
     py: Python<'py>,
     registry: &Bound<'py, PyDict>,
     err: &PyErr,
