@@ -24,7 +24,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{Duration, timeout};
 use tracing::error;
 
 #[derive(Debug, thiserror::Error)]
@@ -172,21 +171,18 @@ pub async fn ws_handler(
         }
     };
 
-    let decision = timeout(Duration::from_secs(10), async {
-        tokio::select! {
-            decision = &mut decision_rx => decision.ok(),
-            result = &mut python_handler_future => {
-                if let Err(error) = result {
-                    error!("Python websocket handler error: {error}");
-                } else {
-                    error!("Python websocket handler returned before handshake");
-                }
-                None
+    let decision = tokio::select! {
+        decision = &mut decision_rx => decision.ok(),
+        result = &mut python_handler_future => {
+            if let Err(error) = result {
+                error!("Python websocket handler error: {error}");
+            } else {
+                error!("Python websocket handler returned before handshake");
             }
+            None
         }
-    })
-    .await;
-    let Ok(Some(decision)) = decision else {
+    };
+    let Some(decision) = decision else {
         execute_teardowns_async(route.event_loop, teardowns).await;
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };

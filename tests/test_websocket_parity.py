@@ -9,9 +9,9 @@ from test_websocket_smoke import _free_port, _recv_frame, _serve
 from fastrapi import FastrAPI
 
 
-def _connect(port, path, headers=()):
+def _connect(port, path, headers=(), timeout=5):
     key = base64.b64encode(os.urandom(16)).decode()
-    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
     extra = "".join(f"{line}\r\n" for line in headers)
     sock.sendall(
         (
@@ -145,3 +145,21 @@ def test_websocket_dependency_receives_websocket():
     status, _, _, sock = _connect(port, "/dep")
     assert status == 101
     assert _recv_frame(sock) == (0x1, b"/dep")
+
+
+def test_websocket_slow_accept_is_not_timed_out():
+    import asyncio
+
+    app = FastrAPI()
+
+    @app.websocket("/slow")
+    async def ws(websocket):
+        await asyncio.sleep(11)
+        await websocket.accept()
+        await websocket.send_text("late")
+        await websocket.close()
+
+    port = _app_with_port(app)
+    status, _, _, sock = _connect(port, "/slow", timeout=15)
+    assert status == 101
+    assert _recv_frame(sock) == (0x1, b"late")
