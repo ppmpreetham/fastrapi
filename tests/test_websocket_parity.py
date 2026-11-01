@@ -125,3 +125,23 @@ def test_websocket_typed_params_and_keyword_websocket():
     assert json.loads(_recv_frame(sock)[1]) == {"item_id": 5, "q": 2, "token": "abc", "session": "s1"}
     status, _, _, _ = _connect(port, "/items/five?q=2", ["Token: abc"])
     assert status == 403
+
+
+def test_websocket_dependency_receives_websocket():
+    from fastrapi import Depends, WebSocket
+
+    app = FastrAPI()
+
+    def client_path(websocket: WebSocket):
+        return websocket.url.path
+
+    @app.websocket("/dep")
+    async def ws(websocket: WebSocket, path: str = Depends(client_path)):
+        await websocket.accept()
+        await websocket.send_text(path)
+        await websocket.close()
+
+    port = _app_with_port(app)
+    status, _, _, sock = _connect(port, "/dep")
+    assert status == 101
+    assert _recv_frame(sock) == (0x1, b"/dep")

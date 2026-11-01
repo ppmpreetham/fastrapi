@@ -87,27 +87,12 @@ pub async fn ws_handler(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let (dependency_results, teardowns) =
-        match dependencies::execute_dependencies(route.event_loop, &plan, &request_input, None)
-            .await
-        {
-            Ok(result) => result,
-            Err(DependencyExecutionError::Python(error)) => {
-                error!("WebSocket dependency error: {error}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-            Err(DependencyExecutionError::Response(_)) => {
-                error!("WebSocket dependency returned a response");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
-
-    let (py_ws_obj, mut python_handler_future) = match Python::attach(|py| {
+    let py_ws_obj = match Python::attach(|py| {
         let connection = PyHTTPConnection {
             scope: build_scope(py, &parts, &request_input).into_any(),
             receive: py.None(),
         };
-        let py_ws_obj = Py::new(
+        Py::new(
             py,
             PyClassInitializer::from(connection).add_subclass(PyWebSocket {
                 tx: tx_to_rust,
@@ -116,8 +101,36 @@ pub async fn ws_handler(
                 decision: Arc::new(Mutex::new(Some(decision_tx))),
                 handshake_state: Arc::new(AtomicU8::new(0)),
             }),
-        )?;
+        )
+    }) {
+        Ok(websocket) => websocket,
+        Err(error) => {
+            error!("WebSocket setup error: {error}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let websocket_arg = Python::attach(|py| py_ws_obj.clone_ref(py).into_any());
 
+    let (dependency_results, teardowns) = match dependencies::execute_dependencies(
+        route.event_loop,
+        &plan,
+        &request_input,
+        Some(websocket_arg),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(DependencyExecutionError::Python(error)) => {
+            error!("WebSocket dependency error: {error}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        Err(DependencyExecutionError::Response(_)) => {
+            error!("WebSocket dependency returned a response");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let mut python_handler_future = match Python::attach(|py| {
         let kwargs = PyDict::new(py);
         for (name, value) in dependency_results {
             kwargs.set_item(name, value.bind(py))?;
@@ -147,7 +160,7 @@ pub async fn ws_handler(
         let fut: py_bridge::PyTaskFuture =
             schedule_python_coroutine(py, route.event_loop, coroutine)?;
 
-        Ok::<_, PyErr>(Ok((py_ws_obj, fut)))
+        Ok::<_, PyErr>(Ok(fut))
     }) {
         Ok(Ok(value)) => value,
         Ok(Err(_errors)) => {
