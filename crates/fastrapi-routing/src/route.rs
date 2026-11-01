@@ -143,6 +143,7 @@ pub struct RouteEntry {
 #[derive(Clone)]
 pub struct WebSocketEntry {
     pub path: String,
+    pub name: String,
     pub handler: Py<PyAny>,
     pub websocket_arg: Option<Py<PyString>>,
     pub params: Vec<ParsedParameter>,

@@ -236,9 +236,15 @@ impl PyAPIRouter {
     ///
     /// app.include_router(router)
     /// ```
-    #[pyo3(signature = (path))]
-    fn websocket(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
-        self.create_ws_decorator(py, path)
+    #[pyo3(signature = (path, name=None, *, dependencies=None))]
+    fn websocket(
+        &self,
+        py: Python<'_>,
+        path: String,
+        name: Option<String>,
+        dependencies: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.create_ws_decorator(py, path, name, dependencies)
     }
 
     /// Include another `APIRouter` in the same current `APIRouter`.

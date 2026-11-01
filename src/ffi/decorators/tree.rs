@@ -48,13 +48,21 @@ impl PyAPIRouter {
         let mut stack = vec![(self.clone(), String::new())];
         while let Some((router, prefix)) = stack.pop() {
             let full_prefix = join_path(&prefix, &router.prefix);
-            let candidates: Vec<(String, &str)> = router
+            let mut candidates: Vec<(String, &str)> = router
                 .route_entries
                 .lock()
                 .iter()
                 .filter(|entry| entry.name == name)
                 .map(|entry| (entry.path.clone(), "http"))
                 .collect();
+            candidates.extend(
+                router
+                    .websocket_entries
+                    .lock()
+                    .iter()
+                    .filter(|entry| entry.name == name)
+                    .map(|entry| (entry.path.clone(), "websocket")),
+            );
             for (path, protocol) in candidates {
                 let template = join_path(&full_prefix, &path);
                 let expected = extract_path_param_names(&template);

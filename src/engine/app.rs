@@ -322,9 +322,18 @@ impl FastrAPI {
     ///         data = await websocket.receive_text()
     ///         await websocket.send_text(f"Message text was: {data}")
     /// ```
-    #[pyo3(signature = (path))]
-    fn websocket(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
-        self.router.bind(py).borrow().create_ws_decorator(py, path)
+    #[pyo3(signature = (path, name=None, *, dependencies=None))]
+    fn websocket(
+        &self,
+        py: Python<'_>,
+        path: String,
+        name: Option<String>,
+        dependencies: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.router
+            .bind(py)
+            .borrow()
+            .create_ws_decorator(py, path, name, dependencies)
     }
 
     #[pyo3(signature = (path, app, *, name=None))]

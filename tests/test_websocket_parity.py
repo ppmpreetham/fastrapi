@@ -249,3 +249,28 @@ def test_websocket_exception_handler_and_validation_error():
     assert (opcode, _close_code(payload)[0]) == (0x8, 4001)
     assert _connect(port, "/typed?count=x")[0] == 403
     assert seen == ["Boom", ["query", "count"]]
+
+
+def test_websocket_route_name_and_dependencies():
+    from fastrapi import APIRouter, Depends, WebSocket
+
+    app = FastrAPI()
+    router = APIRouter()
+    calls = []
+
+    def audit(websocket: WebSocket):
+        calls.append(websocket.url.path)
+
+    @router.websocket("/chat/{room}", name="chat", dependencies=[Depends(audit)])
+    async def chat(websocket: WebSocket, room: str):
+        await websocket.accept()
+        await websocket.send_text(str(websocket.url_for("chat", room="b")))
+        await websocket.close()
+
+    app.include_router(router)
+    port = _app_with_port(app)
+    assert app.url_path_for("chat", room="a") == "/chat/a"
+    status, _, _, sock = _connect(port, "/chat/a")
+    assert status == 101
+    assert _recv_frame(sock) == (0x1, f"ws://127.0.0.1:{port}/chat/b".encode())
+    assert calls == ["/chat/a"]

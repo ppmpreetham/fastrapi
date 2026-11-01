@@ -546,7 +546,13 @@ impl PyAPIRouter {
         PyCFunction::new_closure(py, None, None, decorator).map(Into::into)
     }
 
-    pub fn create_ws_decorator(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
+    pub fn create_ws_decorator(
+        &self,
+        py: Python<'_>,
+        path: String,
+        name: Option<String>,
+        dependencies: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         if self.frozen.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err(
                 "Cannot modify router after it has been frozen",
@@ -563,14 +569,21 @@ impl PyAPIRouter {
             let func: Py<PyAny> = args.get_item(0)?.unbind();
 
             let path_param_names = extract_path_param_names(&path);
-            let deps: SmallVec<[DependencyNode; 4]> =
-                parse_dependencies(py, func.bind(py), &path_param_names)
-                    .unwrap_or_default()
-                    .into();
+            let mut nodes =
+                parse_dependencies(py, func.bind(py), &path_param_names).unwrap_or_default();
+            if let Some(dependencies) = &dependencies {
+                let callables = collect_dependency_callables(py, Some(dependencies));
+                let mut external = parse_external_dependencies(py, &callables, &path_param_names)?;
+                shift_dependency_indices(&mut nodes, external.len());
+                external.append(&mut nodes);
+                nodes = external;
+            }
+            let deps: SmallVec<[DependencyNode; 4]> = nodes.into();
             let signature = parse_websocket_signature(py, func.bind(py), &path, &deps)?;
 
             let entry = WebSocketEntry {
                 path: path.clone(),
+                name: name.clone().unwrap_or_else(|| func_name(py, func.bind(py))),
                 handler: func.clone_ref(py),
                 websocket_arg: signature.websocket_arg,
                 params: signature.params,
