@@ -2,6 +2,9 @@
 //! The class accepts the connection, sends and receives text, bytes, and JSON messages, and closes the connection.
 
 use crate::request::PyHTTPConnection;
+use crate::response_convert::convert_auto_response;
+use axum::body::Body;
+use axum::response::Response;
 use bytes::{BufMut, Bytes, BytesMut};
 use fastrapi_runtime::py_bridge;
 use parking_lot::Mutex;
@@ -31,6 +34,19 @@ fn disconnected() -> PyErr {
 pub enum WSDecision {
     Accept,
     Reject(u16),
+    Deny(Response),
+}
+
+type DenialParts = (u16, Vec<(Vec<u8>, Vec<u8>)>, Vec<u8>);
+
+fn denial_response((status, headers, body): DenialParts) -> PyResult<Response> {
+    let mut builder = Response::builder().status(status);
+    for (name, value) in headers {
+        builder = builder.header(name, value);
+    }
+    builder
+        .body(Body::from(body))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 fn disconnected_with_code(code: u16, reason: String) -> PyErr {
@@ -80,6 +96,7 @@ pub struct PyWebSocket {
     pub decision: Arc<Mutex<Option<oneshot::Sender<WSDecision>>>>,
     pub handshake_state: Arc<AtomicU8>,
     pub connect_delivered: Arc<AtomicBool>,
+    pub denial: Arc<Mutex<Option<DenialParts>>>,
 }
 
 fastrapi_pyutil::cached_py_import!(WEBSOCKET_STATE, "starlette.websockets", "WebSocketState");
@@ -109,6 +126,24 @@ fn asgi_message(py: Python<'_>, message: WSMessage) -> PyResult<Py<PyAny>> {
         }
     }
     Ok(dict.into_any().unbind())
+}
+
+impl PyWebSocket {
+    fn deny<'py>(&self, py: Python<'py>, response: Response) -> PyResult<Bound<'py, PyAny>> {
+        if self
+            .handshake_state
+            .compare_exchange(0, 4, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(PyRuntimeError::new_err(
+                "The denial response can only be sent before the WebSocket is accepted",
+            ));
+        }
+        if let Some(sender) = self.decision.lock().take() {
+            let _ = sender.send(WSDecision::Deny(response));
+        }
+        py_bridge::future_into_py(py, async move { Ok(()) })
+    }
 }
 
 #[pymethods]
@@ -200,6 +235,15 @@ impl PyWebSocket {
         })
     }
 
+    fn send_denial_response<'py>(
+        &self,
+        py: Python<'py>,
+        response: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let response = convert_auto_response(py, response);
+        self.deny(py, response)
+    }
+
     fn receive<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let connect = self.handshake_state.load(Ordering::Acquire) == 0
             && !self.connect_delivered.swap(true, Ordering::AcqRel);
@@ -245,6 +289,38 @@ impl PyWebSocket {
                         "websocket.send needs a 'text' or 'bytes' key",
                     ))
                 }
+            }
+            "websocket.http.response.start" => {
+                let status = field("status")?.map_or(Ok(200), |status| status.extract())?;
+                let headers = field("headers")?
+                    .map(|headers| headers.extract::<Vec<(Vec<u8>, Vec<u8>)>>())
+                    .transpose()?
+                    .unwrap_or_default();
+                *self.denial.lock() = Some((status, headers, Vec::new()));
+                py_bridge::future_into_py(py, async move { Ok(()) })
+            }
+            "websocket.http.response.body" => {
+                let body: Vec<u8> = field("body")?
+                    .map(|body| body.extract())
+                    .transpose()?
+                    .unwrap_or_default();
+                let more_body = field("more_body")?
+                    .map(|more| more.is_truthy())
+                    .transpose()?
+                    .unwrap_or(false);
+                let mut denial = self.denial.lock();
+                let parts = denial.as_mut().ok_or_else(|| {
+                    PyRuntimeError::new_err(
+                        "websocket.http.response.body sent before websocket.http.response.start",
+                    )
+                })?;
+                parts.2.extend_from_slice(&body);
+                if more_body {
+                    return py_bridge::future_into_py(py, async move { Ok(()) });
+                }
+                let response = denial_response(denial.take().unwrap_or_default())?;
+                drop(denial);
+                self.deny(py, response)
             }
             "websocket.close" => {
                 let code = field("code")?.map_or(Ok(1000), |code| code.extract())?;

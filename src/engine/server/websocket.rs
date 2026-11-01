@@ -106,6 +106,7 @@ pub async fn ws_handler(
                 decision: Arc::new(Mutex::new(Some(decision_tx))),
                 handshake_state: Arc::new(AtomicU8::new(0)),
                 connect_delivered: Arc::new(AtomicBool::new(false)),
+                denial: Arc::new(Mutex::new(None)),
             }),
         )
     }) {
@@ -211,6 +212,10 @@ pub async fn ws_handler(
         WSDecision::Reject(_) => {
             execute_teardowns_async(route.event_loop, teardowns).await;
             StatusCode::FORBIDDEN.into_response()
+        }
+        WSDecision::Deny(response) => {
+            execute_teardowns_async(route.event_loop, teardowns).await;
+            response
         }
         WSDecision::Accept => {
             let Ok((response, fut)) = ws.upgrade() else {
@@ -358,6 +363,7 @@ async fn rejected(
     }
     match decision_rx.try_recv() {
         Ok(WSDecision::Reject(_)) => StatusCode::FORBIDDEN.into_response(),
+        Ok(WSDecision::Deny(response)) => response,
         Ok(WSDecision::Accept) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Err(_) => match outcome {
             HandlerOutcome::Close(..) => StatusCode::FORBIDDEN.into_response(),
@@ -482,6 +488,9 @@ fn build_scope(py: Python<'_>, parts: &Parts, input: &RequestInput<'_>) -> Py<Py
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
     _ = scope.set_item("subprotocols", subprotocols);
+    let extensions = PyDict::new(py);
+    _ = extensions.set_item("websocket.http.response", PyDict::new(py));
+    _ = scope.set_item("extensions", extensions);
     _ = scope.set_item(
         "query_string",
         parts.uri.query().unwrap_or_default().as_bytes(),

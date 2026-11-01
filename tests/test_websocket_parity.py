@@ -303,3 +303,31 @@ def test_websocket_raw_asgi_messages_and_states():
     assert _recv_frame(sock) == (0x1, b"websocket.connect|ping|CONNECTING,CONNECTING,CONNECTED")
     assert _recv_frame(sock) == (0x2, b"raw")
     _send(sock, struct.pack("!H", 1000), opcode=0x8)
+
+
+def test_websocket_denial_response():
+    from fastrapi import WebSocket
+    from fastrapi.responses import JSONResponse
+
+    app = FastrAPI()
+
+    @app.websocket("/deny")
+    async def deny(websocket: WebSocket):
+        await websocket.send_denial_response(JSONResponse({"detail": "nope"}, status_code=401))
+
+    @app.websocket("/deny-raw")
+    async def deny_raw(websocket: WebSocket):
+        await websocket.send({"type": "websocket.http.response.start", "status": 418, "headers": [(b"x-why", b"tea")]})
+        await websocket.send({"type": "websocket.http.response.body", "body": b"short"})
+
+    port = _app_with_port(app)
+    status, head, rest, sock = _connect(port, "/deny")
+    assert status == 401
+    for _ in range(5):
+        if b"nope" in rest:
+            break
+        rest += sock.recv(4096)
+    assert b"nope" in rest
+    status, head, _, _ = _connect(port, "/deny-raw")
+    assert status == 418
+    assert "x-why: tea" in head.lower()
