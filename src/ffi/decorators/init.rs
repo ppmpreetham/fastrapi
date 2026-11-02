@@ -133,7 +133,7 @@ struct RouteOptions {
     rate_limit: Option<NonZeroU32>,
     response_description: Option<String>,
     operation_id: Option<String>,
-    responses: Option<simd_json::OwnedValue>,
+    responses: Option<Py<PyAny>>,
     openapi_extra: Option<simd_json::OwnedValue>,
     callbacks: Option<simd_json::OwnedValue>,
     bypass_serialization: bool,
@@ -185,7 +185,9 @@ impl RouteOptions {
 
         let dump_options = build_dump_options(py, kwargs)?;
 
-        let responses = extract_bound(kwargs, "responses").map(|d| py_any_to_json(py, &d));
+        let responses = extract_bound(kwargs, "responses")
+            .filter(|responses| !responses.is_none())
+            .map(Bound::unbind);
 
         let openapi_extra = extract_bound(kwargs, "openapi_extra").map(|d| py_any_to_json(py, &d));
 
@@ -470,7 +472,7 @@ impl PyAPIRouter {
                             .clone()
                             .unwrap_or_else(|| "Successful Response".to_string()),
                     )?;
-                    call_kwargs.set_item("responses", to_py(opts.responses.as_ref()))?;
+                    call_kwargs.set_item("responses", opts.responses.as_ref())?;
                     call_kwargs.set_item("deprecated", opts.resolved_deprecated)?;
                     call_kwargs.set_item("operation_id", opts.operation_id.clone())?;
                     call_kwargs.set_item("include_in_schema", opts.include_in_schema)?;
@@ -547,7 +549,10 @@ impl PyAPIRouter {
                 description: opts.description.clone().or(extra_description),
                 response_description: opts.response_description.clone(),
                 operation_id: opts.operation_id.clone().or(extra_operation_id),
-                responses: opts.responses.clone(),
+                responses: opts
+                    .responses
+                    .as_ref()
+                    .map(|responses| responses.clone_ref(py)),
                 openapi_extra: opts.openapi_extra.clone().or(extra_openapi),
                 callbacks: opts.callbacks.clone(),
                 deprecated: opts.resolved_deprecated,

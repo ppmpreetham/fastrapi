@@ -15,6 +15,25 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+fn merge_responses(py: Python<'_>, layers: &[Option<&Py<PyAny>>]) -> Option<Py<PyAny>> {
+    let dicts: Vec<Bound<'_, PyDict>> = layers
+        .iter()
+        .flatten()
+        .filter_map(|layer| layer.bind(py).cast::<PyDict>().ok().cloned())
+        .collect();
+    match dicts.as_slice() {
+        [] => None,
+        [single] => Some(single.clone().into_any().unbind()),
+        _ => {
+            let merged = PyDict::new(py);
+            for dict in &dicts {
+                merged.update(dict.as_mapping()).ok()?;
+            }
+            Some(merged.into_any().unbind())
+        }
+    }
+}
+
 fn fill_path(template: &str, params: &HashMap<String, String>) -> String {
     let mut filled = String::with_capacity(template.len());
     let mut rest = template;
@@ -131,10 +150,22 @@ pub fn flatten_router(
         Vec::<String>::new(),
         ChainDependencies::new(),
         None::<Py<pyo3::PyAny>>,
+        None::<Py<pyo3::PyAny>>,
     ));
 
-    while let Some((router, prefix, parent_tags, inherited_deps, inherited_unique_id)) = stack.pop()
+    while let Some((
+        router,
+        prefix,
+        parent_tags,
+        inherited_deps,
+        inherited_unique_id,
+        inherited_responses,
+    )) = stack.pop()
     {
+        let level_responses = merge_responses(
+            py,
+            &[inherited_responses.as_ref(), router.responses.as_ref()],
+        );
         router.mark_frozen();
 
         let full_prefix = join_path(&prefix, &router.prefix);
@@ -170,6 +201,8 @@ pub fn flatten_router(
                 });
 
             entry.path = join_path(&full_prefix, &entry.path);
+            entry.responses =
+                merge_responses(py, &[level_responses.as_ref(), entry.responses.as_ref()]);
             if entry.generate_unique_id_function.is_none() {
                 entry.generate_unique_id_function = inherited_unique_id
                     .as_ref()
@@ -229,6 +262,7 @@ pub fn flatten_router(
                 sub_tags,
                 sub_deps,
                 sub_unique_id,
+                merge_responses(py, &[level_responses.as_ref(), sub.responses.as_ref()]),
             )
         }));
     }

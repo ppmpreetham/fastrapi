@@ -133,7 +133,7 @@ pub struct RouteEntry {
     pub response_description: Option<String>,
     pub operation_id: Option<String>,
     pub openapi_extra: Option<simd_json::OwnedValue>,
-    pub responses: Option<simd_json::OwnedValue>,
+    pub responses: Option<Py<PyAny>>,
     pub callbacks: Option<simd_json::OwnedValue>,
     pub deprecated: Option<bool>,
     pub include_in_schema: bool,

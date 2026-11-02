@@ -1312,3 +1312,30 @@ def test_openapi_request_bodies_for_forms_files_and_plain_values(client, app):
     assert schemas["Body_upload_upload_post"]["properties"]["file"] == {"type": "string", "format": "binary", "title": "File"}
     assert paths["/count"]["put"]["requestBody"] == {"content": {"application/json": {"schema": {"type": "integer", "title": "Value"}}}, "required": True}
     assert "required" not in paths["/optional"]["post"]["requestBody"]
+
+
+def test_openapi_additional_response_models(client, app):
+    from pydantic import BaseModel
+
+    from fastrapi import APIRouter
+
+    class Missing(BaseModel):
+        detail: str
+
+    router = APIRouter(responses={418: {"description": "Teapot"}})
+
+    @router.get("/things/{thing_id}", responses={404: {"model": Missing}, 500: {}})
+    def thing(thing_id: int):
+        return {}
+
+    app.include_router(router, responses={403: {"description": "Forbidden here"}})
+    spec = client.get("/openapi.json").json()
+    responses = spec["paths"]["/things/{thing_id}"]["get"]["responses"]
+    assert responses["404"] == {
+        "description": "Not Found",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}},
+    }
+    assert responses["500"] == {"description": "Internal Server Error"}
+    assert responses["418"]["description"] == "Teapot"
+    assert responses["403"]["description"] == "Forbidden here"
+    assert "Missing" in spec["components"]["schemas"]

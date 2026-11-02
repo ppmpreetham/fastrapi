@@ -84,14 +84,6 @@ pub fn build_openapi_spec(
         spec.external_docs = Some(py_dict_to_json(py, dict));
     }
 
-    let app_responses = if let Some(resp) = app.responses
-        && let Ok(dict) = resp.bind(py).cast::<PyDict>()
-    {
-        Some(py_dict_to_json(py, dict))
-    } else {
-        None
-    };
-
     let mut schemas: HashMap<String, JsonValue> = HashMap::new();
     let mut security_schemes: HashMap<String, JsonValue> = HashMap::new();
 
@@ -99,7 +91,7 @@ pub fn build_openapi_spec(
         py,
         app.routes,
         &mut schemas,
-        app_responses.as_ref(),
+        app.responses,
         app.separate_input_output_schemas,
         app.generate_unique_id_function,
         &mut security_schemes,

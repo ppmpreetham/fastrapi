@@ -22,7 +22,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use simd_json::json;
 use simd_json::owned::{Object, Value as JsonValue};
-use simd_json::prelude::{ValueAsMutObject, ValueAsObject};
+use simd_json::prelude::{ValueAsMutObject, ValueAsObject, ValueAsScalar};
 use simd_json::serde::to_owned_value;
 use std::collections::HashMap;
 
@@ -136,6 +136,95 @@ fn route_object<'py>(
         .ok()
 }
 
+fn status_text(py: Python<'_>, code: &str) -> Option<String> {
+    let range = match code {
+        "1XX" => Some("Information"),
+        "2XX" => Some("Success"),
+        "3XX" => Some("Redirection"),
+        "4XX" => Some("Client Error"),
+        "5XX" => Some("Server Error"),
+        "DEFAULT" => Some("Default Response"),
+        _ => None,
+    };
+    if let Some(range) = range {
+        return Some(range.to_string());
+    }
+    let status = code.parse::<u16>().ok()?;
+    py.import("http.client")
+        .ok()?
+        .getattr("responses")
+        .ok()?
+        .get_item(status)
+        .ok()?
+        .extract::<String>()
+        .ok()
+}
+
+fn additional_responses(
+    py: Python<'_>,
+    responses: &Bound<'_, PyAny>,
+    existing: &HashMap<String, Response>,
+    unique_id: &str,
+    registry: &mut SchemaRegistry,
+) -> Option<JsonValue> {
+    let dict = responses.cast::<PyDict>().ok()?;
+    let mut merged = Object::new();
+    for (code, response) in dict.iter() {
+        let upper = code.str().ok()?.to_string().to_uppercase();
+        let key = if upper == "DEFAULT" {
+            "default".to_string()
+        } else {
+            upper.clone()
+        };
+        let mut processed = json!({});
+        let mut model = None;
+        if let Ok(response) = response.cast::<PyDict>() {
+            for (name, value) in response.iter() {
+                let name = name.extract::<String>().ok()?;
+                if name == "model" {
+                    model = Some(value).filter(|value| !value.is_none());
+                } else if let Some(object) = processed.as_object_mut() {
+                    object.insert(name, py_any_to_json(py, &value));
+                }
+            }
+        }
+        let object = processed.as_object_mut()?;
+        if let Some(model) = model {
+            let schema = registry.field(
+                &model,
+                "serialization",
+                Some(schema_title(&format!("Response_{upper}_{unique_id}"))),
+            );
+            let content = object
+                .entry("content".to_string())
+                .or_insert_with(|| json!({}));
+            if let Some(content) = content.as_object_mut() {
+                let media = content
+                    .entry("application/json".to_string())
+                    .or_insert_with(|| json!({}));
+                if let Some(media) = media.as_object_mut()
+                    && !media.contains_key("schema")
+                {
+                    media.insert("schema".to_string(), schema);
+                }
+            }
+        }
+        let has_description = object
+            .get("description")
+            .is_some_and(|description| description.as_str().is_some_and(|text| !text.is_empty()));
+        if !has_description {
+            let description = existing
+                .get(&key)
+                .map(|response| response.description.clone())
+                .or_else(|| status_text(py, &upper))
+                .unwrap_or_else(|| "Additional Response".to_string());
+            object.insert("description".to_string(), json!(description));
+        }
+        merged.insert(key, processed);
+    }
+    Some(JsonValue::Object(Box::new(merged)))
+}
+
 fn marker_class(py: Python<'_>, param: &ParsedParameter) -> Option<String> {
     let marker = param.param_object.as_ref()?.bind(py).get_type();
     Some(marker.name().ok()?.to_string())
@@ -247,7 +336,7 @@ pub fn build_paths_from_routes(
     py: Python<'_>,
     collected: &[RouteEntry],
     schemas: &mut HashMap<String, JsonValue>,
-    app_responses: Option<&JsonValue>,
+    app_responses: Option<&Py<PyAny>>,
     separate_input_output_schemas: bool,
     generate_unique_id_function: Option<&Py<PyAny>>,
     security_schemes: &mut HashMap<String, JsonValue>,
@@ -589,20 +678,32 @@ pub fn build_paths_from_routes(
             deep_merge_json(&mut operation_val, extra.clone());
         }
 
-        // Global app.responses merge
-        if let Some(app_resps) = app_responses
+        let combined_responses = match (app_responses, route.responses.as_ref()) {
+            (None, None) => None,
+            (Some(only), None) | (None, Some(only)) => Some(only.bind(py).clone()),
+            (Some(app_level), Some(route_level)) => {
+                let merged = PyDict::new(py);
+                if let Ok(app_level) = app_level.bind(py).cast::<PyDict>() {
+                    _ = merged.update(app_level.as_mapping());
+                }
+                if let Ok(route_level) = route_level.bind(py).cast::<PyDict>() {
+                    _ = merged.update(route_level.as_mapping());
+                }
+                Some(merged.into_any())
+            }
+        };
+        if let Some(responses) = combined_responses
+            && let Some(processed) = additional_responses(
+                py,
+                &responses,
+                &operation.responses,
+                &operation_id,
+                &mut registry,
+            )
             && let Some(op_obj) = operation_val.as_object_mut()
             && let Some(op_resp) = op_obj.get_mut("responses")
         {
-            deep_merge_json(op_resp, app_resps.clone());
-        }
-
-        // Route responses override app.responses
-        if let Some(responses) = &route.responses
-            && let Some(op_obj) = operation_val.as_object_mut()
-            && let Some(op_resp) = op_obj.get_mut("responses")
-        {
-            deep_merge_json(op_resp, responses.clone());
+            deep_merge_json(op_resp, processed);
         }
 
         // Callbacks handling
