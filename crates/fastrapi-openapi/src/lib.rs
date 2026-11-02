@@ -3,5 +3,6 @@
 
 pub mod document;
 pub mod paths;
+mod registry;
 pub mod schema;
 pub mod spec;

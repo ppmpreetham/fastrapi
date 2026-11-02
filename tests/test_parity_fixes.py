@@ -1244,3 +1244,37 @@ def test_openapi_operation_ids_use_names_and_route_objects(client, app):
     assert paths["/r/{thing_id}"]["get"]["operationId"] == "things-read_thing-/r/{thing_id}"
     assert paths["/named"]["get"]["operationId"] == "custom_name_named_get"
     assert paths["/named"]["get"]["summary"] == "Custom Name"
+
+
+def test_openapi_separate_input_output_schemas(client, app):
+    from pydantic import BaseModel, computed_field
+
+    class Child(BaseModel):
+        value: int
+
+    class Item(BaseModel):
+        name: str
+        child: Child
+
+        @computed_field
+        @property
+        def upper(self) -> str:
+            return self.name.upper()
+
+    @app.post("/items", response_model=Item)
+    def create(item: Item):
+        return item
+
+    @app.get("/items", response_model=list[Item])
+    def listing():
+        return []
+
+    spec = client.get("/openapi.json").json()
+    schemas = spec["components"]["schemas"]
+    assert {"Item-Input", "Item-Output", "Child"} <= set(schemas)
+    post = spec["paths"]["/items"]["post"]
+    assert post["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/Item-Input"}
+    assert post["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/Item-Output"}
+    listed = spec["paths"]["/items"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    assert listed == {"type": "array", "items": {"$ref": "#/components/schemas/Item-Output"}, "title": "Response Listing Items Get"}
+    assert schemas["Item-Input"]["properties"]["child"] == {"$ref": "#/components/schemas/Child"}

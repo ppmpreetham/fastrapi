@@ -4,9 +4,9 @@
 use super::document::{
     MediaType, Operation, Parameter, PathItem, RequestBody, Response, deep_merge_json,
 };
+use super::registry::{SchemaRegistry, substitute};
 use super::schema::{
-    apply_parameter_constraints, extract_pydantic_schema, get_schema_name, native_operation_id,
-    python_type_to_openapi_type, schema_title,
+    apply_parameter_constraints, native_operation_id, python_type_to_openapi_type, schema_title,
 };
 use super::spec::RouteCollector;
 use fastrapi_core::method::HttpMethod;
@@ -22,7 +22,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use simd_json::json;
 use simd_json::owned::{Object, Value as JsonValue};
-use simd_json::prelude::{ValueAsMutObject, ValueAsObject, ValueObjectAccess};
+use simd_json::prelude::{ValueAsMutObject, ValueAsObject};
 use simd_json::serde::to_owned_value;
 use std::collections::HashMap;
 
@@ -142,6 +142,7 @@ fn build_request_body(
     route: &RouteEntry,
     unique_id: &str,
     schemas: &mut HashMap<String, JsonValue>,
+    registry: &mut SchemaRegistry,
 ) -> Option<RequestBody> {
     if handler.validation.param_validators.is_empty()
         || !matches!(
@@ -153,96 +154,57 @@ fn build_request_body(
     }
 
     let validators = &handler.validation.param_validators;
-    if validators.len() == 1 {
-        let validator_bound = validators[0].model_class.bind(py);
-        let schema = extract_pydantic_schema(py, validator_bound, "validation")?;
-        let schema_name = get_schema_name(validator_bound);
-        schemas.insert(schema_name.clone(), schema);
-
-        // fastapi `Body(embed=True)`: the body is an object with the model under
-        // the parameter name, described by a synthetic `Body_*` schema
-        let embedded = handler
+    let body_schema = if validators.len() == 1 {
+        let model_schema = registry.field(validators[0].model_class.bind(py), "validation", None);
+        let embedded_param = handler
             .payload
             .parsed_params
             .iter()
             .find(|param| param.validator_index == Some(0))
-            .is_some_and(|param| param.embed);
-
-        let body_schema = if embedded {
-            let param_name = handler
-                .payload
-                .parsed_params
-                .iter()
-                .find(|param| param.validator_index == Some(0))
-                .map_or_else(
-                    || validators[0].name.clone(),
-                    |param| param.external_name.clone(),
-                );
+            .filter(|param| param.embed);
+        if let Some(param) = embedded_param {
             let wrapper_name = format!("Body_{unique_id}");
             schemas.insert(
                 wrapper_name.clone(),
                 json!({
-                    "properties": { param_name.clone(): { "$ref": format!("#/components/schemas/{schema_name}") } },
+                    "properties": { param.external_name.clone(): model_schema },
                     "type": "object",
-                    "required": [param_name],
+                    "required": [param.external_name.clone()],
                     "title": wrapper_name,
                 }),
             );
             json!({ "$ref": format!("#/components/schemas/{wrapper_name}") })
         } else {
-            json!({ "$ref": format!("#/components/schemas/{}", schema_name) })
-        };
-
-        let mut content = HashMap::new();
-        content.insert(
-            "application/json".to_string(),
-            MediaType {
-                schema: body_schema,
-            },
+            model_schema
+        }
+    } else {
+        let mut properties = Object::new();
+        let mut required_fields = Vec::new();
+        for validator in validators {
+            properties.insert(
+                validator.name.clone(),
+                registry.field(validator.model_class.bind(py), "validation", None),
+            );
+            required_fields.push(validator.name.clone());
+        }
+        let wrapper_name = format!("Body_{unique_id}");
+        schemas.insert(
+            wrapper_name.clone(),
+            json!({
+                "properties": properties,
+                "type": "object",
+                "required": required_fields,
+                "title": wrapper_name,
+            }),
         );
-        return Some(RequestBody {
-            required: true,
-            content,
-        });
-    }
-
-    let mut properties = Object::new();
-    let mut required_fields = Vec::new();
-
-    for validator in validators {
-        let validator_bound = validator.model_class.bind(py);
-        let Some(schema) = extract_pydantic_schema(py, validator_bound, "validation") else {
-            continue;
-        };
-        let schema_name = get_schema_name(validator_bound);
-        schemas.insert(schema_name.clone(), schema);
-        properties.insert(
-            validator.name.clone(),
-            json!({ "$ref": format!("#/components/schemas/{}", schema_name) }),
-        );
-        required_fields.push(validator.name.clone());
-    }
-
-    if properties.is_empty() {
-        return None;
-    }
-
-    let wrapper_name = format!("Body_{unique_id}");
-
-    schemas.insert(
-        wrapper_name.clone(),
-        json!({
-            "type": "object",
-            "properties": properties,
-            "required": required_fields,
-        }),
-    );
+        json!({ "$ref": format!("#/components/schemas/{wrapper_name}") })
+    };
 
     let mut content = HashMap::new();
     content.insert(
         "application/json".to_string(),
         MediaType {
-            schema: json!({ "$ref": format!("#/components/schemas/{}", wrapper_name) }),
+            schema: body_schema,
         },
     );
     Some(RequestBody {
@@ -261,6 +223,7 @@ pub fn build_paths_from_routes(
     security_schemes: &mut HashMap<String, JsonValue>,
 ) -> HashMap<String, PathItem> {
     let mut paths: HashMap<String, PathItem> = HashMap::new();
+    let mut registry = SchemaRegistry::default();
 
     for route in collected {
         if !route.include_in_schema {
@@ -451,46 +414,28 @@ pub fn build_paths_from_routes(
 
         operation.parameters = (!parameters.is_empty()).then_some(parameters);
 
-        operation.request_body = build_request_body(py, &handler, route, &operation_id, schemas);
+        operation.request_body =
+            build_request_body(py, &handler, route, &operation_id, schemas, &mut registry);
         let response_desc = route
             .response_description
             .clone()
             .unwrap_or_else(|| "Successful Response".to_string());
 
-        let mut response_schema = json!({});
-        if let Some(rm) = &handler.response.response_model {
-            let rm_bound = rm.bind(py);
-            let mode = if separate_input_output_schemas {
-                "serialization"
-            } else {
-                "validation"
-            };
-            if let Some(schema) = extract_pydantic_schema(py, rm_bound, mode) {
-                let schema_name = get_schema_name(rm_bound);
-                if schema_name.starts_with("list[")
-                    || schema_name.starts_with("tuple[")
-                    || schema_name.starts_with("typing.")
-                {
-                    if let Some(defs) = schema.get("$defs").and_then(JsonValue::as_object) {
-                        schemas.extend(
-                            defs.iter()
-                                .map(|(name, value)| (name.clone(), value.clone())),
-                        );
-                    }
-                    if let Some(defs) = schema.get("definitions").and_then(JsonValue::as_object) {
-                        schemas.extend(
-                            defs.iter()
-                                .map(|(name, value)| (name.clone(), value.clone())),
-                        );
-                    }
-                    response_schema = schema;
-                } else {
-                    schemas.insert(schema_name.clone(), schema);
-                    response_schema =
-                        json!({ "$ref": format!("#/components/schemas/{}", schema_name) });
-                }
-            }
-        }
+        let response_schema = handler
+            .response
+            .response_model
+            .as_ref()
+            .filter(|model| !model.bind(py).is_none())
+            .map_or_else(
+                || json!({}),
+                |model| {
+                    registry.field(
+                        model.bind(py),
+                        "serialization",
+                        Some(schema_title(&format!("Response_{operation_id}"))),
+                    )
+                },
+            );
 
         let success_status = handler
             .response
@@ -632,6 +577,26 @@ pub fn build_paths_from_routes(
             HttpMethod::HEAD => path_item.head = Some(operation_val),
             HttpMethod::OPTIONS => path_item.options = Some(operation_val),
         }
+    }
+    let resolved = registry.resolve(py, separate_input_output_schemas, schemas);
+    for path_item in paths.values_mut() {
+        for operation in [
+            &mut path_item.get,
+            &mut path_item.post,
+            &mut path_item.put,
+            &mut path_item.delete,
+            &mut path_item.patch,
+            &mut path_item.head,
+            &mut path_item.options,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            substitute(operation, &resolved);
+        }
+    }
+    for schema in schemas.values_mut() {
+        substitute(schema, &resolved);
     }
     paths
 }
