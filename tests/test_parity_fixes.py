@@ -1278,3 +1278,37 @@ def test_openapi_separate_input_output_schemas(client, app):
     listed = spec["paths"]["/items"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
     assert listed == {"type": "array", "items": {"$ref": "#/components/schemas/Item-Output"}, "title": "Response Listing Items Get"}
     assert schemas["Item-Input"]["properties"]["child"] == {"$ref": "#/components/schemas/Child"}
+
+
+def test_openapi_request_bodies_for_forms_files_and_plain_values(client, app):
+    from typing import Annotated
+
+    from fastrapi import Body, File, Form, UploadFile
+
+    @app.post("/login")
+    def login(username: Annotated[str, Form()], password: Annotated[str, Form()]):
+        return {}
+
+    @app.post("/upload")
+    def upload(file: UploadFile = File(...), note: Annotated[str | None, Form()] = None):
+        return {}
+
+    @app.put("/count")
+    def count(value: Annotated[int, Body()]):
+        return {}
+
+    @app.post("/optional")
+    def optional(value: Annotated[int | None, Body()] = None):
+        return {}
+
+    spec = client.get("/openapi.json").json()
+    paths, schemas = spec["paths"], spec["components"]["schemas"]
+    login_body = paths["/login"]["post"]["requestBody"]
+    assert login_body["required"] is True
+    assert login_body["content"] == {"application/x-www-form-urlencoded": {"schema": {"$ref": "#/components/schemas/Body_login_login_post"}}}
+    assert schemas["Body_login_login_post"]["required"] == ["username", "password"]
+    upload_body = paths["/upload"]["post"]["requestBody"]["content"]
+    assert list(upload_body) == ["multipart/form-data"]
+    assert schemas["Body_upload_upload_post"]["properties"]["file"] == {"type": "string", "format": "binary", "title": "File"}
+    assert paths["/count"]["put"]["requestBody"] == {"content": {"application/json": {"schema": {"type": "integer", "title": "Value"}}}, "required": True}
+    assert "required" not in paths["/optional"]["post"]["requestBody"]

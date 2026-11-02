@@ -127,8 +127,9 @@ pub struct Parameter {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestBody {
-    pub required: bool,
     pub content: HashMap<String, MediaType>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

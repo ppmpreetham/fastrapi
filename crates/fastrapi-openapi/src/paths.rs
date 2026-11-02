@@ -136,81 +136,111 @@ fn route_object<'py>(
         .ok()
 }
 
+fn marker_class(py: Python<'_>, param: &ParsedParameter) -> Option<String> {
+    let marker = param.param_object.as_ref()?.bind(py).get_type();
+    Some(marker.name().ok()?.to_string())
+}
+
+fn body_field_schema(
+    py: Python<'_>,
+    param: &ParsedParameter,
+    registry: &mut SchemaRegistry,
+) -> JsonValue {
+    let title = schema_title(&param.external_name);
+    if param.is_file || marker_class(py, param).as_deref() == Some("File") {
+        let binary = json!({ "type": "string", "format": "binary" });
+        return if param.is_list {
+            json!({ "type": "array", "items": binary, "title": title })
+        } else {
+            json!({ "type": "string", "format": "binary", "title": title })
+        };
+    }
+    param.annotation.as_ref().map_or_else(
+        || json!({ "title": title.as_str() }),
+        |annotation| registry.field(annotation.bind(py), "validation", Some(title.clone())),
+    )
+}
+
 fn build_request_body(
     py: Python<'_>,
-    handler: &RouteHandler,
     route: &RouteEntry,
+    body_params: &[&ParsedParameter],
     unique_id: &str,
     schemas: &mut HashMap<String, JsonValue>,
     registry: &mut SchemaRegistry,
 ) -> Option<RequestBody> {
-    if handler.validation.param_validators.is_empty()
-        || !matches!(
-            route.method,
-            HttpMethod::POST | HttpMethod::PUT | HttpMethod::PATCH
-        )
-    {
+    if body_params.is_empty() || route.method == HttpMethod::OPTIONS {
         return None;
     }
-
-    let validators = &handler.validation.param_validators;
-    let body_schema = if validators.len() == 1 {
-        let model_schema = registry.field(validators[0].model_class.bind(py), "validation", None);
-        let embedded_param = handler
-            .payload
-            .parsed_params
-            .iter()
-            .find(|param| param.validator_index == Some(0))
-            .filter(|param| param.embed);
-        if let Some(param) = embedded_param {
-            let wrapper_name = format!("Body_{unique_id}");
-            schemas.insert(
-                wrapper_name.clone(),
-                json!({
-                    "properties": { param.external_name.clone(): model_schema },
-                    "type": "object",
-                    "required": [param.external_name.clone()],
-                    "title": wrapper_name,
-                }),
-            );
-            json!({ "$ref": format!("#/components/schemas/{wrapper_name}") })
-        } else {
-            model_schema
-        }
+    let is_file = |param: &&ParsedParameter| {
+        param.is_file || marker_class(py, param).as_deref() == Some("File")
+    };
+    let is_form = |param: &&ParsedParameter| {
+        is_file(param) || marker_class(py, param).as_deref() == Some("Form")
+    };
+    let has_file = body_params.iter().any(is_file);
+    let has_form = body_params.iter().any(is_form);
+    let default_media_type = if has_file {
+        "multipart/form-data"
+    } else if has_form {
+        "application/x-www-form-urlencoded"
     } else {
+        "application/json"
+    };
+    let first = body_params[0];
+    let single_model_form = body_params.len() == 1 && has_form && first.is_pydantic_model;
+    let embed = body_params.len() > 1 || first.embed || (has_form && !single_model_form);
+
+    let (schema, required, media_type) = if embed {
         let mut properties = Object::new();
         let mut required_fields = Vec::new();
-        for validator in validators {
+        for param in body_params {
             properties.insert(
-                validator.name.clone(),
-                registry.field(validator.model_class.bind(py), "validation", None),
+                param.external_name.clone(),
+                body_field_schema(py, param, registry),
             );
-            required_fields.push(validator.name.clone());
+            if param.required {
+                required_fields.push(json!(param.external_name.as_str()));
+            }
         }
         let wrapper_name = format!("Body_{unique_id}");
-        schemas.insert(
-            wrapper_name.clone(),
-            json!({
-                "properties": properties,
-                "type": "object",
-                "required": required_fields,
-                "title": wrapper_name,
-            }),
-        );
-        json!({ "$ref": format!("#/components/schemas/{wrapper_name}") })
+        let mut wrapper = json!({
+            "properties": properties,
+            "type": "object",
+            "title": wrapper_name.as_str(),
+        });
+        if !required_fields.is_empty()
+            && let Some(object) = wrapper.as_object_mut()
+        {
+            object.insert(
+                "required".to_string(),
+                JsonValue::Array(Box::new(required_fields.clone())),
+            );
+        }
+        schemas.insert(wrapper_name.clone(), wrapper);
+        (
+            json!({ "$ref": format!("#/components/schemas/{wrapper_name}") }),
+            !required_fields.is_empty(),
+            default_media_type.to_string(),
+        )
+    } else {
+        let media_type = first
+            .param_object
+            .as_ref()
+            .and_then(|marker| marker.bind(py).getattr(intern!(py, "media_type")).ok())
+            .and_then(|value| value.extract::<String>().ok())
+            .filter(|_| !has_form)
+            .unwrap_or_else(|| default_media_type.to_string());
+        (
+            body_field_schema(py, first, registry),
+            first.required,
+            media_type,
+        )
     };
 
     let mut content = HashMap::new();
-    content.insert(
-        "application/json".to_string(),
-        MediaType {
-            schema: body_schema,
-        },
-    );
-    Some(RequestBody {
-        required: true,
-        content,
-    })
+    content.insert(media_type, MediaType { schema });
+    Some(RequestBody { content, required })
 }
 
 pub fn build_paths_from_routes(
@@ -414,8 +444,26 @@ pub fn build_paths_from_routes(
 
         operation.parameters = (!parameters.is_empty()).then_some(parameters);
 
-        operation.request_body =
-            build_request_body(py, &handler, route, &operation_id, schemas, &mut registry);
+        let body_params: Vec<&ParsedParameter> = handler
+            .payload
+            .dependencies
+            .iter()
+            .flat_map(|node| node.injection_plan.iter())
+            .filter_map(|(_, injection)| match injection {
+                InjectionType::Parameter(param) => Some(param.as_ref()),
+                _ => None,
+            })
+            .chain(handler.payload.parsed_params.iter())
+            .filter(|param| param.source == ParameterSource::Body)
+            .collect();
+        operation.request_body = build_request_body(
+            py,
+            route,
+            &body_params,
+            &operation_id,
+            schemas,
+            &mut registry,
+        );
         let response_desc = route
             .response_description
             .clone()
