@@ -121,6 +121,7 @@ fn func_name(_py: Python<'_>, func: &Bound<'_, PyAny>) -> String {
 
 struct RouteOptions {
     name: Option<String>,
+    generate_unique_id_function: Option<Py<PyAny>>,
     dependencies: Option<Py<PyAny>>,
     default_status: Option<StatusCode>,
     response_model: Option<Py<PyAny>>,
@@ -149,6 +150,9 @@ impl RouteOptions {
         parent_deprecated: Option<bool>,
     ) -> PyResult<Self> {
         let name = extract::<String>(kwargs, "name");
+        let generate_unique_id_function = extract_bound(kwargs, "generate_unique_id_function")
+            .filter(|function| !function.is_none())
+            .map(Bound::unbind);
         let dependencies = extract_py(kwargs, "dependencies");
         let status_code = extract::<u16>(kwargs, "status_code");
         let summary = extract::<String>(kwargs, "summary");
@@ -206,6 +210,7 @@ impl RouteOptions {
 
         Ok(Self {
             name,
+            generate_unique_id_function,
             dependencies,
             default_status,
             response_model,
@@ -530,6 +535,11 @@ impl PyAPIRouter {
                 method,
                 path: path_for_closure.clone(),
                 name: route_name,
+                generate_unique_id_function: opts
+                    .generate_unique_id_function
+                    .as_ref()
+                    .or(router_unique_id_fn.as_ref())
+                    .map(|function| function.clone_ref(py)),
                 handler: Arc::new(handler),
                 route_instance,
                 tags: opts.merged_tags.clone(),

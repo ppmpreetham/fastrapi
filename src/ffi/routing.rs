@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyTuple};
 
 use fastrapi_core::method::HttpMethod;
-use fastrapi_core::path::extract_path_param_names;
+use fastrapi_core::path::{extract_path_param_names, strip_path_convertors};
 use fastrapi_pyutil::lazy::LazyPyAttr;
 use pyo3::Bound;
 
@@ -186,6 +186,7 @@ impl PyAPIRoute {
         attrs.set_item("methods", &methods)?;
         attrs.set_item("name", default_name)?;
         attrs.set_item("include_in_schema", include_in_schema)?;
+        attrs.set_item("path_format", strip_path_convertors(path))?;
         attrs.set_item(
             "param_names",
             extract_path_param_names(path).into_pyobject(slf.py())?,

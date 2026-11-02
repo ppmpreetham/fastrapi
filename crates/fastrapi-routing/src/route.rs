@@ -124,6 +124,7 @@ pub struct RouteEntry {
     pub method: HttpMethod,
     pub path: String,
     pub name: String,
+    pub generate_unique_id_function: Option<Py<PyAny>>,
     pub handler: Arc<RouteHandler>,
     pub route_instance: Option<Py<PyAny>>,
     pub tags: Vec<String>,

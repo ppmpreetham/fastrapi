@@ -1221,3 +1221,26 @@ def test_openapi_documents_dependency_parameters(client, app):
 
     params = client.get("/openapi.json").json()["paths"]["/paged"]["get"]["parameters"]
     assert [(p["in"], p["name"]) for p in params] == [("query", "limit"), ("header", "x-tenant"), ("query", "q")]
+
+
+def test_openapi_operation_ids_use_names_and_route_objects(client, app):
+    from fastrapi import APIRouter
+
+    def tagged_id(route):
+        return f"{route.tags[0]}-{route.name}-{route.path_format}"
+
+    router = APIRouter(prefix="/r", tags=["things"], generate_unique_id_function=tagged_id)
+
+    @router.get("/{thing_id}")
+    def read_thing(thing_id: int):
+        return {}
+
+    @app.get("/named", name="custom_name")
+    def named():
+        return {}
+
+    app.include_router(router)
+    paths = client.get("/openapi.json").json()["paths"]
+    assert paths["/r/{thing_id}"]["get"]["operationId"] == "things-read_thing-/r/{thing_id}"
+    assert paths["/named"]["get"]["operationId"] == "custom_name_named_get"
+    assert paths["/named"]["get"]["summary"] == "Custom Name"

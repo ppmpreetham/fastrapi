@@ -179,21 +179,6 @@ pub(crate) fn schema_title(name: &str) -> String {
     out
 }
 
-/// Makes the title of the combined body schema in the FastAPI format.
-/// The title is the operation ID with the prefix `Body_`.
-pub(crate) fn body_model_name(
-    handler_func: &Bound<'_, pyo3::PyAny>,
-    path: &str,
-    method: &str,
-) -> String {
-    let func_name = handler_func
-        .getattr("__name__")
-        .ok()
-        .and_then(|name| name.extract::<String>().ok())
-        .unwrap_or_else(|| "unknown".to_string());
-    format!("Body_{}", native_operation_id(&func_name, path, method))
-}
-
 /// Makes the default operation ID in the FastAPI format.
 /// The format is `{name}{path}_{method}`, with each `\W` character changed to `_`.
 pub(crate) fn native_operation_id(name: &str, path: &str, method: &str) -> String {

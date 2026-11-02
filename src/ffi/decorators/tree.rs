@@ -130,9 +130,11 @@ pub fn flatten_router(
         String::new(),
         Vec::<String>::new(),
         ChainDependencies::new(),
+        None::<Py<pyo3::PyAny>>,
     ));
 
-    while let Some((router, prefix, parent_tags, inherited_deps)) = stack.pop() {
+    while let Some((router, prefix, parent_tags, inherited_deps, inherited_unique_id)) = stack.pop()
+    {
         router.mark_frozen();
 
         let full_prefix = join_path(&prefix, &router.prefix);
@@ -168,6 +170,11 @@ pub fn flatten_router(
                 });
 
             entry.path = join_path(&full_prefix, &entry.path);
+            if entry.generate_unique_id_function.is_none() {
+                entry.generate_unique_id_function = inherited_unique_id
+                    .as_ref()
+                    .map(|function| function.clone_ref(py));
+            }
 
             if !chain_deps.is_empty() {
                 entry.handler = prepend_chain_dependencies(py, &entry.handler, &chain_deps);
@@ -210,11 +217,18 @@ pub fn flatten_router(
                 sub_deps.extend(collect_dependency_callables(py, Some(deps)));
             }
 
+            let sub_unique_id = sub
+                .generate_unique_id_function
+                .as_ref()
+                .or(router.generate_unique_id_function.as_ref())
+                .or(inherited_unique_id.as_ref())
+                .map(|function| function.clone_ref(py));
             (
                 sub_router.clone(),
                 join_path(&full_prefix, &sub.prefix),
                 sub_tags,
                 sub_deps,
+                sub_unique_id,
             )
         }));
     }

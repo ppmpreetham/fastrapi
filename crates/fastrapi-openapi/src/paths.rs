@@ -5,8 +5,8 @@ use super::document::{
     MediaType, Operation, Parameter, PathItem, RequestBody, Response, deep_merge_json,
 };
 use super::schema::{
-    apply_parameter_constraints, body_model_name, extract_pydantic_schema, get_schema_name,
-    native_operation_id, python_type_to_openapi_type, schema_title,
+    apply_parameter_constraints, extract_pydantic_schema, get_schema_name, native_operation_id,
+    python_type_to_openapi_type, schema_title,
 };
 use super::spec::RouteCollector;
 use fastrapi_core::method::HttpMethod;
@@ -104,10 +104,43 @@ fn scheme_to_openapi(
     base
 }
 
+fn route_object<'py>(
+    py: Python<'py>,
+    route: &RouteEntry,
+    handler: &RouteHandler,
+) -> Option<Bound<'py, PyAny>> {
+    let kwargs = PyDict::new(py);
+    kwargs
+        .set_item("methods", vec![route.method.as_ref()])
+        .ok()?;
+    kwargs.set_item("name", &route.name).ok()?;
+    kwargs.set_item("tags", &route.tags).ok()?;
+    kwargs.set_item("summary", &route.summary).ok()?;
+    kwargs.set_item("description", &route.description).ok()?;
+    kwargs.set_item("operation_id", &route.operation_id).ok()?;
+    kwargs.set_item("deprecated", route.deprecated).ok()?;
+    kwargs
+        .set_item("include_in_schema", route.include_in_schema)
+        .ok()?;
+    kwargs
+        .set_item("path_format", strip_path_convertors(&route.path))
+        .ok()?;
+    py.import("fastrapi.routing")
+        .ok()?
+        .getattr("APIRoute")
+        .ok()?
+        .call(
+            (route.path.as_str(), handler.execution.func.bind(py)),
+            Some(&kwargs),
+        )
+        .ok()
+}
+
 fn build_request_body(
     py: Python<'_>,
     handler: &RouteHandler,
     route: &RouteEntry,
+    unique_id: &str,
     schemas: &mut HashMap<String, JsonValue>,
 ) -> Option<RequestBody> {
     if handler.validation.param_validators.is_empty()
@@ -145,11 +178,7 @@ fn build_request_body(
                     || validators[0].name.clone(),
                     |param| param.external_name.clone(),
                 );
-            let wrapper_name = body_model_name(
-                handler.execution.func.bind(py),
-                &strip_path_convertors(&route.path),
-                route.method.as_ref(),
-            );
+            let wrapper_name = format!("Body_{unique_id}");
             schemas.insert(
                 wrapper_name.clone(),
                 json!({
@@ -198,11 +227,7 @@ fn build_request_body(
         return None;
     }
 
-    let wrapper_name = body_model_name(
-        handler.execution.func.bind(py),
-        &strip_path_convertors(&route.path),
-        route.method.as_ref(),
-    );
+    let wrapper_name = format!("Body_{unique_id}");
 
     schemas.insert(
         wrapper_name.clone(),
@@ -258,39 +283,38 @@ pub fn build_paths_from_routes(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        // fastapi defaults the summary to the endpoint name as `{name}{path}_{method}`.
-        let func_name = handler
-            .execution
-            .func
-            .bind(py)
-            .getattr(intern!(py, "__name__"))
-            .ok()
-            .and_then(|name| name.extract::<String>().ok())
-            .unwrap_or_else(|| "endpoint".to_string());
         let summary = route
             .summary
             .clone()
-            .or_else(|| Some(schema_title(&func_name)));
-        let operation_id = route.operation_id.clone().or_else(|| {
-            generate_unique_id_function.and_then(|f| {
-                f.bind(py)
-                    .call1((handler.execution.func.bind(py),))
-                    .ok()
-                    .and_then(|res| res.extract::<String>().ok())
-            })
+            .or_else(|| Some(schema_title(&route.name)));
+        let unique_id_function = route
+            .generate_unique_id_function
+            .as_ref()
+            .or(generate_unique_id_function);
+        let operation_id = route.operation_id.clone().unwrap_or_else(|| {
+            unique_id_function
+                .and_then(|function| {
+                    let route_obj = route_object(py, route, &handler)?;
+                    function
+                        .bind(py)
+                        .call1((route_obj,))
+                        .ok()?
+                        .extract::<String>()
+                        .ok()
+                })
+                .unwrap_or_else(|| {
+                    native_operation_id(
+                        &route.name,
+                        &strip_path_convertors(&route.path),
+                        route.method.as_ref(),
+                    )
+                })
         });
 
         let mut operation = Operation {
             summary,
             description: route.description.clone().or(description),
-            operation_id: operation_id.or_else(|| {
-                // fastapi's unique id uses the path without convertor suffixes
-                Some(native_operation_id(
-                    &func_name,
-                    &strip_path_convertors(&route.path),
-                    route.method.as_ref(),
-                ))
-            }),
+            operation_id: Some(operation_id.clone()),
             tags: (!tags.is_empty()).then(|| tags.clone()),
             deprecated: route.deprecated,
             parameters: None,
@@ -427,7 +451,7 @@ pub fn build_paths_from_routes(
 
         operation.parameters = (!parameters.is_empty()).then_some(parameters);
 
-        operation.request_body = build_request_body(py, &handler, route, schemas);
+        operation.request_body = build_request_body(py, &handler, route, &operation_id, schemas);
         let response_desc = route
             .response_description
             .clone()
