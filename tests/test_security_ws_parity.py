@@ -268,7 +268,7 @@ def test_openapi_security_schemes_and_requirements():
     assert schemes["OpenIdConnect"]["type"] == "openIdConnect"
 
     assert spec["paths"]["/a"]["get"]["security"] == [{"OAuth2": []}]
-    assert set(spec["paths"]["/b"]["get"]["security"][0]) == {"OAuth2", "OpenIdConnect"}
+    assert spec["paths"]["/b"]["get"]["security"] == [{"OAuth2": []}, {"OpenIdConnect": []}]
 
 
 # ------------------------------------------------------------- websockets

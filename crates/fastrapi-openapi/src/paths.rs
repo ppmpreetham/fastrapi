@@ -300,7 +300,7 @@ pub fn build_paths_from_routes(
         };
 
         if !route.security.is_empty() {
-            let mut grouped = Object::new();
+            let mut requirements: Vec<JsonValue> = Vec::new();
             for req in &route.security {
                 let compiled = req.scheme.as_ref();
                 security_schemes
@@ -313,9 +313,14 @@ pub fn build_paths_from_routes(
                         )
                     });
                 let scope_list: Vec<JsonValue> = req.scopes.iter().map(|s| json!(s)).collect();
-                grouped.insert(compiled.name.clone(), json!(scope_list));
+                let mut requirement = Object::new();
+                requirement.insert(compiled.name.clone(), json!(scope_list));
+                let requirement = JsonValue::Object(Box::new(requirement));
+                if !requirements.contains(&requirement) {
+                    requirements.push(requirement);
+                }
             }
-            operation.security = Some(vec![to_owned_value(&grouped).unwrap_or_else(|_| json!({}))]);
+            operation.security = Some(requirements);
         }
 
         let parameters: Vec<Parameter> = handler

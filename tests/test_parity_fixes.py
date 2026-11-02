@@ -1188,3 +1188,20 @@ def test_openapi_documents_head_and_options(client, app):
     paths = client.get("/openapi.json").json()["paths"]
     assert paths["/probe"]["head"]["operationId"] == "probe_head_probe_head"
     assert paths["/probe"]["options"]["operationId"] == "probe_options_probe_options"
+
+
+def test_openapi_security_requirements_are_alternatives(client, app):
+    from fastrapi import APIRouter, Depends
+    from fastrapi.security import APIKeyHeader, HTTPBearer
+
+    key = APIKeyHeader(name="x-key", auto_error=False)
+    bearer = HTTPBearer(auto_error=False)
+    router = APIRouter(dependencies=[Depends(key)])
+
+    @router.get("/both")
+    def both(token=Depends(bearer)):
+        return {}
+
+    app.include_router(router)
+    spec = client.get("/openapi.json").json()
+    assert spec["paths"]["/both"]["get"]["security"] == [{"APIKeyHeader": []}, {"HTTPBearer": []}]

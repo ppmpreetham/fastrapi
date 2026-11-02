@@ -150,6 +150,11 @@ pub fn flatten_router(
             router.dependencies.as_ref(),
         ));
 
+        let chain_security = if chain_deps.is_empty() {
+            Vec::new()
+        } else {
+            super::init::security_requirements(py, &parse_chain_nodes(py, &chain_deps, &[]))
+        };
         let route_entries = router.route_entries.lock().clone();
         routes.extend(route_entries.into_iter().map(|mut entry| {
             entry.tags = entry
@@ -166,6 +171,9 @@ pub fn flatten_router(
 
             if !chain_deps.is_empty() {
                 entry.handler = prepend_chain_dependencies(py, &entry.handler, &chain_deps);
+                let mut security = chain_security.clone();
+                security.append(&mut entry.security);
+                entry.security = security;
             }
             entry
         }));

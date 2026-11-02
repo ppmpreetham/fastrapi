@@ -63,6 +63,30 @@ pub(crate) const API_ROUTE_OPTIONS: [&str; 16] = [
     "generate_unique_id_function",
 ];
 
+pub(crate) fn security_requirements(
+    py: Python<'_>,
+    nodes: &[DependencyNode],
+) -> Vec<fastrapi_core::security::RouteSecurityRequirement> {
+    use fastrapi_core::security::{CompiledSecurityScheme, RouteSecurityRequirement};
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let bound = node.func.bind(py);
+            let spec = describe_scheme(py, bound)?;
+            Some(RouteSecurityRequirement {
+                scheme: Arc::new(CompiledSecurityScheme {
+                    id: bound.as_ptr() as u32,
+                    name: spec.name,
+                    description: spec.description,
+                    scopes: spec.scopes,
+                    kind: spec.kind,
+                }),
+                scopes: node.scopes.clone().into(),
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn set_if_some<'py, T>(
     kwargs: &Bound<'py, PyDict>,
     key: &str,
@@ -345,25 +369,7 @@ impl PyAPIRouter {
             }
             let analysis = RouteAnalysis::new(&metadata);
 
-            let mut security_requirements = Vec::new();
-            for node in &metadata.dependencies {
-                let bound = node.func.bind(py);
-                if let Some(spec) = describe_scheme(py, bound) {
-                    use fastrapi_core::security::{
-                        CompiledSecurityScheme, RouteSecurityRequirement,
-                    };
-                    security_requirements.push(RouteSecurityRequirement {
-                        scheme: Arc::new(CompiledSecurityScheme {
-                            id: bound.as_ptr() as u32,
-                            name: spec.name,
-                            description: spec.description,
-                            scopes: spec.scopes,
-                            kind: spec.kind,
-                        }),
-                        scopes: node.scopes.clone().into(),
-                    });
-                }
-            }
+            let security_requirements = security_requirements(py, &metadata.dependencies);
 
             let effective_response_class = opts.response_class.clone().or_else(|| {
                 router_route_class.as_ref().and_then(|rc| {
