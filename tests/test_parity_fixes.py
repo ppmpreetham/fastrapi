@@ -1375,3 +1375,28 @@ def test_get_openapi_with_app_routes(client, app):
     assert operation["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/Item"}
     assert "Item" in spec["components"]["schemas"]
     assert [route.path for route in app.routes] == ["/items"]
+
+
+def test_openapi_models_match_fastapi():
+    from fastrapi.openapi.models import (
+        OAuth2,
+        OAuthFlowPassword,
+        OAuthFlows,
+        OpenAPI,
+        Operation,
+        Reference,
+        Schema,
+    )
+
+    spec = OpenAPI.model_validate(
+        {
+            "openapi": "3.1.0",
+            "info": {"title": "T", "version": "1"},
+            "paths": {"/a": {"get": {"responses": {"200": {"description": "ok"}}}}},
+        }
+    )
+    assert isinstance(spec.paths["/a"].get, Operation)
+    assert Reference(**{"$ref": "#/x"}).ref == "#/x"
+    assert Schema(type="string").type == "string"
+    flows = OAuthFlows(password=OAuthFlowPassword(tokenUrl="token"))
+    assert OAuth2(flows=flows).type_.value == "oauth2"

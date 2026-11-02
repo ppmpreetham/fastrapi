@@ -158,10 +158,6 @@ fn python_type<'py>(
         .call1((name, bases, PyDict::new(py)))
 }
 
-fn str_type(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-    py.import("builtins")?.getattr("str")
-}
-
 pub(crate) fn register_security(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let base = PyModule::new(py, "base")?;
@@ -498,6 +494,17 @@ pub(crate) fn register_exception_handlers(parent: &Bound<'_, PyModule>) -> PyRes
     Ok(())
 }
 
+pub(crate) fn python_source_module<'py>(
+    py: Python<'py>,
+    source: &str,
+    file_name: &std::ffi::CStr,
+    module_name: &std::ffi::CStr,
+) -> PyResult<Bound<'py, PyModule>> {
+    let source = std::ffi::CString::new(source)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    PyModule::from_code(py, &source, file_name, module_name)
+}
+
 pub(crate) fn register_openapi_helpers(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
     let docs = PyModule::new(py, "docs")?;
@@ -506,248 +513,12 @@ pub(crate) fn register_openapi_helpers(module: &Bound<'_, PyModule>) -> PyResult
     py.import("sys")?
         .getattr("modules")?
         .set_item("fastrapi.openapi.docs", &docs)?;
-    let models = PyModule::new(py, "models")?;
-    let pydantic = py.import("pydantic")?;
-    let config_kwargs = PyDict::new(py);
-    config_kwargs.set_item("extra", "allow")?;
-    let config = pydantic
-        .getattr("ConfigDict")?
-        .call((), Some(&config_kwargs))?;
-    let typing = py.import("typing")?;
-    let any = typing.getattr("Any")?;
-    let optional = typing.getattr("Optional")?;
-    let list = typing.getattr("List")?;
-    let dict = typing.getattr("Dict")?;
-    let ellipsis = py.import("builtins")?.getattr("Ellipsis")?;
-    let optional_any = optional.get_item(any)?;
-    let make = |name: &str, fields: Vec<(&str, Py<PyAny>)>| -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("__config__", &config)?;
-        for (field, value) in fields {
-            kwargs.set_item(field, value)?;
-        }
-        Ok(pydantic
-            .getattr("create_model")?
-            .call((name,), Some(&kwargs))?
-            .unbind())
-    };
-    let field =
-        |annotation: &Bound<'_, PyAny>, default: &Bound<'_, PyAny>| -> PyResult<Py<PyAny>> {
-            Ok(PyTuple::new(py, [annotation.clone(), default.clone()])?
-                .into_any()
-                .unbind())
-        };
-    let none = py.None().into_bound(py);
-    let empty = PyList::empty(py).into_any();
-    let empty_dict = PyDict::new(py).into_any();
-    let contact = make(
-        "Contact",
-        vec![
-            ("name", field(&optional_any, &none)?),
-            ("url", field(&optional_any, &none)?),
-            ("email", field(&optional_any, &none)?),
-        ],
+    let models = python_source_module(
+        py,
+        include_str!("py/openapi_models.py"),
+        c"fastrapi/openapi/models.py",
+        c"fastrapi.openapi.models",
     )?;
-    let license = make(
-        "License",
-        vec![
-            ("name", field(&str_type(py)?, &ellipsis)?),
-            ("identifier", field(&optional_any, &none)?),
-            ("url", field(&optional_any, &none)?),
-        ],
-    )?;
-    let info = make(
-        "Info",
-        vec![
-            ("title", field(&str_type(py)?, &ellipsis)?),
-            ("summary", field(&optional_any, &none)?),
-            ("description", field(&optional_any, &none)?),
-            ("termsOfService", field(&optional_any, &none)?),
-            (
-                "contact",
-                field(&optional.get_item(contact.bind(py))?, &none)?,
-            ),
-            (
-                "license",
-                field(&optional.get_item(license.bind(py))?, &none)?,
-            ),
-            ("version", field(&str_type(py)?, &ellipsis)?),
-        ],
-    )?;
-    let server_variable = make(
-        "ServerVariable",
-        vec![
-            ("enum", field(&list.get_item(str_type(py)?)?, &empty)?),
-            ("default", field(&str_type(py)?, &ellipsis)?),
-            ("description", field(&optional_any, &none)?),
-        ],
-    )?;
-    let server = make(
-        "Server",
-        vec![
-            ("url", field(&str_type(py)?, &ellipsis)?),
-            ("description", field(&optional_any, &none)?),
-            (
-                "variables",
-                field(
-                    &dict.get_item((str_type(py)?, server_variable.bind(py)))?,
-                    &empty_dict,
-                )?,
-            ),
-        ],
-    )?;
-    let external_docs = make(
-        "ExternalDocumentation",
-        vec![
-            ("description", field(&optional_any, &none)?),
-            ("url", field(&str_type(py)?, &ellipsis)?),
-        ],
-    )?;
-    let tag = make(
-        "Tag",
-        vec![
-            ("name", field(&str_type(py)?, &ellipsis)?),
-            ("description", field(&optional_any, &none)?),
-            (
-                "externalDocs",
-                field(&optional.get_item(external_docs.bind(py))?, &none)?,
-            ),
-        ],
-    )?;
-    let components = make(
-        "Components",
-        vec![
-            ("schemas", field(&dict, &empty_dict)?),
-            ("responses", field(&dict, &empty_dict)?),
-            ("parameters", field(&dict, &empty_dict)?),
-            ("examples", field(&dict, &empty_dict)?),
-            ("requestBodies", field(&dict, &empty_dict)?),
-            ("headers", field(&dict, &empty_dict)?),
-            ("securitySchemes", field(&dict, &empty_dict)?),
-            ("links", field(&dict, &empty_dict)?),
-            ("callbacks", field(&dict, &empty_dict)?),
-            ("pathItems", field(&dict, &empty_dict)?),
-        ],
-    )?;
-    let info_any = info.bind(py).clone().into_any();
-    let openapi = make(
-        "OpenAPI",
-        vec![
-            ("openapi", field(&str_type(py)?, &ellipsis)?),
-            ("info", field(&info_any, &ellipsis)?),
-            ("servers", field(&list.get_item(server.bind(py))?, &empty)?),
-            ("paths", field(&dict, &empty_dict)?),
-            (
-                "components",
-                field(&optional.get_item(components.bind(py))?, &none)?,
-            ),
-            ("security", field(&optional_any, &none)?),
-            ("tags", field(&optional.get_item(tag.bind(py))?, &none)?),
-            (
-                "externalDocs",
-                field(&optional.get_item(external_docs.bind(py))?, &none)?,
-            ),
-        ],
-    )?;
-    for (name, value) in [
-        ("OpenAPI", openapi),
-        ("Info", info),
-        ("Contact", contact),
-        ("License", license),
-        ("Server", server),
-        ("ServerVariable", server_variable),
-        ("ExternalDocumentation", external_docs),
-        ("Tag", tag),
-        ("Components", components),
-    ] {
-        models.add(name, value.bind(py))?;
-    }
-    let path_item = make(
-        "PathItem",
-        vec![
-            ("summary", field(&optional_any, &none)?),
-            ("description", field(&optional_any, &none)?),
-            ("get", field(&optional_any, &none)?),
-            ("put", field(&optional_any, &none)?),
-            ("post", field(&optional_any, &none)?),
-            ("delete", field(&optional_any, &none)?),
-            ("options", field(&optional_any, &none)?),
-            ("head", field(&optional_any, &none)?),
-            ("patch", field(&optional_any, &none)?),
-            ("trace", field(&optional_any, &none)?),
-            ("servers", field(&list, &empty)?),
-            ("parameters", field(&list, &empty)?),
-        ],
-    )?;
-    let operation = make(
-        "Operation",
-        vec![
-            ("tags", field(&list, &empty)?),
-            ("summary", field(&optional_any, &none)?),
-            ("description", field(&optional_any, &none)?),
-            ("operationId", field(&optional_any, &none)?),
-            ("parameters", field(&list, &empty)?),
-            ("requestBody", field(&optional_any, &none)?),
-            ("responses", field(&dict, &empty_dict)?),
-            ("callbacks", field(&dict, &empty_dict)?),
-            ("deprecated", field(&optional_any, &none)?),
-            ("security", field(&optional_any, &none)?),
-            ("servers", field(&list, &empty)?),
-        ],
-    )?;
-    let parameter = make(
-        "Parameter",
-        vec![
-            ("name", field(&str_type(py)?, &ellipsis)?),
-            ("in", field(&str_type(py)?, &ellipsis)?),
-            ("description", field(&optional_any, &none)?),
-            ("required", field(&optional_any, &none)?),
-            ("deprecated", field(&optional_any, &none)?),
-            ("schema", field(&optional_any, &none)?),
-            ("example", field(&optional_any, &none)?),
-            ("examples", field(&dict, &empty_dict)?),
-        ],
-    )?;
-    let request_body = make(
-        "RequestBody",
-        vec![
-            ("description", field(&optional_any, &none)?),
-            ("content", field(&dict, &ellipsis)?),
-            ("required", field(&optional_any, &none)?),
-        ],
-    )?;
-    let response = make(
-        "Response",
-        vec![
-            ("description", field(&str_type(py)?, &ellipsis)?),
-            ("headers", field(&dict, &empty_dict)?),
-            ("content", field(&dict, &empty_dict)?),
-            ("links", field(&dict, &empty_dict)?),
-        ],
-    )?;
-    let security_scheme = make(
-        "SecurityScheme",
-        vec![
-            ("type", field(&str_type(py)?, &ellipsis)?),
-            ("description", field(&optional_any, &none)?),
-            ("name", field(&optional_any, &none)?),
-            ("in", field(&optional_any, &none)?),
-            ("scheme", field(&optional_any, &none)?),
-            ("bearerFormat", field(&optional_any, &none)?),
-            ("flows", field(&optional_any, &none)?),
-            ("openIdConnectUrl", field(&optional_any, &none)?),
-        ],
-    )?;
-    for (name, value) in [
-        ("PathItem", path_item),
-        ("Operation", operation),
-        ("Parameter", parameter),
-        ("RequestBody", request_body),
-        ("Response", response),
-        ("SecurityScheme", security_scheme),
-    ] {
-        models.add(name, value.bind(py))?;
-    }
     module.add_submodule(&models)?;
     py.import("sys")?
         .getattr("modules")?
