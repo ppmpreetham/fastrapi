@@ -262,13 +262,13 @@ def test_openapi_security_schemes_and_requirements():
     spec = live.openapi()
 
     schemes = spec["components"]["securitySchemes"]
-    assert set(schemes) == {"OAuth2", "OpenIdConnect"}
-    assert schemes["OAuth2"]["type"] == "oauth2"
-    assert schemes["OAuth2"]["flows"]["password"]["scopes"] == {"read": "Read"}
+    assert set(schemes) == {"OAuth2PasswordBearer", "OpenIdConnect"}
+    assert schemes["OAuth2PasswordBearer"]["type"] == "oauth2"
+    assert schemes["OAuth2PasswordBearer"]["flows"]["password"]["scopes"] == {"read": "Read"}
     assert schemes["OpenIdConnect"]["type"] == "openIdConnect"
 
-    assert spec["paths"]["/a"]["get"]["security"] == [{"OAuth2": []}]
-    assert spec["paths"]["/b"]["get"]["security"] == [{"OAuth2": []}, {"OpenIdConnect": []}]
+    assert spec["paths"]["/a"]["get"]["security"] == [{"OAuth2PasswordBearer": []}]
+    assert spec["paths"]["/b"]["get"]["security"] == [{"OAuth2PasswordBearer": []}, {"OpenIdConnect": []}]
 
 
 # ------------------------------------------------------------- websockets

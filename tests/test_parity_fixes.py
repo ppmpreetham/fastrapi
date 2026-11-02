@@ -60,7 +60,7 @@ def test_password_bearer_refresh_url_in_openapi(client, app):
     def me(token: str = Depends(scheme)):
         return {}
 
-    flow = client.get("/openapi.json").json()["components"]["securitySchemes"]["OAuth2"]
+    flow = client.get("/openapi.json").json()["components"]["securitySchemes"]["OAuth2PasswordBearer"]
     assert flow["flows"]["password"] == {"tokenUrl": "/token", "refreshUrl": "/refresh", "scopes": {}}
 
 

@@ -40,7 +40,7 @@ pub fn describe_scheme(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<SchemeS
     _ = py;
 
     try_scheme!(obj, OAuth2PasswordBearer => s, SchemeSpec {
-        name: s.scheme_name.clone().unwrap_or_else(|| "OAuth2".into()),
+        name: s.scheme_name.clone().unwrap_or_else(|| "OAuth2PasswordBearer".into()),
         description: s.description.clone(),
         scopes: scopes_json(py, obj),
         kind: SecurityKind::OAuth2PasswordBearer {
@@ -50,7 +50,7 @@ pub fn describe_scheme(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<SchemeS
         },
     });
     try_scheme!(obj, OAuth2AuthorizationCodeBearer => s, SchemeSpec {
-        name: s.scheme_name.clone().unwrap_or_else(|| "OAuth2".into()),
+        name: s.scheme_name.clone().unwrap_or_else(|| "OAuth2AuthorizationCodeBearer".into()),
         description: s.description.clone(),
         scopes: scopes_json(py, obj),
         kind: SecurityKind::OAuth2AuthorizationCode {
@@ -91,19 +91,19 @@ pub fn describe_scheme(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<SchemeS
         kind: SecurityKind::HTTPBasic { auto_error: s.auto_error },
     });
     try_scheme!(obj, APIKeyHeader => s, SchemeSpec {
-        name: s.scheme_name.clone().unwrap_or_else(|| format!("APIKeyHeader-{}", s.name)),
+        name: s.scheme_name.clone().unwrap_or_else(|| "APIKeyHeader".into()),
         description: s.description.clone(),
         scopes: None,
         kind: SecurityKind::APIKeyHeader { name: s.name.clone(), auto_error: s.auto_error },
     });
     try_scheme!(obj, APIKeyQuery => s, SchemeSpec {
-        name: s.scheme_name.clone().unwrap_or_else(|| format!("APIKeyQuery-{}", s.name)),
+        name: s.scheme_name.clone().unwrap_or_else(|| "APIKeyQuery".into()),
         description: s.description.clone(),
         scopes: None,
         kind: SecurityKind::APIKeyQuery { name: s.name.clone(), auto_error: s.auto_error },
     });
     try_scheme!(obj, APIKeyCookie => s, SchemeSpec {
-        name: s.scheme_name.clone().unwrap_or_else(|| format!("APIKeyCookie-{}", s.name)),
+        name: s.scheme_name.clone().unwrap_or_else(|| "APIKeyCookie".into()),
         description: s.description.clone(),
         scopes: None,
         kind: SecurityKind::APIKeyCookie { name: s.name.clone(), auto_error: s.auto_error },
