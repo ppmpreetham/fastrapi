@@ -6,6 +6,11 @@
 //! Thus the output is the same as the served `/openapi.json`, and only one implementation exists.
 
 use crate::ffi::compat::register_openapi_helpers;
+use crate::ffi::decorators::{PyAPIRouter, collect_router_routes};
+use crate::ffi::routing::PyRouteEntry;
+use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
+use fastrapi_pyutil::json::json_to_py_object;
+use fastrapi_routing::route::RouteEntry;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PySet};
 
@@ -14,11 +19,6 @@ pub(crate) const REF_PREFIX: &str = "#/components/schemas/";
 pub(crate) const REF_TEMPLATE: &str = "#/components/schemas/{model}";
 pub(crate) const METHODS_WITH_BODY: [&str; 6] = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"];
 
-// This function is the same as `fastapi.openapi.utils.get_openapi`.
-//
-// `routes` can contain `APIRoute` instances, `RouteContext` objects, or other
-// objects that have `path`, `methods` and `endpoint` attributes.
-// FastAPI accepts the same duck-typed objects.
 #[pyo3::pyfunction]
 #[pyo3(signature = (*, title, version, openapi_version="3.1.0", summary=None, description=None,
     routes, webhooks=None, tags=None, servers=None, terms_of_service=None, contact=None,
@@ -26,8 +26,8 @@ pub(crate) const METHODS_WITH_BODY: [&str; 6] = ["GET", "HEAD", "POST", "PUT", "
 #[allow(clippy::too_many_arguments)]
 pub fn get_openapi(
     py: Python<'_>,
-    title: String,
-    version: String,
+    title: &str,
+    version: &str,
     openapi_version: &str,
     summary: Option<&str>,
     description: Option<&str>,
@@ -41,119 +41,153 @@ pub fn get_openapi(
     separate_input_output_schemas: bool,
     external_docs: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let info = PyDict::new(py);
-    info.set_item("title", title)?;
-    info.set_item("version", version)?;
-    if let Some(summary) = summary {
-        info.set_item("summary", summary)?;
-    }
-    if let Some(description) = description {
-        info.set_item("description", description)?;
-    }
-    if let Some(terms) = terms_of_service {
-        info.set_item("termsOfService", terms)?;
-    }
-    if let Some(contact) = contact {
-        info.set_item("contact", contact)?;
-    }
-    if let Some(license_info) = license_info {
-        info.set_item("license", license_info)?;
-    }
-
-    let output = PyDict::new(py);
-    output.set_item("openapi", openapi_version)?;
-    output.set_item("info", &info)?;
-    if let Some(servers) = servers {
-        output.set_item("servers", servers)?;
-    }
-    output.set_item(
-        "paths",
-        paths_from_routes(py, routes, separate_input_output_schemas)?,
-    )?;
-    if let Some(webhooks) = webhooks.filter(|w| !w.is_none() && w.len().is_ok_and(|n| n > 0)) {
-        output.set_item(
-            "webhooks",
-            paths_from_routes(py, webhooks, separate_input_output_schemas)?,
-        )?;
-    }
-    if let Some(tags) = tags {
-        output.set_item("tags", tags)?;
-    }
-    if let Some(external_docs) = external_docs {
-        output.set_item("externalDocs", external_docs)?;
-    }
-    Ok(output.into_any().unbind())
+    let owned = |value: Option<&Bound<'_, PyAny>>| value.map(|value| value.clone().unbind());
+    let (tags, servers, contact, license_info, external_docs) = (
+        owned(tags),
+        owned(servers),
+        owned(contact),
+        owned(license_info),
+        owned(external_docs),
+    );
+    let route_router = router_from_routes(py, routes)?;
+    let routes = route_router.borrow().snapshot(py).0;
+    let webhook_router = webhooks
+        .filter(|webhooks| !webhooks.is_none())
+        .map(|webhooks| router_from_routes(py, webhooks))
+        .transpose()?
+        .map(|router| router.into_any().unbind());
+    let document = AppDocument {
+        openapi_version,
+        title,
+        version,
+        summary,
+        description: description.unwrap_or_default(),
+        terms_of_service,
+        contact: contact.as_ref(),
+        license_info: license_info.as_ref(),
+        servers: servers.as_ref(),
+        root_path_in_servers: false,
+        root_path: "",
+        openapi_tags: tags.as_ref(),
+        openapi_external_docs: external_docs.as_ref(),
+        responses: None,
+        webhooks: webhook_router.as_ref(),
+        generate_unique_id_function: None,
+        separate_input_output_schemas,
+        routes: &routes,
+    };
+    let spec = build_openapi_spec(py, &document, collect_router_routes);
+    Ok(json_to_py_object(py, &spec))
 }
 
-/// Builds the `paths` section for a sequence of route objects.
-/// The function adds the routes to a temporary `FastrAPI` app and uses the real schema builder.
-fn paths_from_routes(
-    py: Python<'_>,
-    routes: &Bound<'_, PyAny>,
-    _separate_input_output_schemas: bool,
-) -> PyResult<Py<PyAny>> {
-    let paths = PyDict::new(py);
-    for context in routes.try_iter()? {
-        let context = context?;
-        let route = context.getattr("route").unwrap_or_else(|_| context.clone());
-        let Ok(path) = route.getattr("path").and_then(|p| p.extract::<String>()) else {
-            continue;
-        };
-        let Ok(methods) = route.getattr("methods") else {
-            continue;
-        };
-        let Ok(endpoint) = route.getattr("endpoint") else {
-            continue;
-        };
-        let include_in_schema = route
-            .getattr("include_in_schema")
-            .and_then(|v| v.extract::<bool>())
-            .unwrap_or(true);
-        if !include_in_schema {
+const ROUTE_OPTIONS: [&str; 15] = [
+    "response_model",
+    "status_code",
+    "tags",
+    "dependencies",
+    "summary",
+    "description",
+    "response_description",
+    "responses",
+    "deprecated",
+    "operation_id",
+    "include_in_schema",
+    "response_class",
+    "name",
+    "openapi_extra",
+    "generate_unique_id_function",
+];
+
+fn router_from_routes<'py>(
+    py: Python<'py>,
+    routes: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAPIRouter>> {
+    let router = Bound::new(py, PyAPIRouter::default())?;
+    for item in routes.try_iter()? {
+        let item = item?;
+        let route = item.getattr("route").unwrap_or_else(|_| item.clone());
+        if let Ok(handle) = route.getattr("_fastrapi_entry")
+            && let Ok(handle) = handle.cast::<PyRouteEntry>()
+        {
+            let mut entry = handle.get().entry.clone();
+            apply_route_overrides(&route, &mut entry);
+            router.borrow().route_entries.lock().push(entry);
             continue;
         }
-
-        let entry = match paths.get_item(&path)? {
-            Some(entry) => entry,
-            None => PyDict::new(py).into_any(),
+        let (Ok(path), Ok(methods), Ok(endpoint)) = (
+            route
+                .getattr("path")
+                .and_then(|path| path.extract::<String>()),
+            route.getattr("methods"),
+            route.getattr("endpoint"),
+        ) else {
+            continue;
         };
-        let entry = entry.cast_into::<PyDict>()?;
-        let method_list: Vec<String> = methods
+        if methods.is_none() || endpoint.is_none() {
+            continue;
+        }
+        let methods: Vec<String> = methods
             .try_iter()?
-            .filter_map(|m| m.ok()?.extract().ok())
+            .filter_map(|method| method.ok()?.extract().ok())
             .collect();
-        entry.set_item(
-            method_list.join(", ").to_lowercase(),
-            operation_for(py, &endpoint, &method_list)?,
-        )?;
-        paths.set_item(&path, &entry)?;
+        let kwargs = PyDict::new(py);
+        for option in ROUTE_OPTIONS {
+            if let Ok(value) = route.getattr(option)
+                && !value.is_none()
+            {
+                kwargs.set_item(option, value)?;
+            }
+        }
+        router
+            .borrow()
+            .add_api_route_impl(py, &path, &endpoint, Some(methods), &kwargs)?;
     }
-    Ok(paths.into_any().unbind())
+    Ok(router)
 }
 
-/// Builds a minimal operation entry for one endpoint.
-fn operation_for(
-    py: Python<'_>,
-    endpoint: &Bound<'_, PyAny>,
-    methods: &[String],
-) -> PyResult<Py<PyAny>> {
-    let operation = PyDict::new(py);
-    let summary = endpoint
-        .getattr("__doc__")
-        .ok()
-        .and_then(|doc| doc.extract::<String>().ok())
-        .filter(|s| !s.trim().is_empty());
-    if let Some(summary) = summary {
-        operation.set_item("summary", summary.trim())?;
+fn apply_route_overrides(route: &Bound<'_, PyAny>, entry: &mut RouteEntry) {
+    let text = |name: &str| {
+        route
+            .getattr(name)
+            .ok()
+            .and_then(|value| value.extract::<Option<String>>().ok())
+    };
+    if let Some(operation_id) = text("operation_id") {
+        entry.operation_id = operation_id;
     }
-    let name = endpoint
-        .getattr("__name__")
-        .and_then(|n| n.extract::<String>())
-        .unwrap_or_else(|_| "endpoint".to_string());
-    let joined = methods.join("_").to_lowercase();
-    operation.set_item("operationId", format!("{name}_{joined}_path"))?;
-    operation.set_item("responses", PyDict::new(py))?;
-    Ok(operation.into_any().unbind())
+    if let Some(summary) = text("summary") {
+        entry.summary = summary;
+    }
+    if let Some(description) = text("description") {
+        entry.description = description;
+    }
+    if let Some(Some(name)) = text("name") {
+        entry.name = name;
+    }
+    if let Ok(path) = route
+        .getattr("path")
+        .and_then(|path| path.extract::<String>())
+    {
+        entry.path = path;
+    }
+    if let Ok(tags) = route
+        .getattr("tags")
+        .and_then(|tags| tags.extract::<Vec<String>>())
+    {
+        entry.tags = tags;
+    }
+    if let Ok(include) = route
+        .getattr("include_in_schema")
+        .and_then(|value| value.extract::<bool>())
+    {
+        entry.include_in_schema = include;
+    }
+    if let Ok(deprecated) = route
+        .getattr("deprecated")
+        .and_then(|value| value.extract::<Option<bool>>())
+    {
+        entry.deprecated = deprecated;
+    }
 }
 
 /// Adds the `fastrapi.openapi` module (`constants` and `utils`) to the parent module.

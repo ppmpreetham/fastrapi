@@ -10,7 +10,9 @@ use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, 
 
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::path::{extract_path_param_names, strip_path_convertors};
+use fastrapi_pyutil::json::json_to_py_object;
 use fastrapi_pyutil::lazy::LazyPyAttr;
+use fastrapi_routing::route::{RouteEntry, WebSocketEntry};
 use pyo3::Bound;
 
 /// Gets the path parameters from a matched request path, in declaration order.
@@ -178,8 +180,11 @@ impl PyAPIRoute {
             _ => PyList::new(slf.py(), ["GET"])?.into_any().unbind(),
         };
         let default_name: Py<PyAny> = match name {
-            Some(name) => name.clone().unbind(),
-            None => path.into_pyobject(slf.py())?.unbind().into(),
+            Some(name) if !name.is_none() => name.clone().unbind(),
+            _ => match endpoint.and_then(|endpoint| endpoint.getattr("__name__").ok()) {
+                Some(endpoint_name) => endpoint_name.unbind(),
+                None => path.into_pyobject(slf.py())?.unbind().into(),
+            },
         };
         let attrs = PyDict::new(slf.py());
         attrs.set_item("endpoint", endpoint)?;
@@ -187,6 +192,34 @@ impl PyAPIRoute {
         attrs.set_item("name", default_name)?;
         attrs.set_item("include_in_schema", include_in_schema)?;
         attrs.set_item("path_format", strip_path_convertors(path))?;
+        for key in [
+            "summary",
+            "operation_id",
+            "deprecated",
+            "response_model",
+            "status_code",
+            "openapi_extra",
+            "callbacks",
+        ] {
+            attrs.set_item(key, slf.py().None())?;
+        }
+        attrs.set_item("tags", PyList::empty(slf.py()))?;
+        attrs.set_item("dependencies", PyList::empty(slf.py()))?;
+        attrs.set_item("responses", PyDict::new(slf.py()))?;
+        attrs.set_item("response_description", "Successful Response")?;
+        let description = endpoint
+            .and_then(|endpoint| endpoint.getattr("__doc__").ok())
+            .filter(|doc| !doc.is_none())
+            .map(|doc| {
+                slf.py()
+                    .import("inspect")?
+                    .call_method1("cleandoc", (doc,))?
+                    .call_method1("split", ("\x0c",))?
+                    .get_item(0)
+            })
+            .transpose()?
+            .filter(|doc| doc.is_truthy().unwrap_or(false));
+        attrs.set_item("description", description)?;
         attrs.set_item(
             "param_names",
             extract_path_param_names(path).into_pyobject(slf.py())?,
@@ -253,6 +286,75 @@ impl PyAPIRoute {
     fn __repr__(slf: &Bound<'_, Self>) -> String {
         format!("APIRoute(path={})", slf.borrow().path)
     }
+}
+
+#[pyclass(frozen, name = "RouteEntry", module = "fastrapi.routing")]
+pub struct PyRouteEntry {
+    pub entry: RouteEntry,
+}
+
+pub(crate) fn route_objects<'py>(
+    py: Python<'py>,
+    routes: &[RouteEntry],
+    websockets: &[WebSocketEntry],
+) -> PyResult<Bound<'py, PyList>> {
+    let objects = PyList::empty(py);
+    for entry in routes {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("methods", vec![entry.method.as_ref()])?;
+        kwargs.set_item("name", &entry.name)?;
+        kwargs.set_item("include_in_schema", entry.include_in_schema)?;
+        kwargs.set_item("tags", &entry.tags)?;
+        kwargs.set_item("summary", &entry.summary)?;
+        kwargs.set_item("description", &entry.description)?;
+        kwargs.set_item("response_description", &entry.response_description)?;
+        kwargs.set_item("operation_id", &entry.operation_id)?;
+        kwargs.set_item("deprecated", entry.deprecated)?;
+        kwargs.set_item("responses", entry.responses.as_ref())?;
+        kwargs.set_item(
+            "response_model",
+            entry.handler.response.response_model.as_ref(),
+        )?;
+        kwargs.set_item(
+            "status_code",
+            entry
+                .handler
+                .response
+                .default_status
+                .map(|status| status.as_u16()),
+        )?;
+        kwargs.set_item(
+            "openapi_extra",
+            entry
+                .openapi_extra
+                .as_ref()
+                .map(|extra| json_to_py_object(py, extra)),
+        )?;
+        kwargs.set_item(
+            "_fastrapi_entry",
+            Py::new(
+                py,
+                PyRouteEntry {
+                    entry: entry.clone(),
+                },
+            )?,
+        )?;
+        let route = py.get_type::<PyAPIRoute>().call(
+            (entry.path.as_str(), entry.handler.execution.func.bind(py)),
+            Some(&kwargs),
+        )?;
+        objects.append(route)?;
+    }
+    for websocket in websockets {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("name", &websocket.name)?;
+        let route = py.get_type::<PyAPIWebSocketRoute>().call(
+            (websocket.path.as_str(), websocket.handler.bind(py)),
+            Some(&kwargs),
+        )?;
+        objects.append(route)?;
+    }
+    Ok(objects)
 }
 
 #[pyclass(

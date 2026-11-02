@@ -84,7 +84,7 @@ pub struct FastrAPI {
     pub debug: bool,
     #[pyo3(get)]
     pub state: Py<PyAny>,
-    #[pyo3(get, set)]
+    #[pyo3(set)]
     pub routes: Option<Py<PyAny>>,
     #[pyo3(get, set)]
     pub title: String,

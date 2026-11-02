@@ -38,6 +38,7 @@ pub struct OpenApiSpec {
 
     #[serde(skip_serializing_if = "Option::is_none", rename = "externalDocs")]
     pub external_docs: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub components: Option<Components>,
 }
 

@@ -5,7 +5,7 @@ use super::init::set_if_some;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_routing::route::{RouteEntry, WebSocketEntry};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
-use pyo3::types::{PyDict, PyType};
+use pyo3::types::{PyDict, PyList, PyType};
 
 use parking_lot::Mutex;
 use pyo3::Bound;
@@ -189,6 +189,12 @@ impl PyAPIRouter {
             generate_unique_id_function,
         )?;
         self.add_api_route_impl(py, path, endpoint, methods, &kwargs)
+    }
+
+    #[getter]
+    fn routes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let (routes, websockets) = self.snapshot(py);
+        crate::ffi::routing::route_objects(py, &routes, &websockets)
     }
 
     #[pyo3(signature = (name, /, **path_params))]

@@ -1339,3 +1339,39 @@ def test_openapi_additional_response_models(client, app):
     assert responses["418"]["description"] == "Teapot"
     assert responses["403"]["description"] == "Forbidden here"
     assert "Missing" in spec["components"]["schemas"]
+
+
+def test_get_openapi_with_app_routes(client, app):
+    from pydantic import BaseModel
+
+    from fastrapi.openapi.utils import get_openapi
+    from fastrapi.routing import APIRoute
+
+    class Item(BaseModel):
+        name: str
+
+    @app.post("/items", response_model=Item, tags=["items"])
+    def create_item(item: Item, verbose: bool = False):
+        return item
+
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            route.operation_id = route.name
+
+    def custom_openapi():
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(title="Custom", version="2.0", routes=app.routes)
+        schema["info"]["x-logo"] = {"url": "logo.png"}
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = custom_openapi
+    spec = client.get("/openapi.json").json()
+    operation = spec["paths"]["/items"]["post"]
+    assert spec["info"] == {"title": "Custom", "version": "2.0", "x-logo": {"url": "logo.png"}}
+    assert operation["operationId"] == "create_item"
+    assert operation["parameters"][0]["name"] == "verbose"
+    assert operation["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/Item"}
+    assert "Item" in spec["components"]["schemas"]
+    assert [route.path for route in app.routes] == ["/items"]

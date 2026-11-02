@@ -203,7 +203,8 @@ def test_openapi_helpers_models_docs_and_route_filters():
     spec = get_openapi(title="T", version="1", routes=routes, tags=[{"name": "x"}], external_docs={"url": "/docs"})
     assert spec["info"] == {"title": "T", "version": "1"}
     assert set(spec["paths"]) == {"/listed"}
-    assert spec["paths"]["/listed"]["get"]["summary"] == "listed summary"
+    assert spec["paths"]["/listed"]["get"]["summary"] == "Listed"
+    assert spec["paths"]["/listed"]["get"]["description"] == "listed summary"
     assert b"/openapi.json" in get_swagger_ui_html(openapi_url="/openapi.json", title="Docs").body
     assert b"ReDoc" in get_redoc_html(openapi_url="/openapi.json", title="Docs").body
 

@@ -475,6 +475,12 @@ impl FastrAPI {
             .add_api_route_impl(py, path, endpoint, methods, &route_kwargs)
     }
 
+    #[getter(routes)]
+    fn get_routes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let (routes, websockets) = self.router.bind(py).borrow().snapshot(py);
+        crate::ffi::routing::route_objects(py, &routes, &websockets)
+    }
+
     #[pyo3(signature = (name, /, **path_params))]
     fn url_path_for(
         &self,

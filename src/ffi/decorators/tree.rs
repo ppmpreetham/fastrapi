@@ -115,7 +115,7 @@ impl PyAPIRouter {
         if self.frozen.load(Ordering::Acquire) {
             return;
         }
-        let flat = Arc::new(flatten_router(py, self));
+        let flat = Arc::new(flatten_router(py, self, true));
         *self.cached_flat.lock() = Some(flat);
         self.mark_frozen();
     }
@@ -126,10 +126,15 @@ impl PyAPIRouter {
             if let Some(cached) = self.cached_flat.lock().as_ref() {
                 return cached.clone();
             }
-            return Arc::new(flatten_router(py, self));
+            return Arc::new(flatten_router(py, self, true));
         }
 
-        Arc::new(flatten_router(py, self))
+        Arc::new(flatten_router(py, self, true))
+    }
+
+    #[must_use]
+    pub fn snapshot(&self, py: Python<'_>) -> (Vec<RouteEntry>, Vec<WebSocketEntry>) {
+        flatten_router(py, self, false)
     }
 }
 
@@ -139,6 +144,7 @@ type ChainDependencies = Vec<Py<pyo3::PyAny>>;
 pub fn flatten_router(
     py: Python<'_>,
     root: &PyAPIRouter,
+    freeze: bool,
 ) -> (Vec<RouteEntry>, Vec<WebSocketEntry>) {
     let mut routes = Vec::new();
     let mut ws_routes = Vec::new();
@@ -166,7 +172,9 @@ pub fn flatten_router(
             py,
             &[inherited_responses.as_ref(), router.responses.as_ref()],
         );
-        router.mark_frozen();
+        if freeze {
+            router.mark_frozen();
+        }
 
         let full_prefix = join_path(&prefix, &router.prefix);
 

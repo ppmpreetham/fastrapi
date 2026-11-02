@@ -112,10 +112,12 @@ pub fn build_openapi_spec(
         spec.webhooks = Some(wh_paths);
     }
 
-    if let Some(components) = &mut spec.components {
-        components.schemas = schemas;
-        components.security_schemes = security_schemes;
-    }
+    spec.components = (!schemas.is_empty() || !security_schemes.is_empty()).then(|| {
+        super::document::Components {
+            schemas,
+            security_schemes,
+        }
+    });
     debug!("Built OpenAPI spec with {} paths", spec.paths.len());
     to_owned_value(&spec).unwrap_or_else(|_| json!({}))
 }
