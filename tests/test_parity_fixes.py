@@ -1205,3 +1205,19 @@ def test_openapi_security_requirements_are_alternatives(client, app):
     app.include_router(router)
     spec = client.get("/openapi.json").json()
     assert spec["paths"]["/both"]["get"]["security"] == [{"APIKeyHeader": []}, {"HTTPBearer": []}]
+
+
+def test_openapi_documents_dependency_parameters(client, app):
+    from typing import Annotated
+
+    from fastrapi import Depends, Header, Query
+
+    def paging(limit: int = 10, x_tenant: Annotated[str, Header()] = "a"):
+        return limit
+
+    @app.get("/paged")
+    def paged(page: int = Depends(paging), q: Annotated[str | None, Query()] = None):
+        return {}
+
+    params = client.get("/openapi.json").json()["paths"]["/paged"]["get"]["parameters"]
+    assert [(p["in"], p["name"]) for p in params] == [("query", "limit"), ("header", "x-tenant"), ("query", "q")]

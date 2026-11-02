@@ -4,7 +4,7 @@
 use regex::Regex;
 use std::sync::Arc;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ParameterSource {
     Path,
     Query,

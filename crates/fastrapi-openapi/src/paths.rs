@@ -15,7 +15,8 @@ use fastrapi_core::path::strip_path_convertors;
 use fastrapi_core::security::SecurityKind;
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_pyutil::json::py_any_to_json;
-use fastrapi_routing::route::{RouteEntry, RouteHandler};
+use fastrapi_routing::dependencies::InjectionType;
+use fastrapi_routing::route::{ParsedParameter, RouteEntry, RouteHandler};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -323,9 +324,20 @@ pub fn build_paths_from_routes(
             operation.security = Some(requirements);
         }
 
-        let parameters: Vec<Parameter> = handler
+        let mut seen_params = std::collections::HashSet::new();
+        let all_params: Vec<&ParsedParameter> = handler
             .payload
-            .parsed_params
+            .dependencies
+            .iter()
+            .flat_map(|node| node.injection_plan.iter())
+            .filter_map(|(_, injection)| match injection {
+                InjectionType::Parameter(param) => Some(param.as_ref()),
+                _ => None,
+            })
+            .chain(handler.payload.parsed_params.iter())
+            .filter(|param| seen_params.insert((param.source.clone(), param.external_name.clone())))
+            .collect();
+        let parameters: Vec<Parameter> = all_params
             .iter()
             .filter_map(|param| {
                 let location = match param.source {
@@ -491,9 +503,7 @@ pub fn build_paths_from_routes(
         );
 
         // 422 for validation errors, documented with the shared component schemas
-        if !handler.validation.param_validators.is_empty()
-            || !handler.payload.parsed_params.is_empty()
-        {
+        if !handler.validation.param_validators.is_empty() || !all_params.is_empty() {
             schemas
                 .entry("HTTPValidationError".to_string())
                 .or_insert_with(|| {
