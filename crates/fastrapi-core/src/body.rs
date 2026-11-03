@@ -12,6 +12,7 @@ pub type FormText = SmolStr;
 pub struct UploadedFile {
     pub filename: Option<String>,
     pub content_type: Option<String>,
+    pub headers: Vec<(String, String)>,
     pub content: Bytes,
 }
 

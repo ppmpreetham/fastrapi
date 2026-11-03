@@ -19,6 +19,7 @@ pub(crate) enum FormEntry {
         name: String,
         filename: String,
         content_type: Option<String>,
+        headers: Vec<(String, String)>,
         content: Bytes,
     },
 }
@@ -58,6 +59,16 @@ async fn parse_multipart(content_type: &str, raw: &[u8]) -> Result<Vec<FormEntry
             continue;
         };
         let content_type = field.content_type().map(ToString::to_string);
+        let headers = field
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
         let filename = field.file_name().map(str::to_owned);
         let content = field.bytes().await.map_err(|e| e.to_string())?;
 
@@ -66,6 +77,7 @@ async fn parse_multipart(content_type: &str, raw: &[u8]) -> Result<Vec<FormEntry
                 name,
                 filename,
                 content_type,
+                headers,
                 content,
             },
             None => FormEntry::Text(name, String::from_utf8_lossy(&content).into_owned()),
@@ -81,11 +93,12 @@ impl FormEntry {
                 name,
                 filename,
                 content_type,
+                headers,
                 content,
             } => {
                 let file = Py::new(
                     py,
-                    PyUploadFile::from_bytes(py, Some(filename), content_type, content),
+                    PyUploadFile::from_bytes(py, Some(filename), content_type, headers, content),
                 )?;
                 (name, file.into_any())
             }

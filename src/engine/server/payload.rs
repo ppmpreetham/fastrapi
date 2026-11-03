@@ -18,6 +18,18 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::str::from_utf8;
 
+fn part_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect()
+}
+
 pub(crate) async fn extract_payload(
     headers: &HeaderMap,
     body: Body,
@@ -137,6 +149,7 @@ pub(crate) async fn parse_multipart_form(
         };
         let filename = field.file_name().map(str::to_owned);
         let content_type = field.content_type().map(ToString::to_string);
+        let headers = part_headers(field.headers());
         let bytes = field
             .bytes()
             .await
@@ -146,6 +159,7 @@ pub(crate) async fn parse_multipart_form(
             Some(filename) => BodyField::File(UploadedFile {
                 filename: Some(filename),
                 content_type,
+                headers,
                 content: bytes,
             }),
             None => BodyField::Text(form_text(String::from_utf8_lossy(&bytes))),

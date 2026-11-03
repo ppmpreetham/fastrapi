@@ -57,6 +57,7 @@ pub struct PyUploadFile {
     cursor: usize,
     file_obj: Option<Py<PyAny>>,
     headers: Option<Py<PyAny>>,
+    raw_headers: Vec<(String, String)>,
 }
 
 impl PyUploadFile {
@@ -64,6 +65,7 @@ impl PyUploadFile {
         py: Python<'_>,
         filename: Option<String>,
         content_type: Option<String>,
+        raw_headers: Vec<(String, String)>,
         file_content: Bytes,
     ) -> Self {
         let size = file_content.len();
@@ -87,6 +89,7 @@ impl PyUploadFile {
             cursor: 0,
             file_obj,
             headers: None,
+            raw_headers,
         }
     }
 }
@@ -131,6 +134,7 @@ impl PyUploadFile {
             cursor: 0,
             file_obj: (!file.is_none(py)).then_some(file),
             headers: headers.filter(|headers| !headers.is_none(py)),
+            raw_headers: Vec::new(),
         })
     }
 
@@ -155,15 +159,31 @@ impl PyUploadFile {
         if let Some(headers) = &self.headers {
             return Ok(headers.clone_ref(py));
         }
-        let raw = PyDict::new(py);
-        if let Some(content_type) = &self.content_type {
-            raw.set_item("content-type", content_type)?;
-        }
-        let headers = STARLETTE_DATASTRUCTURES
+        let headers_class = STARLETTE_DATASTRUCTURES
             .get(py)?
-            .getattr(pyo3::intern!(py, "Headers"))?
-            .call1((raw,))?
-            .unbind();
+            .getattr(pyo3::intern!(py, "Headers"))?;
+        let headers = if self.raw_headers.is_empty() {
+            let raw = PyDict::new(py);
+            if let Some(content_type) = &self.content_type {
+                raw.set_item("content-type", content_type)?;
+            }
+            headers_class.call1((raw,))?
+        } else {
+            let raw: Vec<(Bound<'_, PyBytes>, Bound<'_, PyBytes>)> = self
+                .raw_headers
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        PyBytes::new(py, name.as_bytes()),
+                        PyBytes::new(py, value.as_bytes()),
+                    )
+                })
+                .collect();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("raw", raw)?;
+            headers_class.call((), Some(&kwargs))?
+        }
+        .unbind();
         self.headers = Some(headers.clone_ref(py));
         Ok(headers)
     }

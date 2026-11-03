@@ -665,6 +665,7 @@ fn form_field_to_py(
                 py,
                 file.filename.clone(),
                 file.content_type.clone(),
+                file.headers.clone(),
                 file.content.clone(),
             ),
         )

@@ -1425,3 +1425,21 @@ def test_openapi_utils_helpers():
     path, security, schemas = get_openapi_path(route=route, operation_ids=set())
     assert path["get"]["parameters"][0]["name"] == "item_id"
     assert "HTTPValidationError" in schemas
+
+
+def test_upload_file_headers_include_all_part_headers(client, app):
+    from fastrapi import UploadFile
+
+    @app.post("/up")
+    async def up(file: UploadFile):
+        return {"disposition": file.headers["content-disposition"], "extra": file.headers.get("x-extra")}
+
+    body = (
+        b"--b\r\n"
+        b'Content-Disposition: form-data; name="file"; filename="a.txt"\r\n'
+        b"Content-Type: text/plain\r\n"
+        b"X-Extra: yes\r\n\r\n"
+        b"hello\r\n--b--\r\n"
+    )
+    response = client.post("/up", content=body, headers={"content-type": "multipart/form-data; boundary=b"})
+    assert response.json() == {"disposition": 'form-data; name="file"; filename="a.txt"', "extra": "yes"}
