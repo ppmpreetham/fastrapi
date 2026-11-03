@@ -135,20 +135,7 @@ pub(crate) fn build_router(
     let mut frozen_router_builder = FrozenRouterBuilder::new();
     for route in routes {
         let host: Option<Box<str>> = route.host.as_deref().map(Into::into);
-        frozen_router_builder.add_route(
-            route.method,
-            &route.path,
-            route.handler.clone(),
-            host.clone(),
-        );
-        if route.method == HttpMethod::GET {
-            frozen_router_builder.add_route(
-                HttpMethod::HEAD,
-                &route.path,
-                route.handler.clone(),
-                host,
-            );
-        }
+        frozen_router_builder.add_route(route.method, &route.path, route.handler.clone(), host);
     }
     let frozen_router: &'static FrozenRouter<RouteHandler> =
         Box::leak(Box::new(frozen_router_builder.build()));
@@ -177,9 +164,14 @@ fn register_routes(
     frozen_router: &'static FrozenRouter<RouteHandler>,
 ) -> Router {
     let frontend_mounts = Arc::new(app_config.frontend_mounts.clone());
+    let head_dispatch = on(MethodFilter::HEAD, move |req: Request| async move {
+        dispatch_or_not_found(frozen_router, app_state, req)
+            .await
+            .unwrap_or_else(|_| not_found_response())
+    });
 
     // 1. Cached routes
-    app = group_and_register_routes(app, routes, |route| {
+    app = group_and_register_routes(app, routes, &head_dispatch, |route| {
         if route.host.is_none()
             && route.handler.execution.rate_limit_per_second.is_none()
             && route.handler.execution.cache_response
@@ -200,7 +192,7 @@ fn register_routes(
     });
 
     // 2. Direct no request routes
-    app = group_and_register_routes(app, routes, |route| {
+    app = group_and_register_routes(app, routes, &head_dispatch, |route| {
         if route.host.is_none()
             && route.handler.execution.rate_limit_per_second.is_none()
             && !route.handler.execution.cache_response
@@ -516,7 +508,7 @@ where
     T: 'static,
 {
     let filter = match method {
-        HttpMethod::GET => MethodFilter::GET.or(MethodFilter::HEAD),
+        HttpMethod::GET => MethodFilter::GET,
         HttpMethod::POST => MethodFilter::POST,
         HttpMethod::PUT => MethodFilter::PUT,
         HttpMethod::DELETE => MethodFilter::DELETE,
@@ -657,21 +649,33 @@ pub(crate) fn parse_header_value(value: &str) -> Option<HeaderValue> {
 pub(crate) fn group_and_register_routes<'a, F>(
     mut app: Router,
     routes: &'a [RouteEntry],
+    head_dispatch: &MethodRouter,
     mut builder: F,
 ) -> Router
 where
     F: FnMut(&'a RouteEntry) -> Option<(&'a str, MethodRouter)>,
 {
-    let mut grouped_routes: AHashMap<&'a str, MethodRouter> = AHashMap::new();
+    let mut grouped_routes: AHashMap<&'a str, (MethodRouter, bool, bool)> = AHashMap::new();
     for route in routes {
         if let Some((path, method_router)) = builder(route) {
+            let is_get = route.method == HttpMethod::GET;
+            let is_head = route.method == HttpMethod::HEAD;
             grouped_routes
                 .entry(path)
-                .and_modify(|existing| *existing = existing.clone().merge(method_router.clone()))
-                .or_insert(method_router);
+                .and_modify(|(existing, has_get, has_head)| {
+                    *existing = existing.clone().merge(method_router.clone());
+                    *has_get |= is_get;
+                    *has_head |= is_head;
+                })
+                .or_insert((method_router, is_get, is_head));
         }
     }
-    for (path, method_router) in grouped_routes {
+    for (path, (method_router, has_get, has_head)) in grouped_routes {
+        let method_router = if has_get && !has_head {
+            method_router.merge(head_dispatch.clone())
+        } else {
+            method_router
+        };
         app = app.route(path, method_router);
     }
     app

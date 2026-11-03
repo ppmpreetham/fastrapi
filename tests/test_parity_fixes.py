@@ -1476,3 +1476,22 @@ def test_root_path_routes_paths_outside_the_prefix():
     _serve(app, port)
     assert httpx.get(f"http://127.0.0.1:{port}/api/items").json() == {"ok": True}
     assert httpx.get(f"http://127.0.0.1:{port}/items").json() == {"ok": True}
+
+
+def test_head_on_get_route_is_method_not_allowed(client, app):
+    @app.get("/plain")
+    def plain():
+        return {}
+
+    @app.get("/both")
+    def both_get():
+        return {"get": True}
+
+    @app.head("/both")
+    def both_head():
+        return None
+
+    response = client.head("/plain")
+    assert response.status_code == 405
+    assert response.headers["allow"] == "GET"
+    assert client.head("/both").status_code == 200

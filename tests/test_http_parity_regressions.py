@@ -10,7 +10,7 @@ def test_method_not_allowed_has_allow_header(client, app):
 
     response = client.post("/only-get")
     assert response.status_code == 405
-    assert response.headers["allow"] == "GET, HEAD"
+    assert response.headers["allow"] == "GET"
 
 
 def test_http_exception_detail_is_structured(client, app):
