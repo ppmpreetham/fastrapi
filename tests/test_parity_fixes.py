@@ -1460,3 +1460,19 @@ def test_method_not_allowed_uses_handler(client, app):
     assert response.status_code == 405
     assert response.json() == {"custom": 405}
     assert response.headers["allow"] == "GET"
+
+
+def test_root_path_routes_paths_outside_the_prefix():
+    import httpx
+    from test_websocket_smoke import _free_port, _serve
+
+    app = FastrAPI(root_path="/api")
+
+    @app.get("/items")
+    def items():
+        return {"ok": True}
+
+    port = _free_port()
+    _serve(app, port)
+    assert httpx.get(f"http://127.0.0.1:{port}/api/items").json() == {"ok": True}
+    assert httpx.get(f"http://127.0.0.1:{port}/items").json() == {"ok": True}

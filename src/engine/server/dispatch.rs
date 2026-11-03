@@ -34,9 +34,7 @@ pub(crate) async fn dispatch_or_not_found(
         return Ok(StatusCode::METHOD_NOT_ALLOWED.into_response());
     };
 
-    let Some(path_str) = dispatch_path(state, req.uri().path()) else {
-        return Err(req);
-    };
+    let path_str = dispatch_path(state, req.uri().path());
 
     let request_host = if router.has_host_routes() {
         req.headers()
@@ -165,6 +163,6 @@ fn apply_validation_handler(response: Response) -> Response {
     Python::attach(|py| dispatch_validation_handler(py, response, None))
 }
 
-pub(crate) fn dispatch_path<'a>(state: &AppState, original_path: &'a str) -> Option<&'a str> {
-    strip_root_path(&state.root_path, original_path)
+pub(crate) fn dispatch_path<'a>(state: &AppState, original_path: &'a str) -> &'a str {
+    strip_root_path(&state.root_path, original_path).unwrap_or(original_path)
 }
