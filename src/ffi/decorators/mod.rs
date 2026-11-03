@@ -5,7 +5,7 @@ mod init;
 mod requests;
 mod tree;
 
-pub(crate) use init::API_ROUTE_OPTIONS;
+pub(crate) use init::add_api_route_kwargs;
 pub use tree::flatten_router;
 mod router;
 

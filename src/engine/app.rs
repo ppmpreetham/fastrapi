@@ -5,7 +5,7 @@
 use super::config::{FastrAPI, FrontendMount, HostMount, StaticMount, SubAppMount};
 use super::server::serve::{serve, serve_with_reload};
 use crate::ffi::decorators;
-use crate::ffi::decorators::{API_ROUTE_OPTIONS, PyAPIRouter, collect_router_routes};
+use crate::ffi::decorators::{PyAPIRouter, collect_router_routes};
 use ahash::AHasher;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_http::middleware::{
@@ -459,16 +459,7 @@ impl FastrAPI {
         methods: Option<Vec<String>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let route_kwargs = PyDict::new(py);
-        if let Some(kwargs) = kwargs {
-            for key in API_ROUTE_OPTIONS {
-                if let Some(value) = kwargs.get_item(key)?
-                    && !value.is_none()
-                {
-                    route_kwargs.set_item(key, value)?;
-                }
-            }
-        }
+        let route_kwargs = crate::ffi::decorators::add_api_route_kwargs(py, kwargs)?;
         self.router
             .bind(py)
             .borrow()

@@ -1534,3 +1534,37 @@ def test_trailing_slash_routes_and_redirects():
     strict_port = _free_port()
     _serve(strict, strict_port)
     assert httpx.get(f"http://127.0.0.1:{strict_port}/only").status_code == 404
+
+
+def test_add_api_route_accepts_fastapi_options(client, app):
+    import pytest
+    from pydantic import BaseModel
+
+    from fastrapi import APIRouter
+    from fastrapi.routing import APIRoute
+
+    class Out(BaseModel):
+        name: str
+        secret: str | None = None
+
+    class TaggedRoute(APIRoute):
+        pass
+
+    def read():
+        return {"name": "a"}
+
+    router = APIRouter()
+    router.add_api_route(
+        "/r",
+        read,
+        response_model=Out,
+        response_model_exclude_none=True,
+        route_class_override=TaggedRoute,
+        strict_content_type=False,
+    )
+    app.add_api_route("/a", read, response_model=Out, response_model_exclude_unset=True)
+    app.include_router(router)
+    with pytest.raises(TypeError):
+        app.add_api_route("/bad", read, not_an_option=1)
+    assert client.get("/r").json() == {"name": "a"}
+    assert client.get("/a").json() == {"name": "a"}

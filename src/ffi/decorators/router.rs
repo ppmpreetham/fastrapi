@@ -1,7 +1,6 @@
 //! The `APIRouter` Python class and its methods.
 //! A router holds HTTP routes, WebSocket routes and included sub-routers.
 
-use super::init::set_if_some;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_routing::route::{RouteEntry, WebSocketEntry};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
@@ -138,56 +137,16 @@ impl PyAPIRouter {
         self.create_method_decorator_kw(py, HttpMethod::GET, path, None)
     }
 
-    #[pyo3(signature = (path, endpoint, *, response_model=None, status_code=None, tags=None,
-        dependencies=None, summary=None, description=None, response_description=None,
-        responses=None, deprecated=None, methods=None, operation_id=None,
-        include_in_schema=true, response_class=None, name=None, callbacks=None,
-        openapi_extra=None, generate_unique_id_function=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path, endpoint, *, methods=None, **kwargs))]
     fn add_api_route(
         &self,
         py: Python<'_>,
         path: &str,
         endpoint: &Bound<'_, PyAny>,
-        response_model: Option<Py<PyAny>>,
-        status_code: Option<u16>,
-        tags: Option<Py<PyAny>>,
-        dependencies: Option<Py<PyAny>>,
-        summary: Option<String>,
-        description: Option<String>,
-        response_description: Option<String>,
-        responses: Option<Py<PyAny>>,
-        deprecated: Option<bool>,
         methods: Option<Vec<String>>,
-        operation_id: Option<String>,
-        include_in_schema: bool,
-        response_class: Option<Py<PyAny>>,
-        name: Option<String>,
-        callbacks: Option<Py<PyAny>>,
-        openapi_extra: Option<Py<PyAny>>,
-        generate_unique_id_function: Option<Py<PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let kwargs = PyDict::new(py);
-        set_if_some(&kwargs, "response_model", response_model)?;
-        set_if_some(&kwargs, "status_code", status_code)?;
-        set_if_some(&kwargs, "tags", tags)?;
-        set_if_some(&kwargs, "dependencies", dependencies)?;
-        set_if_some(&kwargs, "summary", summary)?;
-        set_if_some(&kwargs, "description", description)?;
-        set_if_some(&kwargs, "response_description", response_description)?;
-        set_if_some(&kwargs, "responses", responses)?;
-        set_if_some(&kwargs, "deprecated", deprecated)?;
-        set_if_some(&kwargs, "operation_id", operation_id)?;
-        kwargs.set_item("include_in_schema", include_in_schema)?;
-        set_if_some(&kwargs, "response_class", response_class)?;
-        set_if_some(&kwargs, "name", name)?;
-        set_if_some(&kwargs, "callbacks", callbacks)?;
-        set_if_some(&kwargs, "openapi_extra", openapi_extra)?;
-        set_if_some(
-            &kwargs,
-            "generate_unique_id_function",
-            generate_unique_id_function,
-        )?;
+        let kwargs = super::init::add_api_route_kwargs(py, kwargs)?;
         self.add_api_route_impl(py, path, endpoint, methods, &kwargs)
     }
 

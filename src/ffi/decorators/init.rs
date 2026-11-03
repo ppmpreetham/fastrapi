@@ -44,25 +44,6 @@ where
     obj.extract().ok()
 }
 
-pub(crate) const API_ROUTE_OPTIONS: [&str; 16] = [
-    "response_model",
-    "status_code",
-    "tags",
-    "dependencies",
-    "summary",
-    "description",
-    "response_description",
-    "responses",
-    "deprecated",
-    "operation_id",
-    "include_in_schema",
-    "response_class",
-    "name",
-    "callbacks",
-    "openapi_extra",
-    "generate_unique_id_function",
-];
-
 pub(crate) fn security_requirements(
     py: Python<'_>,
     nodes: &[DependencyNode],
@@ -87,15 +68,55 @@ pub(crate) fn security_requirements(
         .collect()
 }
 
-pub(crate) fn set_if_some<'py, T>(
-    kwargs: &Bound<'py, PyDict>,
-    key: &str,
-    value: Option<T>,
-) -> PyResult<()>
-where
-    T: pyo3::IntoPyObject<'py>,
-{
-    value.map_or(Ok(()), |value| kwargs.set_item(key, value))
+pub(crate) const ADD_API_ROUTE_OPTIONS: [&str; 26] = [
+    "response_model",
+    "status_code",
+    "tags",
+    "dependencies",
+    "summary",
+    "description",
+    "response_description",
+    "responses",
+    "deprecated",
+    "operation_id",
+    "response_model_include",
+    "response_model_exclude",
+    "response_model_by_alias",
+    "response_model_exclude_unset",
+    "response_model_exclude_defaults",
+    "response_model_exclude_none",
+    "include_in_schema",
+    "response_class",
+    "name",
+    "route_class_override",
+    "callbacks",
+    "openapi_extra",
+    "generate_unique_id_function",
+    "strict_content_type",
+    "cache_resp",
+    "rate_limit",
+];
+
+pub(crate) fn add_api_route_kwargs<'py>(
+    py: Python<'py>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let route_kwargs = PyDict::new(py);
+    let Some(kwargs) = kwargs else {
+        return Ok(route_kwargs);
+    };
+    for (key, value) in kwargs.iter() {
+        let name: String = key.extract()?;
+        if !ADD_API_ROUTE_OPTIONS.contains(&name.as_str()) {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "add_api_route() got an unexpected keyword argument '{name}'"
+            )));
+        }
+        if !value.is_none() || name == "response_model" {
+            route_kwargs.set_item(key, value)?;
+        }
+    }
+    Ok(route_kwargs)
 }
 
 #[inline]
@@ -356,7 +377,10 @@ impl PyAPIRouter {
         let opts = RouteOptions::from_kwargs(py, kwargs, &router_tags, self.deprecated)?;
         let path_for_closure = path;
         let routes = Arc::clone(&self.route_entries);
-        let router_route_class = self.route_class.clone();
+        let router_route_class = extract_bound(kwargs, "route_class_override")
+            .filter(|class| !class.is_none())
+            .map(Bound::unbind)
+            .or_else(|| self.route_class.clone());
         let router_unique_id_fn = self.generate_unique_id_function.clone();
 
         let decorator = move |args: &Bound<'_, PyTuple>,
