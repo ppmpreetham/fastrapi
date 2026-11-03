@@ -13,6 +13,7 @@ use axum::serve::ListenerExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 use std::path::PathBuf;
 use tracing::{error, info};
 
@@ -82,6 +83,26 @@ impl AppState {
     }
 }
 
+fn combined_handlers(
+    py: Python<'_>,
+    app_handlers: Option<&Py<PyAny>>,
+    router_handlers: &[Py<PyAny>],
+) -> PyResult<Option<Py<PyAny>>> {
+    if router_handlers.is_empty() {
+        return Ok(app_handlers.map(|handlers| handlers.clone_ref(py)));
+    }
+    let combined = PyList::empty(py);
+    if let Some(handlers) = app_handlers {
+        for handler in handlers.bind(py).try_iter()? {
+            combined.append(handler?)?;
+        }
+    }
+    for handler in router_handlers {
+        combined.append(handler.bind(py))?;
+    }
+    Ok(Some(combined.into_any().unbind()))
+}
+
 pub fn serve(
     py: Python<'_>,
     host: Option<String>,
@@ -122,18 +143,38 @@ pub fn serve(
     let docs_url = app_config.docs_url.clone();
     let openapi_url = app_config.openapi_url.clone();
     let docs_url_for_log = docs_url.clone();
-    let on_startup = app_config
-        .on_startup
-        .as_ref()
-        .map(|handler| handler.clone_ref(py));
-    let on_shutdown = app_config
-        .on_shutdown
-        .as_ref()
-        .map(|handler| handler.clone_ref(py));
-    let lifespan = app_config
+    let router_events = app_config.router.bind(py).borrow();
+    let on_startup = combined_handlers(
+        py,
+        app_config.on_startup.as_ref(),
+        &router_events.startup_handlers.lock(),
+    )?;
+    let on_shutdown = combined_handlers(
+        py,
+        app_config.on_shutdown.as_ref(),
+        &router_events.shutdown_handlers.lock(),
+    )?;
+    let router_lifespan = router_events
         .lifespan
+        .lock()
         .as_ref()
-        .map(|handler| handler.clone_ref(py));
+        .map(|lifespan| lifespan.clone_ref(py));
+    drop(router_events);
+    let lifespan = match (
+        app_config
+            .lifespan
+            .as_ref()
+            .map(|handler| handler.clone_ref(py)),
+        router_lifespan,
+    ) {
+        (Some(original), Some(nested)) => Some(
+            crate::ffi::compat::py_helpers(py)?
+                .getattr("merge_lifespan_context")?
+                .call1((original, nested))?
+                .unbind(),
+        ),
+        (original, nested) => original.or(nested),
+    };
     let app = app.clone_ref(py);
     let redoc_url = app_config.redoc_url.clone();
     let scalar_url = app_config.scalar_url.clone();

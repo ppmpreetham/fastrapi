@@ -90,6 +90,58 @@ class Param(abc.ABC):
     pass
 
 
+def _async_lifespan(factory):
+    import inspect
+    from contextlib import contextmanager
+
+    if inspect.isasyncgenfunction(factory):
+        return asynccontextmanager(factory)
+    if inspect.isgeneratorfunction(factory):
+        sync_factory = contextmanager(factory)
+
+        @asynccontextmanager
+        async def wrapped(app):
+            with sync_factory(app) as state:
+                yield state
+
+        return wrapped
+    return factory
+
+
+def merge_lifespan_context(original, nested):
+    original = _async_lifespan(original)
+    nested = _async_lifespan(nested)
+
+    @asynccontextmanager
+    async def merged_lifespan(app):
+        async with original(app) as maybe_original_state:
+            async with nested(app) as maybe_nested_state:
+                if maybe_nested_state is None and maybe_original_state is None:
+                    yield None
+                else:
+                    yield {**(maybe_nested_state or {}), **(maybe_original_state or {})}
+
+    return merged_lifespan
+
+
+def default_lifespan(router):
+    import inspect
+
+    @asynccontextmanager
+    async def lifespan(app):
+        for handler in router.on_startup:
+            result = handler()
+            if inspect.isawaitable(result):
+                await result
+        yield None
+        for handler in router.on_shutdown:
+            result = handler()
+            if inspect.isawaitable(result):
+                await result
+
+    return lifespan
+
+
 def request_endpoint(endpoint):
     import inspect
 

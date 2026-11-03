@@ -1602,3 +1602,34 @@ def test_router_trace_add_route_and_websocket_helpers(client, app):
     assert "trace" in spec["paths"]["/traced"]
     assert "/plain" not in spec["paths"]
     assert {route.path for route in app.routes if not hasattr(route, "methods")} == {"/ws-route", "/ws-added"}
+
+
+def test_router_events_and_lifespans_merge(client, app):
+    from contextlib import asynccontextmanager
+
+    from fastrapi import APIRouter
+
+    events = []
+
+    @asynccontextmanager
+    async def router_lifespan(app):
+        events.append("router-lifespan")
+        yield {"from_router": True}
+
+    router = APIRouter(on_startup=[lambda: events.append("ctor-startup")], lifespan=router_lifespan)
+
+    @router.on_event("startup")
+    def on_start():
+        events.append("decorated-startup")
+
+    router.add_event_handler("startup", lambda: events.append("added-startup"))
+    assert callable(router.lifespan_context)
+
+    @router.get("/events")
+    def read_events():
+        return events
+
+    app.include_router(router)
+    assert sorted(client.get("/events").json()) == sorted(
+        ["router-lifespan", "ctor-startup", "decorated-startup", "added-startup"]
+    )

@@ -62,6 +62,9 @@ pub struct PyAPIRouter {
     pub sub_routers: Arc<Mutex<Vec<SubRouterMount>>>,
     pub frozen: Arc<AtomicBool>,
     pub cached_flat: Arc<Mutex<Option<Arc<(Vec<RouteEntry>, Vec<WebSocketEntry>)>>>>,
+    pub startup_handlers: Arc<Mutex<Vec<Py<PyAny>>>>,
+    pub shutdown_handlers: Arc<Mutex<Vec<Py<PyAny>>>>,
+    pub lifespan: Arc<Mutex<Option<Py<PyAny>>>>,
 }
 
 impl Default for PyAPIRouter {
@@ -82,6 +85,9 @@ impl Default for PyAPIRouter {
             sub_routers: Arc::new(Mutex::new(Vec::new())),
             frozen: Arc::new(AtomicBool::new(false)),
             cached_flat: Arc::new(Mutex::new(None)),
+            startup_handlers: Arc::new(Mutex::new(Vec::new())),
+            shutdown_handlers: Arc::new(Mutex::new(Vec::new())),
+            lifespan: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -89,7 +95,11 @@ impl Default for PyAPIRouter {
 #[pymethods]
 impl PyAPIRouter {
     #[new]
-    #[pyo3(signature = (*, prefix=String::new(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None, route_class=None))]
+    #[pyo3(signature = (*, prefix=String::new(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None, route_class=None, on_startup=None, on_shutdown=None, lifespan=None))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the signature matches FastAPI's APIRouter"
+    )]
     fn new(
         prefix: String,
         tags: Option<&Bound<'_, PyAny>>,
@@ -100,6 +110,9 @@ impl PyAPIRouter {
         default_response_class: Option<Py<PyAny>>,
         generate_unique_id_function: Option<Py<PyAny>>,
         route_class: Option<Py<PyAny>>,
+        on_startup: Option<Vec<Py<PyAny>>>,
+        on_shutdown: Option<Vec<Py<PyAny>>>,
+        lifespan: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let tag_vec = tags
             .and_then(|obj| obj.try_iter().ok())
@@ -128,8 +141,81 @@ impl PyAPIRouter {
             default_response_class,
             generate_unique_id_function,
             route_class,
+            startup_handlers: Arc::new(Mutex::new(on_startup.unwrap_or_default())),
+            shutdown_handlers: Arc::new(Mutex::new(on_shutdown.unwrap_or_default())),
+            lifespan: Arc::new(Mutex::new(lifespan)),
             ..Self::default()
         })
+    }
+
+    #[getter]
+    fn on_startup<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        PyList::new(
+            py,
+            self.startup_handlers.lock().iter().map(|h| h.clone_ref(py)),
+        )
+    }
+
+    #[getter]
+    fn on_shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        PyList::new(
+            py,
+            self.shutdown_handlers
+                .lock()
+                .iter()
+                .map(|h| h.clone_ref(py)),
+        )
+    }
+
+    #[getter]
+    fn lifespan_context(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(lifespan) = slf.borrow().lifespan.lock().as_ref() {
+            return Ok(lifespan.clone_ref(py));
+        }
+        Ok(crate::ffi::compat::py_helpers(py)?
+            .getattr("default_lifespan")?
+            .call1((slf,))?
+            .unbind())
+    }
+
+    #[setter]
+    fn set_lifespan_context(&self, lifespan: Option<Py<PyAny>>) {
+        *self.lifespan.lock() = lifespan;
+    }
+
+    fn add_event_handler(&self, event_type: &str, func: Py<PyAny>) -> PyResult<()> {
+        match event_type {
+            "startup" => self.startup_handlers.lock().push(func),
+            "shutdown" => self.shutdown_handlers.lock().push(func),
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "event_type must be 'startup' or 'shutdown'",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn on_event(&self, py: Python<'_>, event_type: &str) -> PyResult<Py<PyAny>> {
+        if !matches!(event_type, "startup" | "shutdown") {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "event_type must be 'startup' or 'shutdown'",
+            ));
+        }
+        let handlers = if event_type == "startup" {
+            Arc::clone(&self.startup_handlers)
+        } else {
+            Arc::clone(&self.shutdown_handlers)
+        };
+        let decorator = move |args: &Bound<'_, pyo3::types::PyTuple>,
+                              _kwargs: Option<&Bound<'_, PyDict>>|
+              -> PyResult<Py<PyAny>> {
+            let func = args.get_item(0)?.unbind();
+            handlers.lock().push(func.clone_ref(args.py()));
+            Ok(func)
+        };
+        pyo3::types::PyCFunction::new_closure(py, Some(c"on_event"), None, decorator)
+            .map(Into::into)
     }
 
     #[pyo3(signature = (path))]
@@ -258,6 +344,40 @@ impl PyAPIRouter {
             .flatten()
             .filter_map(|item| item.ok()?.extract::<String>().ok())
             .collect();
+
+        let py = router.py();
+        let included = router.borrow();
+        self.startup_handlers.lock().extend(
+            included
+                .startup_handlers
+                .lock()
+                .iter()
+                .map(|handler| handler.clone_ref(py)),
+        );
+        self.shutdown_handlers.lock().extend(
+            included
+                .shutdown_handlers
+                .lock()
+                .iter()
+                .map(|handler| handler.clone_ref(py)),
+        );
+        let nested = included
+            .lifespan
+            .lock()
+            .as_ref()
+            .map(|lifespan| lifespan.clone_ref(py));
+        drop(included);
+        if let Some(nested) = nested {
+            let mut own = self.lifespan.lock();
+            let merged = match own.take() {
+                Some(original) => crate::ffi::compat::py_helpers(py)?
+                    .getattr("merge_lifespan_context")?
+                    .call1((original, nested))?
+                    .unbind(),
+                None => nested,
+            };
+            *own = Some(merged);
+        }
 
         self.sub_routers.lock().push(SubRouterMount {
             router: router.clone().unbind(),
