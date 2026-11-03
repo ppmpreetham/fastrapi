@@ -549,6 +549,7 @@ where
         HttpMethod::PATCH => MethodFilter::PATCH,
         HttpMethod::OPTIONS => MethodFilter::OPTIONS,
         HttpMethod::HEAD => MethodFilter::HEAD,
+        HttpMethod::TRACE => MethodFilter::TRACE,
     };
     on(filter, handler)
 }

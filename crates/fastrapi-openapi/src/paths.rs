@@ -258,7 +258,7 @@ fn build_request_body(
     schemas: &mut HashMap<String, JsonValue>,
     registry: &mut SchemaRegistry,
 ) -> Option<RequestBody> {
-    if body_params.is_empty() || route.method == HttpMethod::OPTIONS {
+    if body_params.is_empty() || matches!(route.method, HttpMethod::OPTIONS | HttpMethod::TRACE) {
         return None;
     }
     let is_file = |param: &&ParsedParameter| {
@@ -669,6 +669,7 @@ pub fn build_paths_from_routes(
             patch: None,
             head: None,
             options: None,
+            trace: None,
             parameters: None,
         });
 
@@ -725,6 +726,7 @@ pub fn build_paths_from_routes(
             HttpMethod::PATCH => path_item.patch = Some(operation_val),
             HttpMethod::HEAD => path_item.head = Some(operation_val),
             HttpMethod::OPTIONS => path_item.options = Some(operation_val),
+            HttpMethod::TRACE => path_item.trace = Some(operation_val),
         }
     }
     let resolved = registry.resolve(py, separate_input_output_schemas, schemas);
@@ -737,6 +739,7 @@ pub fn build_paths_from_routes(
             &mut path_item.patch,
             &mut path_item.head,
             &mut path_item.options,
+            &mut path_item.trace,
         ]
         .into_iter()
         .flatten()

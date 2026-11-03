@@ -669,6 +669,24 @@ impl PyAPIRouter {
         PyCFunction::new_closure(py, None, None, closure).map(Into::into)
     }
 
+    pub(crate) fn add_starlette_route(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        endpoint: &Bound<'_, PyAny>,
+        methods: Option<Vec<String>>,
+        name: Option<String>,
+        _include_in_schema: bool,
+    ) -> PyResult<()> {
+        let wrapped = crate::ffi::compat::py_helpers(py)?
+            .getattr("request_endpoint")?
+            .call1((endpoint,))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("name", name.unwrap_or_else(|| func_name(py, endpoint)))?;
+        kwargs.set_item("include_in_schema", false)?;
+        self.add_api_route_impl(py, path, &wrapped, methods, &kwargs)
+    }
+
     pub(crate) fn add_api_route_impl(
         &self,
         py: Python<'_>,

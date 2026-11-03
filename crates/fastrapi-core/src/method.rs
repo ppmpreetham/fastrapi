@@ -16,6 +16,7 @@ pub enum HttpMethod {
     PATCH = 4,
     OPTIONS = 5,
     HEAD = 6,
+    TRACE = 7,
 }
 
 impl TryFrom<&Method> for HttpMethod {
@@ -30,6 +31,7 @@ impl TryFrom<&Method> for HttpMethod {
             Method::PATCH => Self::PATCH,
             Method::OPTIONS => Self::OPTIONS,
             Method::HEAD => Self::HEAD,
+            Method::TRACE => Self::TRACE,
             _ => return Err(()),
         })
     }

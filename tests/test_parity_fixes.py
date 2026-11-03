@@ -1568,3 +1568,37 @@ def test_add_api_route_accepts_fastapi_options(client, app):
         app.add_api_route("/bad", read, not_an_option=1)
     assert client.get("/r").json() == {"name": "a"}
     assert client.get("/a").json() == {"name": "a"}
+
+
+def test_router_trace_add_route_and_websocket_helpers(client, app):
+    from fastrapi import APIRouter
+    from fastrapi.responses import PlainTextResponse
+
+    router = APIRouter()
+
+    @router.trace("/traced")
+    def traced():
+        return {"trace": True}
+
+    def starlette_style(request):
+        return PlainTextResponse(f"{request.method} {request.url.path}")
+
+    async def socket(websocket):
+        await websocket.accept()
+        await websocket.close()
+
+    router.add_route("/plain", starlette_style, methods=["GET"])
+    router.add_api_websocket_route("/ws-added", socket)
+    app.include_router(router)
+
+    @app.websocket_route("/ws-route")
+    async def ws_route(websocket):
+        await websocket.accept()
+        await websocket.close()
+
+    assert client.request("TRACE", "/traced").json() == {"trace": True}
+    assert client.get("/plain").text == "GET /plain"
+    spec = client.get("/openapi.json").json()
+    assert "trace" in spec["paths"]["/traced"]
+    assert "/plain" not in spec["paths"]
+    assert {route.path for route in app.routes if not hasattr(route, "methods")} == {"/ws-route", "/ws-added"}

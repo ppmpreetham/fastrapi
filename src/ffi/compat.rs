@@ -90,6 +90,26 @@ class Param(abc.ABC):
     pass
 
 
+def request_endpoint(endpoint):
+    import inspect
+
+    from fastrapi import Request
+
+    if inspect.iscoroutinefunction(endpoint):
+
+        async def route(request: Request):
+            return await endpoint(request)
+
+    else:
+
+        def route(request: Request):
+            return endpoint(request)
+
+    route.__name__ = getattr(endpoint, \"__name__\", \"route\")
+    route.__doc__ = endpoint.__doc__
+    return route
+
+
 class SecurityBase(abc.ABC):
     pass
 

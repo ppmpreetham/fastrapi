@@ -52,6 +52,24 @@ macro_rules! generate_http_methods {
             fn head(&self, py: pyo3::prelude::Python<'_>, path: String, kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
                 self.$get_router(py).create_method_decorator_kw(py, ::fastrapi_core::method::HttpMethod::HEAD, path, kwargs)
             }
+            #[pyo3(signature = (path, **kwargs))]
+            fn trace(&self, py: pyo3::prelude::Python<'_>, path: String, kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
+                self.$get_router(py).create_method_decorator_kw(py, ::fastrapi_core::method::HttpMethod::TRACE, path, kwargs)
+            }
+            #[pyo3(signature = (path, endpoint, methods=None, name=None, include_in_schema=true))]
+            fn add_route(&self, py: pyo3::prelude::Python<'_>, path: &str, endpoint: &pyo3::Bound<'_, pyo3::prelude::PyAny>, methods: Option<Vec<String>>, name: Option<String>, include_in_schema: bool) -> pyo3::prelude::PyResult<()> {
+                self.$get_router(py).add_starlette_route(py, path, endpoint, methods, name, include_in_schema)
+            }
+            #[pyo3(signature = (path, name=None))]
+            fn websocket_route(&self, py: pyo3::prelude::Python<'_>, path: String, name: Option<String>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
+                self.$get_router(py).create_ws_decorator(py, path, name, None)
+            }
+            #[pyo3(signature = (path, endpoint, name=None, *, dependencies=None))]
+            fn add_api_websocket_route(&self, py: pyo3::prelude::Python<'_>, path: String, endpoint: &pyo3::Bound<'_, pyo3::prelude::PyAny>, name: Option<String>, dependencies: Option<pyo3::prelude::Py<pyo3::prelude::PyAny>>) -> pyo3::prelude::PyResult<()> {
+                use pyo3::prelude::PyAnyMethods;
+                self.$get_router(py).create_ws_decorator(py, path, name, dependencies)?.bind(py).call1((endpoint,))?;
+                Ok(())
+            }
         }
     }
 }

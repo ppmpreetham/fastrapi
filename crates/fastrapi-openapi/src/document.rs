@@ -80,6 +80,8 @@ pub struct PathItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Vec<Parameter>>,
 }
 
