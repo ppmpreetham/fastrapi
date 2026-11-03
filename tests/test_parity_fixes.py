@@ -1443,3 +1443,20 @@ def test_upload_file_headers_include_all_part_headers(client, app):
     )
     response = client.post("/up", content=body, headers={"content-type": "multipart/form-data; boundary=b"})
     assert response.json() == {"disposition": 'form-data; name="file"; filename="a.txt"', "extra": "yes"}
+
+
+def test_method_not_allowed_uses_handler(client, app):
+    from fastrapi.responses import JSONResponse
+
+    @app.exception_handler(405)
+    async def not_allowed(request, exc):
+        return JSONResponse({"custom": exc.status_code}, status_code=405)
+
+    @app.get("/only-get")
+    def only_get():
+        return {}
+
+    response = client.post("/only-get")
+    assert response.status_code == 405
+    assert response.json() == {"custom": 405}
+    assert response.headers["allow"] == "GET"

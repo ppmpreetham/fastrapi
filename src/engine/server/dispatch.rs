@@ -6,12 +6,13 @@ use super::serve::AppState;
 use fastrapi_core::rate_limit::is_rate_limited;
 
 use axum::extract::Request;
-use axum::http::header::{ALLOW, HOST};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::StatusCode;
+use axum::http::header::HOST;
 use axum::response::{IntoResponse, Response};
 use pyo3::prelude::Python;
 use smallvec::SmallVec;
 
+use super::routes::method_not_allowed_response;
 use crate::engine::exception_dispatch::{dispatch_validation_handler, resolve_pending_handler};
 use crate::engine::executor::{run_py_handler, run_py_handler_no_request};
 use fastrapi_core::method::HttpMethod;
@@ -53,11 +54,7 @@ pub(crate) async fn dispatch_or_not_found(
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
-            if let Ok(value) = HeaderValue::from_str(&value) {
-                response.headers_mut().insert(ALLOW, value);
-            }
-            return Ok(response);
+            return Ok(method_not_allowed_response(value).await);
         }
         return Err(req);
     };

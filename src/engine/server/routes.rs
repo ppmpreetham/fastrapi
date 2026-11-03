@@ -298,7 +298,7 @@ fn allowed_methods_header(
         .join(", ")
 }
 
-async fn method_not_allowed_response(allow: String) -> Response {
+pub(crate) async fn method_not_allowed_response(allow: String) -> Response {
     let handler_resp =
         Python::attach(|py| dispatch_status_handler(py, StatusCode::METHOD_NOT_ALLOWED.as_u16()));
     let mut response = match handler_resp {
