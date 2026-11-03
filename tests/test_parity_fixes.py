@@ -1495,3 +1495,42 @@ def test_head_on_get_route_is_method_not_allowed(client, app):
     assert response.status_code == 405
     assert response.headers["allow"] == "GET"
     assert client.head("/both").status_code == 200
+
+
+def test_trailing_slash_routes_and_redirects():
+    import httpx
+    from test_websocket_smoke import _free_port, _serve
+
+    app = FastrAPI()
+
+    @app.get("/items/")
+    def items():
+        return {"slash": True}
+
+    @app.get("/plain")
+    def plain():
+        return {"slash": False}
+
+    @app.get("/plain/")
+    def plain_slash():
+        return {"slash": True}
+
+    port = _free_port()
+    _serve(app, port)
+    base = f"http://127.0.0.1:{port}"
+    redirect = httpx.get(f"{base}/items?x=1")
+    assert redirect.status_code == 307
+    assert redirect.headers["location"] == f"{base}/items/?x=1"
+    assert httpx.get(f"{base}/items/").json() == {"slash": True}
+    assert httpx.get(f"{base}/plain").json() == {"slash": False}
+    assert httpx.get(f"{base}/plain/").json() == {"slash": True}
+
+    strict = FastrAPI(redirect_slashes=False)
+
+    @strict.get("/only/")
+    def only():
+        return {}
+
+    strict_port = _free_port()
+    _serve(strict, strict_port)
+    assert httpx.get(f"http://127.0.0.1:{strict_port}/only").status_code == 404

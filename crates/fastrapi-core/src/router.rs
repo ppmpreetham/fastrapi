@@ -98,7 +98,6 @@ impl<H> FrozenRouter<H> {
         host: Option<&str>,
     ) -> Option<RouteMatch<'r, 'p, H>> {
         let idx = method as usize;
-        let normalized = normalize_lookup(path);
         let host_allowed = |target: &RouteTarget<H>| {
             target
                 .host
@@ -106,7 +105,7 @@ impl<H> FrozenRouter<H> {
                 .is_none_or(|pattern| host.is_some_and(|h| h == pattern))
         };
         if let Some(target) = self.static_routes[idx]
-            .get(normalized)
+            .get(path)
             .filter(|target| host_allowed(target))
         {
             return Some(RouteMatch::Static(target));
@@ -200,14 +199,6 @@ impl<H> Default for FrozenRouterBuilder<H> {
     }
 }
 
-fn normalize_lookup(input: &str) -> &str {
-    if input.len() > 1 {
-        input.trim_end_matches('/')
-    } else {
-        input
-    }
-}
-
 /// Checks each typed convertor against its captured value.
 /// A parameter without a convertor always passes.
 fn convertors_match(
@@ -223,13 +214,12 @@ fn convertors_match(
 }
 
 fn normalize_register(input: &str) -> (Cow<'_, str>, bool, Vec<(String, PathConvertor)>) {
-    let normalized = normalize_lookup(input);
-    let base = if normalized.starts_with('/') {
-        Cow::Borrowed(normalized)
+    let base = if input.starts_with('/') {
+        Cow::Borrowed(input)
     } else {
-        let mut s = String::with_capacity(normalized.len() + 1);
+        let mut s = String::with_capacity(input.len() + 1);
         s.push('/');
-        s.push_str(normalized);
+        s.push_str(input);
         Cow::Owned(s)
     };
 

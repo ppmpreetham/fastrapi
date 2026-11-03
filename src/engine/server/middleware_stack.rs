@@ -17,7 +17,6 @@ use pyo3::{Bound, Py, PyAny, Python};
 use sha2::{Digest, Sha256};
 use tower_http::compression::CompressionLayer;
 use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
-use tower_http::normalize_path::NormalizePathLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
@@ -159,10 +158,6 @@ fn apply_config_layers(mut app: Router, app_config: &FastrAPI) -> Router {
 
     if app_config.catch_panics {
         app = app.layer(CatchPanicLayer::new());
-    }
-
-    if app_config.redirect_slashes {
-        app = app.layer(NormalizePathLayer::trim_trailing_slash());
     }
 
     app

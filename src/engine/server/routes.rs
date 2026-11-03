@@ -13,7 +13,7 @@ use ahash::AHashMap;
 use axum::body::{Body, to_bytes};
 use axum::extract::Request;
 use axum::handler::Handler;
-use axum::http::header::{ALLOW, CONTENT_TYPE, HOST};
+use axum::http::header::{ALLOW, CONTENT_TYPE, HOST, LOCATION};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
@@ -248,6 +248,9 @@ fn register_routes(
             match dispatch_or_not_found(frozen_router, app_state, req).await {
                 Ok(resp) => resp,
                 Err(req) => {
+                    if let Some(redirect) = slash_redirect(frozen_router, app_state, &req) {
+                        return redirect;
+                    }
                     let handler_resp = Python::attach(|py| dispatch_status_handler(py, 404));
                     match handler_resp {
                         Some(resp) => resolve_pending_handler(resp).await,
@@ -259,6 +262,37 @@ fn register_routes(
             }
         })
     })
+}
+
+fn slash_redirect(
+    router: &FrozenRouter<RouteHandler>,
+    state: &AppState,
+    request: &Request,
+) -> Option<Response> {
+    let path = request.uri().path();
+    if !state.redirect_slashes || path == "/" {
+        return None;
+    }
+    let toggled = path
+        .strip_suffix('/')
+        .map_or_else(|| format!("{path}/"), str::to_owned);
+    let host = request
+        .headers()
+        .get(HOST)
+        .and_then(|value| value.to_str().ok());
+    let lookup = strip_root_path(&state.root_path, &toggled).unwrap_or(&toggled);
+    let host_name = host.map(|value| value.split(':').next().unwrap_or(value));
+    if router.allowed_methods(lookup, host_name).is_empty() {
+        return None;
+    }
+    let mut location =
+        host.map_or_else(|| toggled.clone(), |host| format!("http://{host}{toggled}"));
+    if let Some(query) = request.uri().query() {
+        location.push('?');
+        location.push_str(query);
+    }
+    let location = HeaderValue::from_str(&location).ok()?;
+    Some((StatusCode::TEMPORARY_REDIRECT, [(LOCATION, location)]).into_response())
 }
 
 /// Returns the 404 Not Found response.
