@@ -1400,3 +1400,28 @@ def test_openapi_models_match_fastapi():
     assert Schema(type="string").type == "string"
     flows = OAuthFlows(password=OAuthFlowPassword(tokenUrl="token"))
     assert OAuth2(flows=flows).type_.value == "oauth2"
+
+
+def test_openapi_utils_helpers():
+    from fastrapi.openapi.utils import (
+        generate_operation_summary,
+        get_openapi_operation_metadata,
+        get_openapi_path,
+        status_code_ranges,
+        validation_error_response_definition,
+    )
+    from fastrapi.routing import APIRoute
+
+    def read_item(item_id: int):
+        return {}
+
+    route = APIRoute("/items/{item_id}", read_item, methods=["GET"], tags=["items"])
+    assert status_code_ranges["4XX"] == "Client Error"
+    assert validation_error_response_definition["title"] == "HTTPValidationError"
+    assert generate_operation_summary(route=route, method="GET") == "Read Item"
+    ids = set()
+    metadata = get_openapi_operation_metadata(route=route, method="GET", operation_ids=ids)
+    assert metadata["operationId"] == "read_item_items__item_id__get"
+    path, security, schemas = get_openapi_path(route=route, operation_ids=set())
+    assert path["get"]["parameters"][0]["name"] == "item_id"
+    assert "HTTPValidationError" in schemas

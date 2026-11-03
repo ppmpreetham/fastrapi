@@ -5,7 +5,7 @@
 //! The function sends these routes through the router code of the app.
 //! Thus the output is the same as the served `/openapi.json`, and only one implementation exists.
 
-use crate::ffi::compat::register_openapi_helpers;
+use crate::ffi::compat::{python_source_module, register_openapi_helpers};
 use crate::ffi::decorators::{PyAPIRouter, collect_router_routes};
 use crate::ffi::routing::PyRouteEntry;
 use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
@@ -203,6 +203,23 @@ pub(crate) fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
 
     let utils = PyModule::new(py, "utils")?;
     utils.add_function(pyo3::wrap_pyfunction!(get_openapi, &utils)?)?;
+    let helpers = python_source_module(
+        py,
+        include_str!("py/openapi_utils.py"),
+        c"fastrapi/openapi/utils.py",
+        c"fastrapi._openapi_utils",
+    )?;
+    for name in [
+        "validation_error_definition",
+        "validation_error_response_definition",
+        "status_code_ranges",
+        "generate_operation_id",
+        "generate_operation_summary",
+        "get_openapi_operation_metadata",
+        "get_openapi_path",
+    ] {
+        utils.add(name, helpers.getattr(name)?)?;
+    }
     openapi_module.add_submodule(&utils)?;
     parent.add_submodule(&openapi_module)?;
 
