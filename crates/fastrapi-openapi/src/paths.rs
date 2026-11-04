@@ -333,7 +333,7 @@ fn build_request_body(
                 param.external_name.clone(),
                 body_field_schema(py, param, registry),
             );
-            if param.required {
+            if param.required || !param.has_default {
                 required_fields.push(json!(param.external_name.as_str()));
             }
         }
@@ -367,7 +367,7 @@ fn build_request_body(
             .unwrap_or_else(|| default_media_type.to_string());
         (
             body_field_schema(py, first, registry),
-            first.required,
+            first.required || !first.has_default,
             media_type,
         )
     };

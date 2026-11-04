@@ -1286,7 +1286,7 @@ def test_openapi_request_bodies_for_forms_files_and_plain_values(client, app):
     from fastrapi import Body, File, Form, UploadFile
 
     @app.post("/login")
-    def login(username: Annotated[str, Form()], password: Annotated[str, Form()]):
+    def login(username: Annotated[str, Form(...)], password: Annotated[str, Form(...)]):
         return {}
 
     @app.post("/upload")
