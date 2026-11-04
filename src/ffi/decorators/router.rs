@@ -65,6 +65,16 @@ pub struct PyAPIRouter {
     pub startup_handlers: Arc<Mutex<Vec<Py<PyAny>>>>,
     pub shutdown_handlers: Arc<Mutex<Vec<Py<PyAny>>>>,
     pub lifespan: Arc<Mutex<Option<Py<PyAny>>>>,
+    #[pyo3(get)]
+    pub callbacks: Option<Py<PyAny>>,
+    #[pyo3(get)]
+    pub redirect_slashes: bool,
+    #[pyo3(get)]
+    pub default: Option<Py<PyAny>>,
+    #[pyo3(get)]
+    pub dependency_overrides_provider: Option<Py<PyAny>>,
+    #[pyo3(get)]
+    pub strict_content_type: bool,
     pub mounts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
     pub hosts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
 }
@@ -90,6 +100,11 @@ impl Default for PyAPIRouter {
             startup_handlers: Arc::new(Mutex::new(Vec::new())),
             shutdown_handlers: Arc::new(Mutex::new(Vec::new())),
             lifespan: Arc::new(Mutex::new(None)),
+            callbacks: None,
+            redirect_slashes: true,
+            default: None,
+            dependency_overrides_provider: None,
+            strict_content_type: true,
             mounts: Arc::new(Mutex::new(Vec::new())),
             hosts: Arc::new(Mutex::new(Vec::new())),
         }
@@ -99,12 +114,13 @@ impl Default for PyAPIRouter {
 #[pymethods]
 impl PyAPIRouter {
     #[new]
-    #[pyo3(signature = (*, prefix=String::new(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None, route_class=None, on_startup=None, on_shutdown=None, lifespan=None))]
+    #[pyo3(signature = (*, prefix=String::new(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None, route_class=None, on_startup=None, on_shutdown=None, lifespan=None, routes=None, redirect_slashes=true, default=None, callbacks=None, dependency_overrides_provider=None, strict_content_type=true))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the signature matches FastAPI's APIRouter"
     )]
     fn new(
+        py: Python<'_>,
         prefix: String,
         tags: Option<&Bound<'_, PyAny>>,
         dependencies: Option<Py<PyAny>>,
@@ -117,6 +133,12 @@ impl PyAPIRouter {
         on_startup: Option<Vec<Py<PyAny>>>,
         on_shutdown: Option<Vec<Py<PyAny>>>,
         lifespan: Option<Py<PyAny>>,
+        routes: Option<&Bound<'_, PyAny>>,
+        redirect_slashes: bool,
+        default: Option<Py<PyAny>>,
+        callbacks: Option<Py<PyAny>>,
+        dependency_overrides_provider: Option<Py<PyAny>>,
+        strict_content_type: bool,
     ) -> PyResult<Self> {
         let tag_vec = tags
             .and_then(|obj| obj.try_iter().ok())
@@ -135,7 +157,7 @@ impl PyAPIRouter {
             }
         }
 
-        Ok(Self {
+        let router = Self {
             prefix,
             tags: tag_vec,
             dependencies,
@@ -148,8 +170,17 @@ impl PyAPIRouter {
             startup_handlers: Arc::new(Mutex::new(on_startup.unwrap_or_default())),
             shutdown_handlers: Arc::new(Mutex::new(on_shutdown.unwrap_or_default())),
             lifespan: Arc::new(Mutex::new(lifespan)),
+            callbacks,
+            redirect_slashes,
+            default,
+            dependency_overrides_provider,
+            strict_content_type,
             ..Self::default()
-        })
+        };
+        if let Some(routes) = routes.filter(|routes| !routes.is_none()) {
+            crate::ffi::openapi::add_route_objects(py, &router, routes)?;
+        }
+        Ok(router)
     }
 
     #[pyo3(signature = (path, app, name=None))]
@@ -345,7 +376,7 @@ impl PyAPIRouter {
     /// internal_router.include_router(users_router)
     /// app.include_router(internal_router)
     /// ```
-    #[pyo3(signature = (router, *, prefix="", tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (router, *, prefix="", tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, callbacks=None, generate_unique_id_function=None))]
     pub fn include_router(
         &self,
         router: &Bound<'_, Self>,
@@ -356,6 +387,7 @@ impl PyAPIRouter {
         deprecated: Option<bool>,
         include_in_schema: bool,
         default_response_class: Option<&Bound<'_, PyAny>>,
+        callbacks: Option<&Bound<'_, PyAny>>,
         generate_unique_id_function: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         if self.frozen.load(Ordering::Relaxed) {
@@ -415,12 +447,15 @@ impl PyAPIRouter {
             include_in_schema,
             default_response_class: default_response_class.map(|d| d.clone().unbind()),
             generate_unique_id_function: generate_unique_id_function.map(|g| g.clone().unbind()),
+            callbacks: callbacks
+                .filter(|callbacks| !callbacks.is_none())
+                .map(|callbacks| callbacks.clone().unbind()),
         });
 
         Ok(())
     }
 
-    #[pyo3(signature = (prefix, router, *, tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (prefix, router, *, tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, callbacks=None, generate_unique_id_function=None))]
     fn nest(
         &self,
         prefix: &str,
@@ -431,6 +466,7 @@ impl PyAPIRouter {
         deprecated: Option<bool>,
         include_in_schema: bool,
         default_response_class: Option<&Bound<'_, PyAny>>,
+        callbacks: Option<&Bound<'_, PyAny>>,
         generate_unique_id_function: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         self.include_router(
@@ -442,6 +478,7 @@ impl PyAPIRouter {
             deprecated,
             include_in_schema,
             default_response_class,
+            callbacks,
             generate_unique_id_function,
         )
     }
@@ -458,6 +495,7 @@ pub struct SubRouterMount {
     pub include_in_schema: bool,
     pub default_response_class: Option<Py<PyAny>>,
     pub generate_unique_id_function: Option<Py<PyAny>>,
+    pub callbacks: Option<Py<PyAny>>,
 }
 
 pub(crate) fn collect_router_routes(

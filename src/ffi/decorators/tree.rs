@@ -3,6 +3,9 @@
 
 use crate::ffi::decorators::PyAPIRouter;
 use fastrapi_core::path::{extract_path_param_names, join_path};
+use fastrapi_openapi::document::deep_merge_json;
+use fastrapi_openapi::paths::parse_callbacks_to_json;
+use fastrapi_routing::analysis::get_response_type_from_class;
 use fastrapi_routing::dependencies::{
     DependencyNode, collect_dependency_callables, parse_external_dependencies,
     shift_dependency_indices,
@@ -11,6 +14,7 @@ use fastrapi_routing::route::{RouteEntry, RouteHandler, WebSocketEntry};
 use pyo3::Py;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use simd_json::OwnedValue as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -141,6 +145,44 @@ impl PyAPIRouter {
 type ChainDependencies = Vec<Py<pyo3::PyAny>>;
 
 #[must_use]
+struct Level {
+    router: PyAPIRouter,
+    prefix: String,
+    tags: Vec<String>,
+    dependencies: ChainDependencies,
+    unique_id: Option<Py<pyo3::PyAny>>,
+    responses: Option<Py<pyo3::PyAny>>,
+    callbacks: Option<JsonValue>,
+    include_in_schema: bool,
+    deprecated: bool,
+    response_class: Option<Py<pyo3::PyAny>>,
+}
+
+fn with_response_class(
+    py: Python<'_>,
+    handler: &Arc<RouteHandler>,
+    class: &Py<pyo3::PyAny>,
+) -> Arc<RouteHandler> {
+    let response_type = get_response_type_from_class(py, class.bind(py));
+    let mut updated = (**handler).clone();
+    updated.response.response_type = response_type;
+    updated.response.response_class = Some(class.clone_ref(py));
+    Arc::new(updated)
+}
+
+fn merge_callbacks(base: Option<&JsonValue>, extra: Option<&JsonValue>) -> Option<JsonValue> {
+    match (base, extra) {
+        (None, None) => None,
+        (Some(only), None) | (None, Some(only)) => Some(only.clone()),
+        (Some(base), Some(extra)) => {
+            let mut merged = base.clone();
+            deep_merge_json(&mut merged, extra.clone());
+            Some(merged)
+        }
+    }
+}
+
+#[must_use]
 pub fn flatten_router(
     py: Python<'_>,
     root: &PyAPIRouter,
@@ -150,42 +192,37 @@ pub fn flatten_router(
     let mut ws_routes = Vec::new();
 
     let mut stack = Vec::with_capacity(16);
-    stack.push((
-        root.clone(),
-        String::new(),
-        Vec::<String>::new(),
-        ChainDependencies::new(),
-        None::<Py<pyo3::PyAny>>,
-        None::<Py<pyo3::PyAny>>,
-    ));
+    stack.push(Level {
+        router: root.clone(),
+        prefix: String::new(),
+        tags: Vec::new(),
+        dependencies: ChainDependencies::new(),
+        unique_id: None,
+        responses: None,
+        callbacks: None,
+        include_in_schema: true,
+        deprecated: false,
+        response_class: None,
+    });
 
-    while let Some((
-        router,
-        prefix,
-        parent_tags,
-        inherited_deps,
-        inherited_unique_id,
-        inherited_responses,
-    )) = stack.pop()
-    {
-        let level_responses = merge_responses(
-            py,
-            &[inherited_responses.as_ref(), router.responses.as_ref()],
-        );
+    while let Some(level) = stack.pop() {
+        let router = level.router;
+        let level_responses =
+            merge_responses(py, &[level.responses.as_ref(), router.responses.as_ref()]);
         if freeze {
             router.mark_frozen();
         }
 
-        let full_prefix = join_path(&prefix, &router.prefix);
+        let full_prefix = join_path(&level.prefix, &router.prefix);
 
-        let merged_tags = router.tags.iter().fold(parent_tags, |mut acc, tag| {
+        let merged_tags = router.tags.iter().fold(level.tags, |mut acc, tag| {
             if !acc.contains(tag) {
                 acc.push(tag.clone());
             }
             acc
         });
 
-        let mut chain_deps = inherited_deps;
+        let mut chain_deps = level.dependencies;
         chain_deps.extend(collect_dependency_callables(
             py,
             router.dependencies.as_ref(),
@@ -212,9 +249,21 @@ pub fn flatten_router(
             entry.responses =
                 merge_responses(py, &[level_responses.as_ref(), entry.responses.as_ref()]);
             if entry.generate_unique_id_function.is_none() {
-                entry.generate_unique_id_function = inherited_unique_id
+                entry.generate_unique_id_function = level
+                    .unique_id
                     .as_ref()
                     .map(|function| function.clone_ref(py));
+            }
+            entry.include_in_schema &= level.include_in_schema;
+            if level.deprecated {
+                entry.deprecated = Some(true);
+            }
+            entry.callbacks = merge_callbacks(level.callbacks.as_ref(), entry.callbacks.as_ref());
+            if !entry.explicit_response_class
+                && let Some(class) = &level.response_class
+            {
+                entry.handler = with_response_class(py, &entry.handler, class);
+                entry.explicit_response_class = true;
             }
 
             if !chain_deps.is_empty() {
@@ -240,8 +289,8 @@ pub fn flatten_router(
         }));
 
         let subs = router.sub_routers.lock().clone();
-        stack.extend(subs.into_iter().map(|sub| {
-            let sub_router = sub.router.bind(py).borrow();
+        for sub in subs {
+            let sub_router = sub.router.bind(py).borrow().clone();
 
             let sub_tags = sub
                 .tags
@@ -258,21 +307,40 @@ pub fn flatten_router(
                 sub_deps.extend(collect_dependency_callables(py, Some(deps)));
             }
 
-            let sub_unique_id = sub
-                .generate_unique_id_function
-                .as_ref()
-                .or(router.generate_unique_id_function.as_ref())
-                .or(inherited_unique_id.as_ref())
-                .map(|function| function.clone_ref(py));
-            (
-                sub_router.clone(),
-                join_path(&full_prefix, &sub.prefix),
-                sub_tags,
-                sub_deps,
-                sub_unique_id,
-                merge_responses(py, &[level_responses.as_ref(), sub.responses.as_ref()]),
-            )
-        }));
+            let sub_callbacks = sub.callbacks.as_ref().and_then(|callbacks| {
+                parse_callbacks_to_json(
+                    py,
+                    callbacks.bind(py),
+                    super::router::collect_router_routes,
+                )
+            });
+            stack.push(Level {
+                router: sub_router,
+                prefix: join_path(&full_prefix, &sub.prefix),
+                tags: sub_tags,
+                dependencies: sub_deps,
+                unique_id: sub
+                    .generate_unique_id_function
+                    .as_ref()
+                    .or(router.generate_unique_id_function.as_ref())
+                    .or(level.unique_id.as_ref())
+                    .map(|function| function.clone_ref(py)),
+                responses: merge_responses(py, &[level_responses.as_ref(), sub.responses.as_ref()]),
+                callbacks: merge_callbacks(level.callbacks.as_ref(), sub_callbacks.as_ref()),
+                include_in_schema: level.include_in_schema
+                    && router.include_in_schema
+                    && sub.include_in_schema,
+                deprecated: level.deprecated
+                    || sub.deprecated == Some(true)
+                    || router.deprecated == Some(true),
+                response_class: sub
+                    .default_response_class
+                    .as_ref()
+                    .or(router.default_response_class.as_ref())
+                    .or(level.response_class.as_ref())
+                    .map(|class| class.clone_ref(py)),
+            });
+        }
     }
 
     (routes, ws_routes)

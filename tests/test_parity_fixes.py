@@ -1659,3 +1659,59 @@ def test_router_mount_and_host(tmp_path):
     assert httpx.get(f"http://127.0.0.1:{port}/assets/static/hello.txt").text == "hi there"
     hosted = httpx.get(f"http://127.0.0.1:{port}/sub", headers={"host": "api.example.test"})
     assert hosted.json() == {"host": True}
+
+
+def test_router_and_include_options(client, app):
+    from fastrapi import APIRouter
+    from fastrapi.responses import HTMLResponse, PlainTextResponse
+    from fastrapi.routing import APIRoute
+
+    def listed():
+        return {"from": "routes"}
+
+    def callback_endpoint():
+        return {}
+
+    callback_router = APIRouter()
+    callback_router.add_api_route("/{$request.body.url}", callback_endpoint, methods=["POST"])
+
+    router = APIRouter(
+        routes=[APIRoute("/listed", listed, methods=["GET"])],
+        redirect_slashes=False,
+        strict_content_type=False,
+        callbacks=callback_router.routes,
+    )
+
+    @router.get("/hidden-include")
+    def hidden_include():
+        return {}
+
+    @router.get("/html")
+    def html():
+        return "<b>hi</b>"
+
+    hidden_router = APIRouter(include_in_schema=False)
+
+    @hidden_router.get("/hidden-router")
+    def hidden_router_route():
+        return {}
+
+    text_router = APIRouter(default_response_class=PlainTextResponse)
+
+    @text_router.get("/text")
+    def text():
+        return "plain"
+
+    app.include_router(router, include_in_schema=True, deprecated=True, default_response_class=HTMLResponse)
+    app.include_router(hidden_router)
+    app.include_router(text_router)
+    assert router.redirect_slashes is False and router.strict_content_type is False
+    assert client.get("/listed").json() == {"from": "routes"}
+    html_response = client.get("/html")
+    assert html_response.headers["content-type"].startswith("text/html")
+    assert html_response.text == "<b>hi</b>"
+    assert client.get("/text").headers["content-type"].startswith("text/plain")
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/hidden-router" not in paths
+    assert paths["/listed"]["get"]["deprecated"] is True
+    assert "callbacks" in paths["/listed"]["get"]

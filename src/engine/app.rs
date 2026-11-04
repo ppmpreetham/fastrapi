@@ -204,6 +204,9 @@ impl FastrAPI {
         powered_by_header: Option<String>,
         extra: Option<Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        let explicit_default_response_class = default_response_class
+            .as_ref()
+            .map(|class| class.clone_ref(py));
         let default_response_class = match default_response_class {
             Some(c) => c,
             None => py
@@ -213,7 +216,13 @@ impl FastrAPI {
                 .map(Bound::unbind)?,
         };
         let generate_unique_id_function = generate_unique_id_function;
-        let base_router = Py::new(py, PyAPIRouter::default())?;
+        let base_router = Py::new(
+            py,
+            PyAPIRouter {
+                default_response_class: explicit_default_response_class,
+                ..PyAPIRouter::default()
+            },
+        )?;
 
         let state = STARLETTE_STATE
             .get(py)
@@ -693,7 +702,7 @@ impl FastrAPI {
     ///
     /// app.include_router(users_router)
     /// ```
-    #[pyo3(signature = (router, *, prefix="", tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (router, *, prefix="", tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, callbacks=None, generate_unique_id_function=None))]
     fn include_router(
         &self,
         router: &Bound<'_, PyAPIRouter>,
@@ -704,6 +713,7 @@ impl FastrAPI {
         deprecated: Option<bool>,
         include_in_schema: bool,
         default_response_class: Option<&Bound<'_, pyo3::PyAny>>,
+        callbacks: Option<&Bound<'_, pyo3::PyAny>>,
         generate_unique_id_function: Option<&Bound<'_, pyo3::PyAny>>,
     ) -> PyResult<()> {
         self.router.bind(router.py()).borrow().include_router(
@@ -715,11 +725,12 @@ impl FastrAPI {
             deprecated,
             include_in_schema,
             default_response_class,
+            callbacks,
             generate_unique_id_function,
         )
     }
 
-    #[pyo3(signature = (prefix, router, *, tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None))]
+    #[pyo3(signature = (prefix, router, *, tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, callbacks=None, generate_unique_id_function=None))]
     fn nest(
         &self,
         prefix: &str,
@@ -730,6 +741,7 @@ impl FastrAPI {
         deprecated: Option<bool>,
         include_in_schema: bool,
         default_response_class: Option<&Bound<'_, pyo3::PyAny>>,
+        callbacks: Option<&Bound<'_, pyo3::PyAny>>,
         generate_unique_id_function: Option<&Bound<'_, pyo3::PyAny>>,
     ) -> PyResult<()> {
         self.include_router(
@@ -741,6 +753,7 @@ impl FastrAPI {
             deprecated,
             include_in_schema,
             default_response_class,
+            callbacks,
             generate_unique_id_function,
         )
     }

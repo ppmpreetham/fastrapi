@@ -103,6 +103,15 @@ fn router_from_routes<'py>(
     routes: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAPIRouter>> {
     let router = Bound::new(py, PyAPIRouter::default())?;
+    add_route_objects(py, &router.borrow(), routes)?;
+    Ok(router)
+}
+
+pub(crate) fn add_route_objects(
+    py: Python<'_>,
+    router: &PyAPIRouter,
+    routes: &Bound<'_, PyAny>,
+) -> PyResult<()> {
     for item in routes.try_iter()? {
         let item = item?;
         let route = item.getattr("route").unwrap_or_else(|_| item.clone());
@@ -111,21 +120,31 @@ fn router_from_routes<'py>(
         {
             let mut entry = handle.get().entry.clone();
             apply_route_overrides(&route, &mut entry);
-            router.borrow().route_entries.lock().push(entry);
+            router.route_entries.lock().push(entry);
             continue;
         }
-        let (Ok(path), Ok(methods), Ok(endpoint)) = (
+        let (Ok(path), Ok(endpoint)) = (
             route
                 .getattr("path")
                 .and_then(|path| path.extract::<String>()),
-            route.getattr("methods"),
             route.getattr("endpoint"),
         ) else {
             continue;
         };
-        if methods.is_none() || endpoint.is_none() {
+        if endpoint.is_none() {
             continue;
         }
+        let Some(methods) = route.getattr("methods").ok().filter(|m| !m.is_none()) else {
+            let name = route
+                .getattr("name")
+                .ok()
+                .and_then(|name| name.extract::<String>().ok());
+            router
+                .create_ws_decorator(py, path, name, None)?
+                .bind(py)
+                .call1((endpoint,))?;
+            continue;
+        };
         let methods: Vec<String> = methods
             .try_iter()?
             .filter_map(|method| method.ok()?.extract().ok())
@@ -138,11 +157,9 @@ fn router_from_routes<'py>(
                 kwargs.set_item(option, value)?;
             }
         }
-        router
-            .borrow()
-            .add_api_route_impl(py, &path, &endpoint, Some(methods), &kwargs)?;
+        router.add_api_route_impl(py, &path, &endpoint, Some(methods), &kwargs)?;
     }
-    Ok(router)
+    Ok(())
 }
 
 fn apply_route_overrides(route: &Bound<'_, PyAny>, entry: &mut RouteEntry) {

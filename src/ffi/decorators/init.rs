@@ -374,7 +374,36 @@ impl PyAPIRouter {
         }
 
         let router_tags = self.tags.clone();
+        let merged_kwargs;
+        let kwargs = match &self.callbacks {
+            Some(router_callbacks) => {
+                let copy = match kwargs {
+                    Some(kwargs) => kwargs.copy()?,
+                    None => PyDict::new(py),
+                };
+                let callbacks = pyo3::types::PyList::empty(py);
+                for callback in router_callbacks.bind(py).try_iter()? {
+                    callbacks.append(callback?)?;
+                }
+                if let Some(route_callbacks) = copy.get_item("callbacks")?
+                    && !route_callbacks.is_none()
+                {
+                    for callback in route_callbacks.try_iter()? {
+                        callbacks.append(callback?)?;
+                    }
+                }
+                copy.set_item("callbacks", callbacks)?;
+                merged_kwargs = copy;
+                Some(&merged_kwargs)
+            }
+            None => kwargs,
+        };
         let opts = RouteOptions::from_kwargs(py, kwargs, &router_tags, self.deprecated)?;
+        let router_include_in_schema = self.include_in_schema;
+        let router_default_class = self
+            .default_response_class
+            .as_ref()
+            .map(|class| class.clone_ref(py));
         let path_for_closure = path;
         let routes = Arc::clone(&self.route_entries);
         let router_route_class = extract_bound(kwargs, "route_class_override")
@@ -402,15 +431,24 @@ impl PyAPIRouter {
 
             let security_requirements = security_requirements(py, &metadata.dependencies);
 
-            let effective_response_class = opts.response_class.clone().or_else(|| {
-                router_route_class.as_ref().and_then(|rc| {
-                    rc.bind(py)
-                        .getattr("response_class")
-                        .ok()
-                        .filter(|c| !c.is_none())
-                        .map(Bound::unbind)
+            let effective_response_class = opts
+                .response_class
+                .clone()
+                .or_else(|| {
+                    router_route_class.as_ref().and_then(|rc| {
+                        rc.bind(py)
+                            .getattr("response_class")
+                            .ok()
+                            .filter(|c| !c.is_none())
+                            .map(Bound::unbind)
+                    })
                 })
-            });
+                .or_else(|| {
+                    router_default_class
+                        .as_ref()
+                        .map(|class| class.clone_ref(py))
+                });
+            let explicit_response_class = effective_response_class.is_some();
 
             let final_response_type = if let Some(cls) = &effective_response_class {
                 get_response_type_from_class(py, cls.bind(py))
@@ -561,6 +599,7 @@ impl PyAPIRouter {
                 method,
                 path: path_for_closure.clone(),
                 name: route_name,
+                explicit_response_class,
                 generate_unique_id_function: opts
                     .generate_unique_id_function
                     .as_ref()
@@ -580,7 +619,8 @@ impl PyAPIRouter {
                 openapi_extra: opts.openapi_extra.clone().or(extra_openapi),
                 callbacks: opts.callbacks.clone(),
                 deprecated: opts.resolved_deprecated,
-                include_in_schema: extra_include.unwrap_or(opts.include_in_schema),
+                include_in_schema: extra_include.unwrap_or(opts.include_in_schema)
+                    && router_include_in_schema,
                 security: security_requirements,
                 host: None,
             });
