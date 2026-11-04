@@ -1715,3 +1715,21 @@ def test_router_and_include_options(client, app):
     assert "/hidden-router" not in paths
     assert paths["/listed"]["get"]["deprecated"] is True
     assert "callbacks" in paths["/listed"]["get"]
+
+
+def test_route_objects_drive_openapi(client, app):
+    from fastrapi.routing import APIRoute
+
+    @app.get("/items/{item_id}", tags=["items"])
+    def read_item(item_id: int):
+        return {}
+
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            route.operation_id = route.name
+            route.summary = "Read one item"
+
+    assert app.routes[0] is app.routes[0]
+    operation = client.get("/openapi.json").json()["paths"]["/items/{item_id}"]["get"]
+    assert operation["operationId"] == "read_item"
+    assert operation["summary"] == "Read one item"

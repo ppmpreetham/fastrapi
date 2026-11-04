@@ -126,6 +126,7 @@ pub struct RouteEntry {
     pub name: String,
     pub generate_unique_id_function: Option<Py<PyAny>>,
     pub explicit_response_class: bool,
+    pub route_object: Arc<parking_lot::Mutex<Option<Py<PyAny>>>>,
     pub handler: Arc<RouteHandler>,
     pub route_instance: Option<Py<PyAny>>,
     pub tags: Vec<String>,

@@ -300,6 +300,10 @@ pub(crate) fn route_objects<'py>(
 ) -> PyResult<Bound<'py, PyList>> {
     let objects = PyList::empty(py);
     for entry in routes {
+        if let Some(existing) = entry.route_object.lock().as_ref() {
+            objects.append(existing.bind(py))?;
+            continue;
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item("methods", vec![entry.method.as_ref()])?;
         kwargs.set_item("name", &entry.name)?;
@@ -343,6 +347,7 @@ pub(crate) fn route_objects<'py>(
             (entry.path.as_str(), entry.handler.execution.func.bind(py)),
             Some(&kwargs),
         )?;
+        *entry.route_object.lock() = Some(route.clone().unbind());
         objects.append(route)?;
     }
     for websocket in websockets {

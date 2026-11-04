@@ -10,7 +10,6 @@ use crate::ffi::decorators::{PyAPIRouter, collect_router_routes};
 use crate::ffi::routing::PyRouteEntry;
 use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
 use fastrapi_pyutil::json::json_to_py_object;
-use fastrapi_routing::route::RouteEntry;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PySet};
 
@@ -119,7 +118,7 @@ pub(crate) fn add_route_objects(
             && let Ok(handle) = handle.cast::<PyRouteEntry>()
         {
             let mut entry = handle.get().entry.clone();
-            apply_route_overrides(&route, &mut entry);
+            fastrapi_openapi::paths::apply_route_overrides(&route, &mut entry);
             router.route_entries.lock().push(entry);
             continue;
         }
@@ -160,51 +159,6 @@ pub(crate) fn add_route_objects(
         router.add_api_route_impl(py, &path, &endpoint, Some(methods), &kwargs)?;
     }
     Ok(())
-}
-
-fn apply_route_overrides(route: &Bound<'_, PyAny>, entry: &mut RouteEntry) {
-    let text = |name: &str| {
-        route
-            .getattr(name)
-            .ok()
-            .and_then(|value| value.extract::<Option<String>>().ok())
-    };
-    if let Some(operation_id) = text("operation_id") {
-        entry.operation_id = operation_id;
-    }
-    if let Some(summary) = text("summary") {
-        entry.summary = summary;
-    }
-    if let Some(description) = text("description") {
-        entry.description = description;
-    }
-    if let Some(Some(name)) = text("name") {
-        entry.name = name;
-    }
-    if let Ok(path) = route
-        .getattr("path")
-        .and_then(|path| path.extract::<String>())
-    {
-        entry.path = path;
-    }
-    if let Ok(tags) = route
-        .getattr("tags")
-        .and_then(|tags| tags.extract::<Vec<String>>())
-    {
-        entry.tags = tags;
-    }
-    if let Ok(include) = route
-        .getattr("include_in_schema")
-        .and_then(|value| value.extract::<bool>())
-    {
-        entry.include_in_schema = include;
-    }
-    if let Ok(deprecated) = route
-        .getattr("deprecated")
-        .and_then(|value| value.extract::<Option<bool>>())
-    {
-        entry.deprecated = deprecated;
-    }
 }
 
 /// Adds the `fastrapi.openapi` module (`constants` and `utils`) to the parent module.

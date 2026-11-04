@@ -600,6 +600,7 @@ impl PyAPIRouter {
                 path: path_for_closure.clone(),
                 name: route_name,
                 explicit_response_class,
+                route_object: Arc::new(parking_lot::Mutex::new(None)),
                 generate_unique_id_function: opts
                     .generate_unique_id_function
                     .as_ref()

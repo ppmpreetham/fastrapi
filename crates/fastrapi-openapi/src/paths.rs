@@ -136,6 +136,51 @@ fn route_object<'py>(
         .ok()
 }
 
+pub fn apply_route_overrides(route: &Bound<'_, PyAny>, entry: &mut RouteEntry) {
+    let text = |name: &str| {
+        route
+            .getattr(name)
+            .ok()
+            .and_then(|value| value.extract::<Option<String>>().ok())
+    };
+    if let Some(operation_id) = text("operation_id") {
+        entry.operation_id = operation_id;
+    }
+    if let Some(summary) = text("summary") {
+        entry.summary = summary;
+    }
+    if let Some(description) = text("description") {
+        entry.description = description;
+    }
+    if let Some(Some(name)) = text("name") {
+        entry.name = name;
+    }
+    if let Ok(path) = route
+        .getattr("path")
+        .and_then(|path| path.extract::<String>())
+    {
+        entry.path = path;
+    }
+    if let Ok(tags) = route
+        .getattr("tags")
+        .and_then(|tags| tags.extract::<Vec<String>>())
+    {
+        entry.tags = tags;
+    }
+    if let Ok(include) = route
+        .getattr("include_in_schema")
+        .and_then(|value| value.extract::<bool>())
+    {
+        entry.include_in_schema = include;
+    }
+    if let Ok(deprecated) = route
+        .getattr("deprecated")
+        .and_then(|value| value.extract::<Option<bool>>())
+    {
+        entry.deprecated = deprecated;
+    }
+}
+
 fn status_text(py: Python<'_>, code: &str) -> Option<String> {
     let range = match code {
         "1XX" => Some("Information"),
@@ -345,6 +390,16 @@ pub fn build_paths_from_routes(
     let mut registry = SchemaRegistry::default();
 
     for route in collected {
+        let overridden;
+        let route = match route.route_object.lock().as_ref() {
+            Some(object) => {
+                let mut entry = route.clone();
+                apply_route_overrides(object.bind(py), &mut entry);
+                overridden = entry;
+                &overridden
+            }
+            None => route,
+        };
         if !route.include_in_schema {
             continue;
         }
