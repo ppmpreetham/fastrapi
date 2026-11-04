@@ -305,9 +305,11 @@ fn serialize_response_model(
     content: &Bound<'_, PyAny>,
 ) -> PyResult<Bytes> {
     let adapter = formatter.response_adapter.get_or_try_init(py, || {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "_parent_depth"), 0)?;
         py.import(intern!(py, "pydantic"))?
             .getattr(intern!(py, "TypeAdapter"))?
-            .call1((model.bind(py),))
+            .call((model.bind(py),), Some(&kwargs))
             .map(Bound::unbind)
     })?;
     let serialize = response_helpers(py)?.getattr(intern!(py, "serialize_response"))?;

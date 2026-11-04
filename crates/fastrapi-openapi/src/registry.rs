@@ -91,8 +91,10 @@ impl SchemaRegistry {
             } else {
                 "validation"
             };
+            let adapter_kwargs = PyDict::new(py);
+            adapter_kwargs.set_item("_parent_depth", 0)?;
             let core_schema = type_adapter
-                .call1((field.annotation.bind(py),))?
+                .call((field.annotation.bind(py),), Some(&adapter_kwargs))?
                 .getattr("core_schema")?;
             inputs.append((index, mode, core_schema))?;
         }
