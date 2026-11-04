@@ -25,4 +25,5 @@ pub struct ResponseFormatter {
     pub response_class: Option<Py<PyAny>>,
     pub dump_options: Option<Py<PyDict>>,
     pub response_adapter: std::sync::Arc<pyo3::sync::PyOnceLock<Py<PyAny>>>,
+    pub stream_factory: Option<Py<PyAny>>,
 }

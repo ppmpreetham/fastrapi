@@ -68,6 +68,69 @@ pub(crate) fn security_requirements(
         .collect()
 }
 
+fn generator_stream_factory(
+    py: Python<'_>,
+    func: &Bound<'_, PyAny>,
+    response_class: Option<&Py<PyAny>>,
+    dump_options: Option<&Py<PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let inspect = py.import("inspect")?;
+    let is_generator = inspect
+        .call_method1("isgeneratorfunction", (func,))?
+        .is_truthy()?
+        || inspect
+            .call_method1("isasyncgenfunction", (func,))?
+            .is_truthy()?;
+    if !is_generator {
+        return Ok(None);
+    }
+    let mode = match response_class {
+        None => "jsonl",
+        Some(class)
+            if class
+                .bind(py)
+                .cast::<pyo3::types::PyType>()
+                .is_ok_and(|class| {
+                    class
+                        .is_subclass_of::<fastrapi_http::sse::PyEventSourceResponse>()
+                        .unwrap_or(false)
+                }) =>
+        {
+            "sse"
+        }
+        Some(_) => "raw",
+    };
+    let typing = py.import("typing")?;
+    let item_type = typing
+        .getattr("get_type_hints")?
+        .call1((func,))
+        .ok()
+        .and_then(|hints| hints.get_item("return").ok())
+        .and_then(|annotation| {
+            let args = typing
+                .getattr("get_args")
+                .ok()?
+                .call1((&annotation,))
+                .ok()?;
+            args.get_item(0).ok()
+        })
+        .filter(|item| {
+            !item.is_none()
+                && item
+                    .getattr("__name__")
+                    .and_then(|name| name.extract::<String>())
+                    .map_or(true, |name| name != "ServerSentEvent")
+        });
+    fastrapi_http::response_convert::stream_factory(
+        py,
+        mode,
+        item_type.as_ref(),
+        response_class.map(|class| class.bind(py)),
+        dump_options.map(|options| options.bind(py)),
+    )
+    .map(Some)
+}
+
 fn inferred_response_model(py: Python<'_>, func: &Bound<'_, PyAny>) -> Option<Py<PyAny>> {
     let typing = py.import("typing").ok()?;
     let kwargs = PyDict::new(py);
@@ -531,6 +594,12 @@ impl PyAPIRouter {
                         .map(|class| class.clone_ref(py))
                 });
             let explicit_response_class = effective_response_class.is_some();
+            let stream_factory = generator_stream_factory(
+                py,
+                &func,
+                effective_response_class.as_ref(),
+                opts.dump_options.as_ref(),
+            )?;
 
             let final_response_type = if let Some(cls) = &effective_response_class {
                 get_response_type_from_class(py, cls.bind(py))
@@ -596,6 +665,7 @@ impl PyAPIRouter {
                     response_class: effective_response_class,
                     dump_options: opts.dump_options.clone(),
                     response_adapter: Arc::new(pyo3::sync::PyOnceLock::new()),
+                    stream_factory,
                 },
             };
 

@@ -201,10 +201,102 @@ def serialize_response(
         exclude_defaults=exclude_defaults,
         exclude_none=exclude_none,
     )
+
+
+def stream_factory(mode, item_type, response_class, options):
+    import json
+
+    from pydantic import TypeAdapter
+
+    from fastrapi.encoders import jsonable_encoder
+
+    adapter = TypeAdapter(item_type) if item_type is not None else None
+    options = dict(options or {})
+
+    def validated(item):
+        try:
+            return adapter.validate_python(item, from_attributes=True)
+        except ValidationError as exc:
+            from fastrapi.exceptions import ResponseValidationError
+
+            errors = [
+                {**error, 'loc': ('response', *error['loc'])}
+                for error in exc.errors(include_url=False)
+            ]
+            raise ResponseValidationError(errors, body=item) from None
+
+    def serialize(item):
+        if adapter is not None:
+            return adapter.dump_json(validated(item), **options)
+        return json.dumps(jsonable_encoder(item)).encode('utf-8')
+
+    def sse_value(item):
+        from fastrapi.sse import ServerSentEvent
+
+        if isinstance(item, ServerSentEvent) or adapter is None:
+            return item
+        return adapter.dump_python(validated(item), mode='json', **options)
+
+    def factory(gen):
+        from fastrapi.responses import StreamingResponse
+
+        if mode == 'raw':
+            return response_class(gen)
+        convert = serialize if mode == 'jsonl' else sse_value
+        suffix = b'\\n' if mode == 'jsonl' else None
+        if hasattr(gen, '__anext__'):
+
+            async def body():
+                async for item in gen:
+                    value = convert(item)
+                    yield value + suffix if suffix is not None else value
+
+        else:
+
+            def body():
+                for item in gen:
+                    value = convert(item)
+                    yield value + suffix if suffix is not None else value
+
+        if mode == 'jsonl':
+            return StreamingResponse(body(), media_type='application/jsonl')
+        response = response_class(body())
+        response.headers['cache-control'] = 'no-cache'
+        response.headers['x-accel-buffering'] = 'no'
+        return response
+
+    return factory
 ";
 
 static RESPONSE_HELPERS_MODULE: pyo3::sync::PyOnceLock<Py<pyo3::types::PyModule>> =
     pyo3::sync::PyOnceLock::new();
+
+fn response_helpers(py: Python<'_>) -> PyResult<&Bound<'_, pyo3::types::PyModule>> {
+    RESPONSE_HELPERS_MODULE
+        .get_or_try_init(py, || {
+            pyo3::types::PyModule::from_code(
+                py,
+                RESPONSE_HELPERS,
+                c"fastrapi/_responses.py",
+                c"fastrapi._responses",
+            )
+            .map(Bound::unbind)
+        })
+        .map(|module| module.bind(py))
+}
+
+pub fn stream_factory(
+    py: Python<'_>,
+    mode: &str,
+    item_type: Option<&Bound<'_, PyAny>>,
+    response_class: Option<&Bound<'_, PyAny>>,
+    options: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    Ok(response_helpers(py)?
+        .getattr(intern!(py, "stream_factory"))?
+        .call1((mode, item_type, response_class, options))?
+        .unbind())
+}
 
 fn serialize_response_model(
     py: Python<'_>,
@@ -218,18 +310,7 @@ fn serialize_response_model(
             .call1((model.bind(py),))
             .map(Bound::unbind)
     })?;
-    let helpers = RESPONSE_HELPERS_MODULE.get_or_try_init(py, || {
-        pyo3::types::PyModule::from_code(
-            py,
-            RESPONSE_HELPERS,
-            c"fastrapi/_responses.py",
-            c"fastrapi._responses",
-        )
-        .map(Bound::unbind)
-    })?;
-    let serialize = helpers
-        .bind(py)
-        .getattr(intern!(py, "serialize_response"))?;
+    let serialize = response_helpers(py)?.getattr(intern!(py, "serialize_response"))?;
     let json = serialize.call(
         (adapter.bind(py), content),
         formatter
@@ -293,6 +374,18 @@ fn convert_response_value(
     formatter: &ResponseFormatter,
     request_headers: Option<&HeaderMap>,
 ) -> PyResult<Response> {
+    let streamed;
+    let result = match &formatter.stream_factory {
+        Some(factory)
+            if response_kind(result) == ResponseKind::Unknown
+                && (result.hasattr(intern!(py, "__anext__"))?
+                    || result.hasattr(intern!(py, "__next__"))?) =>
+        {
+            streamed = factory.bind(py).call1((result,))?;
+            &streamed
+        }
+        _ => result,
+    };
     if result.is_none() {
         let status = formatter.default_status.unwrap_or(StatusCode::OK);
         return Ok(

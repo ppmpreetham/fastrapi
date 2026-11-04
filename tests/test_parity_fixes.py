@@ -1835,3 +1835,37 @@ def test_streaming_response_accepts_iterables_and_binary_chunks(client, app):
 
     assert client.get("/list-stream").text == "abcd"
     assert client.get("/sync-gen").text == "xy"
+
+
+def test_generator_endpoints_stream(client, app):
+    from collections.abc import AsyncIterator, Iterator
+
+    from pydantic import BaseModel
+
+    from fastrapi.responses import EventSourceResponse, StreamingResponse
+
+    class Item(BaseModel):
+        name: str
+
+    @app.get("/jsonl")
+    def jsonl() -> Iterator[Item]:
+        yield {"name": "a", "extra": 1}
+        yield Item(name="b")
+
+    @app.get("/sse", response_class=EventSourceResponse)
+    async def sse() -> AsyncIterator[Item]:
+        yield {"name": "c"}
+
+    @app.get("/raw", response_class=StreamingResponse)
+    async def raw():
+        yield b"r1"
+        yield "r2"
+
+    jsonl_response = client.get("/jsonl")
+    assert jsonl_response.headers["content-type"].startswith("application/jsonl")
+    assert jsonl_response.text == '{"name":"a"}\n{"name":"b"}\n'
+    sse_response = client.get("/sse")
+    assert sse_response.headers["content-type"].startswith("text/event-stream")
+    assert sse_response.headers["cache-control"] == "no-cache"
+    assert 'data: {"name":"c"}' in sse_response.text
+    assert client.get("/raw").text == "r1r2"
