@@ -22,15 +22,17 @@ use bytes::Bytes;
 use fastrapi_pyutil::json::{
     py_json_response_with_dump_options, py_json_response_with_status, py_to_response,
 };
+use fastrapi_runtime::blocking::run_python;
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::server_state::server_loop;
-use pyo3::exceptions::{PyStopAsyncIteration, PyStopIteration};
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyStopIteration};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{
+    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple,
+};
 use pyo3::{Bound, Py, PyAny, intern};
 use pyo3_async_runtimes::TaskLocals;
 use std::collections::HashSet;
-use std::convert::Infallible;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::error;
@@ -687,6 +689,23 @@ fn sse_chunk(py: Python<'_>, value: &Bound<'_, PyAny>, sep: &str) -> bytes::Byte
     format_sse_event(py, Some(value), None, None, None, None, None, sep)
 }
 
+fn stream_chunk(py: Python<'_>, value: &Bound<'_, PyAny>, sse: bool, sep: &str) -> PyResult<Bytes> {
+    if sse {
+        return Ok(sse_chunk(py, value, sep));
+    }
+    if let Ok(bytes) = value.cast::<PyBytes>() {
+        return Ok(Bytes::copy_from_slice(bytes.as_bytes()));
+    }
+    if value.is_instance_of::<PyByteArray>() || value.is_instance_of::<PyMemoryView>() {
+        let bytes = py.get_type::<PyBytes>().call1((value,))?;
+        return Ok(Bytes::copy_from_slice(bytes.cast::<PyBytes>()?.as_bytes()));
+    }
+    let encoded = value.call_method1(intern!(py, "encode"), ("utf-8",))?;
+    Ok(Bytes::copy_from_slice(
+        encoded.cast::<PyBytes>()?.as_bytes(),
+    ))
+}
+
 pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response {
     let background = result
         .getattr(intern!(py, "background"))
@@ -742,81 +761,91 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
     let ping_chunk =
         sse.then(|| format_sse_event(py, None, None, None, None, None, Some("ping"), &sep));
 
-    let stream = async_stream::stream! {
-        let (is_async, is_sync) = Python::attach(|py| {
-            let b = content.bind(py);
-            (b.hasattr(intern!(py, "__anext__")).unwrap_or(false), b.hasattr(intern!(py, "__next__")).unwrap_or(false))
-        });
+    let content = {
+        let bound = content.bind(py);
+        let is_iterator = bound.hasattr(intern!(py, "__anext__")).unwrap_or(false)
+            || bound.hasattr(intern!(py, "__next__")).unwrap_or(false);
+        let iterator = if is_iterator {
+            None
+        } else if bound.hasattr(intern!(py, "__aiter__")).unwrap_or(false) {
+            bound.call_method0(intern!(py, "__aiter__")).ok()
+        } else {
+            bound.try_iter().ok().map(Bound::into_any)
+        };
+        iterator.map_or_else(|| bound.clone().unbind(), Bound::unbind)
+    };
 
-        if is_async {
-            loop {
-                let fut = Python::attach(|py| {
-                    let awaitable = match content.bind(py).call_method0(intern!(py, "__anext__")) {
-                        Ok(a) => Some(a),
-                        Err(e) => {
-                            if !e.is_instance_of::<PyStopAsyncIteration>(py)
-                                && !e.is_instance_of::<PyStopIteration>(py)
-                            {
-                                error!("StreamingResponse async error: {:?}", e);
-                            }
-                            None
+    let stream = async_stream::stream! {
+        let is_async = Python::attach(|py| {
+            content.bind(py).hasattr(intern!(py, "__anext__")).unwrap_or(false)
+        });
+        loop {
+            let next: PyResult<Option<Py<PyAny>>> = if is_async {
+                let pending = Python::attach(|py| -> PyResult<Option<_>> {
+                    match content.bind(py).call_method0(intern!(py, "__anext__")) {
+                        Ok(awaitable) => {
+                            let locals = TaskLocals::new(request_loop.bind(py).clone());
+                            py_bridge::into_future_with_locals(&locals, awaitable).map(Some)
                         }
-                    };
-                    awaitable.and_then(|a| {
-                        let locals = TaskLocals::new(request_loop.bind(py).clone());
-                        py_bridge::into_future_with_locals(&locals, a).ok()
-                    })
+                        Err(error) if error.is_instance_of::<PyStopAsyncIteration>(py) => Ok(None),
+                        Err(error) => Err(error),
+                    }
                 });
-                let Some(fut) = fut else { break; };
-                let result = if let Some(ping) = ping {
-                    if let Ok(result) = timeout(Duration::from_secs_f64(ping), fut).await { result } else {
-                        if let Some(chunk) = ping_chunk.clone() {
-                            yield Ok::<_, Infallible>(chunk);
+                match pending {
+                    Ok(Some(future)) => {
+                        let awaited = if let Some(ping) = ping {
+                            if let Ok(result) = timeout(Duration::from_secs_f64(ping), future).await {
+                                result
+                            } else {
+                                if let Some(chunk) = ping_chunk.clone() {
+                                    yield Ok::<_, std::io::Error>(chunk);
+                                }
+                                continue;
+                            }
+                        } else {
+                            future.await
+                        };
+                        match awaited {
+                            Ok(value) => Ok(Some(value)),
+                            Err(error) => {
+                                if Python::attach(|py| error.is_instance_of::<PyStopAsyncIteration>(py)) {
+                                    Ok(None)
+                                } else {
+                                    Err(error)
+                                }
+                            }
                         }
-                        continue;
                     }
-                } else {
-                    fut.await
-                };
-                match result {
-                    Ok(val) => {
-                        let bytes = Python::attach(|py| {
-                            let bound = val.bind(py);
-                            if sse { Ok(sse_chunk(py, bound, &sep)) }
-                            else if let Ok(s) = bound.extract::<&str>() { Ok(Bytes::copy_from_slice(s.as_bytes())) }
-                            else if let Ok(b) = bound.extract::<&[u8]>() { Ok(Bytes::copy_from_slice(b)) }
-                            else { Err(()) }
-                        });
-                        if let Ok(b) = bytes { yield Ok::<_, Infallible>(b); }
-                    }
-                    Err(e) => {
-                        Python::attach(|py| if !e.is_instance_of::<PyStopAsyncIteration>(py) { error!("StreamingResponse async error: {:?}", e); });
-                        break;
-                    }
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(error),
                 }
-            }
-        } else if is_sync {
-            loop {
-                let chunk = Python::attach(|py| {
-                    match content.bind(py).call_method0(intern!(py, "__next__")) {
-                        Ok(val) => {
-                            if sse { Ok(Some(sse_chunk(py, &val, &sep))) }
-                            else if let Ok(s) = val.extract::<&str>() { Ok(Some(Bytes::copy_from_slice(s.as_bytes()))) }
-                            else if let Ok(b) = val.extract::<&[u8]>() { Ok(Some(Bytes::copy_from_slice(b))) }
-                            else { Err(()) }
-                        }
-                        Err(e) => {
-                            if !e.is_instance_of::<PyStopIteration>(py) {
-                                error!("StreamingResponse sync error: {:?}", e);
-                            }
-                            Ok(None)
-                        }
+            } else {
+                let iterator = Python::attach(|py| content.clone_ref(py));
+                match run_python(move |py| -> PyResult<Option<Py<PyAny>>> {
+                    match iterator.bind(py).call_method0(intern!(py, "__next__")) {
+                        Ok(value) => Ok(Some(value.unbind())),
+                        Err(error) if error.is_instance_of::<PyStopIteration>(py) => Ok(None),
+                        Err(error) => Err(error),
                     }
-                });
-                match chunk {
-                    Ok(Some(b)) => yield Ok::<_, Infallible>(b),
-                    Ok(None) => break,
-                    Err(()) => {}
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(join_error) => Err(PyRuntimeError::new_err(join_error.to_string())),
+                }
+            };
+            let chunk = match next {
+                Ok(Some(value)) => Python::attach(|py| stream_chunk(py, value.bind(py), sse, &sep)),
+                Ok(None) => break,
+                Err(error) => Err(error),
+            };
+            match chunk {
+                Ok(bytes) => yield Ok(bytes),
+                Err(error) => {
+                    error!("StreamingResponse failed");
+                    Python::attach(|py| error.print(py));
+                    yield Err(std::io::Error::other("streaming response failed"));
+                    break;
                 }
             }
         }

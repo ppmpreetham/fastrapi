@@ -1816,3 +1816,22 @@ def test_return_annotation_is_response_model(client, app):
     assert client.get("/raw").json() == {"name": "x", "extra": True}
     schema = client.get("/openapi.json").json()["paths"]["/me"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
     assert schema == {"$ref": "#/components/schemas/UserOut"}
+
+
+def test_streaming_response_accepts_iterables_and_binary_chunks(client, app):
+    from fastrapi.responses import StreamingResponse
+
+    @app.get("/list-stream")
+    def list_stream():
+        return StreamingResponse(["a", b"b", bytearray(b"c"), memoryview(b"d")], media_type="text/plain")
+
+    @app.get("/sync-gen")
+    def sync_gen():
+        def chunks():
+            yield "x"
+            yield "y"
+
+        return StreamingResponse(chunks())
+
+    assert client.get("/list-stream").text == "abcd"
+    assert client.get("/sync-gen").text == "xy"
