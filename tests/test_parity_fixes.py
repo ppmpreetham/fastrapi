@@ -1633,3 +1633,29 @@ def test_router_events_and_lifespans_merge(client, app):
     assert sorted(client.get("/events").json()) == sorted(
         ["router-lifespan", "ctor-startup", "decorated-startup", "added-startup"]
     )
+
+
+def test_router_mount_and_host(tmp_path):
+    import httpx
+    from test_websocket_smoke import _free_port, _serve
+
+    from fastrapi import APIRouter
+    from fastrapi.staticfiles import StaticFiles
+
+    (tmp_path / "hello.txt").write_text("hi there")
+    app = FastrAPI()
+    router = APIRouter(prefix="/assets")
+    router.mount("/static", StaticFiles(directory=str(tmp_path)), name="static")
+    sub = FastrAPI()
+
+    @sub.get("/sub")
+    def sub_route():
+        return {"host": True}
+
+    router.host("api.example.test", sub)
+    app.include_router(router)
+    port = _free_port()
+    _serve(app, port)
+    assert httpx.get(f"http://127.0.0.1:{port}/assets/static/hello.txt").text == "hi there"
+    hosted = httpx.get(f"http://127.0.0.1:{port}/sub", headers={"host": "api.example.test"})
+    assert hosted.json() == {"host": True}

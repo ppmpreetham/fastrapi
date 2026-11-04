@@ -124,6 +124,7 @@ pub fn serve(
     set_server_loop(event_loop);
     set_serve_app(app.clone_ref(py).into_any());
     let app_bound = app.bind(py);
+    app_bound.borrow_mut().apply_router_mounts(py)?;
     let custom_openapi = super::routes::custom_openapi_spec(py, app_bound.as_any());
     let app_config = app_bound.borrow();
     let app_state = AppState {

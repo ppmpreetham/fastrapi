@@ -37,6 +37,39 @@ fn is_startup_event(event_type: &str) -> PyResult<bool> {
 }
 
 impl FastrAPI {
+    pub(crate) fn apply_router_mounts(&mut self, py: Python<'_>) -> PyResult<()> {
+        let root = self.router.bind(py).borrow().clone();
+        let mut stack = vec![(root, String::new())];
+        let mut mounts = Vec::new();
+        let mut hosts = Vec::new();
+        while let Some((router, prefix)) = stack.pop() {
+            let full_prefix = fastrapi_core::path::join_path(&prefix, &router.prefix);
+            for (path, app, name) in router.mounts.lock().drain(..) {
+                let path = if full_prefix.is_empty() || full_prefix == "/" {
+                    path
+                } else {
+                    fastrapi_core::path::join_path(&full_prefix, &path)
+                };
+                mounts.push((path, app, name));
+            }
+            hosts.extend(router.hosts.lock().drain(..));
+            for sub in router.sub_routers.lock().iter() {
+                let sub_router = sub.router.bind(py).borrow().clone();
+                stack.push((
+                    sub_router,
+                    fastrapi_core::path::join_path(&full_prefix, &sub.prefix),
+                ));
+            }
+        }
+        for (path, app, name) in mounts {
+            self.mount(py, path, app.bind(py), name)?;
+        }
+        for (host, app, name) in hosts {
+            self.host(py, host, app.bind(py), name.as_deref())?;
+        }
+        Ok(())
+    }
+
     fn push_event_handler(
         &mut self,
         py: Python<'_>,

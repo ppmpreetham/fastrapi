@@ -65,6 +65,8 @@ pub struct PyAPIRouter {
     pub startup_handlers: Arc<Mutex<Vec<Py<PyAny>>>>,
     pub shutdown_handlers: Arc<Mutex<Vec<Py<PyAny>>>>,
     pub lifespan: Arc<Mutex<Option<Py<PyAny>>>>,
+    pub mounts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
+    pub hosts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
 }
 
 impl Default for PyAPIRouter {
@@ -88,6 +90,8 @@ impl Default for PyAPIRouter {
             startup_handlers: Arc::new(Mutex::new(Vec::new())),
             shutdown_handlers: Arc::new(Mutex::new(Vec::new())),
             lifespan: Arc::new(Mutex::new(None)),
+            mounts: Arc::new(Mutex::new(Vec::new())),
+            hosts: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -146,6 +150,28 @@ impl PyAPIRouter {
             lifespan: Arc::new(Mutex::new(lifespan)),
             ..Self::default()
         })
+    }
+
+    #[pyo3(signature = (path, app, name=None))]
+    fn mount(&self, path: String, app: Py<PyAny>, name: Option<String>) -> PyResult<()> {
+        if !path.starts_with('/') {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Mount path must start with '/'",
+            ));
+        }
+        self.mounts.lock().push((path, app, name));
+        Ok(())
+    }
+
+    #[pyo3(signature = (host, app, name=None))]
+    fn host(&self, host: String, app: Py<PyAny>, name: Option<String>) -> PyResult<()> {
+        if host.starts_with('/') {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Host must not start with '/'",
+            ));
+        }
+        self.hosts.lock().push((host, app, name));
+        Ok(())
     }
 
     #[getter]
