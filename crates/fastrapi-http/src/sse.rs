@@ -23,6 +23,8 @@ use pyo3::types::{PyAny, PyDict, PyList, PyTuple, PyType};
 #[pyclass(
     name = "EventSourceResponse",
     module = "fastrapi.responses",
+    extends = crate::responses::PyResponse,
+    subclass,
     get_all,
     set_all,
     from_py_object
@@ -54,7 +56,7 @@ impl PyEventSourceResponse {
         background: Option<Py<PyAny>>,
         ping: Option<f64>,
         sep: String,
-    ) -> PyResult<Self> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         if ping.is_some_and(|value| value < 0.0) {
             return Err(PyValueError::new_err("ping must be non-negative"));
         }
@@ -69,18 +71,20 @@ impl PyEventSourceResponse {
             Some("text/event-stream"),
             "utf-8",
         )?;
-        Ok(Self {
-            content,
-            status_code,
-            headers,
-            media_type: Some(media_type.unwrap_or_else(|| "text/event-stream".to_owned())),
-            background,
-            ping,
-            sep,
-            raw_headers,
-            body: py.None(),
-            charset: "utf-8".to_owned(),
-        })
+        Ok(
+            PyClassInitializer::from(crate::responses::PyResponse::empty(py)?).add_subclass(Self {
+                content,
+                status_code,
+                headers,
+                media_type: Some(media_type.unwrap_or_else(|| "text/event-stream".to_owned())),
+                background,
+                ping,
+                sep,
+                raw_headers,
+                body: py.None(),
+                charset: "utf-8".to_owned(),
+            }),
+        )
     }
 }
 

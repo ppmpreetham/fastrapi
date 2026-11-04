@@ -1733,3 +1733,22 @@ def test_route_objects_drive_openapi(client, app):
     operation = client.get("/openapi.json").json()["paths"]["/items/{item_id}"]["get"]
     assert operation["operationId"] == "read_item"
     assert operation["summary"] == "Read one item"
+
+
+def test_response_classes_subclass_response():
+    from fastrapi.responses import (
+        EventSourceResponse,
+        FileResponse,
+        HTMLResponse,
+        JSONResponse,
+        PlainTextResponse,
+        RedirectResponse,
+        Response,
+        StreamingResponse,
+    )
+
+    for cls in (JSONResponse, HTMLResponse, PlainTextResponse, RedirectResponse, FileResponse, StreamingResponse, EventSourceResponse):
+        assert issubclass(cls, Response)
+    assert isinstance(JSONResponse({"a": 1}), Response)
+    assert JSONResponse({"a": 1}).body == b'{"a":1}'
+    assert isinstance(RedirectResponse("/x"), Response)

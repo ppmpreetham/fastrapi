@@ -167,7 +167,22 @@ pub fn extract_base_response_data<'py>(
     }
 }
 
-crate::macros::define_response_class!(PyResponse, "Response", Py<PyAny>, 200);
+crate::macros::define_response_class!(@base PyResponse, "Response", Py<PyAny>, 200);
+
+impl PyResponse {
+    pub fn empty(py: Python<'_>) -> PyResult<Self> {
+        Ok(Self {
+            content: py.None(),
+            status_code: 200,
+            headers: None,
+            media_type: None,
+            background: None,
+            raw_headers: PyList::empty(py).unbind(),
+            body: PyBytes::new(py, b"").into_any().unbind(),
+            charset: "utf-8".to_owned(),
+        })
+    }
+}
 crate::macros::define_response_class!(PyHTMLResponse, "HTMLResponse", String, 200);
 crate::macros::define_response_class!(PyJSONResponse, "JSONResponse", Py<PyAny>, 200);
 crate::macros::define_response_class!(
@@ -206,6 +221,8 @@ crate::macros::define_response_class!(PyStreamingResponse, "StreamingResponse", 
 #[pyclass(
     name = "RedirectResponse",
     module = "fastrapi.responses",
+    extends = PyResponse,
+    subclass,
     from_py_object
 )]
 #[derive(Clone)]
@@ -227,7 +244,13 @@ pub struct PyRedirectResponse {
     pub media_type: Option<String>,
 }
 
-#[pyclass(name = "FileResponse", module = "fastrapi.responses", from_py_object)]
+#[pyclass(
+    name = "FileResponse",
+    module = "fastrapi.responses",
+    extends = PyResponse,
+    subclass,
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyFileResponse {
     #[pyo3(get, set)]
@@ -289,7 +312,7 @@ impl PyFileResponse {
         )]
         method: Option<&str>,
         content_disposition_type: String,
-    ) -> PyResult<Self> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         let path = py
             .import("os")?
             .getattr("fspath")?
@@ -323,19 +346,21 @@ impl PyFileResponse {
                 headers.set_item("content-disposition", disposition)?;
             }
         }
-        Ok(Self {
-            path,
-            status_code,
-            headers: headers.map(Bound::unbind),
-            media_type,
-            filename,
-            background,
-            raw_headers,
-            body: py.None(),
-            charset: "utf-8".to_owned(),
-            stat_result,
-            content_disposition_type,
-        })
+        Ok(
+            PyClassInitializer::from(PyResponse::empty(py)?).add_subclass(Self {
+                path,
+                status_code,
+                headers: headers.map(Bound::unbind),
+                media_type,
+                filename,
+                background,
+                raw_headers,
+                body: py.None(),
+                charset: "utf-8".to_owned(),
+                stat_result,
+                content_disposition_type,
+            }),
+        )
     }
 
     fn __repr__(&self) -> String {
@@ -353,7 +378,7 @@ impl PyRedirectResponse {
         status_code: u16,
         headers: Option<Py<PyDict>>,
         background: Option<Py<PyAny>>,
-    ) -> PyResult<Self> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         let body = PyBytes::new(py, b"").into_any().unbind();
         let raw_headers = crate::response_api::init_headers(
             py,
@@ -368,15 +393,17 @@ impl PyRedirectResponse {
             .getattr("quote")?
             .call1((&url, ":/%#?=@[]!$&'()*+,;"))?;
         crate::response_api::headers(py, &raw_headers)?.set_item("location", location)?;
-        Ok(Self {
-            url,
-            status_code,
-            headers,
-            background,
-            raw_headers,
-            body,
-            charset: "utf-8".to_owned(),
-            media_type: None,
-        })
+        Ok(
+            PyClassInitializer::from(PyResponse::empty(py)?).add_subclass(Self {
+                url,
+                status_code,
+                headers,
+                background,
+                raw_headers,
+                body,
+                charset: "utf-8".to_owned(),
+                media_type: None,
+            }),
+        )
     }
 }

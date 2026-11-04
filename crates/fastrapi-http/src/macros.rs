@@ -35,7 +35,7 @@ macro_rules! define_validation_subclass {
 /// Defines a standard Python response class.
 /// The class keeps the content, the status code, the headers, and the media type.
 macro_rules! define_response_class {
-    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, $content_type:ty, $default_status:expr) => {
+    (@base $(#[$meta:meta])* $struct_name:ident, $py_name:literal, $content_type:ty, $default_status:expr) => {
         $(#[$meta])*
         #[pyo3::prelude::pyclass(name = $py_name, module = "fastrapi.responses", subclass, from_py_object)]
         #[derive(Clone)]
@@ -89,6 +89,64 @@ macro_rules! define_response_class {
                     body,
                     charset: "utf-8".to_owned(),
                 })
+            }
+        }
+        $crate::macros::response_api_methods!($struct_name, $py_name);
+    };
+    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, $content_type:ty, $default_status:expr) => {
+        $(#[$meta])*
+        #[pyo3::prelude::pyclass(name = $py_name, module = "fastrapi.responses", extends = $crate::responses::PyResponse, subclass, from_py_object)]
+        #[derive(Clone)]
+        pub struct $struct_name {
+            #[pyo3(get, set)]
+            pub content: pyo3::Py<pyo3::PyAny>,
+            #[pyo3(get, set)]
+            pub status_code: u16,
+            pub headers: Option<pyo3::prelude::Py<pyo3::types::PyDict>>,
+            #[pyo3(get, set)]
+            pub media_type: Option<String>,
+            #[pyo3(get, set)]
+            pub background: Option<pyo3::prelude::Py<pyo3::prelude::PyAny>>,
+            #[pyo3(get, set)]
+            pub raw_headers: pyo3::Py<pyo3::types::PyList>,
+            #[pyo3(get, set)]
+            pub body: pyo3::Py<pyo3::PyAny>,
+            #[pyo3(get, set)]
+            pub charset: String,
+        }
+
+        #[pyo3::prelude::pymethods]
+        impl $struct_name {
+            #[new]
+            #[pyo3(signature = (content=None, status_code=$default_status, headers=None, media_type=None, background=None))]
+            fn new(
+                py: pyo3::Python<'_>,
+                content: Option<pyo3::Py<pyo3::PyAny>>,
+                status_code: u16,
+                headers: Option<pyo3::prelude::Py<pyo3::types::PyDict>>,
+                media_type: Option<String>,
+                background: Option<pyo3::prelude::Py<pyo3::prelude::PyAny>>,
+            ) -> pyo3::PyResult<pyo3::PyClassInitializer<Self>> {
+                let content = content.unwrap_or_else(|| py.None());
+                let media_type = media_type.or_else(|| match $py_name {
+                    "HTMLResponse" => Some("text/html".to_owned()),
+                    "PlainTextResponse" => Some("text/plain".to_owned()),
+                    "JSONResponse" | "ORJSONResponse" | "UJSONResponse" => Some("application/json".to_owned()),
+                    _ => None,
+                });
+                let streaming = $py_name == "StreamingResponse";
+                let body = if streaming { py.None() } else { $crate::response_api::render(py, content.bind(py), $py_name, "utf-8")?.unbind() };
+                let raw_headers = $crate::response_api::init_headers(py, headers.as_ref().map(|h| h.bind(py).as_any()), (!streaming).then(|| body.bind(py)), status_code, media_type.as_deref(), "utf-8")?;
+                Ok(pyo3::PyClassInitializer::from($crate::responses::PyResponse::empty(py)?).add_subclass(Self {
+                    content,
+                    status_code,
+                    headers,
+                    media_type,
+                    background,
+                    raw_headers,
+                    body,
+                    charset: "utf-8".to_owned(),
+                }))
             }
         }
         $crate::macros::response_api_methods!($struct_name, $py_name);
