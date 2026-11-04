@@ -161,20 +161,40 @@ pub fn serve(
         .as_ref()
         .map(|lifespan| lifespan.clone_ref(py));
     drop(router_events);
-    let lifespan = match (
+    let helpers = crate::ffi::compat::py_helpers(py)?;
+    let (on_startup, on_shutdown, lifespan) = match (
         app_config
             .lifespan
             .as_ref()
             .map(|handler| handler.clone_ref(py)),
         router_lifespan,
     ) {
-        (Some(original), Some(nested)) => Some(
-            crate::ffi::compat::py_helpers(py)?
-                .getattr("merge_lifespan_context")?
-                .call1((original, nested))?
-                .unbind(),
+        (Some(original), Some(nested)) => (
+            on_startup,
+            on_shutdown,
+            Some(
+                helpers
+                    .getattr("merge_lifespan_context")?
+                    .call1((original, nested))?
+                    .unbind(),
+            ),
         ),
-        (original, nested) => original.or(nested),
+        (None, Some(nested)) => {
+            let handlers = helpers
+                .getattr("handlers_lifespan")?
+                .call1((on_startup, on_shutdown))?;
+            (
+                None,
+                None,
+                Some(
+                    helpers
+                        .getattr("merge_lifespan_context")?
+                        .call1((handlers, nested))?
+                        .unbind(),
+                ),
+            )
+        }
+        (original, None) => (on_startup, on_shutdown, original),
     };
     let app = app.clone_ref(py);
     let redoc_url = app_config.redoc_url.clone();

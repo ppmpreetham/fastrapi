@@ -124,22 +124,26 @@ def merge_lifespan_context(original, nested):
     return merged_lifespan
 
 
-def default_lifespan(router):
+def handlers_lifespan(on_startup, on_shutdown):
     import inspect
 
     @asynccontextmanager
     async def lifespan(app):
-        for handler in router.on_startup:
+        for handler in on_startup or []:
             result = handler()
             if inspect.isawaitable(result):
                 await result
         yield None
-        for handler in router.on_shutdown:
+        for handler in on_shutdown or []:
             result = handler()
             if inspect.isawaitable(result):
                 await result
 
     return lifespan
+
+
+def default_lifespan(router):
+    return handlers_lifespan(router.on_startup, router.on_shutdown)
 
 
 def request_endpoint(endpoint):
