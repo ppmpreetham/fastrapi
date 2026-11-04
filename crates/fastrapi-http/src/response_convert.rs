@@ -260,10 +260,10 @@ def stream_factory(mode, item_type, response_class, options):
 
         if mode == 'jsonl':
             return StreamingResponse(body(), media_type='application/jsonl')
-        response = response_class(body())
-        response.headers['cache-control'] = 'no-cache'
-        response.headers['x-accel-buffering'] = 'no'
-        return response
+        return response_class(
+            body(),
+            headers={'cache-control': 'no-cache', 'x-accel-buffering': 'no'},
+        )
 
     return factory
 ";
