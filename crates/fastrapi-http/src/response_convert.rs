@@ -126,6 +126,120 @@ fn rendered_response(result: &Bound<'_, PyAny>) -> Option<Response> {
     Some(apply_raw_headers(response, result, RawHeaders::All))
 }
 
+const RESPONSE_HELPERS: &std::ffi::CStr = c"import dataclasses
+
+from pydantic import BaseModel, ValidationError
+
+
+def _prepare_response_content(res, *, exclude_unset, exclude_defaults, exclude_none):
+    if isinstance(res, BaseModel):
+        return res.model_dump(
+            by_alias=True,
+            exclude_unset=exclude_unset,
+            exclude_defaults=exclude_defaults,
+            exclude_none=exclude_none,
+        )
+    if isinstance(res, list):
+        return [
+            _prepare_response_content(
+                item,
+                exclude_unset=exclude_unset,
+                exclude_defaults=exclude_defaults,
+                exclude_none=exclude_none,
+            )
+            for item in res
+        ]
+    if isinstance(res, dict):
+        return {
+            key: _prepare_response_content(
+                value,
+                exclude_unset=exclude_unset,
+                exclude_defaults=exclude_defaults,
+                exclude_none=exclude_none,
+            )
+            for key, value in res.items()
+        }
+    if dataclasses.is_dataclass(res) and not isinstance(res, type):
+        return dataclasses.asdict(res)
+    return res
+
+
+def serialize_response(
+    adapter,
+    content,
+    include=None,
+    exclude=None,
+    by_alias=False,
+    exclude_unset=False,
+    exclude_defaults=False,
+    exclude_none=False,
+):
+    prepared = _prepare_response_content(
+        content,
+        exclude_unset=exclude_unset,
+        exclude_defaults=exclude_defaults,
+        exclude_none=exclude_none,
+    )
+    try:
+        value = adapter.validate_python(prepared, from_attributes=True)
+    except ValidationError as exc:
+        from fastrapi.exceptions import ResponseValidationError
+
+        errors = [
+            {**error, 'loc': ('response', *error['loc'])}
+            for error in exc.errors(include_url=False)
+        ]
+        raise ResponseValidationError(errors, body=prepared) from None
+    return adapter.dump_json(
+        value,
+        include=include,
+        exclude=exclude,
+        by_alias=by_alias,
+        exclude_unset=exclude_unset,
+        exclude_defaults=exclude_defaults,
+        exclude_none=exclude_none,
+    )
+";
+
+static RESPONSE_HELPERS_MODULE: pyo3::sync::PyOnceLock<Py<pyo3::types::PyModule>> =
+    pyo3::sync::PyOnceLock::new();
+
+fn serialize_response_model(
+    py: Python<'_>,
+    formatter: &ResponseFormatter,
+    model: &Py<PyAny>,
+    content: &Bound<'_, PyAny>,
+) -> PyResult<Bytes> {
+    let adapter = formatter.response_adapter.get_or_try_init(py, || {
+        py.import(intern!(py, "pydantic"))?
+            .getattr(intern!(py, "TypeAdapter"))?
+            .call1((model.bind(py),))
+            .map(Bound::unbind)
+    })?;
+    let helpers = RESPONSE_HELPERS_MODULE.get_or_try_init(py, || {
+        pyo3::types::PyModule::from_code(
+            py,
+            RESPONSE_HELPERS,
+            c"fastrapi/_responses.py",
+            c"fastrapi._responses",
+        )
+        .map(Bound::unbind)
+    })?;
+    let serialize = helpers
+        .bind(py)
+        .getattr(intern!(py, "serialize_response"))?;
+    let json = serialize.call(
+        (adapter.bind(py), content),
+        formatter
+            .dump_options
+            .as_ref()
+            .map(|options| options.bind(py)),
+    )?;
+    Ok(Bytes::copy_from_slice(
+        json.cast::<pyo3::types::PyBytes>()?.as_bytes(),
+    ))
+}
+
 const fn body_allowed(status: StatusCode) -> bool {
     !matches!(status.as_u16(), 100..=199 | 204 | 304)
 }
@@ -263,7 +377,28 @@ fn convert_response_value(
         }
     }
 
-    if let Some(model) = &formatter.response_model {
+    if let Some(model) = formatter
+        .response_model
+        .as_ref()
+        .filter(|model| !model.bind(py).is_none())
+    {
+        if matches!(
+            formatter.response_type,
+            ResponseType::Json | ResponseType::Auto
+        ) {
+            let body = serialize_response_model(py, formatter, model, final_result)?;
+            let response = if body_allowed(default_status) {
+                (
+                    default_status,
+                    [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+                    body,
+                )
+                    .into_response()
+            } else {
+                default_status.into_response()
+            };
+            return Ok(response);
+        }
         validated_storage = validate_response_model(py, model.bind(py), final_result)?;
         final_result = &validated_storage;
         kind = response_kind(final_result);

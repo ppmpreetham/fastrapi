@@ -1752,3 +1752,44 @@ def test_response_classes_subclass_response():
     assert isinstance(JSONResponse({"a": 1}), Response)
     assert JSONResponse({"a": 1}).body == b'{"a":1}'
     assert isinstance(RedirectResponse("/x"), Response)
+
+
+def test_response_model_filters_aliases_lists_and_errors(client, app):
+    from pydantic import BaseModel, Field
+
+    from fastrapi.exceptions import ResponseValidationError
+    from fastrapi.responses import JSONResponse
+
+    class Public(BaseModel):
+        name: str
+        full_name: str | None = Field(default=None, alias="fullName")
+
+    class Private(Public):
+        password: str
+
+    @app.get("/sub", response_model=Public)
+    def sub():
+        return Private(name="a", fullName="A", password="secret")
+
+    @app.get("/list", response_model=list[Public], response_model_exclude_none=True)
+    def listed():
+        return [{"name": "b"}, Private(name="c", password="x")]
+
+    @app.get("/plain-alias", response_model=Public, response_model_by_alias=False)
+    def plain_alias():
+        return {"name": "d", "fullName": "D"}
+
+    @app.get("/broken", response_model=Public)
+    def broken():
+        return {"nope": 1}
+
+    @app.exception_handler(ResponseValidationError)
+    async def on_bad_response(request, exc):
+        return JSONResponse({"errors": len(exc.errors()), "loc": exc.errors()[0]["loc"]}, status_code=500)
+
+    assert client.get("/sub").json() == {"name": "a", "fullName": "A"}
+    assert client.get("/list").json() == [{"name": "b"}, {"name": "c"}]
+    assert client.get("/plain-alias").json() == {"name": "d", "full_name": "D"}
+    broken_response = client.get("/broken")
+    assert broken_response.status_code == 500
+    assert broken_response.json() == {"errors": 1, "loc": ["response", "name"]}

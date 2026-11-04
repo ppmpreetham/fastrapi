@@ -508,6 +508,7 @@ impl PyAPIRouter {
                     response_model: opts.response_model.clone(),
                     response_class: effective_response_class,
                     dump_options: opts.dump_options.clone(),
+                    response_adapter: Arc::new(pyo3::sync::PyOnceLock::new()),
                 },
             };
 
