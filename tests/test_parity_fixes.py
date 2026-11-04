@@ -1793,3 +1793,26 @@ def test_response_model_filters_aliases_lists_and_errors(client, app):
     broken_response = client.get("/broken")
     assert broken_response.status_code == 500
     assert broken_response.json() == {"errors": 1, "loc": ["response", "name"]}
+
+
+def test_return_annotation_is_response_model(client, app):
+    from pydantic import BaseModel
+
+    class UserOut(BaseModel):
+        name: str
+
+    class UserIn(UserOut):
+        password: str
+
+    @app.get("/me")
+    def me() -> UserOut:
+        return UserIn(name="ann", password="hunter2")
+
+    @app.get("/raw", response_model=None)
+    def raw() -> UserOut:
+        return {"name": "x", "extra": True}
+
+    assert client.get("/me").json() == {"name": "ann"}
+    assert client.get("/raw").json() == {"name": "x", "extra": True}
+    schema = client.get("/openapi.json").json()["paths"]["/me"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    assert schema == {"$ref": "#/components/schemas/UserOut"}

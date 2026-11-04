@@ -68,6 +68,88 @@ pub(crate) fn security_requirements(
         .collect()
 }
 
+fn inferred_response_model(py: Python<'_>, func: &Bound<'_, PyAny>) -> Option<Py<PyAny>> {
+    let typing = py.import("typing").ok()?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("include_extras", true).ok()?;
+    let annotation = typing
+        .getattr("get_type_hints")
+        .ok()?
+        .call((func,), Some(&kwargs))
+        .ok()
+        .and_then(|hints| hints.get_item("return").ok())
+        .or_else(|| {
+            func.getattr("__annotations__")
+                .ok()?
+                .get_item("return")
+                .ok()
+                .filter(|annotation| !annotation.is_instance_of::<pyo3::types::PyString>())
+        })?;
+    if annotation.is_none() || annotation.is(&typing.getattr("Any").ok()?) {
+        return None;
+    }
+    let builtins = py.import("builtins").ok()?;
+    let none_type = builtins.getattr("type").ok()?.call1((py.None(),)).ok()?;
+    if annotation.is(&none_type) {
+        return None;
+    }
+    for name in [
+        "dict", "list", "str", "int", "float", "bool", "bytes", "object", "tuple", "set",
+    ] {
+        if annotation.is(&builtins.getattr(name).ok()?) {
+            return None;
+        }
+    }
+    let is_response_class = |candidate: &Bound<'_, PyAny>| {
+        candidate.cast::<pyo3::types::PyType>().is_ok_and(|class| {
+            class
+                .is_subclass_of::<fastrapi_http::responses::PyResponse>()
+                .unwrap_or(false)
+                || py
+                    .import("starlette.responses")
+                    .and_then(|module| module.getattr("Response"))
+                    .is_ok_and(|base| class.is_subclass(&base).unwrap_or(false))
+        })
+    };
+    if is_response_class(&annotation) {
+        return None;
+    }
+    let args = typing
+        .getattr("get_args")
+        .ok()?
+        .call1((&annotation,))
+        .ok()?;
+    if args
+        .try_iter()
+        .ok()?
+        .filter_map(Result::ok)
+        .any(|arg| is_response_class(&arg))
+    {
+        return None;
+    }
+    let origin = typing
+        .getattr("get_origin")
+        .ok()?
+        .call1((&annotation,))
+        .ok()?;
+    if !origin.is_none() {
+        let abc = py.import("collections.abc").ok()?;
+        for name in [
+            "Iterator",
+            "AsyncIterator",
+            "Generator",
+            "AsyncGenerator",
+            "Iterable",
+            "AsyncIterable",
+        ] {
+            if origin.is(&abc.getattr(name).ok()?) {
+                return None;
+            }
+        }
+    }
+    Some(annotation.unbind())
+}
+
 pub(crate) const ADD_API_ROUTE_OPTIONS: [&str; 26] = [
     "response_model",
     "status_code",
@@ -461,9 +543,14 @@ impl PyAPIRouter {
                 .map(|s| Arc::from(s.as_str()))
                 .collect();
 
+            let response_model = opts
+                .response_model
+                .as_ref()
+                .map(|model| model.clone_ref(py))
+                .or_else(|| inferred_response_model(py, &func));
             let serialization_hint = if opts.bypass_serialization {
                 SerializationHint::Unknown
-            } else if opts.response_model.is_some() {
+            } else if response_model.is_some() {
                 SerializationHint::PydanticModel
             } else {
                 metadata.serialization_hint
@@ -505,7 +592,7 @@ impl PyAPIRouter {
                     response_type: final_response_type,
                     serialization_hint,
                     default_status: opts.default_status,
-                    response_model: opts.response_model.clone(),
+                    response_model: response_model.as_ref().map(|model| model.clone_ref(py)),
                     response_class: effective_response_class,
                     dump_options: opts.dump_options.clone(),
                     response_adapter: Arc::new(pyo3::sync::PyOnceLock::new()),
@@ -524,7 +611,7 @@ impl PyAPIRouter {
                     };
                     let call_kwargs = PyDict::new(py);
                     call_kwargs.set_item("name", &route_name)?;
-                    call_kwargs.set_item("response_model", opts.response_model.as_ref())?;
+                    call_kwargs.set_item("response_model", response_model.as_ref())?;
                     call_kwargs.set_item("status_code", opts.default_status.map(|s| s.as_u16()))?;
                     call_kwargs.set_item("tags", opts.merged_tags.clone())?;
                     call_kwargs.set_item("summary", opts.summary.clone())?;
