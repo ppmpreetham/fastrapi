@@ -12,7 +12,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyModule, PyType};
 use pyo3::{Bound, Py, intern};
 use simd_json::OwnedValue as Value;
-use std::str::from_utf8;
 
 pub fn pydantic_error_to_response(py: Python<'_>, err: &pyo3::PyErr) -> Response {
     use axum::response::IntoResponse;
@@ -91,11 +90,10 @@ pub fn validate_json_with_pydantic(
     }
 
     if let Some(validate_json_method) = &validator.validate_json_method {
-        let raw_str = from_utf8(raw_payload).map_err(|_| {
-            (StatusCode::UNPROCESSABLE_ENTITY, "Invalid UTF-8 payload").into_response()
-        })?;
-
-        return match validate_json_method.bind(py).call1((raw_str,)) {
+        return match validate_json_method
+            .bind(py)
+            .call1((PyBytes::new(py, raw_payload),))
+        {
             Ok(obj) => Ok(obj.into()),
             Err(e) => Err(pydantic_error_to_response(py, &e)),
         };

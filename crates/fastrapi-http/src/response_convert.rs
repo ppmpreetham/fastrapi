@@ -3,8 +3,8 @@
 
 use super::response_file::convert_file_response;
 use super::responses::{
-    PyFileResponse, PyRedirectResponse, ResponseKind, extract_base_response_data,
-    is_starlette_response, response_kind, response_status, validate_response_model,
+    PyFileResponse, PyRedirectResponse, ResponseKind, extract_base_response_data, response_kind,
+    response_status, validate_response_model,
 };
 use crate::background::{OwnBackground, spawn_response_background_value};
 use crate::response_type::{ResponseFormatter, ResponseType};
@@ -17,7 +17,7 @@ use crate::sse::{event_fields, format_sse_event, sse_options};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{Html, IntoResponse, Response};
 use bytes::Bytes;
 use fastrapi_pyutil::json::{
     py_json_response_with_dump_options, py_json_response_with_status, py_to_response,
@@ -77,7 +77,7 @@ pub(crate) fn apply_raw_headers(
     result: &Bound<'_, PyAny>,
     which: RawHeaders,
 ) -> Response {
-    let Ok(raw) = result.getattr("raw_headers") else {
+    let Ok(raw) = result.getattr(intern!(result.py(), "raw_headers")) else {
         return res;
     };
     let Ok(raw) = raw.cast::<PyList>() else {
@@ -116,11 +116,16 @@ pub(crate) fn apply_raw_headers(
 }
 
 fn rendered_response(result: &Bound<'_, PyAny>) -> Option<Response> {
-    let body = result.getattr("body").ok().filter(|body| !body.is_none())?;
+    let py = result.py();
+    let body = result
+        .getattr_opt(intern!(py, "body"))
+        .ok()
+        .flatten()
+        .filter(|body| !body.is_none())?;
     let body = if let Ok(bytes) = body.extract::<&[u8]>() {
         Bytes::copy_from_slice(bytes)
     } else {
-        let bytes = body.call_method0("tobytes").ok()?;
+        let bytes = body.call_method0(intern!(py, "tobytes")).ok()?;
         Bytes::copy_from_slice(bytes.extract::<&[u8]>().ok()?)
     };
     let mut response = Response::new(Body::from(body));
@@ -338,6 +343,15 @@ fn null_json_response(status: StatusCode) -> Response {
         .into_response()
 }
 
+fn is_plain_value(value: &Bound<'_, PyAny>) -> bool {
+    value.is_exact_instance_of::<PyDict>()
+        || value.is_exact_instance_of::<PyList>()
+        || value.is_exact_instance_of::<PyString>()
+        || value.is_exact_instance_of::<PyInt>()
+        || value.is_exact_instance_of::<PyBool>()
+        || value.is_exact_instance_of::<PyFloat>()
+}
+
 #[inline(always)]
 pub fn convert_response_by_type(
     py: Python,
@@ -345,28 +359,43 @@ pub fn convert_response_by_type(
     formatter: &ResponseFormatter,
     request_headers: Option<&HeaderMap>,
 ) -> PyResult<Response> {
-    let background = if result.is_none() {
-        None
-    } else {
-        result
-            .getattr(intern!(py, "background"))
-            .ok()
-            .filter(|background| !background.is_none())
-    };
-    let mut response = convert_response_value(py, result, formatter, request_headers)?;
+    if result.is_none() || is_plain_value(result) {
+        return convert_response_value(py, result, formatter, request_headers);
+    }
+    let kind = response_kind(result);
+    if kind == ResponseKind::Unknown {
+        return convert_response_value(py, result, formatter, request_headers);
+    }
+    let background = result
+        .getattr_opt(intern!(py, "background"))
+        .ok()
+        .flatten()
+        .filter(|background| !background.is_none());
+    let mut response = convert_response_object(py, result, kind, request_headers);
     if let Some(background) = background {
-        let deferred = result.is_instance_of::<PyStreamingResponse>()
-            || result.is_instance_of::<PyEventSourceResponse>()
-            || matches!(
-                response_kind(result),
-                ResponseKind::Streaming | ResponseKind::Sse
-            );
-        if !deferred {
+        if !matches!(kind, ResponseKind::Streaming | ResponseKind::Sse) {
             spawn_response_background_value(background.unbind());
         }
         response.extensions_mut().insert(OwnBackground);
     }
     Ok(response)
+}
+
+fn convert_response_object(
+    py: Python,
+    result: &Bound<PyAny>,
+    kind: ResponseKind,
+    request_headers: Option<&HeaderMap>,
+) -> Response {
+    match kind {
+        ResponseKind::File => convert_file_response(py, result, request_headers),
+        ResponseKind::Streaming | ResponseKind::Sse => convert_streaming_response(py, result),
+        ResponseKind::Json => convert_json_response(py, result),
+        ResponseKind::Text => convert_text_response(py, result),
+        ResponseKind::Html => convert_html_response(py, result),
+        ResponseKind::Redirect => convert_redirect_response(py, result),
+        ResponseKind::Base | ResponseKind::Unknown => convert_auto_response(py, result),
+    }
 }
 
 #[inline(always)]
@@ -376,18 +405,14 @@ fn convert_response_value(
     formatter: &ResponseFormatter,
     request_headers: Option<&HeaderMap>,
 ) -> PyResult<Response> {
-    let streamed;
-    let result = match &formatter.stream_factory {
-        Some(factory)
-            if response_kind(result) == ResponseKind::Unknown
-                && (result.hasattr(intern!(py, "__anext__"))?
-                    || result.hasattr(intern!(py, "__next__"))?) =>
-        {
-            streamed = factory.bind(py).call1((result,))?;
-            &streamed
-        }
-        _ => result,
-    };
+    if let Some(factory) = &formatter.stream_factory
+        && !is_plain_value(result)
+        && response_kind(result) == ResponseKind::Unknown
+        && (result.hasattr(intern!(py, "__anext__"))? || result.hasattr(intern!(py, "__next__"))?)
+    {
+        let streamed = factory.bind(py).call1((result,))?;
+        return convert_response_by_type(py, &streamed, formatter, request_headers);
+    }
     if result.is_none() {
         let status = formatter.default_status.unwrap_or(StatusCode::OK);
         return Ok(
@@ -406,73 +431,7 @@ fn convert_response_value(
     let default_status = formatter.default_status.unwrap_or(StatusCode::OK);
     let mut final_result = result;
     let validated_storage;
-
-    if response_kind(final_result) == ResponseKind::File
-        || (final_result.hasattr("path").unwrap_or(false)
-            && final_result.hasattr("filename").unwrap_or(false))
-    {
-        return Ok(convert_file_response(py, final_result, request_headers));
-    }
-
-    if !final_result.is_instance_of::<PyFileResponse>()
-        && !final_result.is_instance_of::<PyStreamingResponse>()
-        && !final_result.is_instance_of::<PyEventSourceResponse>()
-        && response_kind(final_result) != ResponseKind::File
-        && response_kind(final_result) != ResponseKind::Streaming
-        && response_kind(final_result) != ResponseKind::Sse
-        && let Some(response) = rendered_response(final_result)
-    {
-        return Ok(response);
-    }
-    if final_result.is_instance_of::<PyStreamingResponse>()
-        || final_result.is_instance_of::<PyEventSourceResponse>()
-    {
-        return Ok(convert_streaming_response(py, final_result));
-    } else if final_result.is_instance_of::<PyFileResponse>() {
-        return Ok(convert_file_response(py, final_result, request_headers));
-    }
-
-    let is_plain_value = final_result.is_instance_of::<PyDict>()
-        || final_result.is_instance_of::<PyList>()
-        || final_result.is_instance_of::<PyString>()
-        || final_result.is_instance_of::<PyBool>()
-        || final_result.is_instance_of::<PyInt>()
-        || final_result.is_instance_of::<PyFloat>();
-
-    let mut kind = if is_plain_value {
-        ResponseKind::Unknown
-    } else {
-        let kind = response_kind(final_result);
-        if kind == ResponseKind::Base {
-            return Ok(convert_auto_response(py, final_result));
-        }
-        kind
-    };
-
-    if !is_plain_value && is_starlette_response(final_result) {
-        return Ok(convert_auto_response(py, final_result));
-    }
-
-    if !is_plain_value {
-        match kind {
-            ResponseKind::Json => {
-                return Ok(convert_json_response(py, final_result));
-            }
-            ResponseKind::Text => {
-                return Ok(convert_text_response(py, final_result));
-            }
-            ResponseKind::Html => {
-                return Ok(convert_html_response(py, final_result));
-            }
-            ResponseKind::Redirect => {
-                return Ok(convert_redirect_response(py, final_result));
-            }
-            ResponseKind::Streaming | ResponseKind::Sse => {
-                return Ok(convert_streaming_response(py, final_result));
-            }
-            _ => {}
-        }
-    }
+    let mut kind = ResponseKind::Unknown;
 
     if let Some(model) = formatter
         .response_model
@@ -727,6 +686,14 @@ pub fn convert_text_response(py: Python, result: &Bound<PyAny>) -> Response {
     }
 }
 
+fn redirect_response(status: u16, url: &str) -> Response {
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::TEMPORARY_REDIRECT);
+    HeaderValue::try_from(url).map_or_else(
+        |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        |location| (status, [(header::LOCATION, location)]).into_response(),
+    )
+}
+
 #[inline(always)]
 pub fn convert_redirect_response(py: Python, result: &Bound<PyAny>) -> Response {
     if let Some(response) = rendered_response(result) {
@@ -734,17 +701,13 @@ pub fn convert_redirect_response(py: Python, result: &Bound<PyAny>) -> Response 
     }
     if let Ok(resp_bound) = result.cast::<PyRedirectResponse>() {
         let resp = resp_bound.borrow();
-        let res = if resp.status_code == 301 {
-            Redirect::permanent(&resp.url).into_response()
-        } else {
-            Redirect::temporary(&resp.url).into_response()
-        };
+        let res = redirect_response(resp.status_code, &resp.url);
         apply_response_metadata(py, res, resp.headers.as_ref(), None)
     } else if response_kind(result) == ResponseKind::Redirect {
         let url = result
             .getattr(intern!(py, "url"))
             .ok()
-            .and_then(|url| url.extract::<String>().ok())
+            .and_then(|url| url.str().ok().map(|url| url.to_string()))
             .unwrap_or_default();
         let status = result
             .getattr(intern!(py, "status_code"))
@@ -755,11 +718,7 @@ pub fn convert_redirect_response(py: Python, result: &Bound<PyAny>) -> Response 
             .getattr(intern!(py, "headers"))
             .ok()
             .and_then(|h| h.extract::<Py<PyDict>>().ok());
-        let res = if status == 301 {
-            Redirect::permanent(&url).into_response()
-        } else {
-            Redirect::temporary(&url).into_response()
-        };
+        let res = redirect_response(status, &url);
         apply_response_metadata(py, res, headers.as_ref(), None)
     } else {
         error!("Expected RedirectResponse, but got another type.");

@@ -45,10 +45,11 @@ pub(crate) fn build_stack(
     event_loop: EventLoop,
 ) -> Router {
     let max_body_size = app_config.max_body_size.unwrap_or(usize::MAX);
+    let threadpool = app_config.sync_to_threadpool;
     let app = if container.order.is_empty() {
-        apply_legacy(app, container, event_loop)
+        apply_legacy(app, container, event_loop, threadpool)
     } else {
-        apply_declared(app, container, event_loop, max_body_size)
+        apply_declared(app, container, event_loop, max_body_size, threadpool)
     };
 
     apply_config_layers(app, app_config)
@@ -59,6 +60,7 @@ fn apply_declared(
     container: &MiddlewareContainer,
     event_loop: EventLoop,
     max_body_size: usize,
+    threadpool: bool,
 ) -> Router {
     // axum's `.layer()` makes each successive call OUTERMOST, so applying
     // in declaration order yields Starlette semantics: the last-declared
@@ -74,16 +76,21 @@ fn apply_declared(
                 if mw.kind == PyMiddlewareKind::Asgi {
                     asgi_layer(app, mw, event_loop, max_body_size)
                 } else {
-                    custom_layer(app, mw.clone(), event_loop)
+                    custom_layer(app, mw.clone(), event_loop, threadpool)
                 }
             }
         };
     }
     // Decorator-style middlewares stay innermost.
-    decorator_layer(app, container, event_loop)
+    decorator_layer(app, container, event_loop, threadpool)
 }
 
-fn apply_legacy(mut app: Router, container: &MiddlewareContainer, event_loop: EventLoop) -> Router {
+fn apply_legacy(
+    mut app: Router,
+    container: &MiddlewareContainer,
+    event_loop: EventLoop,
+    threadpool: bool,
+) -> Router {
     if container.session.is_some() {
         info!("🔑 Layer: Sessions");
         app = session_layer(app, container);
@@ -95,7 +102,7 @@ fn apply_legacy(mut app: Router, container: &MiddlewareContainer, event_loop: Ev
     }
 
     if !container.py_middlewares.is_empty() {
-        app = decorator_layer(app, container, event_loop);
+        app = decorator_layer(app, container, event_loop, threadpool);
     }
 
     if let Some(_config) = &container.https_redirect {
@@ -272,7 +279,7 @@ fn trusted_host_layer(app: Router, container: &MiddlewareContainer) -> Router {
                 .get(header::HOST)
                 .and_then(|host| host.to_str().ok())
                 .unwrap_or_default();
-            let host = authority.split(':').next().unwrap_or_default();
+            let host = fastrapi_core::path::host_without_port(authority);
 
             if host_matches(&allowed, host) {
                 return next.run(req).await;
@@ -320,7 +327,12 @@ fn https_redirect_layer(app: Router) -> Router {
     ))
 }
 
-fn decorator_layer(app: Router, container: &MiddlewareContainer, event_loop: EventLoop) -> Router {
+fn decorator_layer(
+    app: Router,
+    container: &MiddlewareContainer,
+    event_loop: EventLoop,
+    sync_to_threadpool: bool,
+) -> Router {
     if container.py_middlewares.is_empty() {
         return app;
     }
@@ -330,7 +342,10 @@ fn decorator_layer(app: Router, container: &MiddlewareContainer, event_loop: Eve
         container.py_middlewares.len()
     );
 
-    let py_mws = Arc::new(PreparedMiddlewares::new(&container.py_middlewares));
+    let py_mws = Arc::new(PreparedMiddlewares::new(
+        &container.py_middlewares,
+        sync_to_threadpool,
+    ));
     app.layer(axum_middleware::from_fn(move |req, next| {
         let py_mws = py_mws.clone();
         let loop_ = event_loop;
@@ -374,13 +389,16 @@ fn asgi_layer(
     }
 }
 
-fn custom_layer(app: Router, mw: Arc<PyMiddleware>, event_loop: EventLoop) -> Router {
+fn custom_layer(
+    app: Router,
+    mw: Arc<PyMiddleware>,
+    event_loop: EventLoop,
+    sync_to_threadpool: bool,
+) -> Router {
+    let prepared = Arc::new(PreparedMiddlewares::new(&[mw], sync_to_threadpool));
     app.layer(axum_middleware::from_fn(move |req, next| {
-        let mw = mw.clone();
+        let prepared = prepared.clone();
         let loop_ = event_loop;
-        async move {
-            let prepared = Arc::new(PreparedMiddlewares::new(&[mw]));
-            execute_py_middlewares(prepared, req, next, loop_).await
-        }
+        async move { execute_py_middlewares(prepared, req, next, loop_).await }
     }))
 }

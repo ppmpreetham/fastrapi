@@ -17,7 +17,7 @@ use crate::engine::exception_dispatch::{dispatch_validation_handler, resolve_pen
 use crate::engine::executor::{run_py_handler, run_py_handler_no_request};
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::params::PathParamRange;
-use fastrapi_core::path::strip_root_path;
+use fastrapi_core::path::{host_without_port, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, RouteMatch, RoutePattern};
 use fastrapi_routing::request_data::ValidationErrorDetails;
 use fastrapi_routing::route::{ExecutionMode, RouteHandler};
@@ -40,7 +40,7 @@ pub(crate) async fn dispatch_or_not_found(
         req.headers()
             .get(HOST)
             .and_then(|h| h.to_str().ok())
-            .map(|h| h.split(':').next().unwrap_or(h))
+            .map(host_without_port)
     } else {
         None
     };
@@ -52,7 +52,7 @@ pub(crate) async fn dispatch_or_not_found(
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Ok(method_not_allowed_response(value).await);
+            return Ok(method_not_allowed_response(state.event_loop, value).await);
         }
         return Err(req);
     };
@@ -80,7 +80,8 @@ pub(crate) async fn dispatch_or_not_found(
 
     let event_loop = state.event_loop;
 
-    let path_base = path_str.as_ptr() as usize;
+    let full_path = req.uri().path();
+    let path_base = full_path.as_ptr() as usize;
     let param_ranges: SmallVec<[PathParamRange; 4]> = params_iter
         .map(|params| {
             params
@@ -89,7 +90,7 @@ pub(crate) async fn dispatch_or_not_found(
                 .map(|(i, (_k, v))| {
                     let start = v.as_ptr() as usize - path_base;
                     debug_assert!(
-                        start <= path_str.len(),
+                        start <= full_path.len(),
                         "matchit returned a string outside the input path"
                     );
                     PathParamRange {

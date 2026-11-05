@@ -62,7 +62,7 @@ pub(crate) fn security_requirements(
                     scopes: spec.scopes,
                     kind: spec.kind,
                 }),
-                scopes: node.scopes.clone().into(),
+                scopes: node.scopes.clone(),
             })
         })
         .collect()
@@ -833,6 +833,7 @@ impl PyAPIRouter {
                 params: signature.params,
                 deps,
                 dependency_overrides: None,
+                host: None,
             };
             websockets.lock().push(entry);
             Ok(func)

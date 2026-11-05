@@ -24,7 +24,7 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::mem::take;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 type SharedPyObject = Py<PyAny>;
 
@@ -82,14 +82,31 @@ pub struct DependencyNode {
     /// The position of this node in the flattened plan.
     pub index: usize,
     pub param_name: Option<Py<PyString>>,
-    pub scopes: Vec<String>,
+    pub scopes: Arc<[String]>,
     pub use_cache: bool,
     pub is_top_level: bool,
     pub injection_plan: Vec<(Py<PyString>, InjectionType)>,
     pub needs_request_object: bool,
+    pub context_factory: Arc<OnceLock<Py<PyAny>>>,
 }
 
 impl DependencyNode {
+    fn context_factory<'py>(&self, py: Python<'py>) -> PyResult<&Bound<'py, PyAny>> {
+        if self.context_factory.get().is_none() {
+            let decorator = if self.is_async_generator {
+                &ASYNC_CONTEXT_MANAGER
+            } else {
+                &CONTEXT_MANAGER
+            };
+            let factory = decorator.get(py)?.call1((self.func.bind(py),))?;
+            _ = self.context_factory.set(factory.unbind());
+        }
+        self.context_factory
+            .get()
+            .map(|factory| factory.bind(py))
+            .ok_or_else(|| PyRuntimeError::new_err("dependency context factory is missing"))
+    }
+
     #[inline]
     #[must_use]
     pub const fn is_sync_callable(&self) -> bool {
@@ -220,8 +237,8 @@ pub async fn execute_request_dependencies(
     event_loop: EventLoop,
     plan: &[DependencyNode],
     input: &RequestInput<'_>,
-    request: &Py<PyAny>,
-    response: &Py<PyAny>,
+    request: Option<&Py<PyAny>>,
+    response: Option<&Py<PyAny>>,
     stack: &mut Option<Py<PyAny>>,
     sync_to_threadpool: bool,
 ) -> Result<ResolvedDependencies, DependencyExecutionError> {
@@ -229,22 +246,19 @@ pub async fn execute_request_dependencies(
     let mut results = ResolvedDependencies::new();
     for node in plan {
         let step = Python::attach(|py| -> Result<_, DependencyExecutionError> {
-            let kwargs = build_dependency_kwargs(py, node, &registry, input, Some(request))?;
+            let kwargs = build_dependency_kwargs(py, node, &registry, input, request)?;
             let kwargs = kwargs.bind(py);
-            for (name, injection) in &node.injection_plan {
-                if matches!(injection, InjectionType::Response) {
-                    kwargs.set_item(name.bind(py), response.bind(py))?;
+            if let Some(response) = response {
+                for (name, injection) in &node.injection_plan {
+                    if matches!(injection, InjectionType::Response) {
+                        kwargs.set_item(name.bind(py), response.bind(py))?;
+                    }
                 }
             }
             let func = node.func.bind(py);
             let pending = |future, exit| Ok(NodeStep::Pending { future, exit });
             if node.is_generator || node.is_async_generator {
-                let decorator = if node.is_async_generator {
-                    &ASYNC_CONTEXT_MANAGER
-                } else {
-                    &CONTEXT_MANAGER
-                };
-                let manager = decorator.get(py)?.call1((func,))?.call((), Some(kwargs))?;
+                let manager = node.context_factory(py)?.call((), Some(kwargs))?;
                 if node.is_generator && sync_to_threadpool {
                     let to_thread = TO_THREAD.get(py)?;
                     let coroutine =
@@ -669,11 +683,12 @@ fn extract_and_flatten(
         is_async_generator,
         index: node_index,
         param_name: parent_param_name.map(|name| PyString::intern(py, name).unbind()),
-        scopes,
+        scopes: scopes.into(),
         use_cache,
         is_top_level,
         injection_plan,
         needs_request_object,
+        context_factory: Arc::new(OnceLock::new()),
     });
 
     if use_cache {
@@ -777,7 +792,12 @@ fn build_dependency_kwargs(
                 }
             }
             InjectionType::SecurityScopes => {
-                let py_scopes = Py::new(py, PySecurityScopes::new(Some(dep.scopes.clone())))?;
+                let py_scopes = Py::new(
+                    py,
+                    PySecurityScopes {
+                        scopes: dep.scopes.clone(),
+                    },
+                )?;
                 final_kwargs.set_item(py_arg_name, py_scopes)?;
             }
             InjectionType::Response => {}
@@ -886,16 +906,8 @@ async fn execute_dependencies_inner(
 
         if dep.is_async_generator {
             let future = Python::attach(|py| -> Result<_, DependencyExecutionError> {
-                let py_kwargs = build_dependency_kwargs(
-                    py,
-                    dep,
-                    &results_registry,
-                    request_input,
-                    request.as_ref(),
-                )?;
-                let bound_func = dep.func.bind(py);
-                let bound_kwargs = py_kwargs.bind(py);
-                let generator = bound_func.call((), Some(bound_kwargs))?;
+                let generator =
+                    call_dependency(py, dep, &results_registry, request_input, request.as_ref())?;
 
                 let anext_coroutine = generator.call_method0(intern!(py, "__anext__"))?;
 
@@ -927,16 +939,8 @@ async fn execute_dependencies_inner(
             })?;
         } else {
             let future = Python::attach(|py| -> Result<_, DependencyExecutionError> {
-                let py_kwargs = build_dependency_kwargs(
-                    py,
-                    dep,
-                    &results_registry,
-                    request_input,
-                    request.as_ref(),
-                )?;
-                let bound_func = dep.func.bind(py);
-                let bound_kwargs = py_kwargs.bind(py);
-                let coroutine = bound_func.call((), Some(bound_kwargs))?;
+                let coroutine =
+                    call_dependency(py, dep, &results_registry, request_input, request.as_ref())?;
                 Ok(py_bridge::schedule_task(py, event_loop, coroutine)?)
             })?;
             let outcome = future.await;
@@ -978,12 +982,8 @@ fn execute_sync_node(
     request_input: &RequestInput<'_>,
     request: Option<&SharedPyObject>,
 ) -> Result<(SharedPyObject, Option<TeardownTask>), DependencyExecutionError> {
-    let py_kwargs = build_dependency_kwargs(py, dep, results_registry, request_input, request)?;
-    let bound_func = dep.func.bind(py);
-    let bound_kwargs = py_kwargs.bind(py);
-
     if dep.is_generator {
-        let generator = bound_func.call((), Some(bound_kwargs))?;
+        let generator = call_dependency(py, dep, results_registry, request_input, request)?;
         let value = match generator.call_method0(intern!(py, "__next__")) {
             Ok(v) => v.unbind(),
             Err(e) => {
@@ -1002,8 +1002,26 @@ fn execute_sync_node(
         };
         Ok((value, Some(teardown)))
     } else {
-        Ok((bound_func.call((), Some(bound_kwargs))?.unbind(), None))
+        Ok((
+            call_dependency(py, dep, results_registry, request_input, request)?.unbind(),
+            None,
+        ))
     }
+}
+
+fn call_dependency<'py>(
+    py: Python<'py>,
+    dep: &DependencyNode,
+    results_registry: &[Option<SharedPyObject>],
+    request_input: &RequestInput<'_>,
+    request: Option<&SharedPyObject>,
+) -> Result<Bound<'py, PyAny>, DependencyExecutionError> {
+    let func = dep.func.bind(py);
+    if dep.injection_plan.is_empty() {
+        return Ok(func.call0()?);
+    }
+    let kwargs = build_dependency_kwargs(py, dep, results_registry, request_input, request)?;
+    Ok(func.call((), Some(kwargs.bind(py)))?)
 }
 
 #[inline(always)]

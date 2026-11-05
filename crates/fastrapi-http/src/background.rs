@@ -3,7 +3,7 @@
 
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
-use fastrapi_runtime::server_state::server_loop;
+use fastrapi_runtime::server_state::current_server;
 use fastrapi_runtime::tokio_runtime::spawn;
 use parking_lot::Mutex;
 use pyo3::intern;
@@ -210,7 +210,7 @@ pub fn spawn_response_background(py: Python<'_>, result: &Bound<'_, PyAny>) {
 }
 
 pub fn spawn_response_background_value(background: Py<PyAny>) {
-    let Some(event_loop) = server_loop() else {
+    let Some(event_loop) = current_server() else {
         return;
     };
     spawn(async move {

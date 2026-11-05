@@ -64,6 +64,7 @@ parking_lot = "0.12.5"
 fastwebsockets = { version = "0.10.0", features = ["upgrade", "with_axum", "unstable-split"] }
 
 bytes = "1.12.1"
+itoa = "1.0.18"
 regex = "1"
 matchit = "0.9.2"
 ahash = "0.8.12"
@@ -77,7 +78,6 @@ metrics-exporter-prometheus = "0.18.3"
 metrics = "0.24.6"
 axum-governor = "2.0.3"
 strum = { version = "0.28.0", features = ["derive"] }
-pythonize = "0.29.0"
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "2.0.19"
 smart-default = "0.7.1"

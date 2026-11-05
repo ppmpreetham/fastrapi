@@ -14,8 +14,8 @@ use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::response_convert::convert_auto_response;
 use fastrapi_pyutil::json::json_to_py_object;
 use fastrapi_routing::request_data::ValidationErrorDetails;
-use fastrapi_runtime::py_bridge::{PyTaskFuture, request_loop, schedule_task};
-use fastrapi_runtime::server_state::{exception_handlers, server_loop};
+use fastrapi_runtime::py_bridge::{EventLoop, PyTaskFuture, schedule_task};
+use fastrapi_runtime::server_state::current_server;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -78,7 +78,10 @@ pub(crate) fn dispatch_validation_handler(
     let Some(details) = response.extensions_mut().remove::<ValidationErrorDetails>() else {
         return response;
     };
-    let Some(registry) = exception_handlers() else {
+    let Some(server) = server_of(request_input) else {
+        return response;
+    };
+    let Some(registry) = server.server().exception_handlers() else {
         return response;
     };
     let registry = registry.bind(py);
@@ -95,7 +98,7 @@ pub(crate) fn dispatch_validation_handler(
     };
     let request = build_request_arg(py, request_input);
     match handler.call1((request, exception)) {
-        Ok(result) => match handler_response(py, result) {
+        Ok(result) => match handler_response(py, server, result) {
             Some(result) => result.into_response(response),
             None => response,
         },
@@ -110,9 +113,10 @@ pub(crate) fn dispatch_exception_handler(
     py: Python<'_>,
     err: &PyErr,
     request_input: Option<&RequestInput<'_>>,
+    server: Option<EventLoop>,
 ) -> Option<Response> {
-    let registry = exception_handlers()?;
-    let bound_registry = registry.bind(py);
+    let server = server.or_else(|| server_of(request_input))?;
+    let bound_registry = server.server().exception_handlers()?.bind(py);
 
     let exc_value = err.value(py).clone();
     let handler = if let Ok(http_error) = exc_value.cast::<PyHTTPException>()
@@ -125,7 +129,7 @@ pub(crate) fn dispatch_exception_handler(
 
     let request = build_request_arg(py, request_input);
     match handler.call1((request, exc_value)) {
-        Ok(result) => handler_response(py, result)
+        Ok(result) => handler_response(py, server, result)
             .map(|result| result.into_response(StatusCode::INTERNAL_SERVER_ERROR.into_response())),
         Err(handler_err) => {
             tracing::error!("Exception handler itself failed:");
@@ -135,10 +139,19 @@ pub(crate) fn dispatch_exception_handler(
     }
 }
 
-fn handler_response(py: Python<'_>, result: Bound<'_, PyAny>) -> Option<HandlerResult> {
-    if result.hasattr("__await__").unwrap_or(false) {
-        let event_loop = request_loop().or_else(server_loop)?;
-        let future = schedule_task(py, event_loop, result).ok()?;
+fn server_of(request_input: Option<&RequestInput<'_>>) -> Option<EventLoop> {
+    request_input
+        .and_then(|input| input.server)
+        .or_else(current_server)
+}
+
+fn handler_response(
+    py: Python<'_>,
+    server: EventLoop,
+    result: Bound<'_, PyAny>,
+) -> Option<HandlerResult> {
+    if result.hasattr(intern!(py, "__await__")).unwrap_or(false) {
+        let future = schedule_task(py, server, result).ok()?;
         return Some(HandlerResult::Pending(future));
     }
     Some(HandlerResult::Ready(convert_auto_response(py, &result)))
@@ -181,8 +194,21 @@ fn build_request_arg(py: Python<'_>, request_input: Option<&RequestInput<'_>>) -
         .unwrap_or_else(|| py.None())
 }
 
-pub(crate) fn dispatch_status_handler(py: Python<'_>, status: u16) -> Option<Response> {
-    let registry = exception_handlers()?;
+pub(crate) fn dispatch_status_handler(server: EventLoop, status: u16) -> Option<Response> {
+    let context = server.server();
+    if !context.has_status_handlers() {
+        return None;
+    }
+    let registry = context.exception_handlers()?;
+    Python::attach(|py| status_handler_response(py, server, registry, status))
+}
+
+fn status_handler_response(
+    py: Python<'_>,
+    server: EventLoop,
+    registry: &Py<PyDict>,
+    status: u16,
+) -> Option<Response> {
     let key = PyInt::new(py, status);
     let handler = registry.bind(py).get_item(key).ok().flatten()?;
 
@@ -199,7 +225,7 @@ pub(crate) fn dispatch_status_handler(py: Python<'_>, status: u16) -> Option<Res
     let request = create_stub_request(py).ok()?;
 
     match handler.call1((request, exc.bind(py))) {
-        Ok(result) => handler_response(py, result)
+        Ok(result) => handler_response(py, server, result)
             .map(|result| result.into_response(StatusCode::INTERNAL_SERVER_ERROR.into_response())),
         Err(err) => {
             err.print(py);

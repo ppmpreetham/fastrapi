@@ -120,7 +120,23 @@ pub(crate) fn content_type_of(py: Python<'_>, scope: &Bound<'_, PyAny>) -> Strin
     let Ok(headers) = scope.get_item("headers") else {
         return String::new();
     };
-    let Ok(value) = headers.get_item(PyBytes::new(py, b"content-type")) else {
+    let value = if let Ok(headers) = headers.cast::<pyo3::types::PyDict>() {
+        headers
+            .get_item(PyBytes::new(py, b"content-type"))
+            .ok()
+            .flatten()
+    } else {
+        headers.try_iter().ok().and_then(|pairs| {
+            pairs.flatten().find_map(|pair| {
+                let name = pair.get_item(0).ok()?;
+                let name = name.extract::<&[u8]>().ok()?;
+                name.eq_ignore_ascii_case(b"content-type")
+                    .then(|| pair.get_item(1).ok())
+                    .flatten()
+            })
+        })
+    };
+    let Some(value) = value else {
         return String::new();
     };
     let text = value.extract::<String>().or_else(|_| {

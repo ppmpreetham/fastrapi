@@ -49,7 +49,7 @@ pub fn get_openapi(
         owned(external_docs),
     );
     let route_router = router_from_routes(py, routes)?;
-    let routes = route_router.borrow().snapshot(py).0;
+    let routes = route_router.borrow().snapshot(py)?.0;
     let webhook_router = webhooks
         .filter(|webhooks| !webhooks.is_none())
         .map(|webhooks| router_from_routes(py, webhooks))

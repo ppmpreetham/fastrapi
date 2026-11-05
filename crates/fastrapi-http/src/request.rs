@@ -7,10 +7,11 @@ use crate::request_input::RequestInput;
 use crate::url::PyURL;
 use axum::http::HeaderMap;
 use axum::http::header::COOKIE;
+use bytes::Bytes;
 use cookie::Cookie;
 use fastrapi_pyutil::imports::{SIMPLE_COOKIE, STARLETTE_HEADERS, STARLETTE_STATE, TYPES};
 use fastrapi_runtime::py_bridge;
-use fastrapi_runtime::server_state::{lifespan_state, serve_app};
+use fastrapi_runtime::server_state::current_server;
 use futures_util::FutureExt;
 use pyo3::exceptions::{PyAssertionError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -482,26 +483,34 @@ fn process_asgi_message(message: &Bound<'_, PyAny>, full_body: &mut Vec<u8>) -> 
     Ok(!more_body)
 }
 
-pub fn create_py_request<'a>(
+pub fn create_py_request(
     py: Python<'_>,
     input: &RequestInput<'_>,
-    raw_body: impl Into<Option<&'a [u8]>>,
+    raw_body: Option<Bytes>,
 ) -> PyResult<Py<PyAny>> {
+    let headers = Arc::new(input.headers.clone());
     let scope = PyDict::new(py);
     scope.set_item(intern!(py, "type"), intern!(py, "http"))?;
     scope.set_item(intern!(py, "method"), input.method)?;
     scope.set_item(intern!(py, "path"), input.path)?;
     scope.set_item(intern!(py, "query_string"), input.query_string)?;
-    let headers = PyDict::new(py);
-    for (name, value) in input.headers {
-        headers.set_item(name.as_str().as_bytes(), value.as_bytes())?;
-    }
-    scope.set_item(intern!(py, "headers"), headers)?;
-    if let Some(app) = serve_app() {
-        scope.set_item(intern!(py, "app"), app.bind(py))?;
-    }
-    if let Some(state) = lifespan_state(py) {
-        scope.set_item(intern!(py, "state"), state.bind(py))?;
+    scope.set_item(
+        intern!(py, "headers"),
+        Bound::new(
+            py,
+            PyScopeHeaders {
+                headers: headers.clone(),
+            },
+        )?,
+    )?;
+    if let Some(server) = input.server.or_else(current_server) {
+        let server = server.server();
+        if let Some(app) = server.app() {
+            scope.set_item(intern!(py, "app"), app.bind(py))?;
+        }
+        if let Some(state) = server.lifespan_state(py) {
+            scope.set_item(intern!(py, "state"), state.bind(py))?;
+        }
     }
 
     let path_params = PyDict::new(py);
@@ -512,13 +521,72 @@ pub fn create_py_request<'a>(
     }
     scope.set_item(intern!(py, "path_params"), path_params)?;
 
-    let bound_req = PyRequest::create_bound(
-        py,
-        scope.into_any().unbind(),
-        Some(Arc::new(input.headers.clone())),
-        raw_body,
-    )?;
+    let bound_req =
+        PyRequest::create_bound(py, scope.into_any().unbind(), Some(headers), raw_body)?;
     Ok(bound_req.into_any().unbind())
+}
+
+#[pyclass(
+    frozen,
+    name = "ScopeHeaders",
+    module = "fastrapi.request",
+    skip_from_py_object
+)]
+pub struct PyScopeHeaders {
+    headers: Arc<HeaderMap>,
+}
+
+impl PyScopeHeaders {
+    fn pair<'py>(
+        py: Python<'py>,
+        name: &axum::http::HeaderName,
+        value: &axum::http::HeaderValue,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(
+            py,
+            [
+                PyBytes::new(py, name.as_str().as_bytes()),
+                PyBytes::new(py, value.as_bytes()),
+            ],
+        )
+    }
+
+    fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let list = PyList::empty(py);
+        for (name, value) in self.headers.iter() {
+            list.append(Self::pair(py, name, value)?)?;
+        }
+        Ok(list)
+    }
+}
+
+#[pymethods]
+impl PyScopeHeaders {
+    fn __len__(&self) -> usize {
+        self.headers.len()
+    }
+
+    fn __getitem__<'py>(&self, py: Python<'py>, index: isize) -> PyResult<Bound<'py, PyTuple>> {
+        let len = self.headers.len().cast_signed();
+        let position = if index < 0 { index + len } else { index };
+        usize::try_from(position)
+            .ok()
+            .and_then(|position| self.headers.iter().nth(position))
+            .ok_or_else(|| pyo3::exceptions::PyIndexError::new_err("header index out of range"))
+            .and_then(|(name, value)| Self::pair(py, name, value))
+    }
+
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyIterator>> {
+        self.to_list(py)?.into_any().try_iter()
+    }
+
+    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        self.to_list(py)?.eq(other)
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(self.to_list(py)?.repr()?.to_string())
+    }
 }
 
 pub fn create_stub_request(py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -541,16 +609,16 @@ pub fn create_stub_request(py: Python<'_>) -> PyResult<Py<PyAny>> {
 pub struct PyRequest {
     #[pyo3(get, set)]
     pub send: Py<PyAny>,
-    pub(crate) body_cache: Arc<OnceCell<Arc<[u8]>>>,
+    pub(crate) body_cache: Arc<OnceCell<Bytes>>,
     pub(crate) raw_headers: Option<Arc<HeaderMap>>,
 }
 
 impl PyRequest {
-    pub fn create_bound<'a>(
+    pub fn create_bound(
         py: Python<'_>,
         scope: Py<PyAny>,
         headers: Option<Arc<HeaderMap>>,
-        raw_body: impl Into<Option<&'a [u8]>>,
+        raw_body: Option<Bytes>,
     ) -> PyResult<Bound<'_, Self>> {
         let conn = PyHTTPConnection {
             scope,
@@ -562,8 +630,8 @@ impl PyRequest {
             raw_headers: headers,
         };
 
-        if let Some(bytes) = raw_body.into() {
-            _ = req.body_cache.set(bytes.into());
+        if let Some(bytes) = raw_body {
+            _ = req.body_cache.set(bytes);
         }
 
         let initializer = PyClassInitializer::from(conn).add_subclass(req);
@@ -633,7 +701,7 @@ impl PyRequest {
         let locals = py_bridge::get_current_locals(py)?;
 
         py_bridge::future_into_py_with_locals(py, locals.clone(), async move {
-            let body: Arc<[u8]> = body_cell
+            let body: Bytes = body_cell
                 .get_or_try_init(|| async {
                     let mut full_body = content_length.map_or_else(Vec::new, Vec::with_capacity);
 
@@ -653,7 +721,7 @@ impl PyRequest {
                             break;
                         }
                     }
-                    Ok::<Arc<[u8]>, PyErr>(full_body.into())
+                    Ok::<Bytes, PyErr>(full_body.into())
                 })
                 .await?
                 .clone();
@@ -760,12 +828,12 @@ impl PyRequest {
         py_bridge::future_into_py_with_locals(py, locals, async move {
             let body_bytes: Py<PyAny> = body_fut.await?;
 
-            let raw: Arc<[u8]> = body_cell.get().cloned().unwrap_or_else(|| {
+            let raw: Bytes = body_cell.get().cloned().unwrap_or_else(|| {
                 Python::attach(|py| {
                     body_bytes
                         .bind(py)
                         .cast::<PyBytes>()
-                        .map(|bytes| Arc::from(bytes.as_bytes()))
+                        .map(|bytes| Bytes::copy_from_slice(bytes.as_bytes()))
                         .unwrap_or_default()
                 })
             });

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use tracing::{error, info};
 
 use fastrapi_runtime::py_bridge::{self, EventLoop};
-use fastrapi_runtime::server_state::{set_serve_app, set_server_loop};
+use fastrapi_runtime::server_state::set_server_loop;
 use fastrapi_runtime::tokio_runtime::PYTHON_RUNTIME;
 use std::env::var;
 use std::io;
@@ -122,7 +122,7 @@ pub fn serve(
     py_bridge::init_with_fastrapi_runtime();
     let event_loop = start_background_asyncio_loop(py)?;
     set_server_loop(event_loop);
-    set_serve_app(app.clone_ref(py).into_any());
+    event_loop.server().set_app(app.clone_ref(py).into_any());
     let app_bound = app.bind(py);
     app_bound.borrow_mut().apply_router_mounts(py)?;
     let custom_openapi = super::routes::custom_openapi_spec(py, app_bound.as_any());
@@ -209,8 +209,15 @@ pub fn serve(
         custom_openapi,
     );
     drop(app_config);
+    let router = match router {
+        Ok(router) => router,
+        Err(err) => {
+            stop_background_asyncio_loop(py, event_loop);
+            return Err(err);
+        }
+    };
 
-    let server_thread = spawn(move || -> io::Result<()> {
+    let server_thread = spawn(move || -> PyResult<()> {
         let entered_lifespan =
             Python::attach(|py| run_startup_phase(py, &app, lifespan, on_startup, event_loop));
 
@@ -219,11 +226,11 @@ pub fn serve(
             Err(err) => {
                 log_python_error("startup failed", &err);
                 Python::attach(|py| stop_background_asyncio_loop(py, event_loop));
-                return Ok(());
+                return Err(err);
             }
         };
         let addr = format!("{host}:{port}");
-        let served = PYTHON_RUNTIME.block_on(async move {
+        let served: io::Result<()> = PYTHON_RUNTIME.block_on(async move {
             let listener = TcpListener::bind(&addr).await.map_err(|err| {
                 io::Error::new(err.kind(), format!("failed to bind to {addr}: {err}"))
             })?;
@@ -262,13 +269,17 @@ pub fn serve(
             }
             stop_background_asyncio_loop(py, event_loop);
         });
-        served
+        served.map_err(PyErr::from)
     });
 
-    py.detach(move || server_thread.join())
-        .map_err(|_| PyRuntimeError::new_err("Server thread panicked"))??;
-
-    Ok(())
+    py.detach(move || server_thread.join()).map_err(|panic| {
+        let message = panic
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        PyRuntimeError::new_err(format!("Server thread panicked: {message}"))
+    })?
 }
 
 pub fn serve_with_reload(

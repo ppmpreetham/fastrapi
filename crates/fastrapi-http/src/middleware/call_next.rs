@@ -32,8 +32,6 @@ pub struct PyDownstreamResponse {
     pub status_code: u16,
     #[pyo3(get)]
     pub headers: Py<PyDict>,
-    #[pyo3(get)]
-    pub body: Py<PyBytes>,
     pub body_bytes: bytes::Bytes,
 }
 
@@ -43,8 +41,13 @@ impl PyDownstreamResponse {
         format!("DownstreamResponse(status_code={})", self.status_code)
     }
 
-    fn text(&self, py: Python<'_>) -> String {
-        String::from_utf8_lossy(self.body.bind(py).as_bytes()).into_owned()
+    #[getter]
+    fn body<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.body_bytes)
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body_bytes).into_owned()
     }
 }
 
@@ -135,7 +138,6 @@ fn parts_to_py<'py>(
         PyDownstreamResponse {
             status_code: parts.status,
             headers: headers_dict.unbind(),
-            body: PyBytes::new(py, &body).unbind(),
             body_bytes: body,
         },
     )
@@ -189,6 +191,7 @@ fn drive(
         let Some(mw) = middlewares.get(idx).cloned() else {
             return next.run(request).await;
         };
+        let is_async = mw.is_async;
 
         let (parts, body) = request.into_parts();
         let method = parts.method.clone();
@@ -201,7 +204,7 @@ fn drive(
             next,
         };
 
-        let outcome = run_python(move |py| -> Result<Outcome, Response> {
+        let call = move |py: Python<'_>| -> Result<Outcome, Response> {
             invoke(
                 py,
                 &mw,
@@ -212,8 +215,12 @@ fn drive(
                 downstream,
                 event_loop,
             )
-        })
-        .await;
+        };
+        let outcome = if is_async {
+            Ok(Python::attach(call))
+        } else {
+            run_python(call).await
+        };
 
         match outcome {
             Ok(Ok(Outcome::Respond(response))) => response,

@@ -148,6 +148,7 @@ impl PyAPIRouter {
             })
             .unwrap_or_default();
 
+        super::tree::validate_dependencies(py, dependencies.as_ref())?;
         if let Some(rc) = &route_class {
             let is_type = Python::attach(|py| rc.bind(py).is_instance_of::<PyType>());
             if !is_type {
@@ -295,7 +296,7 @@ impl PyAPIRouter {
 
     #[getter]
     fn routes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let (routes, websockets) = self.snapshot(py);
+        let (routes, websockets) = self.snapshot(py)?;
         crate::ffi::routing::route_objects(py, &routes, &websockets)
     }
 
@@ -404,6 +405,8 @@ impl PyAPIRouter {
             .collect();
 
         let py = router.py();
+        let dependencies_owned = dependencies.map(|d| d.clone().unbind());
+        super::tree::validate_dependencies(py, dependencies_owned.as_ref())?;
         let included = router.borrow();
         self.startup_handlers.lock().extend(
             included
@@ -441,7 +444,7 @@ impl PyAPIRouter {
             router: router.clone().unbind(),
             prefix: prefix.to_owned(),
             tags: tag_vec,
-            dependencies: dependencies.map(|d| d.clone().unbind()),
+            dependencies: dependencies_owned,
             responses: responses.map(|r| r.clone().unbind()),
             deprecated,
             include_in_schema,
@@ -503,10 +506,10 @@ pub(crate) fn collect_router_routes(
     obj: &Bound<'_, PyAny>,
 ) -> Option<Vec<RouteEntry>> {
     if let Ok(router) = obj.cast::<PyAPIRouter>() {
-        return Some(router.borrow().flatten(py).0.clone());
+        return router.borrow().flatten(py).ok().map(|flat| flat.0.clone());
     }
     let routes = PyList::new(py, [obj]).ok()?;
     let router = PyAPIRouter::default();
     crate::ffi::openapi::add_route_objects(py, &router, routes.as_any()).ok()?;
-    Some(router.snapshot(py).0)
+    router.snapshot(py).ok().map(|flat| flat.0)
 }

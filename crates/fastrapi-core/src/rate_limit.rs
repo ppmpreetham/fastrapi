@@ -47,7 +47,8 @@ pub fn is_rate_limited(req: &Request, handler: usize, limit: NonZeroU32) -> bool
     let now_secs = Instant::now().duration_since(*start_time).as_secs() as u32;
 
     let pinned = limits.pin();
-    if LAST_SWEEP.swap(u64::from(now_secs), Relaxed) != u64::from(now_secs) {
+    let now = u64::from(now_secs);
+    if LAST_SWEEP.load(Relaxed) != now && LAST_SWEEP.swap(now, Relaxed) != now {
         pinned.retain(|_, window| window.is_live(now_secs));
     }
 

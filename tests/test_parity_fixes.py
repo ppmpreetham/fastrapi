@@ -1869,3 +1869,177 @@ def test_generator_endpoints_stream(client, app):
     assert sse_response.headers["cache-control"] == "no-cache"
     assert 'data: {"name":"c"}' in sse_response.text
     assert client.get("/raw").text == "r1r2"
+
+
+def test_root_path_keeps_path_params():
+    import httpx
+    from test_websocket_smoke import _free_port, _serve
+
+    app = FastrAPI(root_path="/api")
+
+    @app.get("/items/{item_id}/{name}")
+    def item(item_id: int, name: str):
+        return {"item_id": item_id, "name": name}
+
+    port = _free_port()
+    _serve(app, port)
+    expected = {"item_id": 7, "name": "box"}
+    assert httpx.get(f"http://127.0.0.1:{port}/api/items/7/box").json() == expected
+    assert httpx.get(f"http://127.0.0.1:{port}/items/7/box").json() == expected
+
+
+def test_objects_with_path_and_filename_are_not_served_as_files(client, app, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("top secret")
+
+    class Upload:
+        def __init__(self):
+            self.path = str(secret)
+            self.filename = "secret.txt"
+
+    @app.get("/upload", response_model=None)
+    def upload():
+        return Upload()
+
+    response = client.get("/upload")
+    assert "top secret" not in response.text
+
+
+def test_openapi_before_routes_does_not_freeze_app():
+    app = FastrAPI()
+    assert app.openapi()["paths"] == {}
+
+    @app.get("/late")
+    def late():
+        return {}
+
+    app.openapi_schema = None
+    assert "/late" in app.openapi()["paths"]
+
+
+def test_invalid_router_dependencies_fail_at_registration():
+    import pytest
+
+    from fastrapi import APIRouter, Depends
+
+    with pytest.raises(TypeError):
+        APIRouter(dependencies=[Depends(1)])
+    with pytest.raises(TypeError):
+        FastrAPI().include_router(APIRouter(), dependencies=[Depends(1)])
+    with pytest.raises(TypeError):
+        FastrAPI(dependencies=[Depends(1)])
+
+
+def test_startup_failure_raises_from_serve():
+    import pytest
+    from test_websocket_smoke import _free_port
+
+    def broken():
+        raise RuntimeError("startup broke")
+
+    app = FastrAPI(on_startup=[broken])
+    with pytest.raises(RuntimeError, match="startup broke"):
+        app.serve(host="127.0.0.1", port=_free_port())
+
+
+def test_each_server_keeps_its_own_app_and_handlers():
+    import httpx
+    from test_websocket_smoke import _free_port, _serve
+
+    from fastrapi import Request
+    from fastrapi.responses import JSONResponse
+
+    def build(title):
+        app = FastrAPI(title=title)
+
+        @app.get("/who")
+        def who(request: Request):
+            return {"title": request.app.title}
+
+        @app.exception_handler(ValueError)
+        def handle(request, exc):
+            return JSONResponse({"handled_by": title}, status_code=418)
+
+        @app.get("/boom")
+        def boom():
+            raise ValueError("boom")
+
+        return app
+
+    ports = []
+    for title in ("first", "second"):
+        port = _free_port()
+        _serve(build(title), port)
+        ports.append((title, port))
+    for title, port in ports:
+        assert httpx.get(f"http://127.0.0.1:{port}/who").json() == {"title": title}
+        boom = httpx.get(f"http://127.0.0.1:{port}/boom")
+        assert boom.status_code == 418 and boom.json() == {"handled_by": title}
+
+
+def test_redirect_status_codes_are_kept(client, app):
+    from fastrapi.responses import RedirectResponse
+
+    @app.get("/see-other")
+    def see_other():
+        return RedirectResponse("/target", status_code=303)
+
+    @app.get("/found")
+    def found():
+        return RedirectResponse("/target", status_code=302)
+
+    @app.get("/permanent")
+    def permanent():
+        return RedirectResponse("/target", status_code=301)
+
+    for path, status in (("/see-other", 303), ("/found", 302), ("/permanent", 301)):
+        response = client.get(path, follow_redirects=False)
+        assert response.status_code == status
+        assert response.headers["location"] == "/target"
+
+
+def test_host_routes_accept_ipv6_hosts_and_websockets_respect_hosts():
+    import socket
+
+    import httpx
+    from test_websocket_smoke import _free_port, _serve
+
+    from fastrapi import APIRouter, WebSocket
+
+    app = FastrAPI()
+    router = APIRouter()
+    sub = FastrAPI()
+
+    @sub.get("/v6")
+    def v6():
+        return {"v6": True}
+
+    @sub.websocket("/hosted-ws")
+    async def hosted_ws(websocket: WebSocket):
+        await websocket.accept()
+        await websocket.close()
+
+    router.host("[::1]", sub)
+    app.include_router(router)
+    port = _free_port()
+    _serve(app, port)
+    response = httpx.get(f"http://127.0.0.1:{port}/v6", headers={"host": f"[::1]:{port}"})
+    assert response.json() == {"v6": True}
+
+    def upgrade(host):
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.sendall(
+                (
+                    "GET /hosted-ws HTTP/1.1\r\n"
+                    f"Host: {host}\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                    "Sec-WebSocket-Version: 13\r\n"
+                    "\r\n"
+                ).encode()
+            )
+            return sock.recv(64).split(b"\r\n", 1)[0]
+
+    assert b" 101 " in upgrade(f"[::1]:{port}")
+    assert b" 404 " in upgrade(f"127.0.0.1:{port}")

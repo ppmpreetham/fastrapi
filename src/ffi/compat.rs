@@ -306,7 +306,7 @@ fn get_dependant(
         let kwargs = PyDict::new(py);
         kwargs.set_item("call", node.func.bind(py))?;
         kwargs.set_item("use_cache", node.use_cache)?;
-        kwargs.set_item("security_scopes", node.scopes)?;
+        kwargs.set_item("security_scopes", node.scopes.to_vec())?;
         dependencies.append(namespace.call((), Some(&kwargs))?)?;
     }
     let kwargs = PyDict::new(py);

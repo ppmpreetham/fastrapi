@@ -204,6 +204,7 @@ impl FastrAPI {
         powered_by_header: Option<String>,
         extra: Option<Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        crate::ffi::decorators::tree::validate_dependencies(py, dependencies.as_ref())?;
         let explicit_default_response_class = default_response_class
             .as_ref()
             .map(|class| class.clone_ref(py));
@@ -510,7 +511,7 @@ impl FastrAPI {
 
     #[getter(routes)]
     fn get_routes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let (routes, websockets) = self.router.bind(py).borrow().snapshot(py);
+        let (routes, websockets) = self.router.bind(py).borrow().snapshot(py)?;
         crate::ffi::routing::route_objects(py, &routes, &websockets)
     }
 
@@ -785,7 +786,7 @@ impl FastrAPI {
             return Ok(entry.dict.clone_ref(py));
         }
 
-        let spec = self.openapi_spec(py);
+        let spec = self.openapi_spec(py)?;
         let json_str = simd_json::to_string(&spec).unwrap_or_else(|_| "{}".to_string());
         let json_module = py.import(pyo3::intern!(py, "json"))?;
         let dict = json_module.call_method1(pyo3::intern!(py, "loads"), (json_str,))?;
@@ -1049,8 +1050,9 @@ crate::generate_http_methods!(
 );
 
 impl FastrAPI {
-    pub(crate) fn openapi_spec(&self, py: Python<'_>) -> simd_json::OwnedValue {
-        let routes = self.router.bind(py).borrow().flatten(py).0.clone();
+    pub(crate) fn openapi_spec(&self, py: Python<'_>) -> PyResult<simd_json::OwnedValue> {
+        let flat = self.router.bind(py).borrow().flatten(py)?;
+        let routes = &flat.0;
         let document = AppDocument {
             openapi_version: &self.openapi_version,
             title: &self.title,
@@ -1069,8 +1071,8 @@ impl FastrAPI {
             webhooks: self.webhooks.as_ref(),
             generate_unique_id_function: self.generate_unique_id_function.as_ref(),
             separate_input_output_schemas: self.separate_input_output_schemas,
-            routes: &routes,
+            routes,
         };
-        build_openapi_spec(py, &document, collect_router_routes)
+        Ok(build_openapi_spec(py, &document, collect_router_routes))
     }
 }

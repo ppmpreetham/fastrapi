@@ -11,7 +11,6 @@ use axum::response::{IntoResponse, Response};
 use bytes::{Bytes, BytesMut};
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
-use fastrapi_runtime::server_state::serve_app;
 use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
@@ -292,7 +291,7 @@ pub async fn run_asgi_request(
 
     let outcome = Python::attach(|py| -> PyResult<_> {
         let locals = py_bridge::TaskLocals::new(event_loop.bind(py).clone());
-        let scope = build_scope(py, &parts)?;
+        let scope = build_scope(py, &parts, event_loop)?;
         let handle = Py::new(
             py,
             PyDownstreamASGI {
@@ -427,7 +426,7 @@ fn middleware_error_response() -> Response {
         .into_response()
 }
 
-fn build_scope(py: Python<'_>, parts: &Parts) -> PyResult<Py<PyDict>> {
+fn build_scope(py: Python<'_>, parts: &Parts, server: EventLoop) -> PyResult<Py<PyDict>> {
     let scope = PyDict::new(py);
     scope.set_item(intern!(py, "type"), intern!(py, "http"))?;
     let asgi = PyDict::new(py);
@@ -457,7 +456,7 @@ fn build_scope(py: Python<'_>, parts: &Parts) -> PyResult<Py<PyDict>> {
     scope.set_item(intern!(py, "headers"), headers)?;
     scope.set_item(intern!(py, "client"), py.None())?;
     scope.set_item(intern!(py, "server"), py.None())?;
-    if let Some(app) = serve_app() {
+    if let Some(app) = server.server().app() {
         scope.set_item(intern!(py, "app"), app.bind(py))?;
     }
     scope.set_item(intern!(py, "state"), PyDict::new(py))?;

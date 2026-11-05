@@ -1,6 +1,6 @@
 [package]
 name = "fastrapi-runtime"
-description = "The tokio runtime fastrapi runs on, its bridge to the asyncio loop, and process-wide server state"
+description = "The tokio runtime fastrapi runs on, its bridge to the asyncio loop, and per-server state"
 version.workspace = true
 edition.workspace = true
 

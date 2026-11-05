@@ -7,9 +7,9 @@ edition.workspace = true
 [dependencies]
 axum.workspace = true
 bytes.workspace = true
+itoa.workspace = true
 papaya.workspace = true
 pyo3.workspace = true
-pythonize.workspace = true
 simd-json.workspace = true
 
 [lints]

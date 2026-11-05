@@ -42,6 +42,7 @@ fn specialized_response_conversion(
     result: &Bound<'_, PyAny>,
     handler: &RouteHandler,
     request_headers: Option<&HeaderMap>,
+    server: EventLoop,
 ) -> Response {
     match handler.response.response_type {
         ResponseType::PlainText => {
@@ -51,13 +52,13 @@ fn specialized_response_conversion(
 
             match convert_response_by_type(py, result, &handler.response, request_headers) {
                 Ok(resp) => resp,
-                Err(err) => python_error_to_response(py, err),
+                Err(err) => python_error_to_response(py, err, server),
             }
         }
 
         _ => match convert_response_by_type(py, result, &handler.response, request_headers) {
             Ok(resp) => resp,
-            Err(err) => python_error_to_response(py, err),
+            Err(err) => python_error_to_response(py, err, server),
         },
     }
 }
@@ -66,6 +67,7 @@ pub(crate) fn build_request_input_from_parts<'a>(
     parts: &'a Parts,
     param_ranges: &[PathParamRange],
     names: &'a [Arc<str>],
+    server: EventLoop,
 ) -> RequestInput<'a> {
     let path_str = parts.uri.path();
     let path_params = OnceLock::new();
@@ -89,6 +91,7 @@ pub(crate) fn build_request_input_from_parts<'a>(
         path_params,
         query_params: OnceLock::new(),
         cookies: OnceLock::new(),
+        server: Some(server),
     }
 }
 
@@ -135,6 +138,21 @@ pub(crate) fn prepare_kwargs_and_payload<'py>(
     Ok((kwargs, bg_tasks))
 }
 
+pub(crate) fn request_object(
+    py: Python<'_>,
+    handler: &RouteHandler,
+    kwargs: &Bound<'_, PyDict>,
+    request_input: &RequestInput<'_>,
+    payload: Option<&BodyPayload>,
+) -> PyResult<Py<PyAny>> {
+    if let Some(name) = &handler.payload.request_param
+        && let Some(existing) = kwargs.get_item(name.bind(py))?
+    {
+        return Ok(existing.unbind());
+    }
+    create_py_request(py, request_input, payload_raw_bytes(payload))
+}
+
 #[inline(always)]
 fn resolve_sync_deps<'py>(
     py: Python<'py>,
@@ -151,7 +169,9 @@ fn resolve_sync_deps<'py>(
     )
     .map_err(|e| match e {
         DependencyExecutionError::Response(r) => *r,
-        DependencyExecutionError::Python(err) => python_error_to_response(py, err),
+        DependencyExecutionError::Python(err) => {
+            python_error_to_response_in(py, &err, Some(request_input))
+        }
     })?;
 
     dep_results.into_iter().try_for_each(|(name, value)| {
@@ -168,6 +188,7 @@ fn call_handler_and_convert(
     handler: &RouteHandler,
     kwargs: Option<&Bound<'_, PyDict>>,
     request_headers: Option<&HeaderMap>,
+    server: EventLoop,
 ) -> Result<Response, PyErr> {
     let py_func = handler.execution.func.bind(py);
     let result = kwargs.map_or_else(|| py_func.call0(), |kw| py_func.call((), Some(kw)));
@@ -177,22 +198,31 @@ fn call_handler_and_convert(
             &res,
             handler,
             request_headers,
+            server,
         )),
         Err(err) => Err(err),
     }
 }
 
-pub(crate) fn render_no_request_response(py: Python<'_>, handler: &RouteHandler) -> Response {
-    match call_handler_and_convert(py, handler, None, None) {
+pub(crate) fn render_no_request_response(
+    py: Python<'_>,
+    handler: &RouteHandler,
+    server: EventLoop,
+) -> Response {
+    match call_handler_and_convert(py, handler, None, None, server) {
         Ok(res) => res,
-        Err(err) => python_error_to_response(py, err),
+        Err(err) => python_error_to_response(py, err, server),
     }
 }
 
-pub(crate) fn render_no_request_json_response(py: Python<'_>, handler: &RouteHandler) -> Response {
+pub(crate) fn render_no_request_json_response(
+    py: Python<'_>,
+    handler: &RouteHandler,
+    server: EventLoop,
+) -> Response {
     let result = match handler.execution.func.bind(py).call0() {
         Ok(result) => result,
-        Err(err) => return python_error_to_response(py, err),
+        Err(err) => return python_error_to_response(py, err, server),
     };
 
     if result.is_none() {
@@ -214,7 +244,7 @@ pub(crate) fn render_no_request_json_response(py: Python<'_>, handler: &RouteHan
     if !is_plain_value {
         return match convert_response_by_type(py, &result, &handler.response, None) {
             Ok(resp) => resp,
-            Err(err) => python_error_to_response(py, err),
+            Err(err) => python_error_to_response(py, err, server),
         };
     }
 
@@ -225,13 +255,14 @@ pub(crate) fn render_no_request_json_response(py: Python<'_>, handler: &RouteHan
         handler.response.serialization_hint,
         handler.response.dump_options.as_ref().map(|d| d.bind(py)),
     )
-    .unwrap_or_else(|err| python_error_to_response(py, err))
+    .unwrap_or_else(|err| python_error_to_response(py, err, server))
 }
 
 pub(crate) type PyTaskFuture = py_bridge::PyTaskFuture;
 
 #[inline(always)]
 async fn await_python_future(
+    event_loop: EventLoop,
     handler: &RouteHandler,
     request_input: Option<&RequestInput<'_>>,
     future_result: Result<PyTaskFuture, Response>,
@@ -248,6 +279,7 @@ async fn await_python_future(
             res.bind(py),
             handler,
             request_input.map(|input| input.headers),
+            event_loop,
         )),
         Err(err) => Err(python_error_to_response_in(py, &err, request_input)),
     })
@@ -268,10 +300,11 @@ fn into_asyncio_future(
     coroutine: Bound<'_, PyAny>,
 ) -> Result<PyTaskFuture, Response> {
     schedule_python_coroutine(py, event_loop, coroutine)
-        .map_err(|err| python_error_to_response(py, err))
+        .map_err(|err| python_error_to_response(py, err, event_loop))
 }
 
 async fn core_sync_no_args(
+    event_loop: EventLoop,
     handler: &'static RouteHandler,
     request_parts: Option<Parts>,
     sync_to_threadpool: bool,
@@ -283,9 +316,10 @@ async fn core_sync_no_args(
                 handler,
                 None,
                 request_parts.as_ref().map(|parts| &parts.headers),
+                event_loop,
             ) {
                 Ok(res) => res,
-                Err(err) => python_error_to_response(py, err),
+                Err(err) => python_error_to_response(py, err, event_loop),
             }
         });
     }
@@ -296,9 +330,10 @@ async fn core_sync_no_args(
             handler,
             None,
             request_parts.as_ref().map(|parts| &parts.headers),
+            event_loop,
         ) {
             Ok(res) => res,
-            Err(err) => python_error_to_response(py, err),
+            Err(err) => python_error_to_response(py, err, event_loop),
         }
     })
     .await
@@ -315,7 +350,12 @@ async fn core_async_no_args(
         .as_ref()
         .zip(param_ranges.as_ref())
         .map(|(parts, ranges)| {
-            build_request_input_from_parts(parts, ranges, &handler.payload.path_param_names)
+            build_request_input_from_parts(
+                parts,
+                ranges,
+                &handler.payload.path_param_names,
+                event_loop,
+            )
         });
     let future_res = Python::attach(|py| -> Result<_, Response> {
         let coroutine = handler
@@ -323,18 +363,18 @@ async fn core_async_no_args(
             .func
             .bind(py)
             .call0()
-            .map_err(|err| python_error_to_response(py, err))?;
+            .map_err(|err| python_error_to_response(py, err, event_loop))?;
         into_asyncio_future(py, event_loop, coroutine)
     });
-    match await_python_future(handler, request_input.as_ref(), future_res).await {
+    match await_python_future(event_loop, handler, request_input.as_ref(), future_res).await {
         Ok(res) => res,
         Err(err) => err,
     }
 }
 
-pub(crate) fn payload_raw_bytes(payload: Option<&BodyPayload>) -> Option<&[u8]> {
+pub(crate) fn payload_raw_bytes(payload: Option<&BodyPayload>) -> Option<bytes::Bytes> {
     match payload {
-        Some(BodyPayload::Json { raw, .. } | BodyPayload::Form { raw, .. }) => Some(raw),
+        Some(BodyPayload::Json { raw, .. } | BodyPayload::Form { raw, .. }) => Some(raw.clone()),
         None => None,
     }
 }
@@ -349,13 +389,14 @@ fn run_sync_gil_section(
         request_input,
         payload,
         needs_request_object,
+        server,
     } = *state;
 
     let (kwargs, bg_tasks) = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
 
     let req_obj = if needs_request_object {
         Some(
-            create_py_request(py, request_input, payload_raw_bytes(payload))
+            request_object(py, handler, &kwargs, request_input, payload)
                 .map_err(|e| python_error_to_response_in(py, &e, Some(request_input)))?,
         )
     } else {
@@ -364,8 +405,13 @@ fn run_sync_gil_section(
 
     let teardowns = resolve_sync_deps(py, handler, request_input, req_obj, &kwargs)?;
 
-    let response =
-        call_handler_and_convert(py, handler, Some(&kwargs), Some(request_input.headers));
+    let response = call_handler_and_convert(
+        py,
+        handler,
+        Some(&kwargs),
+        Some(request_input.headers),
+        server,
+    );
     match response {
         Ok(response) => {
             execute_teardowns_sync(py, teardowns, None);
@@ -373,7 +419,7 @@ fn run_sync_gil_section(
         }
         Err(err) => {
             execute_teardowns_sync(py, teardowns, Some(&err));
-            Err(python_error_to_response(py, err))
+            Err(python_error_to_response_in(py, &err, Some(request_input)))
         }
     }
 }
@@ -383,6 +429,7 @@ struct GilSection<'a, 'b, 'c> {
     request_input: &'b RequestInput<'c>,
     payload: Option<&'a BodyPayload>,
     needs_request_object: bool,
+    server: EventLoop,
 }
 
 #[inline]
@@ -479,12 +526,14 @@ fn run_sync_route<const NEEDS_REQ: bool>(
         request_parts,
         param_ranges,
         &handler.payload.path_param_names,
+        event_loop,
     );
     let section = GilSection {
         handler,
         request_input: &request_input,
         payload,
         needs_request_object: NEEDS_REQ,
+        server: event_loop,
     };
     match run_sync_gil_section(py, &section) {
         Ok((response, bg_tasks)) => {
@@ -506,6 +555,7 @@ async fn core_async_no_deps(
         &request_parts,
         &param_ranges,
         &handler.payload.path_param_names,
+        event_loop,
     );
     let future_res = Python::attach(|py| -> Result<_, Response> {
         let (kwargs, bg_tasks) =
@@ -527,7 +577,7 @@ async fn core_async_no_deps(
         Err(resp) => return resp,
     };
 
-    match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
+    match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
             spawn_background_tasks(event_loop, bg_tasks, &response);
             response
@@ -547,6 +597,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
         &request_parts,
         &param_ranges,
         &handler.payload.path_param_names,
+        event_loop,
     );
     let setup = Python::attach(
         |py| -> Option<Result<(PyTaskFuture, Option<Py<PyBackgroundTasks>>), Response>> {
@@ -580,7 +631,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
         Err(resp) => return resp,
     };
 
-    match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
+    match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
             spawn_background_tasks(event_loop, bg_tasks, &response);
             response
@@ -600,7 +651,7 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
 
     let req_obj = if NEEDS_REQ {
         Some(
-            create_py_request(py, request_input, payload_raw_bytes(payload))
+            request_object(py, handler, &kwargs, request_input, payload)
                 .map_err(|e| python_error_to_response_in(py, &e, Some(request_input)))?,
         )
     } else {
@@ -620,6 +671,8 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
     Ok((future, bg_tasks))
 }
 
+type AsyncDepsPrep = (Option<Py<PyAny>>, Py<PyDict>, Option<Py<PyBackgroundTasks>>);
+
 async fn core_async_async_deps<const NEEDS_REQ: bool>(
     event_loop: EventLoop,
     handler: &'static RouteHandler,
@@ -631,27 +684,42 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
         &request_parts,
         &param_ranges,
         &handler.payload.path_param_names,
+        event_loop,
     );
-    let prep = Python::attach(
-        |py| -> Result<(Option<Py<PyAny>>, Py<PyDict>, Option<Py<PyBackgroundTasks>>), Response> {
+    let prep = Python::attach(|py| -> Option<Result<AsyncDepsPrep, Response>> {
+        if overrides_active(py, handler) {
+            return None;
+        }
+        Some((|| {
             let (kwargs, bg_tasks) =
                 prepare_kwargs_and_payload(py, handler, &request_input, payload.as_ref())?;
-
             let req_obj = if NEEDS_REQ {
                 Some(
-                    create_py_request(py, &request_input, payload_raw_bytes(payload.as_ref()))
+                    request_object(py, handler, &kwargs, &request_input, payload.as_ref())
                         .map_err(|e| python_error_to_response_in(py, &e, Some(&request_input)))?,
                 )
             } else {
                 None
             };
             Ok((req_obj, kwargs.unbind(), bg_tasks))
-        },
-    );
+        })())
+    });
 
     let (request_object, kwargs_unbind, bg_tasks) = match prep {
-        Ok(res) => res,
-        Err(r) => return r,
+        Some(Ok(res)) => res,
+        Some(Err(r)) => return r,
+        None => {
+            drop(request_input);
+            return Box::pin(run_managed_handler(
+                event_loop,
+                handler,
+                request_parts,
+                param_ranges,
+                payload,
+                false,
+            ))
+            .await;
+        }
     };
 
     let (dependency_results, teardowns) = match dependencies::execute_dependencies(
@@ -665,7 +733,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
         Ok(results) => results,
         Err(DependencyExecutionError::Response(r)) => return *r,
         Err(DependencyExecutionError::Python(err)) => {
-            return blocking::run_python(move |py| python_error_to_response(py, err))
+            return blocking::run_python(move |py| python_error_to_response(py, err, event_loop))
                 .await
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
@@ -697,7 +765,14 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
         Err(resp) => return resp,
     };
 
-    let response = match await_python_future(handler, Some(&request_input), Ok(future_res)).await {
+    let response = match await_python_future(
+        event_loop,
+        handler,
+        Some(&request_input),
+        Ok(future_res),
+    )
+    .await
+    {
         Ok(response) => {
             spawn_background_tasks(event_loop, bg_tasks, &response);
             response
@@ -729,7 +804,7 @@ pub async fn run_py_handler(
             .await
         }
         ExecutionMode::SyncNoArgs => {
-            core_sync_no_args(handler, Some(request_parts), sync_to_threadpool).await
+            core_sync_no_args(event_loop, handler, Some(request_parts), sync_to_threadpool).await
         }
         ExecutionMode::AsyncNoArgs => {
             core_async_no_args(event_loop, handler, Some(request_parts), Some(param_ranges)).await
@@ -794,7 +869,7 @@ pub async fn run_py_handler_no_request(
 ) -> Response {
     match handler.execution.execution_mode {
         ExecutionMode::SyncNoArgs => {
-            core_sync_no_args(handler, request_parts, sync_to_threadpool).await
+            core_sync_no_args(event_loop, handler, request_parts, sync_to_threadpool).await
         }
         ExecutionMode::AsyncNoArgs => {
             core_async_no_args(event_loop, handler, request_parts, None).await

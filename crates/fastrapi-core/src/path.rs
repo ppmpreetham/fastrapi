@@ -59,6 +59,14 @@ pub fn join_path(a: &str, b: &str) -> String {
 }
 
 #[must_use]
+pub fn host_without_port(host: &str) -> &str {
+    if host.starts_with('[') {
+        return host.find(']').map_or(host, |end| &host[..=end]);
+    }
+    host.split_once(':').map_or(host, |(name, _)| name)
+}
+
+#[must_use]
 pub fn strip_root_path<'a>(root: &str, original_path: &'a str) -> Option<&'a str> {
     if root.is_empty() {
         Some(original_path)

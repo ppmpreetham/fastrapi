@@ -319,7 +319,9 @@ fn validate_scalar_constraints(
 ) -> Result<(), Response> {
     let loc = param.error_loc();
 
-    if let Ok(number) = value.extract::<f64>() {
+    if param.constraints.has_numeric_bounds()
+        && let Ok(number) = value.extract::<f64>()
+    {
         let numeric = |kind: &str, msg: String, key: &str, limit: f64| {
             validation_error_with_ctx(
                 &loc,
@@ -371,7 +373,9 @@ fn validate_scalar_constraints(
         }
     }
 
-    if let Ok(text) = value.extract::<&str>() {
+    if param.constraints.has_text_bounds()
+        && let Ok(text) = value.extract::<&str>()
+    {
         if let Some(min_length) = param.constraints.min_length
             && text.chars().count() < min_length
         {
@@ -918,9 +922,8 @@ pub fn apply_request_data(
         let req = create_py_request(
             py,
             request_input,
-            payload.and_then(|p| match p {
-                BodyPayload::Json { raw, .. } => Some(raw.as_ref()),
-                BodyPayload::Form { .. } => None,
+            payload.map(|p| match p {
+                BodyPayload::Json { raw, .. } | BodyPayload::Form { raw, .. } => raw.clone(),
             }),
         )
         .map_err(fail)?;

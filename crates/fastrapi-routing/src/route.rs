@@ -152,6 +152,7 @@ pub struct WebSocketEntry {
     pub params: Vec<ParsedParameter>,
     pub deps: SmallVec<[DependencyNode; 4]>,
     pub dependency_overrides: Option<Py<PyAny>>,
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,7 +176,7 @@ impl RouteHandler {
         if payload.response_param.is_some()
             || payload.dependency_needs_response
             || payload.has_generators
-            || payload.has_async_dependencies
+            || (payload.has_async_dependencies && !self.execution.is_async)
         {
             self.execution.execution_mode = ExecutionMode::Managed;
             return;

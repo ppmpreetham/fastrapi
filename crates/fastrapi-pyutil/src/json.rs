@@ -15,9 +15,8 @@ use pyo3::types::{
     PyString, PyTuple, PyType,
 };
 use pyo3::{Bound, intern};
-use pythonize::pythonize;
 use simd_json::owned::Object;
-use simd_json::{OwnedValue as Value, owned};
+use simd_json::{OwnedValue as Value, StaticNode, owned};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::io::{self, Write};
@@ -170,42 +169,50 @@ pub fn json_ser_error(err: simd_json::Error) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
+const ESCAPE: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut byte = 0;
+    while byte < 0x20 {
+        table[byte] = b'u';
+        byte += 1;
+    }
+    table[0x08] = b'b';
+    table[0x09] = b't';
+    table[0x0A] = b'n';
+    table[0x0C] = b'f';
+    table[0x0D] = b'r';
+    table[b'"' as usize] = b'"';
+    table[b'\\' as usize] = b'\\';
+    table
+};
+
 #[inline]
 pub fn write_json_string<W: Write>(writer: &mut W, value: &str) -> PyResult<()> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     writer.write_all(b"\"").map_err(json_io_error)?;
 
     let bytes = value.as_bytes();
     let mut start = 0;
 
     for (i, &b) in bytes.iter().enumerate() {
-        let escape: &[u8] = match b {
-            b'"' => b"\\\"",
-            b'\\' => b"\\\\",
-            0x08 => b"\\b",
-            0x09 => b"\\t",
-            0x0A => b"\\n",
-            0x0C => b"\\f",
-            0x0D => b"\\r",
-            0..=0x1F => {
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                let buf = [
-                    b'\\',
-                    b'u',
-                    b'0',
-                    b'0',
-                    HEX[(b >> 4) as usize],
-                    HEX[(b & 0x0F) as usize],
-                ];
-                writer
-                    .write_all(&bytes[start..i])
-                    .and_then(|()| writer.write_all(&buf))
-                    .map_err(json_io_error)?;
-                start = i + 1;
-                continue;
-            }
-            _ => continue,
+        let code = ESCAPE[b as usize];
+        if code == 0 {
+            continue;
+        }
+        let unicode;
+        let escape: &[u8] = if code == b'u' {
+            unicode = [
+                b'\\',
+                b'u',
+                b'0',
+                b'0',
+                HEX[(b >> 4) as usize],
+                HEX[(b & 0x0F) as usize],
+            ];
+            &unicode
+        } else {
+            &[b'\\', code]
         };
-
         writer
             .write_all(&bytes[start..i])
             .and_then(|()| writer.write_all(escape))
@@ -257,19 +264,19 @@ where
 }
 
 #[derive(Debug)]
-pub enum PyJsonKind<'py> {
+pub enum PyJsonKind<'a, 'py> {
     None,
-    Dict(Bound<'py, PyDict>),
-    List(Bound<'py, PyList>),
-    Tuple(Bound<'py, PyTuple>),
-    Set(Bound<'py, PySet>),
-    FrozenSet(Bound<'py, PyFrozenSet>),
-    Str(Bound<'py, PyString>),
-    Bool(Bound<'py, PyBool>),
-    Int(Bound<'py, PyInt>),
-    Float(Bound<'py, PyFloat>),
-    Bytes(Bound<'py, PyBytes>),
-    ByteArray(Bound<'py, PyByteArray>),
+    Dict(&'a Bound<'py, PyDict>),
+    List(&'a Bound<'py, PyList>),
+    Tuple(&'a Bound<'py, PyTuple>),
+    Set(&'a Bound<'py, PySet>),
+    FrozenSet(&'a Bound<'py, PyFrozenSet>),
+    Str(&'a Bound<'py, PyString>),
+    Bool(&'a Bound<'py, PyBool>),
+    Int(&'a Bound<'py, PyInt>),
+    Float(&'a Bound<'py, PyFloat>),
+    Bytes(&'a Bound<'py, PyBytes>),
+    ByteArray(&'a Bound<'py, PyByteArray>),
     MemoryView,
     PydanticModel,
     Dataclass,
@@ -407,51 +414,46 @@ fn decimal_number<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<B
 
 #[inline]
 #[must_use]
-pub fn classify_py_value<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyJsonKind<'py> {
+pub fn classify_py_value<'a, 'py>(
+    py: Python<'py>,
+    value: &'a Bound<'py, PyAny>,
+) -> PyJsonKind<'a, 'py> {
     if value.is_none() {
         return PyJsonKind::None;
     }
 
+    if let Ok(s) = value.cast_exact::<PyString>() {
+        return PyJsonKind::Str(s);
+    }
+    if let Ok(i) = value.cast_exact::<PyInt>() {
+        return PyJsonKind::Int(i);
+    }
+    if let Ok(b) = value.cast_exact::<PyBool>() {
+        return PyJsonKind::Bool(b);
+    }
+    if let Ok(f) = value.cast_exact::<PyFloat>() {
+        return PyJsonKind::Float(f);
+    }
     if let Ok(d) = value.cast::<PyDict>() {
-        return PyJsonKind::Dict(d.clone());
+        return PyJsonKind::Dict(d);
     }
     if let Ok(l) = value.cast::<PyList>() {
-        return PyJsonKind::List(l.clone());
+        return PyJsonKind::List(l);
     }
     if let Ok(t) = value.cast::<PyTuple>() {
-        return PyJsonKind::Tuple(t.clone());
+        return PyJsonKind::Tuple(t);
     }
     if let Ok(s) = value.cast::<PySet>() {
-        return PyJsonKind::Set(s.clone());
+        return PyJsonKind::Set(s);
     }
     if let Ok(fs) = value.cast::<PyFrozenSet>() {
-        return PyJsonKind::FrozenSet(fs.clone());
-    }
-    if value.is_exact_instance_of::<PyString>()
-        && let Ok(s) = value.cast::<PyString>()
-    {
-        return PyJsonKind::Str(s.clone());
-    }
-    if value.is_exact_instance_of::<PyBool>()
-        && let Ok(b) = value.cast::<PyBool>()
-    {
-        return PyJsonKind::Bool(b.clone());
-    }
-    if value.is_exact_instance_of::<PyInt>()
-        && let Ok(i) = value.cast::<PyInt>()
-    {
-        return PyJsonKind::Int(i.clone());
-    }
-    if value.is_exact_instance_of::<PyFloat>()
-        && let Ok(f) = value.cast::<PyFloat>()
-    {
-        return PyJsonKind::Float(f.clone());
+        return PyJsonKind::FrozenSet(fs);
     }
     if let Ok(b) = value.cast::<PyBytes>() {
-        return PyJsonKind::Bytes(b.clone());
+        return PyJsonKind::Bytes(b);
     }
     if let Ok(b) = value.cast::<PyByteArray>() {
-        return PyJsonKind::ByteArray(b.clone());
+        return PyJsonKind::ByteArray(b);
     }
 
     if value.is_instance_of::<PyMemoryView>() {
@@ -509,7 +511,7 @@ pub fn write_py_json<W: Write>(
 
         PyJsonKind::FrozenSet(fset) => write_json_array(py, writer, fset.iter()),
 
-        PyJsonKind::Str(s) => write_json_string(writer, &json_text(&s)?),
+        PyJsonKind::Str(s) => write_json_string(writer, &json_text(s)?),
 
         PyJsonKind::Bool(b) => {
             if b.is_true() {
@@ -521,7 +523,9 @@ pub fn write_py_json<W: Write>(
 
         PyJsonKind::Int(i) => {
             if let Ok(v) = i.extract::<i64>() {
-                write!(writer, "{v}").map_err(json_io_error)
+                writer
+                    .write_all(itoa::Buffer::new().format(v).as_bytes())
+                    .map_err(json_io_error)
             } else if let Ok(s) = json_text_of(value) {
                 writer.write_all(s.as_bytes()).map_err(json_io_error)
             } else {
@@ -734,7 +738,32 @@ pub fn owned_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::OwnedGuar
 #[inline]
 #[must_use]
 pub fn json_to_py_object(py: Python<'_>, value: &Value) -> Py<PyAny> {
-    pythonize(py, value).map_or_else(|_| py.None(), Bound::unbind)
+    json_value_to_py(py, value).map_or_else(|_| py.None(), Bound::unbind)
+}
+
+fn json_value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match value {
+        Value::Static(StaticNode::Null) => py.None().into_bound(py),
+        Value::Static(StaticNode::Bool(flag)) => PyBool::new(py, *flag).to_owned().into_any(),
+        Value::Static(StaticNode::I64(number)) => number.into_pyobject(py)?.into_any(),
+        Value::Static(StaticNode::U64(number)) => number.into_pyobject(py)?.into_any(),
+        Value::Static(StaticNode::F64(number)) => PyFloat::new(py, *number).into_any(),
+        Value::String(text) => PyString::new(py, text).into_any(),
+        Value::Array(items) => {
+            let list = PyList::empty(py);
+            for item in items.iter() {
+                list.append(json_value_to_py(py, item)?)?;
+            }
+            list.into_any()
+        }
+        Value::Object(entries) => {
+            let dict = PyDict::new(py);
+            for (key, item) in entries.iter() {
+                dict.set_item(PyString::new(py, key), json_value_to_py(py, item)?)?;
+            }
+            dict.into_any()
+        }
+    })
 }
 
 #[inline]
@@ -792,9 +821,9 @@ fn py_dict_key_str<'k>(key: &'k Bound<'_, PyAny>) -> Cow<'k, str> {
 pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
     match classify_py_value(py, value) {
         PyJsonKind::None => simd_json::json!(null),
-        PyJsonKind::Dict(dict) => py_dict_to_json(py, &dict),
-        PyJsonKind::List(list) => py_list_to_json(py, &list),
-        PyJsonKind::Str(s) => simd_json::json!(lossy_text(&s)),
+        PyJsonKind::Dict(dict) => py_dict_to_json(py, dict),
+        PyJsonKind::List(list) => py_list_to_json(py, list),
+        PyJsonKind::Str(s) => simd_json::json!(lossy_text(s)),
         PyJsonKind::Bool(b) => simd_json::json!(b.is_true()),
         PyJsonKind::Int(i) => i.extract::<i64>().map_or_else(
             |_| {

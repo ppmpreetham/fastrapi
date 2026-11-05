@@ -45,6 +45,31 @@ pub(crate) fn response_kind(result: &Bound<'_, PyAny>) -> ResponseKind {
 }
 
 fn probe_response_kind(ty: &Bound<'_, PyType>) -> ResponseKind {
+    let own = kind_from_name(ty);
+    if own != ResponseKind::Unknown {
+        return own;
+    }
+    ty.mro()
+        .iter()
+        .skip(1)
+        .filter_map(|base| base.cast_into::<PyType>().ok())
+        .filter(|base| {
+            base.module().is_ok_and(|module| {
+                module.to_str().is_ok_and(|module| {
+                    ["starlette", "fastapi", "fastrapi"].iter().any(|root| {
+                        module
+                            .strip_prefix(root)
+                            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+                    })
+                })
+            })
+        })
+        .map(|base| kind_from_name(&base))
+        .find(|kind| *kind != ResponseKind::Unknown)
+        .unwrap_or(ResponseKind::Unknown)
+}
+
+fn kind_from_name(ty: &Bound<'_, PyType>) -> ResponseKind {
     let Ok(name) = ty.name() else {
         return ResponseKind::Unknown;
     };
@@ -62,13 +87,6 @@ fn probe_response_kind(ty: &Bound<'_, PyType>) -> ResponseKind {
         "FileResponse" => ResponseKind::File,
         _ => ResponseKind::Unknown,
     }
-}
-
-pub(crate) fn is_starlette_response(result: &Bound<'_, PyAny>) -> bool {
-    let py = result.py();
-    result.hasattr(intern!(py, "body")).unwrap_or(false)
-        && result.hasattr(intern!(py, "status_code")).unwrap_or(false)
-        && result.hasattr(intern!(py, "headers")).unwrap_or(false)
 }
 
 pub(crate) fn response_status(result: &Bound<'_, PyAny>, default: StatusCode) -> StatusCode {

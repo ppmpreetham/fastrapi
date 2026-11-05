@@ -25,6 +25,20 @@ pub struct ParameterConstraints {
     pub pattern: Option<Arc<Regex>>,
 }
 
+impl ParameterConstraints {
+    #[inline]
+    #[must_use]
+    pub const fn has_numeric_bounds(&self) -> bool {
+        self.gt.is_some() || self.ge.is_some() || self.lt.is_some() || self.le.is_some()
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn has_text_bounds(&self) -> bool {
+        self.min_length.is_some() || self.max_length.is_some() || self.pattern.is_some()
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct PathParamRange {
     pub name_index: usize,

@@ -16,29 +16,43 @@ use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio as par;
 use tokio::sync::oneshot;
 
+use crate::server_state::ServerContext;
 use crate::tokio_runtime::PYTHON_RUNTIME;
 pub use pyo3_async_runtimes::{TaskLocals, into_future_with_locals};
 
 fastrapi_pyutil::cached_py_import!(ENSURE_FUTURE, "asyncio", "ensure_future");
+fastrapi_pyutil::cached_py_import!(COROUTINE_TYPE, "types", "CoroutineType");
 
 #[derive(Clone, Copy)]
-pub struct EventLoop(&'static Py<PyAny>);
+pub struct EventLoop(&'static ServerContext);
 
 impl EventLoop {
-    #[must_use]
-    pub fn leak(event_loop: Py<PyAny>) -> Self {
-        Self(Box::leak(Box::new(event_loop)))
+    pub fn leak(py: Python<'_>, event_loop: Py<PyAny>) -> PyResult<Self> {
+        let create_task = event_loop
+            .bind(py)
+            .getattr(intern!(py, "create_task"))?
+            .unbind();
+        Ok(Self(Box::leak(Box::new(ServerContext::new(
+            event_loop,
+            create_task,
+        )))))
     }
 
     #[inline]
     #[must_use]
     pub fn bind(self, py: Python<'_>) -> &Bound<'_, PyAny> {
-        self.0.bind(py)
+        self.0.event_loop.bind(py)
     }
 
     #[inline]
     #[must_use]
     pub const fn as_py(self) -> &'static Py<PyAny> {
+        &self.0.event_loop
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn server(self) -> &'static ServerContext {
         self.0
     }
 }
@@ -138,7 +152,16 @@ impl PyTaskBridge {
             return Ok(());
         }
 
-        let task = ENSURE_FUTURE.get(py)?.call1((awaitable,))?;
+        let awaitable = awaitable.into_bound(py);
+        let task = if awaitable.get_type().is(COROUTINE_TYPE.get(py)?) {
+            handle
+                .event_loop
+                .server()
+                .create_task(py)
+                .call1((awaitable,))?
+        } else {
+            ENSURE_FUTURE.get(py)?.call1((awaitable,))?
+        };
         if handle.cancelled.load(Ordering::Relaxed) {
             _ = task.call_method0(intern!(py, "cancel"));
             return Ok(());

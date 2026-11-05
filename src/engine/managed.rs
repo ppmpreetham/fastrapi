@@ -2,7 +2,7 @@
 //! It injects the dependencies, applies the response metadata and closes the dependency exit stacks.
 
 use super::executor::{
-    build_request_input_from_parts, payload_raw_bytes, prepare_kwargs_and_payload,
+    build_request_input_from_parts, prepare_kwargs_and_payload, request_object,
     spawn_background_tasks,
 };
 use super::handler_errors::python_error_to_response_in;
@@ -22,7 +22,6 @@ use pyo3::types::{PyDict, PyList};
 use smallvec::SmallVec;
 
 use fastrapi_http::background::PyBackgroundTasks;
-use fastrapi_http::request::create_py_request;
 use fastrapi_http::response_convert::convert_response_by_type;
 use fastrapi_http::responses::PyResponse;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -35,31 +34,59 @@ pub(crate) async fn run_managed_handler(
     payload: Option<BodyPayload>,
     sync_to_threadpool: bool,
 ) -> Response {
-    let input = build_request_input_from_parts(&parts, &ranges, &handler.payload.path_param_names);
+    let input = build_request_input_from_parts(
+        &parts,
+        &ranges,
+        &handler.payload.path_param_names,
+        event_loop,
+    );
     let setup = Python::attach(|py| -> Result<_, Response> {
         let (kwargs, background) =
             prepare_kwargs_and_payload(py, handler, &input, payload.as_ref())?;
         let objects = (|| -> PyResult<_> {
-            let response = py.get_type::<PyResponse>().call0()?;
-            response.setattr(intern!(py, "status_code"), 0u16)?;
-            response.setattr(intern!(py, "raw_headers"), PyList::empty(py))?;
-            if let Some(name) = &handler.payload.response_param {
-                kwargs.set_item(name.bind(py), &response)?;
-            }
-            let request = create_py_request(py, &input, payload_raw_bytes(payload.as_ref()))?;
             let plan = dependencies::request_plan(
                 py,
                 &handler.payload.dependencies,
                 handler.payload.dependency_overrides.as_ref(),
                 &handler.payload.path_param_names,
             )?;
-            Ok((
-                kwargs.unbind(),
-                background,
-                request,
-                response.unbind(),
-                plan,
-            ))
+            let (needs_request, needs_response) = match &plan {
+                std::borrow::Cow::Borrowed(_) => (
+                    handler.payload.dependency_needs_request,
+                    handler.payload.dependency_needs_response,
+                ),
+                std::borrow::Cow::Owned(nodes) => (
+                    nodes.iter().any(|node| node.needs_request_object),
+                    nodes.iter().any(|node| {
+                        node.injection_plan.iter().any(|(_, injection)| {
+                            matches!(injection, dependencies::InjectionType::Response)
+                        })
+                    }),
+                ),
+            };
+            let response = if handler.payload.response_param.is_some() || needs_response {
+                let response = py.get_type::<PyResponse>().call0()?;
+                response.setattr(intern!(py, "status_code"), 0u16)?;
+                response.setattr(intern!(py, "raw_headers"), PyList::empty(py))?;
+                if let Some(name) = &handler.payload.response_param {
+                    kwargs.set_item(name.bind(py), &response)?;
+                }
+                Some(response.unbind())
+            } else {
+                None
+            };
+            let request = if needs_request {
+                Some(request_object(
+                    py,
+                    handler,
+                    &kwargs,
+                    &input,
+                    payload.as_ref(),
+                )?)
+            } else {
+                None
+            };
+            Ok((kwargs.unbind(), background, request, response, plan))
         })();
         objects.map_err(|err| python_error_to_response_in(py, &err, Some(&input)))
     });
@@ -74,8 +101,8 @@ pub(crate) async fn run_managed_handler(
             event_loop,
             &plan,
             &input,
-            &request,
-            &metadata,
+            request.as_ref(),
+            metadata.as_ref(),
             &mut stack,
             sync_to_threadpool,
         )
@@ -132,7 +159,7 @@ pub(crate) async fn run_managed_handler(
                 &input,
                 converted,
                 None,
-                &metadata,
+                metadata.as_ref(),
                 background.take(),
             )),
         }
@@ -151,7 +178,7 @@ pub(crate) async fn run_managed_handler(
                     &input,
                     converted,
                     Some(exit),
-                    &metadata,
+                    metadata.as_ref(),
                     background,
                 )
             })
@@ -205,7 +232,7 @@ fn finish_managed_response(
     input: &RequestInput<'_>,
     outcome: ManagedOutcome,
     exit: Option<PyResult<Py<PyAny>>>,
-    metadata: &Py<PyAny>,
+    metadata: Option<&Py<PyAny>>,
     background: Option<Py<PyBackgroundTasks>>,
 ) -> Response {
     match exit {
@@ -229,7 +256,10 @@ fn finish_managed_response(
         }
         Err(DependencyExecutionError::Response(response)) => *response,
         Ok((mut response, explicit)) => {
-            if !explicit && let Err(err) = apply_response_metadata(py, metadata, &mut response) {
+            if !explicit
+                && let Some(metadata) = metadata
+                && let Err(err) = apply_response_metadata(py, metadata, &mut response)
+            {
                 return python_error_to_response_in(py, &err, Some(input));
             }
             spawn_background_tasks(event_loop, background, &response);

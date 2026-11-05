@@ -3,7 +3,7 @@
 
 mod init;
 mod requests;
-mod tree;
+pub(crate) mod tree;
 
 pub(crate) use init::add_api_route_kwargs;
 pub use tree::flatten_router;

@@ -41,6 +41,15 @@ pub(crate) async fn extract_payload(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
 
+    if handler.payload.body_param_indices.is_empty() {
+        let raw = to_bytes(body, state.max_body_size.unwrap_or(usize::MAX))
+            .await
+            .map_err(|_| {
+                (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response()
+            })?;
+        return Ok((!raw.is_empty()).then_some(BodyPayload::Json { raw, value: None }));
+    }
+
     if content_type.starts_with("multipart/form-data") {
         let raw = to_bytes(body, state.max_body_size.unwrap_or(usize::MAX))
             .await

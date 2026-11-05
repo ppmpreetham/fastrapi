@@ -5,6 +5,7 @@
 use axum::http::HeaderMap;
 use axum::http::header::COOKIE;
 use cookie::Cookie;
+use fastrapi_runtime::py_bridge::EventLoop;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::sync::OnceLock;
@@ -21,6 +22,7 @@ pub struct RequestInput<'a> {
     pub query_params: QueryParams<'a>,
     pub headers: &'a HeaderMap,
     pub cookies: OnceLock<SmallVec<[(&'a str, &'a str); 8]>>,
+    pub server: Option<EventLoop>,
 }
 
 impl<'a> RequestInput<'a> {

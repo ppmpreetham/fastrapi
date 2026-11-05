@@ -3,7 +3,6 @@
 
 use crate::engine::config::FastrAPI;
 use fastrapi_runtime::py_bridge::{EventLoop, schedule_task};
-use fastrapi_runtime::server_state::{clear_lifespan_state, set_lifespan_state};
 use fastrapi_runtime::tokio_runtime::PYTHON_RUNTIME;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
@@ -21,7 +20,7 @@ pub(crate) struct EnteredLifespan {
 pub(crate) fn start_background_asyncio_loop(py: Python<'_>) -> PyResult<EventLoop> {
     let event_loop = create_event_loop(py)?;
     spawn_loop_thread(py, &event_loop)?;
-    Ok(EventLoop::leak(event_loop))
+    EventLoop::leak(py, event_loop)
 }
 
 pub(crate) fn create_event_loop(py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -160,7 +159,7 @@ pub(crate) fn enter_lifespan(
         manager.call_method0("__enter__")?.unbind()
     };
     if !state.bind(py).is_none() {
-        set_lifespan_state(state.clone_ref(py));
+        event_loop.server().set_lifespan_state(state.clone_ref(py));
     }
     Ok(EnteredLifespan {
         manager: manager.unbind(),
@@ -202,7 +201,7 @@ pub(crate) fn exit_lifespan(py: Python<'_>, entered_lifespan: &EnteredLifespan) 
             .call_method1("__exit__", (py.None(), py.None(), py.None()))
             .map(|_| ())
     };
-    clear_lifespan_state();
+    entered_lifespan.event_loop.server().clear_lifespan_state();
 
     result
 }

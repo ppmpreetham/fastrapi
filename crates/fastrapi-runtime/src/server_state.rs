@@ -1,11 +1,79 @@
-//! Global state of the running server.
-//! It keeps the server event loop, the application object, the lifespan state, and the exception handlers.
+//! The state of each running server.
+//! Every server keeps its event loop, application object, lifespan state, and exception handlers in its own context.
 
 use parking_lot::RwLock;
+use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::OnceLock;
 
-use crate::py_bridge::EventLoop;
+use crate::py_bridge::{EventLoop, request_loop};
+
+pub struct ServerContext {
+    pub(crate) event_loop: Py<PyAny>,
+    create_task: Py<PyAny>,
+    app: OnceLock<Py<PyAny>>,
+    exception_handlers: OnceLock<Py<PyDict>>,
+    status_handlers: OnceLock<bool>,
+    lifespan_state: RwLock<Option<Py<PyAny>>>,
+}
+
+impl ServerContext {
+    pub(crate) const fn new(event_loop: Py<PyAny>, create_task: Py<PyAny>) -> Self {
+        Self {
+            event_loop,
+            create_task,
+            app: OnceLock::new(),
+            exception_handlers: OnceLock::new(),
+            status_handlers: OnceLock::new(),
+            lifespan_state: RwLock::new(None),
+        }
+    }
+
+    pub(crate) fn create_task<'py>(&self, py: Python<'py>) -> &Bound<'py, PyAny> {
+        self.create_task.bind(py)
+    }
+
+    pub fn set_app(&self, app: Py<PyAny>) {
+        _ = self.app.set(app);
+    }
+
+    pub fn app(&self) -> Option<&Py<PyAny>> {
+        self.app.get()
+    }
+
+    pub fn set_exception_handlers(&self, py: Python<'_>, registry: Py<PyDict>) {
+        let has_status = registry
+            .bind(py)
+            .keys()
+            .iter()
+            .any(|key| key.is_instance_of::<pyo3::types::PyInt>());
+        _ = self.status_handlers.set(has_status);
+        _ = self.exception_handlers.set(registry);
+    }
+
+    pub fn exception_handlers(&self) -> Option<&Py<PyDict>> {
+        self.exception_handlers.get()
+    }
+
+    pub fn has_status_handlers(&self) -> bool {
+        self.status_handlers.get().copied().unwrap_or(false)
+    }
+
+    pub fn set_lifespan_state(&self, state: Py<PyAny>) {
+        *self.lifespan_state.write() = Some(state);
+    }
+
+    pub fn clear_lifespan_state(&self) {
+        *self.lifespan_state.write() = None;
+    }
+
+    pub fn lifespan_state(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.lifespan_state
+            .read()
+            .as_ref()
+            .map(|state| state.clone_ref(py))
+    }
+}
 
 static SERVER_LOOP: RwLock<Option<EventLoop>> = RwLock::new(None);
 
@@ -17,38 +85,6 @@ pub fn server_loop() -> Option<EventLoop> {
     *SERVER_LOOP.read()
 }
 
-static SERVE_APP: OnceLock<pyo3::Py<pyo3::PyAny>> = OnceLock::new();
-static LIFESPAN_STATE: RwLock<Option<pyo3::Py<pyo3::PyAny>>> = RwLock::new(None);
-
-pub fn set_serve_app(app: pyo3::Py<pyo3::PyAny>) {
-    _ = SERVE_APP.set(app);
-}
-
-pub fn serve_app() -> Option<&'static pyo3::Py<pyo3::PyAny>> {
-    SERVE_APP.get()
-}
-
-pub fn set_lifespan_state(state: pyo3::Py<pyo3::PyAny>) {
-    *LIFESPAN_STATE.write() = Some(state);
-}
-
-pub fn clear_lifespan_state() {
-    *LIFESPAN_STATE.write() = None;
-}
-
-pub fn lifespan_state(py: pyo3::Python<'_>) -> Option<pyo3::Py<pyo3::PyAny>> {
-    LIFESPAN_STATE
-        .read()
-        .as_ref()
-        .map(|state| state.clone_ref(py))
-}
-
-static EXCEPTION_HANDLERS: RwLock<Option<pyo3::Py<PyDict>>> = RwLock::new(None);
-
-pub fn set_exception_handlers(registry: pyo3::Py<PyDict>) {
-    *EXCEPTION_HANDLERS.write() = Some(registry);
-}
-
-pub fn exception_handlers() -> Option<pyo3::Py<PyDict>> {
-    EXCEPTION_HANDLERS.read().clone()
+pub fn current_server() -> Option<EventLoop> {
+    request_loop().or_else(server_loop)
 }

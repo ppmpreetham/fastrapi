@@ -40,7 +40,8 @@ fn enabled() -> bool {
 
 pub struct KernelFastPath {
     schema: KernelSchema,
-    model_class: Py<PyAny>,
+    construct: Py<PyAny>,
+    field_names: Box<[(Box<str>, Py<PyString>)]>,
 }
 
 enum KernelSchema {
@@ -116,9 +117,8 @@ pub fn maybe_validate_with_kernel(
     validator: &PydanticValidator,
     raw_payload: &[u8],
 ) -> Option<Result<Py<PyAny>, Response>> {
-    from_utf8(raw_payload).ok()?;
     let fast = fast_path(py, validator)?;
-    KERNEL_VALIDATIONS.fetch_add(1, Ordering::Relaxed);
+    from_utf8(raw_payload).ok()?;
     validate_body(py, fast, raw_payload)
 }
 
@@ -143,7 +143,11 @@ fn resolve_fast_path(
         return cached.clone();
     }
     let compiled = compile_model(py, model_class, name).map(Arc::new);
-    cache().lock().entry(key).or_insert(compiled).clone()
+    let mut cache = cache().lock();
+    if !cache.contains_key(&key) && compiled.is_some() {
+        KERNEL_VALIDATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    cache.entry(key).or_insert(compiled).clone()
 }
 
 fn py_schema_to_json(obj: &Bound<'_, PyAny>) -> Option<serde_json::Value> {
@@ -227,9 +231,27 @@ fn compile_model<'py>(
     } else {
         KernelSchema::Raw(CompiledSchema::with_title(&schema, None, name).ok()?)
     };
+    let py = model_class.py();
+    let construct = model_class
+        .getattr(pyo3::intern!(py, "model_construct"))
+        .ok()?
+        .unbind();
+    let field_names = model_class
+        .getattr(pyo3::intern!(py, "model_fields"))
+        .ok()?
+        .try_iter()
+        .ok()?
+        .filter_map(|name| {
+            let name = name.ok()?.cast_into::<PyString>().ok()?;
+            let text: Box<str> = name.to_str().ok()?.into();
+            let interned = PyString::intern(py, &text).unbind();
+            Some((text, interned))
+        })
+        .collect();
     Some(KernelFastPath {
         schema,
-        model_class: model_class.clone().unbind(),
+        construct,
+        field_names,
     })
 }
 
@@ -479,11 +501,13 @@ fn construct_model(
     let kwargs = PyDict::new(py);
     for (key, field_value) in entries {
         let py_value = value_to_py(py, field_value)?;
-        kwargs.set_item(key, py_value).ok()?;
+        let key: &str = key;
+        match fast.field_names.iter().find(|(name, _)| &**name == key) {
+            Some((_, name)) => kwargs.set_item(name.bind(py), py_value).ok()?,
+            None => kwargs.set_item(key, py_value).ok()?,
+        }
     }
-    let cls = fast.model_class.bind(py);
-    let construct = cls.getattr("model_construct").ok()?;
-    match construct.call((), Some(&kwargs)) {
+    match fast.construct.bind(py).call((), Some(&kwargs)) {
         Ok(instance) => Some(Ok(instance.unbind())),
         Err(_) => None,
     }

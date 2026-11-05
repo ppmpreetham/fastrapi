@@ -115,29 +115,29 @@ impl PyAPIRouter {
     pub fn mark_frozen(&self) {
         self.frozen.store(true, Ordering::Release);
     }
-    pub fn freeze(&self, py: Python<'_>) {
-        if self.frozen.load(Ordering::Acquire) {
-            return;
+    pub fn freeze(&self, py: Python<'_>) -> PyResult<()> {
+        if self.frozen.load(Ordering::Acquire) && self.cached_flat.lock().is_some() {
+            return Ok(());
         }
-        let flat = Arc::new(flatten_router(py, self, true));
+        let flat = Arc::new(flatten_router(py, self, true)?);
         *self.cached_flat.lock() = Some(flat);
         self.mark_frozen();
+        Ok(())
     }
 
-    #[must_use]
-    pub fn flatten(&self, py: Python<'_>) -> Arc<(Vec<RouteEntry>, Vec<WebSocketEntry>)> {
-        if self.frozen.load(Ordering::Acquire) {
-            if let Some(cached) = self.cached_flat.lock().as_ref() {
-                return cached.clone();
-            }
-            return Arc::new(flatten_router(py, self, true));
+    pub fn flatten(&self, py: Python<'_>) -> PyResult<Arc<(Vec<RouteEntry>, Vec<WebSocketEntry>)>> {
+        if !self.frozen.load(Ordering::Acquire) {
+            return flatten_router(py, self, false).map(Arc::new);
         }
-
-        Arc::new(flatten_router(py, self, true))
+        if let Some(cached) = self.cached_flat.lock().as_ref() {
+            return Ok(cached.clone());
+        }
+        let flat = Arc::new(flatten_router(py, self, false)?);
+        *self.cached_flat.lock() = Some(flat.clone());
+        Ok(flat)
     }
 
-    #[must_use]
-    pub fn snapshot(&self, py: Python<'_>) -> (Vec<RouteEntry>, Vec<WebSocketEntry>) {
+    pub fn snapshot(&self, py: Python<'_>) -> PyResult<(Vec<RouteEntry>, Vec<WebSocketEntry>)> {
         flatten_router(py, self, false)
     }
 }
@@ -182,12 +182,19 @@ fn merge_callbacks(base: Option<&JsonValue>, extra: Option<&JsonValue>) -> Optio
     }
 }
 
-#[must_use]
+pub fn validate_dependencies(py: Python<'_>, dependencies: Option<&Py<PyAny>>) -> PyResult<()> {
+    let callables = collect_dependency_callables(py, dependencies);
+    if !callables.is_empty() {
+        parse_external_dependencies(py, &callables, &[])?;
+    }
+    Ok(())
+}
+
 pub fn flatten_router(
     py: Python<'_>,
     root: &PyAPIRouter,
     freeze: bool,
-) -> (Vec<RouteEntry>, Vec<WebSocketEntry>) {
+) -> PyResult<(Vec<RouteEntry>, Vec<WebSocketEntry>)> {
     let mut routes = Vec::new();
     let mut ws_routes = Vec::new();
 
@@ -231,10 +238,14 @@ pub fn flatten_router(
         let chain_security = if chain_deps.is_empty() {
             Vec::new()
         } else {
-            super::init::security_requirements(py, &parse_chain_nodes(py, &chain_deps, &[]))
+            super::init::security_requirements(
+                py,
+                &parse_external_dependencies(py, &chain_deps, &[])?,
+            )
         };
         let route_entries = router.route_entries.lock().clone();
-        routes.extend(route_entries.into_iter().map(|mut entry| {
+        routes.reserve(route_entries.len());
+        for mut entry in route_entries {
             entry.tags = entry
                 .tags
                 .into_iter()
@@ -267,23 +278,24 @@ pub fn flatten_router(
             }
 
             if !chain_deps.is_empty() {
-                entry.handler = prepend_chain_dependencies(py, &entry.handler, &chain_deps);
+                entry.handler = prepend_chain_dependencies(py, &entry.handler, &chain_deps)?;
                 let mut security = chain_security.clone();
                 security.append(&mut entry.security);
                 entry.security = security;
             }
-            entry
-        }));
+            routes.push(entry);
+        }
 
         let ws_entries = router.websocket_entries.lock().clone();
+        let ws_chain = if chain_deps.is_empty() || ws_entries.is_empty() {
+            Vec::new()
+        } else {
+            parse_external_dependencies(py, &chain_deps, &[])?
+        };
         ws_routes.extend(ws_entries.into_iter().map(|mut ws| {
             ws.path = join_path(&full_prefix, &ws.path);
-            if !chain_deps.is_empty() {
-                let mut plan = ws.deps.to_vec();
-                if !chain_deps.is_empty() {
-                    plan = prepend_nodes(py, plan, &parse_chain_nodes(py, &chain_deps, &[]));
-                }
-                ws.deps = plan.into();
+            if !ws_chain.is_empty() {
+                ws.deps = prepend_nodes(ws.deps.to_vec(), &ws_chain).into();
             }
             ws
         }));
@@ -343,22 +355,10 @@ pub fn flatten_router(
         }
     }
 
-    (routes, ws_routes)
-}
-
-fn parse_chain_nodes(
-    py: Python<'_>,
-    chain: &[Py<pyo3::PyAny>],
-    path_param_names: &[String],
-) -> Vec<DependencyNode> {
-    parse_external_dependencies(py, chain, path_param_names).unwrap_or_else(|err| {
-        tracing::error!("Failed to parse router-level dependencies: {}", err);
-        Vec::new()
-    })
+    Ok((routes, ws_routes))
 }
 
 fn prepend_nodes(
-    _py: Python<'_>,
     mut base: Vec<DependencyNode>,
     externals: &[DependencyNode],
 ) -> Vec<DependencyNode> {
@@ -376,7 +376,7 @@ fn prepend_chain_dependencies(
     py: Python<'_>,
     handler: &Arc<RouteHandler>,
     chain: &[Py<pyo3::PyAny>],
-) -> Arc<RouteHandler> {
+) -> PyResult<Arc<RouteHandler>> {
     let path_param_names: Vec<String> = handler
         .payload
         .path_param_names
@@ -384,17 +384,17 @@ fn prepend_chain_dependencies(
         .map(ToString::to_string)
         .collect();
 
-    let externals = parse_chain_nodes(py, chain, &path_param_names);
+    let externals = parse_external_dependencies(py, chain, &path_param_names)?;
     if externals.is_empty() {
-        return handler.clone();
+        return Ok(handler.clone());
     }
 
     let mut merged = <RouteHandler>::clone(handler);
-    merged.payload.dependencies = prepend_nodes(py, merged.payload.dependencies, &externals);
+    merged.payload.dependencies = prepend_nodes(merged.payload.dependencies, &externals);
 
     merged.payload.needs_kwargs = true;
     merged.payload.refresh_dependency_flags();
     merged.assign_execution_mode();
 
-    Arc::new(merged)
+    Ok(Arc::new(merged))
 }

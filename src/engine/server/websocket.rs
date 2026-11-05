@@ -36,7 +36,9 @@ enum SocketPumpError {
 
 use crate::engine::exception_dispatch::find_handler;
 use axum::http::StatusCode;
+use axum::http::header::HOST;
 use axum::http::request::Parts;
+use fastrapi_core::path::host_without_port;
 use fastrapi_http::exceptions::{
     PyWebSocketDisconnect, PyWebSocketException, PyWebSocketRequestValidationError,
 };
@@ -45,7 +47,6 @@ use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_http::websocket::{WSDecision, WSMessage};
 use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
-use fastrapi_runtime::server_state::exception_handlers;
 use fastrapi_runtime::tokio_runtime::spawn;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
@@ -63,6 +64,29 @@ pub struct WsRouteState {
     pub param_names: Arc<[Arc<str>]>,
     pub event_loop: EventLoop,
     pub dependency_overrides: Option<Py<PyAny>>,
+    pub host: Option<Box<str>>,
+}
+
+pub async fn ws_host_handler(
+    ws: upgrade::IncomingUpgrade,
+    State(routes): State<Arc<[Arc<WsRouteState>]>>,
+    parts: Parts,
+) -> Response {
+    let host = parts
+        .headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(host_without_port);
+    let route = routes.iter().find(|route| {
+        route
+            .host
+            .as_deref()
+            .is_none_or(|expected| host == Some(expected))
+    });
+    match route {
+        Some(route) => ws_handler(ws, State(route.clone()), parts).await,
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 pub async fn ws_handler(
@@ -75,7 +99,8 @@ pub async fn ws_handler(
     let (decision_tx, mut decision_rx) = oneshot::channel();
 
     let param_ranges = match_path_params(&route, parts.uri.path());
-    let request_input = build_request_input_from_parts(&parts, &param_ranges, &route.param_names);
+    let request_input =
+        build_request_input_from_parts(&parts, &param_ranges, &route.param_names, route.event_loop);
 
     let plan = match Python::attach(|py| {
         dependencies::request_plan(
@@ -307,8 +332,11 @@ async fn handle_error(
         if value.is_instance_of::<PyWebSocketDisconnect>() {
             return Err(HandlerOutcome::Disconnected);
         }
-        let handler =
-            exception_handlers().and_then(|registry| find_handler(py, registry.bind(py), &error));
+        let handler = route
+            .event_loop
+            .server()
+            .exception_handlers()
+            .and_then(|registry| find_handler(py, registry.bind(py), &error));
         let Some(handler) = handler else {
             if let Some((code, reason)) = websocket_exception_close(py, value) {
                 return Err(HandlerOutcome::Close(code, reason));

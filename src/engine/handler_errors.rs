@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use fastrapi_http::exceptions::PyHTTPException;
 use fastrapi_http::request_input::RequestInput;
+use fastrapi_runtime::py_bridge::EventLoop;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -18,8 +19,8 @@ fastrapi_pyutil::cached_py_import!(TRACEBACK_MODULE, "traceback");
     clippy::needless_pass_by_value,
     reason = "convenience wrapper accepting owned PyErr"
 )]
-pub(crate) fn python_error_to_response(py: Python<'_>, err: PyErr) -> Response {
-    python_error_to_response_in(py, &err, None)
+pub(crate) fn python_error_to_response(py: Python<'_>, err: PyErr, server: EventLoop) -> Response {
+    python_error_response(py, &err, None, Some(server))
 }
 
 /// Converts a Python error into a response with the handlers of the `@app.exception_handler` registry.
@@ -28,7 +29,16 @@ pub(crate) fn python_error_to_response_in(
     err: &PyErr,
     request_input: Option<&RequestInput<'_>>,
 ) -> Response {
-    if let Some(response) = dispatch_exception_handler(py, err, request_input) {
+    python_error_response(py, err, request_input, None)
+}
+
+fn python_error_response(
+    py: Python<'_>,
+    err: &PyErr,
+    request_input: Option<&RequestInput<'_>>,
+    server: Option<EventLoop>,
+) -> Response {
+    if let Some(response) = dispatch_exception_handler(py, err, request_input, server) {
         return response;
     }
 
