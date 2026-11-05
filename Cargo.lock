@@ -629,6 +629,7 @@ dependencies = [
  "papaya",
  "pyo3",
  "simd-json",
+ "smallvec",
 ]
 
 [[package]]
