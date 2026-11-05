@@ -340,14 +340,22 @@ fn deep_dict_update(main: &Bound<'_, PyDict>, update: &Bound<'_, PyDict>) -> PyR
 
 #[pyfunction]
 #[pyo3(signature = (status_code))]
-fn is_body_allowed_for_status_code(status_code: Option<&Bound<'_, PyAny>>) -> bool {
-    let Some(status_code) = status_code else {
-        return true;
+fn is_body_allowed_for_status_code(status_code: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+    let Some(status_code) = status_code.filter(|code| !code.is_none()) else {
+        return Ok(true);
     };
-    let Ok(status) = status_code.extract::<u16>() else {
-        return true;
-    };
-    !(100..200).contains(&status) && status != 204 && status != 304
+    if status_code
+        .extract::<&str>()
+        .is_ok_and(|code| matches!(code, "default" | "1XX" | "2XX" | "3XX" | "4XX" | "5XX"))
+    {
+        return Ok(true);
+    }
+    let status: i64 = status_code
+        .py()
+        .get_type::<pyo3::types::PyInt>()
+        .call1((status_code,))?
+        .extract()?;
+    Ok(u16::try_from(status).map_or(status >= 200, fastrapi_http::status::body_allowed))
 }
 
 pub(crate) fn register_compat_modules(parent: &Bound<'_, PyModule>) -> PyResult<()> {

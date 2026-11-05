@@ -626,8 +626,7 @@ pub fn build_paths_from_routes(
             .response
             .default_status
             .map_or(200, |status| status.as_u16());
-        let body_allowed =
-            !(100..200).contains(&success_status) && success_status != 204 && success_status != 304;
+        let body_allowed = fastrapi_http::status::body_allowed(success_status);
         let media_type = match handler.response.response_type {
             ResponseType::Html => Some("text/html"),
             ResponseType::PlainText => Some("text/plain"),

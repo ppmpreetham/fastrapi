@@ -232,7 +232,7 @@ fn serialize_response_model(
 }
 
 const fn body_allowed(status: StatusCode) -> bool {
-    !matches!(status.as_u16(), 100..=199 | 204 | 304)
+    crate::status::body_allowed(status.as_u16())
 }
 
 fn null_json_response(status: StatusCode) -> Response {

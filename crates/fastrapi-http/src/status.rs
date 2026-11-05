@@ -4,6 +4,11 @@
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
+#[must_use]
+pub const fn body_allowed(status: u16) -> bool {
+    !(status < 200 || matches!(status, 204 | 205 | 304))
+}
+
 pub const HTTP_100_CONTINUE: u16 = 100;
 pub const HTTP_101_SWITCHING_PROTOCOLS: u16 = 101;
 pub const HTTP_102_PROCESSING: u16 = 102;

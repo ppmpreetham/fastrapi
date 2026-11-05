@@ -173,10 +173,6 @@ fn response_headers(headers: &Bound<'_, PyAny>) -> HeaderMap {
     map
 }
 
-const fn body_allowed(status: StatusCode) -> bool {
-    !matches!(status.as_u16(), 100..=199 | 204 | 304)
-}
-
 pub fn http_exception_response(value: &Bound<'_, PyAny>) -> Option<Response> {
     if !is_http_exception(value) {
         return None;
@@ -189,7 +185,7 @@ pub fn http_exception_response(value: &Bound<'_, PyAny>) -> Option<Response> {
         .filter(|headers| !headers.is_none())
         .map(|headers| response_headers(&headers))
         .unwrap_or_default();
-    if !body_allowed(status) {
+    if !crate::status::body_allowed(status.as_u16()) {
         return Some((status, headers).into_response());
     }
     let detail = value.getattr(intern!(py, "detail")).ok()?;
