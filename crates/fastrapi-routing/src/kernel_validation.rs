@@ -9,8 +9,6 @@ use std::sync::{Arc, OnceLock};
 use ahash::AHashMap;
 use parking_lot::Mutex;
 
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use pyo3::prelude::*;
 
 use pydantic_core_kernel::validators::{KValidator, Validator};
@@ -23,12 +21,10 @@ use pyo3::types::{
 };
 
 use crate::route::PydanticValidator;
-use fastrapi_pyutil::json::py_json_response_with_status;
-use pydantic_core_kernel::json::{parse_json, serde_to_value};
-use pydantic_core_kernel::{ExtraBehavior, Int, LocItem};
+use pydantic_core_kernel::json::parse_json;
+use pydantic_core_kernel::{ExtraBehavior, Int};
 use serde_json::{Map, Number, Value as SerdeJsonValue};
 use std::env::var;
-use std::iter::once;
 use std::str::from_utf8;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -117,7 +113,7 @@ pub fn maybe_validate_with_kernel(
     py: Python<'_>,
     validator: &PydanticValidator,
     raw_payload: &[u8],
-) -> Option<Result<Py<PyAny>, Response>> {
+) -> Option<Py<PyAny>> {
     let fast = fast_path(py, validator)?;
     from_utf8(raw_payload).ok()?;
     validate_body(py, fast, raw_payload)
@@ -473,11 +469,7 @@ fn schema_has_nested_models(schema: &CoreSchema) -> bool {
     }
     walk(schema, false)
 }
-fn validate_body(
-    py: Python<'_>,
-    fast: &KernelFastPath,
-    raw_payload: &[u8],
-) -> Option<Result<Py<PyAny>, Response>> {
+fn validate_body(py: Python<'_>, fast: &KernelFastPath, raw_payload: &[u8]) -> Option<Py<PyAny>> {
     let validated = match &fast.schema {
         KernelSchema::Raw(schema) => schema.validate_json(raw_payload),
         KernelSchema::Aliased { validator, core } => {
@@ -486,17 +478,10 @@ fn validate_body(
             validator.validate(&parsed)
         }
     };
-    match validated {
-        Ok(value) => construct_model(py, fast, &value),
-        Err(err) => Some(Err(kernel_error_response(py, &err))),
-    }
+    construct_model(py, fast, &validated.ok()?)
 }
 
-fn construct_model(
-    py: Python<'_>,
-    fast: &KernelFastPath,
-    value: &Value,
-) -> Option<Result<Py<PyAny>, Response>> {
+fn construct_model(py: Python<'_>, fast: &KernelFastPath, value: &Value) -> Option<Py<PyAny>> {
     let Value::Object(entries) = value else {
         return None;
     };
@@ -509,10 +494,11 @@ fn construct_model(
             None => kwargs.set_item(cached_key(py, key), py_value).ok()?,
         }
     }
-    match fast.construct.bind(py).call((), Some(&kwargs)) {
-        Ok(instance) => Some(Ok(instance.unbind())),
-        Err(_) => None,
-    }
+    fast.construct
+        .bind(py)
+        .call((), Some(&kwargs))
+        .ok()
+        .map(Bound::unbind)
 }
 
 fn value_to_py(py: Python<'_>, value: &Value) -> Option<Py<PyAny>> {
@@ -619,79 +605,4 @@ fn py_tz(py: Python<'_>, offset_seconds: i32) -> Option<Bound<'_, PyTzInfo>> {
             .ok()?
     };
     tz.cast_into::<PyTzInfo>().ok()
-}
-
-fn kernel_error_response(py: Python<'_>, err: &ValidationError) -> Response {
-    use pyo3::types::{PyDict, PyInt, PyList, PyString};
-
-    let detail_list = PyList::empty(py);
-    for detail in err.errors() {
-        let item = PyDict::new(py);
-        if item
-            .set_item(pyo3::intern!(py, "type"), detail.r#type.as_str())
-            .is_err()
-            || item
-                .set_item(
-                    "loc",
-                    once(pyo3::intern!(py, "body").clone().unbind().into_any())
-                        .chain(detail.loc.iter().map(|loc_item| match loc_item {
-                            LocItem::S(s) => PyString::new(py, s).unbind().into_any(),
-                            LocItem::I(i) => PyInt::new(py, *i).unbind().into_any(),
-                        }))
-                        .collect::<Vec<_>>(),
-                )
-                .is_err()
-            || item
-                .set_item(pyo3::intern!(py, "msg"), detail.msg.as_str())
-                .is_err()
-        {
-            return fallback_response();
-        }
-        if let Some(input) = &detail.input {
-            match value_to_py(py, input) {
-                Some(v) => {
-                    if item.set_item(pyo3::intern!(py, "input"), v).is_err() {
-                        return fallback_response();
-                    }
-                }
-                None => return fallback_response(),
-            }
-        }
-        if let Some(ctx) = &detail.ctx {
-            let ctx_dict = PyDict::new(py);
-            for (key, ctx_value) in ctx {
-                let v = value_to_py(py, &serde_to_value(ctx_value));
-                match v {
-                    Some(v) => {
-                        if ctx_dict.set_item(key, v).is_err() {
-                            return fallback_response();
-                        }
-                    }
-                    None => return fallback_response(),
-                }
-            }
-            if item.set_item(pyo3::intern!(py, "ctx"), ctx_dict).is_err() {
-                return fallback_response();
-            }
-        }
-        if detail_list.append(item).is_err() {
-            return fallback_response();
-        }
-    }
-
-    let dict = PyDict::new(py);
-    if dict
-        .set_item(pyo3::intern!(py, "detail"), detail_list)
-        .is_err()
-    {
-        return fallback_response();
-    }
-    match py_json_response_with_status(py, StatusCode::UNPROCESSABLE_ENTITY, dict.as_any()) {
-        Ok(resp) => resp,
-        Err(_) => fallback_response(),
-    }
-}
-
-fn fallback_response() -> Response {
-    (StatusCode::UNPROCESSABLE_ENTITY, "Validation failed").into_response()
 }

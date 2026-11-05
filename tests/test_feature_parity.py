@@ -3,7 +3,7 @@ import json
 
 from typing import List
 
-from fastrapi import FastrAPI, Depends, Request
+from fastrapi import FastrAPI, Depends, Query, Request
 from pydantic import BaseModel
 from fastrapi.responses import FileResponse, JSONResponse
 from fastrapi.responses import EventSourceResponse
@@ -80,7 +80,7 @@ def test_sse_response_formatting(client, app):
 
 def test_repeated_query_list_params(client, app):
     @app.get("/qtags")
-    def qtags(tags: List[str] = []):
+    def qtags(tags: List[str] = Query([])):
         return {"tags": tags}
 
     r = client.get("/qtags?tags=a&tags=b&tags=c")
@@ -90,7 +90,7 @@ def test_repeated_query_list_params(client, app):
 
 def test_repeated_query_int_list_coercion(client, app):
     @app.get("/qnums")
-    def qnums(q: List[int] = []):
+    def qnums(q: List[int] = Query([])):
         return {"q": q}
 
     r = client.get("/qnums?q=1&q=2&q=3")

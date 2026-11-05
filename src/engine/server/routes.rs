@@ -39,6 +39,7 @@ use fastrapi_core::method::{HttpMethod, allow_header};
 use fastrapi_core::path::{host_without_port, join_path, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, FrozenRouterBuilder, RoutePattern};
 use fastrapi_http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer};
+use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_routing::route::{ExecutionMode, RouteEntry, RouteHandler, WebSocketEntry};
 use fastrapi_runtime::py_bridge::{self, EventLoop};
@@ -271,7 +272,8 @@ fn register_routes(
 
     app = app.method_not_allowed_fallback(move |req: Request| async move {
         let allow = allowed_methods_header(frozen_router, &app_state.root_path, &req);
-        method_not_allowed_response(app_state.event_loop, allow).await
+        let handled = status_handler(app_state.event_loop, StatusCode::METHOD_NOT_ALLOWED, &req);
+        method_not_allowed_response(handled, allow).await
     });
 
     app.fallback({
@@ -282,7 +284,8 @@ fn register_routes(
                     if let Some(redirect) = slash_redirect(frozen_router, app_state, &req) {
                         return redirect;
                     }
-                    let handler_resp = dispatch_status_handler(app_state.event_loop, 404);
+                    let handler_resp =
+                        status_handler(app_state.event_loop, StatusCode::NOT_FOUND, &req);
                     match handler_resp {
                         Some(resp) => resolve_pending_handler(resp).await,
                         None => serve_frontend_mounts(frontend_mounts, req)
@@ -376,9 +379,22 @@ fn allowed_methods_header(
     router.allowed_methods(path, host)
 }
 
-pub(crate) async fn method_not_allowed_response(server: EventLoop, allow: u8) -> Response {
-    let handler_resp = dispatch_status_handler(server, StatusCode::METHOD_NOT_ALLOWED.as_u16());
-    let mut response = match handler_resp {
+pub(crate) fn status_handler(
+    server: EventLoop,
+    status: StatusCode,
+    request: &Request,
+) -> Option<Response> {
+    let input = RequestInput::new(
+        request.method(),
+        request.uri(),
+        request.headers(),
+        Some(server),
+    );
+    dispatch_status_handler(server, status.as_u16(), Some(&input))
+}
+
+pub(crate) async fn method_not_allowed_response(handled: Option<Response>, allow: u8) -> Response {
+    let mut response = match handled {
         Some(resp) => resolve_pending_handler(resp).await,
         None => json_body(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -625,8 +641,15 @@ fn sync_no_request_method_router(
     handler: &'static RouteHandler,
     server: EventLoop,
 ) -> MethodRouter {
-    method_router(method, move || async move {
-        let response = Python::attach(|py| render_no_request_json_response(py, handler, server));
+    method_router(method, move |request: Request| async move {
+        let input = RequestInput::new(
+            request.method(),
+            request.uri(),
+            request.headers(),
+            Some(server),
+        );
+        let response =
+            Python::attach(|py| render_no_request_json_response(py, handler, &input, server));
         resolve_pending_handler(response).await
     })
 }

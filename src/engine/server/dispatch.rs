@@ -9,17 +9,15 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::http::header::HOST;
 use axum::response::{IntoResponse, Response};
-use pyo3::prelude::Python;
 use smallvec::SmallVec;
 
-use super::routes::method_not_allowed_response;
-use crate::engine::exception_dispatch::{dispatch_validation_handler, resolve_pending_handler};
+use super::routes::{method_not_allowed_response, status_handler};
+use crate::engine::exception_dispatch::resolve_pending_handler;
 use crate::engine::executor::{run_py_handler, run_py_handler_no_request};
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::params::PathParamRange;
 use fastrapi_core::path::{host_without_port, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, RouteMatch, RoutePattern};
-use fastrapi_routing::request_data::ValidationErrorDetails;
 use fastrapi_routing::route::{ExecutionMode, RouteHandler};
 use fastrapi_runtime::py_bridge;
 use std::ptr;
@@ -47,7 +45,8 @@ pub(crate) async fn dispatch_or_not_found(
     let Some(route_match) = router.resolve(method, path_str, request_host) else {
         let allowed = router.allowed_methods(path_str, request_host);
         if allowed != 0 {
-            return Ok(method_not_allowed_response(state.event_loop, allowed).await);
+            let handled = status_handler(state.event_loop, StatusCode::METHOD_NOT_ALLOWED, &req);
+            return Ok(method_not_allowed_response(handled, allowed).await);
         }
         return Err(req);
     };
@@ -117,9 +116,7 @@ pub(crate) async fn dispatch_or_not_found(
         let payload = if handler.payload.needs_body {
             match extract_payload(&request_parts.headers, body, handler, state).await {
                 Ok(p) => p,
-                Err(resp) => {
-                    return Ok(resolve_pending_handler(apply_validation_handler(resp)).await);
-                }
+                Err(resp) => return Ok(resp),
             }
         } else {
             None
@@ -134,25 +131,9 @@ pub(crate) async fn dispatch_or_not_found(
             payload,
         )
         .await;
-        Ok(tag(resolve_pending_handler(apply_validation_handler(
-            response,
-        ))
-        .await))
+        Ok(tag(resolve_pending_handler(response).await))
     })
     .await
-}
-
-/// Runs the user's `RequestValidationError` handler for a 422 response.
-/// Other responses do not need Python, so the GIL is not taken for them.
-fn apply_validation_handler(response: Response) -> Response {
-    if response
-        .extensions()
-        .get::<ValidationErrorDetails>()
-        .is_none()
-    {
-        return response;
-    }
-    Python::attach(|py| dispatch_validation_handler(py, response, None))
 }
 
 pub(crate) fn dispatch_path<'a>(state: &AppState, original_path: &'a str) -> &'a str {

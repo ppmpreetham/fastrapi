@@ -26,6 +26,25 @@ pub struct RequestInput<'a> {
 }
 
 impl<'a> RequestInput<'a> {
+    #[must_use]
+    pub fn new(
+        method: &'a axum::http::Method,
+        uri: &'a axum::http::Uri,
+        headers: &'a HeaderMap,
+        server: Option<EventLoop>,
+    ) -> Self {
+        Self {
+            method: method.as_str(),
+            path: uri.path(),
+            query_string: uri.query().unwrap_or(""),
+            headers,
+            path_params: OnceLock::new(),
+            query_params: OnceLock::new(),
+            cookies: OnceLock::new(),
+            server,
+        }
+    }
+
     pub fn get_path_param(&self, key: &str) -> Option<&'a str> {
         self.path_params
             .get()?

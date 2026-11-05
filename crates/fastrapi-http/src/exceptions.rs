@@ -1,326 +1,221 @@
-//! This module contains the Python exception and warning classes of fastrapi.
-//! These classes are compatible with the FastAPI and starlette exception classes.
-
-use std::borrow::Cow;
+//! This module contains the Python exception classes of fastrapi.
+//! The HTTP and validation exceptions come from an embedded port of FastAPI's `exceptions.py`.
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Json, Response};
-use fastrapi_pyutil::json::py_any_to_json;
-use pyo3::PyClassInitializer;
-use pyo3::exceptions::{PyException, PyRuntimeError, PyUserWarning};
+use axum::response::{IntoResponse, Response};
+use fastrapi_pyutil::json::py_json_response_with_status;
+use pyo3::exceptions::PyException;
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyDictMethods, PyList, PyListMethods, PyString, PyTuple};
-use simd_json::json;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyModule, PyString, PyTuple, PyType};
 
-/// A generic, FastAPI-specific error.
-#[pyclass(extends = PyRuntimeError, subclass, name = "FastAPIError")]
-pub struct PyFastAPIError;
+const EXCEPTIONS_SOURCE: &str = include_str!("py/exceptions.py");
+const HANDLERS_SOURCE: &str = include_str!("py/exception_handlers.py");
 
-#[pymethods]
-impl PyFastAPIError {
-    #[new]
-    const fn new() -> Self {
-        Self
-    }
-}
+static EXCEPTIONS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+static HTTP_EXCEPTION: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static REQUEST_VALIDATION_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static WEBSOCKET_VALIDATION_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static DEPRECATION_WARNING: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
-pub type PyFastrAPIError = PyFastAPIError;
-
-/// A dependency declared that it depends on another dependency with an invalid
-/// (narrower) scope.
-#[pyclass(extends = PyFastAPIError, subclass, name = "DependencyScopeError")]
-pub struct PyDependencyScopeError;
-
-#[pymethods]
-impl PyDependencyScopeError {
-    #[new]
-    fn new() -> PyClassInitializer<Self> {
-        PyClassInitializer::from(PyFastAPIError).add_subclass(Self)
-    }
-}
-
-/// A pydantic.v1 model is used, which is no longer supported.
-#[pyclass(extends = PyFastAPIError, subclass, name = "PydanticV1NotSupportedError")]
-pub struct PyPydanticV1NotSupportedError;
-
-#[pymethods]
-impl PyPydanticV1NotSupportedError {
-    #[new]
-    fn new() -> PyClassInitializer<Self> {
-        PyClassInitializer::from(PyFastAPIError).add_subclass(Self)
-    }
-}
-
-/// Common base class for all non-exit exceptions.
-#[pyclass(extends = PyException, subclass, name = "ValidationException")]
-pub struct PyValidationException {
-    #[expect(
-        clippy::pub_underscore_fields,
-        reason = "FastAPI RequestValidationError._errors attribute compatibility"
-    )]
-    #[pyo3(get)]
-    pub _errors: Py<PyAny>,
-    #[pyo3(get)]
-    pub endpoint_ctx: Option<Py<PyAny>>,
-}
-
-impl PyValidationException {
-    fn context_value(&self, py: Python<'_>, key: &str) -> Option<Py<PyAny>> {
-        let ctx = self.endpoint_ctx.as_ref()?.bind(py);
-        ctx.call_method1(pyo3::intern!(py, "get"), (key,))
-            .ok()
-            .filter(|value| !value.is_none())
-            .map(Bound::unbind)
-    }
-}
-
-#[pymethods]
-impl PyValidationException {
-    #[new]
-    #[pyo3(signature = (errors, *, endpoint_ctx=None))]
-    pub fn new(errors: Bound<'_, PyAny>, endpoint_ctx: Option<Bound<'_, PyAny>>) -> Self {
-        Self {
-            _errors: errors.into(),
-            endpoint_ctx: endpoint_ctx.filter(|ctx| !ctx.is_none()).map(Bound::unbind),
-        }
-    }
-
-    #[getter]
-    fn endpoint_function(&self, py: Python<'_>) -> Option<Py<PyAny>> {
-        self.context_value(py, "function")
-    }
-
-    #[getter]
-    fn endpoint_path(&self, py: Python<'_>) -> Option<Py<PyAny>> {
-        self.context_value(py, "path")
-    }
-
-    #[getter]
-    fn endpoint_file(&self, py: Python<'_>) -> Option<Py<PyAny>> {
-        self.context_value(py, "file")
-    }
-
-    #[getter]
-    fn endpoint_line(&self, py: Python<'_>) -> Option<Py<PyAny>> {
-        self.context_value(py, "line")
-    }
-
-    #[pyo3(signature = (*_args, **_kwargs))]
-    const fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
-
-    #[expect(
-        clippy::used_underscore_binding,
-        reason = "Accesses Python compatibility field _errors"
-    )]
-    fn errors<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
-        self._errors.bind(py).clone()
-    }
-
-    #[expect(
-        clippy::used_underscore_binding,
-        reason = "Accesses Python compatibility field _errors"
-    )]
-    fn __str__(&self, py: Python<'_>) -> String {
-        let errors = self._errors.bind(py);
-        let len = errors
-            .cast::<PyList>()
-            .map(PyListMethods::len)
-            .or_else(|_| errors.cast::<PyDict>().map(PyDictMethods::len))
-            .unwrap_or(0);
-        format!(
-            "{} validation error{} occurred",
-            len,
-            if len == 1 { "" } else { "s" }
-        )
-    }
-}
-
-crate::macros::define_validation_subclass!(
-    /// Common base class for all non-exit exceptions.
-    PyRequestValidationError, "RequestValidationError");
-crate::macros::define_validation_subclass!(
-    PyWebSocketRequestValidationError,
-    "WebSocketRequestValidationError"
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_HTTP_EXCEPTION,
+    "starlette.exceptions",
+    "HTTPException"
 );
-crate::macros::define_validation_subclass!(
-    /// Common base class for all non-exit exceptions.
-    PyResponseValidationError, "ResponseValidationError");
 
-/// An HTTP exception you can raise in your own code to show errors to the client.
-///
-/// This is for client errors, invalid authentication, invalid data, etc. Not for server
-/// errors in your code.
-///
-/// Read more about it in the
-/// [FastAPI docs for Handling Errors](https://fastapi.tiangolo.com/tutorial/handling-errors/).
-///
-/// ## Example
-///
-/// ```python
-/// from fastrapi import FastAPI, HTTPException
-///
-/// app = FastAPI()
-///
-/// items = {"foo": "The Foo Wrestlers"}
-///
-///
-/// @app.get("/items/{item_id}")
-/// async def read_item(item_id: str):
-///     if item_id not in items:
-///         raise HTTPException(status_code=404, detail="Item not found")
-///     return {"item": items[item_id]}
-/// ```
-#[pyclass(
-    extends = PyException,
-    subclass,
-    name = "HTTPException",
-    get_all,
-    from_py_object
-)]
-#[derive(Clone)]
-pub struct PyHTTPException {
-    pub status_code: u16,
-    pub detail: Py<PyAny>,
-    pub headers: Option<Py<PyDict>>,
+pub fn exceptions_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    EXCEPTIONS
+        .get_or_try_init(py, || {
+            let module = fastrapi_pyutil::imports::python_source_module(
+                py,
+                EXCEPTIONS_SOURCE,
+                c"fastrapi/exceptions.py",
+                c"fastrapi.exceptions",
+            )?;
+            module.add("WebSocketException", py.get_type::<PyWebSocketException>())?;
+            module.add(
+                "WebSocketDisconnect",
+                py.get_type::<PyWebSocketDisconnect>(),
+            )?;
+            fastrapi_pyutil::imports::register_module(py, "fastrapi.exceptions", &module)?;
+            Ok::<_, PyErr>(module.unbind())
+        })
+        .map(|module| module.bind(py))
 }
 
-#[pymethods]
-impl PyHTTPException {
-    #[new]
-    #[pyo3(signature = (*args, **kwargs))]
-    fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> Self {
-        let argument = |index: usize, name: &str| {
-            args.get_item(index)
-                .ok()
-                .or_else(|| kwargs.and_then(|kwargs| kwargs.get_item(name).ok().flatten()))
-        };
-        let status_code = argument(0, "status_code")
-            .and_then(|code| code.extract().ok())
-            .unwrap_or(500);
-        let detail = argument(1, "detail").filter(|detail| !detail.is_none());
-        let headers = argument(2, "headers").and_then(|headers| headers.cast_into().ok());
-        Self::with_detail(py, status_code, detail, headers)
-    }
+pub fn exception_handlers_module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
+    let module = fastrapi_pyutil::imports::python_source_module(
+        py,
+        HANDLERS_SOURCE,
+        c"fastrapi/exception_handlers.py",
+        c"fastrapi.exception_handlers",
+    )?;
+    fastrapi_pyutil::imports::register_module(py, "fastrapi.exception_handlers", &module)?;
+    Ok(module)
+}
 
-    #[pyo3(signature = (status_code, detail=None, headers=None))]
-    fn __init__(
-        &mut self,
-        py: Python<'_>,
-        status_code: u16,
-        detail: Option<Bound<'_, PyAny>>,
-        headers: Option<Bound<'_, PyDict>>,
-    ) {
-        *self = Self::with_detail(py, status_code, detail, headers);
-    }
+fn exception_type<'py>(
+    py: Python<'py>,
+    cell: &'static PyOnceLock<Py<PyType>>,
+    name: &Bound<'py, PyString>,
+) -> PyResult<&'py Bound<'py, PyType>> {
+    cell.get_or_try_init(py, || {
+        exceptions_module(py)?
+            .getattr(name)?
+            .cast_into::<PyType>()
+            .map(Bound::unbind)
+            .map_err(PyErr::from)
+    })
+    .map(|ty| ty.bind(py))
+}
 
-    fn __str__(&self, py: Python<'_>) -> String {
-        let detail = self.detail.bind(py);
-        format!("{}: {}", self.status_code, detail)
-    }
+pub fn http_exception_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    exception_type(py, &HTTP_EXCEPTION, intern!(py, "HTTPException"))
+}
 
-    fn __repr__(&self, py: Python<'_>) -> String {
-        let r = self
-            .detail
-            .bind(py)
-            .repr()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        format!(
-            "HTTPException(status_code={}, detail={})",
-            self.status_code, r
-        )
+pub fn request_validation_error_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    exception_type(
+        py,
+        &REQUEST_VALIDATION_ERROR,
+        intern!(py, "RequestValidationError"),
+    )
+}
+
+pub fn websocket_validation_error_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    exception_type(
+        py,
+        &WEBSOCKET_VALIDATION_ERROR,
+        intern!(py, "WebSocketRequestValidationError"),
+    )
+}
+
+pub fn deprecation_warning_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    exception_type(
+        py,
+        &DEPRECATION_WARNING,
+        intern!(py, "FastAPIDeprecationWarning"),
+    )
+}
+
+fn raised(result: PyResult<Bound<'_, PyAny>>) -> PyErr {
+    match result {
+        Ok(value) => PyErr::from_value(value),
+        Err(err) => err,
     }
 }
 
-fn response_headers(py: Python<'_>, headers: Option<&Py<PyDict>>) -> HeaderMap {
+#[must_use]
+pub fn http_exception(
+    py: Python<'_>,
+    status_code: u16,
+    detail: Option<&str>,
+    headers: Option<Bound<'_, PyDict>>,
+) -> PyErr {
+    raised(http_exception_type(py).and_then(|class| class.call1((status_code, detail, headers))))
+}
+
+#[must_use]
+pub fn request_validation_error(
+    py: Python<'_>,
+    errors: Bound<'_, PyAny>,
+    body: Option<Bound<'_, PyAny>>,
+) -> PyErr {
+    let kwargs = PyDict::new(py);
+    raised(
+        kwargs
+            .set_item(intern!(py, "body"), body)
+            .and_then(|()| request_validation_error_type(py))
+            .and_then(|class| class.call((errors,), Some(&kwargs))),
+    )
+}
+
+#[must_use]
+pub fn websocket_validation_error(py: Python<'_>, errors: Bound<'_, PyAny>) -> PyErr {
+    raised(websocket_validation_error_type(py).and_then(|class| class.call1((errors,))))
+}
+
+#[must_use]
+pub fn is_http_exception(value: &Bound<'_, PyAny>) -> bool {
+    STARLETTE_HTTP_EXCEPTION.is_instance(value.py(), value)
+}
+
+#[must_use]
+pub fn http_status_code(value: &Bound<'_, PyAny>) -> Option<u16> {
+    value
+        .getattr(intern!(value.py(), "status_code"))
+        .ok()?
+        .extract()
+        .ok()
+}
+
+fn response_headers(headers: &Bound<'_, PyAny>) -> HeaderMap {
+    let py = headers.py();
     let mut map = HeaderMap::new();
-    let Some(headers) = headers else { return map };
-
-    for (name, value) in headers.bind(py).iter() {
-        let Ok(name) = name.extract::<Cow<'_, str>>() else {
+    let Ok(items) = headers
+        .call_method0(intern!(py, "items"))
+        .and_then(|items| items.try_iter())
+    else {
+        return map;
+    };
+    for item in items.flatten() {
+        let Ok((name, value)) = item.extract::<(String, String)>() else {
             continue;
         };
-        let Ok(value) = value.extract::<Cow<'_, str>>() else {
-            continue;
-        };
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let Ok(value) = HeaderValue::from_str(&value) else {
-            continue;
-        };
-        map.append(name, value);
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&value),
+        ) {
+            map.append(name, value);
+        }
     }
     map
 }
 
-pub fn status_phrase(py: Python<'_>, status_code: u16) -> Py<PyAny> {
-    py.import("http")
-        .and_then(|http| {
-            http.getattr(pyo3::intern!(py, "HTTPStatus"))?
-                .call1((status_code,))
-        })
-        .and_then(|status| status.getattr(pyo3::intern!(py, "phrase")))
-        .map_or_else(
-            |_| {
-                let phrase = StatusCode::from_u16(status_code)
-                    .ok()
-                    .and_then(|status| status.canonical_reason())
-                    .unwrap_or("Internal Server Error");
-                PyString::new(py, phrase).into_any().unbind()
-            },
-            Bound::unbind,
-        )
-}
-
 const fn body_allowed(status: StatusCode) -> bool {
-    let code = status.as_u16();
-    code >= 200 && !matches!(code, 204 | 205 | 304)
+    !matches!(status.as_u16(), 100..=199 | 204 | 304)
 }
 
-impl PyHTTPException {
-    fn with_detail(
-        py: Python<'_>,
-        status_code: u16,
-        detail: Option<Bound<'_, PyAny>>,
-        headers: Option<Bound<'_, PyDict>>,
-    ) -> Self {
-        let detail = match detail {
-            Some(detail) => detail.unbind(),
-            None => status_phrase(py, status_code),
-        };
-        Self {
-            status_code,
-            detail,
-            headers: headers.map(Into::into),
-        }
+pub fn http_exception_response(value: &Bound<'_, PyAny>) -> Option<Response> {
+    if !is_http_exception(value) {
+        return None;
     }
-
-    pub(crate) fn bad_request(py: Python<'_>, detail: &str) -> PyErr {
-        let exc = Self {
-            status_code: 400,
-            detail: PyString::new(py, detail).into_any().unbind(),
-            headers: None,
-        };
-        match Py::new(py, exc).map(Py::into_any) {
-            Ok(instance) => PyErr::from_value(instance.into_bound(py)),
-            Err(err) => err,
-        }
+    let py = value.py();
+    let status = StatusCode::from_u16(http_status_code(value)?).ok()?;
+    let headers = value
+        .getattr(intern!(py, "headers"))
+        .ok()
+        .filter(|headers| !headers.is_none())
+        .map(|headers| response_headers(&headers))
+        .unwrap_or_default();
+    if !body_allowed(status) {
+        return Some((status, headers).into_response());
     }
+    let detail = value.getattr(intern!(py, "detail")).ok()?;
+    let content = PyDict::new(py);
+    content.set_item(intern!(py, "detail"), detail).ok()?;
+    let mut response = py_json_response_with_status(py, status, content.as_any()).ok()?;
+    response.headers_mut().extend(headers);
+    Some(response)
+}
 
-    #[must_use]
-    pub fn to_response(&self, py: Python<'_>) -> Response {
-        let status =
-            StatusCode::try_from(self.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let headers = response_headers(py, self.headers.as_ref());
-
-        if !body_allowed(status) {
-            return (status, headers).into_response();
-        }
-
-        let detail = py_any_to_json(py, self.detail.bind(py));
-        (status, headers, Json(json!({ "detail": detail }))).into_response()
+pub fn validation_error_response(value: &Bound<'_, PyAny>) -> Option<Response> {
+    let py = value.py();
+    if !value
+        .is_instance(request_validation_error_type(py).ok()?)
+        .ok()?
+    {
+        return None;
     }
+    let content = PyDict::new(py);
+    content
+        .set_item(
+            intern!(py, "detail"),
+            value.call_method0(intern!(py, "errors")).ok()?,
+        )
+        .ok()?;
+    py_json_response_with_status(py, StatusCode::UNPROCESSABLE_ENTITY, content.as_any()).ok()
 }
 
 /// A WebSocket exception you can raise in your own code to show errors to the client.
@@ -420,19 +315,3 @@ impl PyWebSocketException {
         )
     }
 }
-
-/// A custom deprecation warning as DeprecationWarning is ignored
-/// Ref: https://sethmlarson.dev/deprecations-via-warnings-dont-work-for-python-libraries
-#[pyclass(extends = PyUserWarning, name = "FastAPIDeprecationWarning")]
-pub struct PyFastAPIDeprecationWarning;
-
-#[pymethods]
-impl PyFastAPIDeprecationWarning {
-    #[new]
-    #[pyo3(signature = (*_args, **_kwargs))]
-    const fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
-        Self
-    }
-}
-
-pub type PyFastrAPIDeprecationWarning = PyFastAPIDeprecationWarning;

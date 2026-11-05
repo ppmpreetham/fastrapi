@@ -11,10 +11,6 @@ pub fn is_inspect_empty(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     INSPECT_PARAMETER_EMPTY.is(py, value)
 }
 
-pub fn is_ellipsis(value: &Bound<'_, PyAny>) -> bool {
-    value.is(value.py().Ellipsis())
-}
-
 pub fn annotation_name(py: Python<'_>, annotation: &Py<PyAny>) -> Option<String> {
     let annotation = annotation.bind(py);
     annotation
@@ -33,11 +29,6 @@ pub fn annotation_name(py: Python<'_>, annotation: &Py<PyAny>) -> Option<String>
                 .ok()
                 .map(|value| value.to_string_lossy().into_owned())
         })
-}
-
-#[inline]
-pub fn is_upload_file_type(name: &str) -> bool {
-    name == "UploadFile" || name.ends_with(".UploadFile")
 }
 
 #[inline]
@@ -90,33 +81,8 @@ pub fn list_element_annotation<'py>(
 }
 
 #[inline]
-pub(crate) fn is_param_marker(marker: &Bound<'_, PyAny>) -> bool {
-    let name = marker
-        .get_type()
-        .name()
-        .ok()
-        .map(|n| n.to_string_lossy().into_owned());
-    matches!(
-        name.as_deref(),
-        Some("Query" | "Path" | "Body" | "Form" | "File" | "Header" | "Cookie")
-    )
-}
-#[inline]
 pub(crate) fn is_dependency_marker(marker: &Bound<'_, PyAny>) -> bool {
     marker.hasattr("dependency").unwrap_or(false) || marker.hasattr("scopes").unwrap_or(false)
-}
-
-pub fn find_annotated_marker<'py>(param_obj: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
-    let annotation = param_obj.getattr("annotation").ok()?;
-    let metadata = annotation.getattr("__metadata__").ok()?;
-
-    for item in metadata.try_iter().ok()? {
-        let Ok(item) = item else { continue };
-        if is_dependency_marker(&item) || is_param_marker(&item) {
-            return Some(item);
-        }
-    }
-    None
 }
 
 #[must_use]

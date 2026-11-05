@@ -27,7 +27,6 @@ pub enum BodyField {
 pub enum BodyPayload {
     Json {
         raw: Bytes,
-        value: Option<simd_json::OwnedValue>,
     },
     Form {
         fields: AHashMap<FormText, SmallVec<[BodyField; 2]>>,
@@ -39,7 +38,7 @@ impl BodyPayload {
     #[must_use]
     pub const fn raw(&self) -> &Bytes {
         match self {
-            Self::Json { raw, .. } | Self::Form { raw, .. } => raw,
+            Self::Json { raw } | Self::Form { raw, .. } => raw,
         }
     }
 }

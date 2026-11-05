@@ -67,16 +67,18 @@ fn is_coroutine_callable(py: Python<'_>, func: &Bound<'_, PyAny>) -> bool {
         .is_ok_and(|call| is_coroutine(&call))
 }
 
-#[must_use]
-pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> ParsedRouteMetadata {
+pub fn parse_route_metadata(
+    py: Python,
+    func: &Bound<PyAny>,
+    path: &str,
+) -> PyResult<ParsedRouteMetadata> {
     let response_type = get_response_type(py, func);
     let serialization_hint = get_serialization_hint(py, func);
 
     let is_async = is_coroutine_callable(py, func);
 
     let path_param_names = fastrapi_core::path::extract_path_param_names(path);
-    let dependencies =
-        dependencies::parse_dependencies(py, func, &path_param_names).unwrap_or_default();
+    let dependencies = dependencies::parse_dependencies(py, func, &path_param_names)?;
 
     let dep_param_names: HashSet<String> = dependencies
         .iter()
@@ -89,7 +91,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     let mut request_param: Option<Py<PyString>> = None;
     let mut response_param = None;
 
-    _ = (|| -> PyResult<()> {
+    {
         let inspect = INSPECT.get(py)?;
         let signature = inspect.call_method1("signature", (func,))?;
         let parameters = signature.getattr("parameters")?;
@@ -129,6 +131,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
             if parsed_param.source == ParameterSource::Body {
                 body_param_names.push(parsed_param.name.clone());
                 if parsed_param.is_pydantic_model
+                    && !parsed_param.is_form
                     && let Some(ann) = &parsed_param.annotation
                 {
                     let validator_idx = param_validators.len();
@@ -166,8 +169,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
 
             parsed_params.push(parsed_param);
         }
-        Ok(())
-    })();
+    }
 
     let is_fast_path = parsed_params.is_empty() && dependencies.is_empty() && !is_async;
 
@@ -179,7 +181,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
     };
     let body_param_names = intern_all(body_param_names);
 
-    ParsedRouteMetadata {
+    Ok(ParsedRouteMetadata {
         param_validators,
         response_type,
         serialization_hint,
@@ -190,7 +192,7 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
         parsed_params,
         is_async,
         is_fast_path,
-    }
+    })
 }
 
 pub struct WebSocketSignature {

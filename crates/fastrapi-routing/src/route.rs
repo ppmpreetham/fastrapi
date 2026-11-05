@@ -1,7 +1,6 @@
 //! Data types that describe a route after the analysis.
 //! These types hold the parsed parameters, the validators, the execution plan, and the route entries for HTTP and WebSocket routes.
 
-use crate::annotations::ScalarCoercion;
 use crate::dependencies::{DependencyNode, InjectionType, OverrideCache};
 use crate::kernel_validation::KernelFastPath;
 use fastrapi_core::method::HttpMethod;
@@ -15,6 +14,23 @@ use smallvec::SmallVec;
 use std::num::NonZeroU32;
 use std::sync::{Arc, OnceLock};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FastKind {
+    Str,
+    Int,
+    Float,
+    Bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelKey {
+    pub lookup: String,
+    pub alias: Py<PyString>,
+    pub sequence: bool,
+    pub required: bool,
+    pub default: Py<PyAny>,
+}
+
 #[expect(
     clippy::struct_excessive_bools,
     reason = "Parsed parameter tracks multiple boolean validation and extraction flags"
@@ -24,11 +40,12 @@ pub struct ParsedParameter {
     pub name: String,
     pub name_py: Py<PyString>,
     pub external_name: String,
-    pub has_alias: bool,
+    pub alias_py: Py<PyString>,
     pub header_name: Option<axum::http::HeaderName>,
     pub source: ParameterSource,
     pub annotation: Option<Py<PyAny>>,
     pub default_value: Option<Py<PyAny>>,
+    pub make_default: Option<Py<PyAny>>,
     pub has_default: bool,
     pub required: bool,
     pub is_list: bool,
@@ -36,9 +53,13 @@ pub struct ParsedParameter {
     pub constraints: ParameterConstraints,
     pub param_object: Option<Py<PyAny>>,
     pub is_pydantic_model: bool,
+    pub model_keys: Option<Arc<[ModelKey]>>,
     pub is_file: bool,
+    pub is_form: bool,
     pub embed: bool,
-    pub coercion: ScalarCoercion,
+    pub fast: Option<FastKind>,
+    pub validate: Py<PyAny>,
+    pub validate_json: Option<Py<PyAny>>,
     pub validator_index: Option<usize>,
 }
 
@@ -81,6 +102,9 @@ pub struct PayloadSpec {
     pub dependency_overrides: Option<Py<PyAny>>,
     pub body_param_names: Vec<Py<PyString>>,
     pub body_param_indices: SmallVec<[usize; 4]>,
+    pub body_embed: bool,
+    pub body_is_form: bool,
+    pub strict_content_type: bool,
     pub request_param_indices: SmallVec<[usize; 8]>,
     pub needs_body: bool,
     pub override_cache: OverrideCache,
@@ -112,7 +136,6 @@ impl PayloadSpec {
 #[derive(Clone)]
 pub struct ValidationRules {
     pub param_validators: Vec<PydanticValidator>,
-    pub defer_json_parse: bool,
     pub bypass_serialization: bool,
 }
 

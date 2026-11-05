@@ -248,7 +248,7 @@ def test_websocket_exception_handler_and_validation_error():
     opcode, payload = _recv_frame(sock)
     assert (opcode, _close_code(payload)[0]) == (0x8, 4001)
     assert _connect(port, "/typed?count=x")[0] == 403
-    assert seen == ["Boom", ["query", "count"]]
+    assert seen == ["Boom", ("query", "count")]
 
 
 def test_websocket_route_name_and_dependencies():

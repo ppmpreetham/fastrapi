@@ -1,6 +1,5 @@
 //! Helpers that examine Python type annotations.
-//! The functions find scalar kinds (`bool`, `int`, `float`, `str`), get the members of a union, and remove `Optional`.
-//! The request code uses the results to convert raw request values.
+//! The functions get the members of a union and remove `Optional`.
 
 use crate::params;
 use fastrapi_http::request::PyHTTPConnection;
@@ -8,93 +7,8 @@ use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_pyutil::imports::TYPING;
 use fastrapi_pyutil::lazy::LazyPyAttr;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyFloat, PyInt, PyModule, PyString, PyTuple, PyType};
+use pyo3::types::{PyAny, PyModule, PyTuple, PyType};
 use pyo3::{Bound, Py, intern};
-use smallvec::SmallVec;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ScalarKind {
-    Bool,
-    Int,
-    Float,
-    Str,
-    #[default]
-    Other,
-}
-
-#[must_use]
-pub fn resolve_scalar_kind(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> ScalarKind {
-    if let Ok(py_type) = annotation.cast::<PyType>() {
-        if py_type.is(py.get_type::<PyBool>()) {
-            return ScalarKind::Bool;
-        }
-        if py_type.is(py.get_type::<PyInt>()) {
-            return ScalarKind::Int;
-        }
-        if py_type.is(py.get_type::<PyFloat>()) {
-            return ScalarKind::Float;
-        }
-        if py_type.is(py.get_type::<PyString>()) {
-            return ScalarKind::Str;
-        }
-    }
-
-    if annotation.is_instance_of::<PyBool>() {
-        ScalarKind::Bool
-    } else if annotation.is_instance_of::<PyInt>() {
-        ScalarKind::Int
-    } else if annotation.is_instance_of::<PyFloat>() {
-        ScalarKind::Float
-    } else if annotation.is_instance_of::<PyString>() {
-        ScalarKind::Str
-    } else {
-        ScalarKind::Other
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum ScalarCoercion {
-    Single(ScalarKind),
-    Union(SmallVec<[ScalarKind; 4]>),
-}
-
-#[must_use]
-pub fn resolve_scalar_coercion(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> ScalarCoercion {
-    let mut kinds = SmallVec::new();
-    collect_scalar_kinds(py, annotation, &mut kinds);
-    match kinds.as_slice() {
-        [] => ScalarCoercion::Single(ScalarKind::Other),
-        [only] => ScalarCoercion::Single(*only),
-        _ => {
-            if kinds.contains(&ScalarKind::Str) {
-                ScalarCoercion::Single(ScalarKind::Str)
-            } else {
-                ScalarCoercion::Union(kinds)
-            }
-        }
-    }
-}
-
-fn collect_scalar_kinds(
-    py: Python<'_>,
-    annotation: &Bound<'_, PyAny>,
-    out: &mut SmallVec<[ScalarKind; 4]>,
-) {
-    if let Some(args) = union_args(py, annotation) {
-        for arg in args.iter() {
-            if is_none_type(&arg) {
-                continue;
-            }
-            collect_scalar_kinds(py, &arg, out);
-        }
-        return;
-    }
-    if let Some((true, Some(element))) = Some(params::list_element_annotation(py, annotation)) {
-        collect_scalar_kinds(py, &element, out);
-        return;
-    }
-    out.push(resolve_scalar_kind(py, annotation));
-}
 
 pub fn union_args<'py>(
     py: Python<'py>,

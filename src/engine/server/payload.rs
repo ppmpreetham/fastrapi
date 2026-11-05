@@ -10,7 +10,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use fastrapi_core::body::{BodyField, BodyPayload, FormText, UploadedFile};
 use fastrapi_core::params::ParameterSource;
-use fastrapi_routing::request_data::ValidationErrorDetails;
 use fastrapi_routing::route::RouteHandler;
 use futures_util::StreamExt;
 use multer::{Constraints, Error, Multipart, SizeLimit};
@@ -37,72 +36,24 @@ pub(crate) async fn extract_payload(
     handler: &RouteHandler,
     state: &AppState,
 ) -> Result<Option<BodyPayload>, Response> {
+    let raw = to_bytes(body, state.max_body_size.unwrap_or(usize::MAX))
+        .await
+        .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response())?;
+    if !handler.payload.body_is_form {
+        return Ok((!raw.is_empty()).then_some(BodyPayload::Json { raw }));
+    }
     let content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-
-    if handler.payload.body_param_indices.is_empty() {
-        let raw = to_bytes(body, state.max_body_size.unwrap_or(usize::MAX))
-            .await
-            .map_err(|_| {
-                (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response()
-            })?;
-        return Ok((!raw.is_empty()).then_some(BodyPayload::Json { raw, value: None }));
-    }
-
-    if content_type.starts_with("multipart/form-data") {
-        let raw = to_bytes(body, state.max_body_size.unwrap_or(usize::MAX))
-            .await
-            .map_err(|_| {
-                (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response()
-            })?;
-        return parse_multipart_form(Body::from(raw.clone()), content_type, handler, state)
-            .await
-            .map(|fields| Some(BodyPayload::Form { fields, raw }));
-    }
-
-    let body = to_bytes(body, state.max_body_size.unwrap_or(usize::MAX))
-        .await
-        .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response())?;
-    if body.is_empty() {
-        return Ok(None);
-    }
-
-    if content_type.starts_with("application/x-www-form-urlencoded") {
-        return parse_urlencoded_form(&body, state.max_field_size)
-            .map(|fields| Some(BodyPayload::Form { fields, raw: body }));
-    }
-
-    if handler.validation.defer_json_parse {
-        return Ok(Some(BodyPayload::Json {
-            raw: body,
-            value: None,
-        }));
-    }
-
-    let mut json_buf = body.to_vec();
-    let value = simd_json::to_owned_value(&mut json_buf).map_err(|err| {
-        let detail = simd_json::json!({
-            "detail": [{
-                "type": "json_invalid",
-                "loc": ["body", err.index()],
-                "msg": "JSON decode error",
-                "input": {},
-                "ctx": { "error": format!("{:?}", err.error()) },
-            }]
-        });
-        let mut response =
-            (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(detail.clone())).into_response();
-        response
-            .extensions_mut()
-            .insert(ValidationErrorDetails(detail));
-        response
-    })?;
-    Ok(Some(BodyPayload::Json {
-        raw: body,
-        value: Some(value),
-    }))
+    let fields = if content_type.starts_with("multipart/form-data") {
+        parse_multipart_form(Body::from(raw.clone()), content_type, handler, state).await?
+    } else if content_type.starts_with("application/x-www-form-urlencoded") {
+        parse_urlencoded_form(&raw, state.max_field_size)?
+    } else {
+        AHashMap::new()
+    };
+    Ok(Some(BodyPayload::Form { fields, raw }))
 }
 
 pub(crate) fn parse_urlencoded_form(

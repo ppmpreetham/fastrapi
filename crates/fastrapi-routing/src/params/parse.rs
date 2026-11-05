@@ -2,79 +2,91 @@
 //! It finds the source of the value (path, query, header, body, or other source), the default value, the external name, and the constraints.
 
 use super::constraints::extract_constraints;
-use super::utils::{
-    annotation_name, base_annotation, find_annotated_marker, is_background_tasks_type,
-    is_dependency_marker, is_ellipsis, is_inspect_empty, is_upload_file_type,
-    list_element_annotation,
-};
-use crate::pydantic;
-use crate::route::ParsedParameter;
+use super::module::analyze;
+use super::utils::{annotation_name, base_annotation, is_background_tasks_type, is_inspect_empty};
+use crate::route::{FastKind, ModelKey, ParsedParameter};
 use fastrapi_core::params::{ParameterConstraints, ParameterSource};
+use fastrapi_http::upload_file::PyUploadFile;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyString};
+use pyo3::types::{PyAny, PyString, PyTuple};
 use pyo3::{Bound, intern};
+use std::sync::Arc;
 
-pub const PARAM_CLASS_QUERY: &str = "Query";
-pub const PARAM_CLASS_PATH: &str = "Path";
-pub const PARAM_CLASS_BODY: &str = "Body";
-pub const PARAM_CLASS_FORM: &str = "Form";
-pub const PARAM_CLASS_FILE: &str = "File";
-pub const PARAM_CLASS_HEADER: &str = "Header";
-pub const PARAM_CLASS_COOKIE: &str = "Cookie";
+fn source_of(name: &str) -> ParameterSource {
+    match name {
+        "path" => ParameterSource::Path,
+        "query" => ParameterSource::Query,
+        "header" => ParameterSource::Header,
+        "cookie" => ParameterSource::Cookie,
+        _ => ParameterSource::Body,
+    }
+}
 
-fn source_from_param_class(type_name: &str) -> Option<ParameterSource> {
-    match type_name {
-        PARAM_CLASS_QUERY => Some(ParameterSource::Query),
-        PARAM_CLASS_PATH => Some(ParameterSource::Path),
-        PARAM_CLASS_BODY | PARAM_CLASS_FORM | PARAM_CLASS_FILE => Some(ParameterSource::Body),
-        PARAM_CLASS_HEADER => Some(ParameterSource::Header),
-        PARAM_CLASS_COOKIE => Some(ParameterSource::Cookie),
+fn fast_kind(name: Option<&str>) -> Option<FastKind> {
+    match name? {
+        "str" => Some(FastKind::Str),
+        "int" => Some(FastKind::Int),
+        "float" => Some(FastKind::Float),
+        "bool" => Some(FastKind::Bool),
         _ => None,
     }
 }
 
-fn extract_param_default(param_obj: &Bound<'_, PyAny>) -> (Option<Py<PyAny>>, bool, bool) {
-    let Ok(default) = param_obj.getattr("default") else {
-        return (None, false, true);
+fn optional<'py>(
+    spec: &Bound<'py, PyAny>,
+    name: &Bound<'py, PyString>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    Ok(Some(spec.getattr(name)?).filter(|value| !value.is_none()))
+}
+
+fn model_keys(spec: &Bound<'_, PyAny>) -> PyResult<Option<Arc<[ModelKey]>>> {
+    let py = spec.py();
+    let Some(keys) = optional(spec, intern!(py, "model_keys"))? else {
+        return Ok(None);
     };
-    if is_ellipsis(&default) {
-        return (None, false, true);
-    }
-    if default.is_none() {
-        return (None, true, false);
-    }
-    (Some(default.unbind()), true, false)
+    keys.try_iter()?
+        .map(|key| {
+            let key = key?;
+            Ok(ModelKey {
+                lookup: key.getattr(intern!(py, "lookup"))?.extract()?,
+                alias: PyString::intern(py, key.getattr(intern!(py, "alias"))?.extract()?).unbind(),
+                sequence: key.getattr(intern!(py, "sequence"))?.extract()?,
+                required: key.getattr(intern!(py, "required"))?.extract()?,
+                default: key.getattr(intern!(py, "default"))?.unbind(),
+            })
+        })
+        .collect::<PyResult<Arc<[ModelKey]>>>()
+        .map(Some)
 }
 
-fn external_name_for_param(
-    param_name: &str,
-    source: &ParameterSource,
-    param_obj: &Bound<'_, PyAny>,
-) -> String {
-    if let Ok(alias) = param_obj.getattr("alias")
-        && let Ok(Some(alias)) = alias.extract::<Option<String>>()
-    {
-        return alias;
+fn background_tasks_parameter(py: Python<'_>, param_name: &str) -> ParsedParameter {
+    let name_py = PyString::intern(py, param_name).unbind();
+    ParsedParameter {
+        name: param_name.to_owned(),
+        alias_py: name_py.clone_ref(py),
+        name_py,
+        external_name: param_name.to_owned(),
+        header_name: None,
+        source: ParameterSource::BackgroundTasks,
+        annotation: None,
+        default_value: None,
+        make_default: None,
+        has_default: false,
+        required: false,
+        is_list: false,
+        description: None,
+        constraints: ParameterConstraints::default(),
+        param_object: None,
+        is_pydantic_model: false,
+        model_keys: None,
+        is_file: false,
+        is_form: false,
+        embed: false,
+        fast: None,
+        validate: py.None(),
+        validate_json: None,
+        validator_index: None,
     }
-    if matches!(source, ParameterSource::Header)
-        && param_obj
-            .getattr("convert_underscores")
-            .ok()
-            .and_then(|value| value.extract::<bool>().ok())
-            .unwrap_or(true)
-    {
-        return param_name.replace('_', "-");
-    }
-    param_name.to_string()
-}
-
-#[inline]
-fn type_name_of(value: &Bound<'_, PyAny>) -> String {
-    value
-        .get_type()
-        .name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 pub fn parse_parameter_spec(
@@ -83,148 +95,60 @@ pub fn parse_parameter_spec(
     param_obj: &Bound<'_, PyAny>,
     path_param_names: &[String],
 ) -> PyResult<ParsedParameter> {
-    let raw_annotation = param_obj
-        .getattr("annotation")
-        .ok()
-        .filter(|annotation| !is_inspect_empty(py, annotation));
-    let has_annotation = raw_annotation.is_some();
-    let annotation = raw_annotation.map(|raw| base_annotation(&raw).unbind());
-    let (is_list, element_annotation) = annotation.as_ref().map_or((false, None), |ann| {
-        let (is_list, elem) = list_element_annotation(py, ann.bind(py));
-        (is_list, elem.map(Bound::unbind))
-    });
+    let raw_annotation = param_obj.getattr(intern!(py, "annotation"))?.into_any();
+    let has_annotation = !is_inspect_empty(py, &raw_annotation);
+    if has_annotation
+        && annotation_name(py, &base_annotation(&raw_annotation).unbind())
+            .as_deref()
+            .is_some_and(is_background_tasks_type)
+    {
+        return Ok(background_tasks_parameter(py, param_name));
+    }
 
-    let effective_annotation = if is_list {
-        element_annotation.or_else(|| annotation.clone())
-    } else {
-        annotation.clone()
-    };
-
-    let is_pydantic_model = effective_annotation
-        .as_ref()
-        .is_some_and(|ann| pydantic::is_pydantic_model(py, ann.bind(py)));
-
-    let ann_name = effective_annotation
-        .as_ref()
-        .and_then(|ann| annotation_name(py, ann));
-    let is_upload_file = ann_name.as_deref().is_some_and(is_upload_file_type);
-    let is_background_tasks = ann_name.as_deref().is_some_and(is_background_tasks_type);
-
-    let default = param_obj.getattr("default")?;
-    let has_plain_default = !is_inspect_empty(py, &default);
     let is_path_param = path_param_names.iter().any(|name| name == param_name);
+    let uploads = PyTuple::new(py, [py.get_type::<PyUploadFile>()])?;
+    let spec = analyze(py)?.call1((param_name, param_obj, is_path_param, uploads))?;
 
-    let initial_source = if is_background_tasks {
-        ParameterSource::BackgroundTasks
-    } else if is_path_param {
-        ParameterSource::Path
-    } else if is_upload_file || is_pydantic_model || (!has_annotation && !has_plain_default) {
-        ParameterSource::Body
-    } else {
-        ParameterSource::Query
-    };
-
-    let plain_default_is_marker =
-        has_plain_default && source_from_param_class(&type_name_of(&default)).is_some();
-
-    let driver = if plain_default_is_marker {
-        Some(default.clone())
-    } else {
-        find_annotated_marker(param_obj).filter(|marker| !is_dependency_marker(marker))
-    };
-
-    let (source, default_value, has_default, required, description, constraints, param_object) =
-        if let Some(marker) = driver {
-            let param_source =
-                source_from_param_class(&type_name_of(&marker)).unwrap_or(initial_source);
-            let (mut value, mut has_val, mut is_req) = extract_param_default(&marker);
-            if has_plain_default && !plain_default_is_marker && !is_ellipsis(&default) {
-                value = (!default.is_none()).then(|| default.clone().unbind());
-                has_val = true;
-                is_req = false;
-            }
-            let desc = marker
-                .getattr("description")
-                .ok()
-                .and_then(|value| value.extract::<Option<String>>().ok())
-                .flatten();
-            let cons = extract_constraints(&marker);
-            (
-                param_source,
-                value,
-                has_val,
-                is_req,
-                desc,
-                cons,
-                Some(marker.unbind()),
-            )
-        } else if has_plain_default && !is_ellipsis(&default) {
-            (
-                initial_source,
-                Some(default.unbind()),
-                true,
-                false,
-                None,
-                ParameterConstraints::default(),
-                None,
-            )
-        } else {
-            (
-                initial_source,
-                None,
-                false,
-                true,
-                None,
-                ParameterConstraints::default(),
-                None,
-            )
-        };
-
-    let external_name = param_object.as_ref().map_or_else(
-        || param_name.to_string(),
-        |obj| external_name_for_param(param_name, &source, obj.bind(py)),
-    );
-
-    let is_file_param = param_object
-        .as_ref()
-        .and_then(|obj| obj.bind(py).get_type().name().ok())
-        .is_some_and(|name| name.to_string_lossy() == PARAM_CLASS_FILE);
-    let is_file = is_upload_file || is_file_param;
-
-    let coercion = if !is_pydantic_model && let Some(ann) = &annotation {
-        crate::annotations::resolve_scalar_coercion(py, ann.bind(py))
-    } else {
-        crate::annotations::ScalarCoercion::Single(crate::annotations::ScalarKind::Other)
-    };
-
-    let embed = param_object
-        .as_ref()
-        .and_then(|obj| obj.bind(py).getattr(intern!(py, "embed")).ok())
-        .and_then(|value| value.extract::<bool>().ok())
-        .unwrap_or(false);
-
+    let source = source_of(spec.getattr(intern!(py, "source"))?.extract::<&str>()?);
+    let external_name: String = spec.getattr(intern!(py, "alias"))?.extract()?;
+    let field_info = spec.getattr(intern!(py, "field_info"))?;
+    let required: bool = spec.getattr(intern!(py, "required"))?.extract()?;
     let header_name = matches!(source, ParameterSource::Header)
-        .then(|| axum::http::HeaderName::from_bytes(external_name.as_bytes()).ok())
+        .then(|| {
+            axum::http::HeaderName::from_bytes(external_name.to_ascii_lowercase().as_bytes()).ok()
+        })
         .flatten();
+    let fast = spec.getattr(intern!(py, "fast"))?;
+
     Ok(ParsedParameter {
-        name: param_name.to_string(),
+        name: param_name.to_owned(),
         name_py: PyString::intern(py, param_name).unbind(),
-        has_alias: external_name != param_name,
+        alias_py: PyString::intern(py, &external_name).unbind(),
         header_name,
-        external_name,
         source,
-        annotation,
-        default_value,
-        has_default,
+        annotation: has_annotation
+            .then(|| spec.getattr(intern!(py, "annotation")))
+            .transpose()?
+            .map(Bound::unbind),
+        default_value: optional(&spec, intern!(py, "default"))?.map(Bound::unbind),
+        make_default: optional(&spec, intern!(py, "make_default"))?.map(Bound::unbind),
+        has_default: !required,
         required,
-        is_list,
-        description,
-        constraints,
-        param_object,
-        is_pydantic_model,
-        is_file,
-        embed,
-        coercion,
+        is_list: spec.getattr(intern!(py, "sequence"))?.extract()?,
+        description: field_info
+            .getattr(intern!(py, "description"))?
+            .extract::<Option<String>>()?,
+        constraints: extract_constraints(&spec.getattr(intern!(py, "constraints"))?),
+        is_pydantic_model: spec.getattr(intern!(py, "model"))?.extract()?,
+        model_keys: model_keys(&spec)?,
+        is_file: spec.getattr(intern!(py, "is_file"))?.extract()?,
+        is_form: spec.getattr(intern!(py, "is_form"))?.extract()?,
+        embed: spec.getattr(intern!(py, "embed"))?.extract()?,
+        fast: fast_kind(fast.extract::<Option<&str>>()?),
+        validate: spec.getattr(intern!(py, "validate"))?.unbind(),
+        validate_json: optional(&spec, intern!(py, "validate_json"))?.map(Bound::unbind),
+        param_object: Some(field_info.unbind()),
+        external_name,
         validator_index: None,
     })
 }

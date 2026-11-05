@@ -4,6 +4,7 @@
 
 use super::params;
 use super::security::PySecurityScopes;
+use crate::request_data::{Errors, request_param_value};
 use crate::route::ParsedParameter;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_pyutil::call::{CallArgs, CallLayout};
@@ -14,7 +15,6 @@ use fastrapi_runtime::{blocking, py_bridge};
 use crate::security::{
     OAuth2PasswordRequestForm, OAuth2PasswordRequestFormStrict, describe_scheme,
 };
-use axum::response::Response;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyStopIteration};
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -310,11 +310,11 @@ pub async fn execute_request_dependencies(
     response: Option<&Py<PyAny>>,
     stack: &mut Option<Py<PyAny>>,
     sync_to_threadpool: bool,
-) -> Result<ResolvedDependencies, DependencyExecutionError> {
+) -> PyResult<ResolvedDependencies> {
     let mut registry: ResultRegistry = smallvec::smallvec![None; plan.len()];
     let mut results = ResolvedDependencies::new();
     for node in plan {
-        let step = Python::attach(|py| -> Result<_, DependencyExecutionError> {
+        let step = Python::attach(|py| -> PyResult<_> {
             let mut args = dependency_args(py, node, &registry, input, request)?;
             if let Some(response) = response {
                 for (name, injection) in &node.injection_plan {
@@ -375,17 +375,6 @@ pub async fn execute_request_dependencies(
         }
     }
     Ok(results)
-}
-
-pub enum DependencyExecutionError {
-    Python(PyErr),
-    Response(Box<Response>),
-}
-
-impl From<PyErr> for DependencyExecutionError {
-    fn from(value: PyErr) -> Self {
-        Self::Python(value)
-    }
 }
 
 fn get_signature<'py>(
@@ -831,8 +820,9 @@ fn dependency_args(
     results_registry: &[Option<SharedPyObject>],
     request_input: &RequestInput<'_>,
     request: Option<&SharedPyObject>,
-) -> Result<CallArgs, DependencyExecutionError> {
+) -> PyResult<CallArgs> {
     let mut final_kwargs = CallArgs::new();
+    let mut errors = Errors::new(py);
 
     for (arg_name, injection_type) in &dep.injection_plan {
         let py_arg_name = arg_name.bind(py);
@@ -843,9 +833,7 @@ fn dependency_args(
                 }
             }
             InjectionType::Parameter(parameter) => {
-                if let Some(value) =
-                    crate::request_data::resolve_parameter_value(py, parameter, request_input)
-                        .map_err(|e| DependencyExecutionError::Response(Box::new(e)))?
+                if let Some(value) = request_param_value(py, parameter, request_input, &mut errors)?
                 {
                     final_kwargs.set(py_arg_name, value)?;
                 }
@@ -868,6 +856,7 @@ fn dependency_args(
         }
     }
 
+    errors.check(|| Ok(None))?;
     Ok(final_kwargs)
 }
 
@@ -876,7 +865,7 @@ pub fn execute_dependencies_sync(
     flat_plan: &[DependencyNode],
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
-) -> Result<(ResolvedDependencies, TeardownTasks), DependencyExecutionError> {
+) -> PyResult<(ResolvedDependencies, TeardownTasks)> {
     let request = request;
     let mut results_registry: ResultRegistry = smallvec::smallvec![None; flat_plan.len()];
     let mut teardown_tasks = TeardownTasks::new();
@@ -907,7 +896,7 @@ pub async fn execute_dependencies(
     flat_plan: &[DependencyNode],
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
-) -> Result<(ResolvedDependencies, TeardownTasks), DependencyExecutionError> {
+) -> PyResult<(ResolvedDependencies, TeardownTasks)> {
     let mut teardowns = TeardownTasks::new();
     match execute_dependencies_inner(
         event_loop,
@@ -932,7 +921,7 @@ async fn execute_dependencies_inner(
     request_input: &RequestInput<'_>,
     request: Option<Py<PyAny>>,
     teardown_tasks: &mut TeardownTasks,
-) -> Result<ResolvedDependencies, DependencyExecutionError> {
+) -> PyResult<ResolvedDependencies> {
     let mut results_registry: ResultRegistry = smallvec::smallvec![None; flat_plan.len()];
     let mut final_results = ResolvedDependencies::new();
 
@@ -947,7 +936,7 @@ async fn execute_dependencies_inner(
                     .take_while(|node| node.is_sync_callable())
                     .count();
 
-            Python::attach(|py| -> Result<(), DependencyExecutionError> {
+            Python::attach(|py| -> PyResult<()> {
                 for node in &flat_plan[idx..run_end] {
                     let (result, teardown) = execute_sync_node(
                         py,
@@ -969,7 +958,7 @@ async fn execute_dependencies_inner(
         }
 
         if dep.is_async_generator {
-            let future = Python::attach(|py| -> Result<_, DependencyExecutionError> {
+            let future = Python::attach(|py| -> PyResult<_> {
                 let generator =
                     call_dependency(py, dep, &results_registry, request_input, request.as_ref())?;
 
@@ -981,16 +970,16 @@ async fn execute_dependencies_inner(
 
             let (generator, future_anext) = future;
             let outcome = future_anext.await;
-            Python::attach(|py| -> Result<(), DependencyExecutionError> {
+            Python::attach(|py| -> PyResult<()> {
                 let value = match outcome {
                     Ok(v) => v,
                     Err(e) => {
                         return Err(if e.is_instance_of::<PyStopAsyncIteration>(py) {
-                            DependencyExecutionError::Python(PyRuntimeError::new_err(
+                            PyRuntimeError::new_err(
                                 "Async generator dependency exited before yielding",
-                            ))
+                            )
                         } else {
-                            DependencyExecutionError::Python(e)
+                            e
                         });
                     }
                 };
@@ -1002,15 +991,15 @@ async fn execute_dependencies_inner(
                 Ok(())
             })?;
         } else {
-            let future = Python::attach(|py| -> Result<_, DependencyExecutionError> {
+            let future = Python::attach(|py| -> PyResult<_> {
                 let coroutine =
                     call_dependency(py, dep, &results_registry, request_input, request.as_ref())?;
-                Ok(py_bridge::schedule_task(py, event_loop, coroutine)?)
+                py_bridge::schedule_task(py, event_loop, coroutine)
             })?;
             let outcome = future.await;
 
-            Python::attach(|py| -> Result<(), DependencyExecutionError> {
-                let result = outcome.map_err(DependencyExecutionError::Python)?;
+            Python::attach(|py| -> PyResult<()> {
+                let result = outcome?;
                 register_result(py, dep, result, &mut results_registry, &mut final_results);
                 Ok(())
             })?;
@@ -1045,18 +1034,16 @@ fn execute_sync_node(
     results_registry: &[Option<SharedPyObject>],
     request_input: &RequestInput<'_>,
     request: Option<&SharedPyObject>,
-) -> Result<(SharedPyObject, Option<TeardownTask>), DependencyExecutionError> {
+) -> PyResult<(SharedPyObject, Option<TeardownTask>)> {
     if dep.is_generator {
         let generator = call_dependency(py, dep, results_registry, request_input, request)?;
         let value = match generator.call_method0(intern!(py, "__next__")) {
             Ok(v) => v.unbind(),
             Err(e) => {
                 return Err(if e.is_instance_of::<PyStopIteration>(py) {
-                    DependencyExecutionError::Python(PyRuntimeError::new_err(
-                        "Generator dependency exited before yielding",
-                    ))
+                    PyRuntimeError::new_err("Generator dependency exited before yielding")
                 } else {
-                    DependencyExecutionError::Python(e)
+                    e
                 });
             }
         };
@@ -1079,13 +1066,13 @@ fn call_dependency<'py>(
     results_registry: &[Option<SharedPyObject>],
     request_input: &RequestInput<'_>,
     request: Option<&SharedPyObject>,
-) -> Result<Bound<'py, PyAny>, DependencyExecutionError> {
+) -> PyResult<Bound<'py, PyAny>> {
     let func = dep.func.bind(py);
     if dep.injection_plan.is_empty() {
-        return Ok(func.call0()?);
+        return func.call0();
     }
     let args = dependency_args(py, dep, results_registry, request_input, request)?;
-    Ok(args.call(func, dep.call_layout.as_deref())?)
+    args.call(func, dep.call_layout.as_deref())
 }
 
 #[inline(always)]

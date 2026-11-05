@@ -4,17 +4,18 @@
 
 use axum::response::{IntoResponse, Response};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyInt};
+use pyo3::types::PyDict;
 use pyo3::{Py, intern};
 
 use ahash::AHashMap;
 use axum::http::StatusCode;
-use fastrapi_http::exceptions::{PyHTTPException, PyRequestValidationError, status_phrase};
+use fastrapi_http::exceptions::{
+    http_exception_type, http_status_code, is_http_exception, request_validation_error_type,
+    websocket_validation_error_type,
+};
 use fastrapi_http::request::{create_py_request, create_stub_request};
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::response_convert::convert_auto_response;
-use fastrapi_pyutil::json::json_to_py_object;
-use fastrapi_routing::request_data::ValidationErrorDetails;
 use fastrapi_runtime::py_bridge::{EventLoop, PyTaskFuture, schedule_task};
 use fastrapi_runtime::server_state::current_server;
 use parking_lot::Mutex;
@@ -76,45 +77,6 @@ pub(crate) async fn resolve_pending_handler(mut response: Response) -> Response 
     })
 }
 
-pub(crate) fn dispatch_validation_handler(
-    py: Python<'_>,
-    mut response: Response,
-    request_input: Option<&RequestInput<'_>>,
-) -> Response {
-    let Some(details) = response.extensions_mut().remove::<ValidationErrorDetails>() else {
-        return response;
-    };
-    let Some(server) = server_of(request_input) else {
-        return response;
-    };
-    let Some(registry) = server.server().exception_handlers() else {
-        return response;
-    };
-    let registry = registry.bind(py);
-    let validation_type = py.get_type::<PyRequestValidationError>();
-    let Ok(Some(handler)) = registry.get_item(&validation_type) else {
-        return response;
-    };
-    let details = json_to_py_object(py, &details.0);
-    let Ok(errors) = details.bind(py).get_item(pyo3::intern!(py, "detail")) else {
-        return response;
-    };
-    let Ok(exception) = validation_type.call1((errors,)) else {
-        return response;
-    };
-    let request = build_request_arg(py, request_input);
-    match handler.call1((request, exception)) {
-        Ok(result) => match handler_response(py, server, result) {
-            Some(result) => result.into_response(response),
-            None => response,
-        },
-        Err(err) => {
-            err.print(py);
-            response
-        }
-    }
-}
-
 pub(crate) fn dispatch_exception_handler(
     py: Python<'_>,
     err: &PyErr,
@@ -122,27 +84,41 @@ pub(crate) fn dispatch_exception_handler(
     server: Option<EventLoop>,
 ) -> Option<Response> {
     let server = server.or_else(|| server_of(request_input))?;
-    let bound_registry = server.server().exception_handlers()?.bind(py);
-
-    let exc_value = err.value(py).clone();
-    let handler = if let Ok(http_error) = exc_value.cast::<PyHTTPException>()
-        && let Ok(Some(handler)) = bound_registry.get_item(http_error.borrow().status_code)
-    {
-        handler
-    } else {
-        find_handler(py, bound_registry, err)?
-    };
-
+    let registry = server.server().exception_handlers()?.bind(py);
+    let exc_value = err.value(py);
+    let http_error = is_http_exception(exc_value);
+    let handler = http_error
+        .then(|| http_status_code(exc_value))
+        .flatten()
+        .and_then(|status| registry.get_item(status).ok().flatten())
+        .or_else(|| find_handler(py, registry, err))
+        .or_else(|| {
+            (!http_error)
+                .then(|| registry.get_item(500).ok().flatten())
+                .flatten()
+        })?;
     let request = build_request_arg(py, request_input);
     match handler.call1((request, exc_value)) {
         Ok(result) => handler_response(py, server, result)
-            .map(|result| result.into_response(StatusCode::INTERNAL_SERVER_ERROR.into_response())),
+            .map(|result| result.into_response(internal_server_error())),
         Err(handler_err) => {
             tracing::error!("Exception handler itself failed:");
             handler_err.print(py);
-            Some(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            Some(internal_server_error())
         }
     }
+}
+
+pub(crate) fn internal_server_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+        )],
+        "Internal Server Error",
+    )
+        .into_response()
 }
 
 fn server_of(request_input: Option<&RequestInput<'_>>) -> Option<EventLoop> {
@@ -196,26 +172,25 @@ fn lookup_handler<'py>(
     let Ok(mro) = ty.getattr(intern!(py, "__mro__")) else {
         return None;
     };
-
-    let http_exception = py.get_type::<PyHTTPException>();
+    let validation_error = request_validation_error_type(py).ok()?;
+    let websocket_validation_error = websocket_validation_error_type(py).ok()?;
     mro.try_iter().ok()?.find_map(|entry| {
         let entry = entry.ok()?;
         if let Ok(Some(handler)) = registry.get_item(&entry) {
-            return Some(handler);
+            return Some(Some(handler));
         }
-        if entry.is(&http_exception) {
-            let starlette = STARLETTE_EXCEPTIONS
-                .get(py)
-                .ok()?
-                .getattr(intern!(py, "HTTPException"))
-                .ok()?;
-            return registry.get_item(starlette).ok().flatten();
-        }
-        None
-    })
+        let has_default = STARLETTE_HTTP_EXCEPTION.is(py, &entry)
+            || entry.is(validation_error)
+            || entry.is(websocket_validation_error);
+        has_default.then_some(None)
+    })?
 }
 
-fastrapi_pyutil::cached_py_import!(STARLETTE_EXCEPTIONS, "starlette.exceptions");
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_HTTP_EXCEPTION,
+    "starlette.exceptions",
+    "HTTPException"
+);
 
 fn build_request_arg(py: Python<'_>, request_input: Option<&RequestInput<'_>>) -> Py<PyAny> {
     request_input
@@ -224,42 +199,26 @@ fn build_request_arg(py: Python<'_>, request_input: Option<&RequestInput<'_>>) -
         .unwrap_or_else(|| py.None())
 }
 
-pub(crate) fn dispatch_status_handler(server: EventLoop, status: u16) -> Option<Response> {
+pub(crate) fn dispatch_status_handler(
+    server: EventLoop,
+    status: u16,
+    request_input: Option<&RequestInput<'_>>,
+) -> Option<Response> {
     let context = server.server();
     if !context.has_status_handlers() {
         return None;
     }
     let registry = context.exception_handlers()?;
-    Python::attach(|py| status_handler_response(py, server, registry, status))
-}
-
-fn status_handler_response(
-    py: Python<'_>,
-    server: EventLoop,
-    registry: &Py<PyDict>,
-    status: u16,
-) -> Option<Response> {
-    let key = PyInt::new(py, status);
-    let handler = registry.bind(py).get_item(key).ok().flatten()?;
-
-    let exc = Py::new(
-        py,
-        PyHTTPException {
-            status_code: status,
-            detail: status_phrase(py, status),
-            headers: None,
-        },
-    )
-    .ok()?
-    .into_any();
-    let request = create_stub_request(py).ok()?;
-
-    match handler.call1((request, exc.bind(py))) {
-        Ok(result) => handler_response(py, server, result)
-            .map(|result| result.into_response(StatusCode::INTERNAL_SERVER_ERROR.into_response())),
-        Err(err) => {
-            err.print(py);
-            Some(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    Python::attach(|py| {
+        let handler = registry.bind(py).get_item(status).ok().flatten()?;
+        let exc = http_exception_type(py).ok()?.call1((status,)).ok()?;
+        match handler.call1((build_request_arg(py, request_input), exc)) {
+            Ok(result) => handler_response(py, server, result)
+                .map(|result| result.into_response(internal_server_error())),
+            Err(err) => {
+                err.print(py);
+                Some(internal_server_error())
+            }
         }
-    }
+    })
 }

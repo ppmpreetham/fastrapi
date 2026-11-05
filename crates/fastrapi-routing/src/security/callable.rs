@@ -5,32 +5,26 @@
 use base64::Engine as _;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyString};
+use pyo3::types::{PyAny, PyDict};
 
 use crate::security::{HTTPAuthorizationCredentials, HTTPBasicCredentials};
 use base64::engine::general_purpose::STANDARD;
-use fastrapi_http::exceptions::PyHTTPException;
+use fastrapi_http::exceptions::http_exception;
 
 /// Makes an `HTTPException` error with a status code, a detail, and an optional challenge.
 /// RFC 9110 requires a `WWW-Authenticate` header in a 401 response.
 fn http_exc(py: Python<'_>, status: u16, detail: &str, challenge: Option<&str>) -> PyErr {
-    let detail = PyString::new(py, detail);
-    let raised = match challenge {
+    let headers = match challenge {
         Some(value) => {
             let headers = PyDict::new(py);
-            match headers.set_item(intern!(py, "WWW-Authenticate"), value) {
-                Ok(()) => py
-                    .get_type::<PyHTTPException>()
-                    .call1((status, detail, headers)),
-                Err(err) => return err,
+            if let Err(err) = headers.set_item(intern!(py, "WWW-Authenticate"), value) {
+                return err;
             }
+            Some(headers)
         }
-        None => py.get_type::<PyHTTPException>().call1((status, detail)),
+        None => None,
     };
-    match raised {
-        Ok(value) => PyErr::from_value(value),
-        Err(err) => err,
-    }
+    http_exception(py, status, Some(detail), headers)
 }
 
 /// Makes a 401 error with the challenge for the expected scheme.

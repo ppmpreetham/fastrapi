@@ -354,7 +354,7 @@ pub(crate) fn apply_parameter_constraints(
         }
 
         if let Some(pattern) = &constraints.pattern {
-            object.insert("pattern".to_string(), json!(pattern.as_str()));
+            object.insert("pattern".to_string(), json!(&**pattern));
         }
     }
     schema

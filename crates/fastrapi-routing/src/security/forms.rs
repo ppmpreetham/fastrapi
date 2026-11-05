@@ -1,12 +1,11 @@
 //! The OAuth2 password form classes `OAuth2PasswordRequestForm` and `OAuth2PasswordRequestFormStrict`.
 //! These dependency classes read the `username`, the `password`, and the scopes from form data.
 
-use fastrapi_http::exceptions::PyHTTPException;
+use fastrapi_http::exceptions::http_exception;
 use fastrapi_http::request::PyRequest;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyString};
-use pyo3::{Py, PyErr};
+use pyo3::types::PyAny;
 
 /// This is a dependency class to collect the `username` and `password` as form data
 /// for an OAuth2 password flow.
@@ -148,16 +147,8 @@ fn form_value(form: &Bound<'_, PyAny>, key: &str) -> PyResult<Option<String>> {
 fn required_form_value(form: &Bound<'_, PyAny>, key: &str) -> PyResult<String> {
     form_value(form, key)?.ok_or_else(|| {
         Python::attach(|py| {
-            let exc = PyHTTPException {
-                status_code: 422,
-                detail: PyString::new(py, &format!("missing form field: {key}"))
-                    .into_any()
-                    .unbind(),
-                headers: None,
-            };
-            Py::new(py, exc).map(|value| PyErr::from_value(value.into_bound(py).into_any()))
+            http_exception(py, 422, Some(&format!("missing form field: {key}")), None)
         })
-        .unwrap_or_else(|err| err)
     })
 }
 

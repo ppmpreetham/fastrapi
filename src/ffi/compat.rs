@@ -2,8 +2,7 @@
 //! This module builds the `fastrapi` submodules for dependencies, security, exception handlers, OpenAPI and docs.
 
 use fastrapi_core::path::extract_path_param_names;
-use fastrapi_http::exceptions::PyFastAPIDeprecationWarning;
-use fastrapi_http::responses::PyJSONResponse;
+use fastrapi_http::exceptions::deprecation_warning_type;
 use fastrapi_openapi::schema::native_operation_id;
 pub(crate) use fastrapi_pyutil::imports::python_source_module;
 use fastrapi_routing::dependencies::parse_dependencies;
@@ -287,69 +286,6 @@ pub(crate) fn register_dependencies(parent: &Bound<'_, PyModule>) -> PyResult<()
     Ok(())
 }
 
-#[pyfunction]
-fn http_exception_handler(
-    py: Python<'_>,
-    _request: &Bound<'_, PyAny>,
-    exc: &Bound<'_, PyAny>,
-) -> PyResult<Py<PyAny>> {
-    let content = PyDict::new(py);
-    content.set_item("detail", exc.getattr("detail")?)?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("status_code", exc.getattr("status_code")?)?;
-    if let Ok(headers) = exc.getattr("headers")
-        && !headers.is_none()
-    {
-        kwargs.set_item("headers", headers)?;
-    }
-    Ok(py
-        .get_type::<PyJSONResponse>()
-        .call((content,), Some(&kwargs))?
-        .unbind())
-}
-
-#[pyfunction]
-fn request_validation_exception_handler(
-    py: Python<'_>,
-    _request: &Bound<'_, PyAny>,
-    exc: &Bound<'_, PyAny>,
-) -> PyResult<Py<PyAny>> {
-    let content = PyDict::new(py);
-    content.set_item("detail", exc.call_method0("errors")?)?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("status_code", 422)?;
-    Ok(py
-        .get_type::<PyJSONResponse>()
-        .call((content,), Some(&kwargs))?
-        .unbind())
-}
-
-#[pyfunction]
-fn websocket_request_validation_exception_handler(
-    websocket: &Bound<'_, PyAny>,
-    exc: &Bound<'_, PyAny>,
-) -> PyResult<Py<PyAny>> {
-    let kwargs = PyDict::new(websocket.py());
-    kwargs.set_item("code", 1008)?;
-    kwargs.set_item("reason", exc.call_method0("errors")?.str()?)?;
-    Ok(websocket.call_method("close", (), Some(&kwargs))?.unbind())
-}
-
-pub(crate) fn register_exception_handlers(parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    let py = parent.py();
-    parent.add_function(wrap_pyfunction!(http_exception_handler, parent)?)?;
-    parent.add_function(wrap_pyfunction!(
-        request_validation_exception_handler,
-        parent
-    )?)?;
-    parent.add_function(wrap_pyfunction!(
-        websocket_request_validation_exception_handler,
-        parent
-    )?)?;
-    fastrapi_pyutil::imports::register_module(py, "fastrapi.exception_handlers", parent)?;
-    Ok(())
-}
-
 pub(crate) fn register_openapi_helpers(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
     let docs = PyModule::new(py, "docs")?;
@@ -377,7 +313,7 @@ fn generate_operation_id_for_path(
 ) -> PyResult<String> {
     PyErr::warn(
         py,
-        &py.get_type::<PyFastAPIDeprecationWarning>(),
+        deprecation_warning_type(py)?,
         c"fastapi.utils.generate_operation_id_for_path() was deprecated, it is not used internally, and will be removed soon",
         2,
     )?;

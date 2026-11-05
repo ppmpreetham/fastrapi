@@ -286,6 +286,10 @@ fn func_name(func: &Bound<'_, PyAny>) -> String {
         .unwrap_or_default()
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Route options mirror independent FastAPI route switches"
+)]
 struct RouteOptions {
     name: Option<String>,
     generate_unique_id_function: Option<Py<PyAny>>,
@@ -296,6 +300,7 @@ struct RouteOptions {
     summary: Option<String>,
     description: Option<String>,
     include_in_schema: bool,
+    strict_content_type: bool,
     cache_resp: bool,
     rate_limit: Option<NonZeroU32>,
     response_description: Option<String>,
@@ -325,6 +330,7 @@ impl RouteOptions {
         let summary = extract::<String>(kwargs, "summary");
         let description = extract::<String>(kwargs, "description");
         let include_in_schema = extract::<bool>(kwargs, "include_in_schema").unwrap_or(true);
+        let strict_content_type = extract::<bool>(kwargs, "strict_content_type").unwrap_or(true);
         let cache_resp = extract::<bool>(kwargs, "cache_resp").unwrap_or(false);
         let rate_limit = extract::<u32>(kwargs, "rate_limit")
             .map(|rps| {
@@ -387,6 +393,7 @@ impl RouteOptions {
             summary,
             description,
             include_in_schema,
+            strict_content_type,
             cache_resp,
             rate_limit,
             response_description,
@@ -446,11 +453,16 @@ fn build_dump_options(
     Ok(Some(options.unbind()))
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Route analysis tracks independent body and argument switches"
+)]
 struct RouteAnalysis {
     needs_kwargs: bool,
     body_param_indices: SmallVec<[usize; 4]>,
     request_param_indices: SmallVec<[usize; 8]>,
-    defer_json_parse: bool,
+    body_embed: bool,
+    body_is_form: bool,
     has_multiple_query_params: bool,
 }
 
@@ -488,8 +500,17 @@ impl RouteAnalysis {
             }
         }
 
-        let defer_json_parse = body_param_indices.len() == 1
-            && metadata.parsed_params[body_param_indices[0]].is_pydantic_model;
+        let body_params = || {
+            body_param_indices
+                .iter()
+                .map(|&idx| &metadata.parsed_params[idx])
+        };
+        let body_is_form = body_params().any(|param| param.is_form);
+        let body_embed = body_params().next().is_some_and(|first| {
+            body_param_indices.len() > 1
+                || first.embed
+                || (first.is_form && !first.is_pydantic_model)
+        });
 
         let has_multiple_query_params = metadata
             .parsed_params
@@ -502,7 +523,8 @@ impl RouteAnalysis {
             needs_kwargs,
             body_param_indices,
             request_param_indices,
-            defer_json_parse,
+            body_embed,
+            body_is_form,
             has_multiple_query_params,
         }
     }
@@ -565,7 +587,7 @@ impl PyAPIRouter {
             let py = args.py();
             let func: Bound<'_, PyAny> = args.get_item(0)?;
 
-            let mut metadata = parse_route_metadata(py, &func, &path_for_closure);
+            let mut metadata = parse_route_metadata(py, &func, &path_for_closure)?;
             if let Some(dependencies) = &opts.dependencies {
                 let path_param_names = extract_path_param_names(&path_for_closure);
                 let callables = collect_dependency_callables(py, Some(dependencies));
@@ -650,6 +672,9 @@ impl PyAPIRouter {
                     body_param_names: metadata.body_param_names,
                     body_param_indices: analysis.body_param_indices,
                     request_param_indices: analysis.request_param_indices,
+                    body_embed: analysis.body_embed,
+                    body_is_form: analysis.body_is_form,
+                    strict_content_type: opts.strict_content_type,
                     needs_body: false,
                     override_cache: OverrideCache::default(),
                     dependencies: metadata.dependencies,
@@ -659,7 +684,6 @@ impl PyAPIRouter {
                 },
                 validation: ValidationRules {
                     param_validators: metadata.param_validators,
-                    defer_json_parse: analysis.defer_json_parse,
                     bypass_serialization: opts.bypass_serialization,
                 },
                 response: ResponseFormatter {

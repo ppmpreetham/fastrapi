@@ -181,7 +181,9 @@ def test_security_base_and_handler_contracts():
     from fastrapi import HTTPException
 
     assert issubclass(APIKeyBase, object) and issubclass(HTTPBase, object) and issubclass(SecurityBase, object)
-    response = http_exception_handler(None, HTTPException(418, detail={"reason": "teapot"}))
+    import asyncio
+
+    response = asyncio.run(http_exception_handler(None, HTTPException(418, detail={"reason": "teapot"})))
     assert response.status_code == 418 and response.body == b'{"detail":{"reason":"teapot"}}'
 
 

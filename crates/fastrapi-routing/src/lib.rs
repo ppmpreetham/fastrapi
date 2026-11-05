@@ -6,8 +6,6 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::too_many_arguments)]
 
-mod macros;
-
 pub mod analysis;
 pub mod annotations;
 pub mod dependencies;

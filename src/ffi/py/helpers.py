@@ -74,10 +74,6 @@ def generate_encoders_by_class_tuples(type_encoder_map):
 encoders_by_class_tuples = generate_encoders_by_class_tuples(ENCODERS_BY_TYPE)
 
 
-class Param(abc.ABC):
-    pass
-
-
 def _async_lifespan(factory):
     import inspect
     from contextlib import contextmanager

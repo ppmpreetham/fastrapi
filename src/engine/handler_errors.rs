@@ -1,17 +1,15 @@
 //! The conversion of Python errors from route handlers into HTTP responses.
 //! This module also writes Python errors to the log.
 
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use fastrapi_http::exceptions::PyHTTPException;
+use axum::response::Response;
+use fastrapi_http::exceptions::{http_exception_response, validation_error_response};
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_runtime::py_bridge::EventLoop;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use tracing::error;
 
-use crate::engine::exception_dispatch::dispatch_exception_handler;
+use crate::engine::exception_dispatch::{dispatch_exception_handler, internal_server_error};
 
 fastrapi_pyutil::cached_py_import!(TRACEBACK_MODULE, "traceback");
 
@@ -21,6 +19,15 @@ fastrapi_pyutil::cached_py_import!(TRACEBACK_MODULE, "traceback");
 )]
 pub(crate) fn python_error_to_response(py: Python<'_>, err: PyErr, server: EventLoop) -> Response {
     python_error_response(py, &err, None, Some(server))
+}
+
+pub(crate) fn error_response(
+    py: Python<'_>,
+    err: &PyErr,
+    request_input: Option<&RequestInput<'_>>,
+    server: EventLoop,
+) -> Response {
+    python_error_response(py, err, request_input, Some(server))
 }
 
 /// Converts a Python error into a response with the handlers of the `@app.exception_handler` registry.
@@ -42,42 +49,15 @@ fn python_error_response(
         return response;
     }
 
-    if let Ok(http_error) = err.value(py).cast::<PyHTTPException>() {
-        return http_error.borrow().to_response(py);
-    }
-    if let Some(http_error) = starlette_http_exception(py, err.value(py)) {
-        return http_error.to_response(py);
+    let value = err.value(py);
+    if let Some(response) =
+        http_exception_response(value).or_else(|| validation_error_response(value))
+    {
+        return response;
     }
     log_python_error(py, err);
-    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    internal_server_error()
 }
-
-fn starlette_http_exception(py: Python<'_>, value: &Bound<'_, PyAny>) -> Option<PyHTTPException> {
-    let class = STARLETTE_EXCEPTIONS
-        .get(py)
-        .ok()?
-        .getattr(intern!(py, "HTTPException"))
-        .ok()?;
-    if !value.is_instance(&class).ok()? {
-        return None;
-    }
-    let headers = value
-        .getattr(intern!(py, "headers"))
-        .ok()
-        .and_then(|headers| headers.cast_into::<PyDict>().ok())
-        .map(Bound::unbind);
-    Some(PyHTTPException {
-        status_code: value
-            .getattr(intern!(py, "status_code"))
-            .ok()?
-            .extract()
-            .ok()?,
-        detail: value.getattr(intern!(py, "detail")).ok()?.unbind(),
-        headers,
-    })
-}
-
-fastrapi_pyutil::cached_py_import!(STARLETTE_EXCEPTIONS, "starlette.exceptions");
 
 pub(crate) fn log_python_error(py: Python<'_>, err: &PyErr) {
     let rendered = (|| -> PyResult<String> {

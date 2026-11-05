@@ -5,8 +5,9 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use fastrapi_runtime::py_bridge;
 use pyo3::Bound;
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
 use std::cmp::min;
 use std::sync::Arc;
 
@@ -109,6 +110,17 @@ fn spool_to_file(py: Python<'_>, content: &[u8]) -> PyResult<Py<PyAny>> {
 
 #[pymethods]
 impl PyUploadFile {
+    #[classmethod]
+    fn __get_pydantic_core_schema__<'py>(
+        cls: &Bound<'py, PyType>,
+        _source: &Bound<'py, PyAny>,
+        _handler: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = cls.py();
+        py.import(intern!(py, "pydantic_core.core_schema"))?
+            .call_method1(intern!(py, "is_instance_schema"), (cls,))
+    }
+
     #[new]
     #[pyo3(signature = (file, *, size=None, filename=None, headers=None, content_type=None))]
     fn py_new(

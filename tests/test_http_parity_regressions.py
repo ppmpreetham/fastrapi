@@ -32,7 +32,7 @@ def test_invalid_json_uses_validation_error_shape(client, app):
     def json_endpoint(payload: Payload):
         return payload
 
-    response = client.post("/json", content="{")
+    response = client.post("/json", content="{", headers={"content-type": "application/json"})
     assert response.status_code == 422
     assert response.json()["detail"][0]["type"] == "json_invalid"
 

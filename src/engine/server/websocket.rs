@@ -6,8 +6,8 @@ use axum::extract::{ConnectInfo, State};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use fastrapi_core::params::PathParamRange;
-use fastrapi_routing::dependencies::{self, DependencyExecutionError, execute_teardowns_async};
-use fastrapi_routing::request_data::{ValidationErrorDetails, resolve_parameter_value};
+use fastrapi_routing::dependencies::{self, execute_teardowns_async};
+use fastrapi_routing::request_data::{Errors, request_param_value};
 use fastrapi_routing::route::ParsedParameter;
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
@@ -19,8 +19,6 @@ use hyper_util::rt::TokioIo;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict, PyList, PyString};
-use simd_json::OwnedValue as JsonValue;
-use simd_json::prelude::{ValueAsArray, ValueAsObject};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{ReadHalf, WriteHalf};
@@ -41,13 +39,14 @@ use axum::http::header::HOST;
 use axum::http::request::Parts;
 use fastrapi_core::path::host_without_port;
 use fastrapi_http::exceptions::{
-    PyWebSocketDisconnect, PyWebSocketException, PyWebSocketRequestValidationError,
+    PyWebSocketDisconnect, PyWebSocketException, request_validation_error_type,
+    websocket_validation_error,
 };
 use fastrapi_http::request::PyHTTPConnection;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_http::websocket::{WSDecision, WSMessage};
-use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
+use fastrapi_pyutil::json::py_any_to_json;
 use fastrapi_runtime::tokio_runtime::spawn;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
@@ -154,16 +153,8 @@ pub async fn ws_handler(
     .await
     {
         Ok(result) => result,
-        Err(DependencyExecutionError::Python(error)) => {
-            return rejected(&route, &py_ws_obj, error, &mut decision_rx, None).await;
-        }
-        Err(DependencyExecutionError::Response(response)) => {
-            let errors = validation_errors(&response);
-            if errors.is_empty() {
-                error!("WebSocket dependency returned a response");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-            let error = Python::attach(|py| validation_exception(py, &errors));
+        Err(error) => {
+            let error = Python::attach(|py| websocket_error(py, error));
             return rejected(&route, &py_ws_obj, error, &mut decision_rx, None).await;
         }
     };
@@ -173,16 +164,14 @@ pub async fn ws_handler(
         for (name, value) in dependency_results {
             kwargs.set_item(name, value.bind(py))?;
         }
-        let mut errors = Vec::new();
+        let mut errors = Errors::new(py);
         for param in route.params.iter() {
-            match resolve_parameter_value(py, param, &request_input) {
-                Ok(Some(value)) => kwargs.set_item(param.name_py.bind(py), value)?,
-                Ok(None) => {}
-                Err(response) => errors.extend(validation_errors(&response)),
+            if let Some(value) = request_param_value(py, param, &request_input, &mut errors)? {
+                kwargs.set_item(param.name_py.bind(py), value)?;
             }
         }
-        if !errors.is_empty() {
-            return Ok(Err(errors));
+        if let Some(errors) = errors.into_list() {
+            return Ok(Err(websocket_validation_error(py, errors.into_any())));
         }
 
         let coroutine = if let Some(name) = &route.websocket_arg {
@@ -201,11 +190,7 @@ pub async fn ws_handler(
         Ok::<_, PyErr>(Ok(fut))
     }) {
         Ok(Ok(value)) => value,
-        Ok(Err(errors)) => {
-            let error = Python::attach(|py| validation_exception(py, &errors));
-            return rejected(&route, &py_ws_obj, error, &mut decision_rx, Some(teardowns)).await;
-        }
-        Err(error) => {
+        Ok(Err(error)) | Err(error) => {
             return rejected(&route, &py_ws_obj, error, &mut decision_rx, Some(teardowns)).await;
         }
     };
@@ -292,17 +277,16 @@ fastrapi_pyutil::cached_py_import!(
     "WebSocketException"
 );
 
-fn validation_exception(py: Python<'_>, errors: &[JsonValue]) -> PyErr {
-    let list = PyList::empty(py);
-    for error in errors {
-        _ = list.append(json_to_py_object(py, error));
-    }
-    match py
-        .get_type::<PyWebSocketRequestValidationError>()
-        .call1((list,))
-    {
-        Ok(value) => PyErr::from_value(value),
-        Err(error) => error,
+fn websocket_error(py: Python<'_>, error: PyErr) -> PyErr {
+    let value = error.value(py);
+    match request_validation_error_type(py) {
+        Ok(class) if value.is_instance(class).unwrap_or(false) => {
+            match value.call_method0(pyo3::intern!(py, "errors")) {
+                Ok(errors) => websocket_validation_error(py, errors),
+                Err(err) => err,
+            }
+        }
+        _ => error,
     }
 }
 
@@ -347,7 +331,9 @@ async fn handle_error(
             if let Some((code, reason)) = websocket_exception_close(py, value) {
                 return Err(HandlerOutcome::Close(code, reason));
             }
-            if value.is_instance_of::<PyWebSocketRequestValidationError>() {
+            if fastrapi_http::exceptions::websocket_validation_error_type(py)
+                .is_ok_and(|class| value.is_instance(class).unwrap_or(false))
+            {
                 let reason = value
                     .call_method0(pyo3::intern!(py, "errors"))
                     .ok()
@@ -456,14 +442,6 @@ async fn handle_connection(
     });
     execute_teardowns_async(route.event_loop, teardowns).await;
     Ok(())
-}
-
-fn validation_errors(response: &Response) -> Vec<JsonValue> {
-    response
-        .extensions()
-        .get::<ValidationErrorDetails>()
-        .and_then(|details| details.0.as_object()?.get("detail")?.as_array().cloned())
-        .unwrap_or_default()
 }
 
 #[must_use]

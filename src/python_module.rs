@@ -89,24 +89,7 @@ mod fastrapi {
     use fastrapi_http::staticfiles::PyStaticFiles as StaticFiles;
 
     #[pymodule_export]
-    use fastrapi_http::exceptions::PyHTTPException as HTTPException;
-
-    #[pymodule_export]
-    use fastrapi_routing::params::PyBody as Body;
-    #[pymodule_export]
-    use fastrapi_routing::params::PyCookie as Cookie;
-    #[pymodule_export]
     use fastrapi_routing::params::PyDepends as Depends;
-    #[pymodule_export]
-    use fastrapi_routing::params::PyFile as File;
-    #[pymodule_export]
-    use fastrapi_routing::params::PyForm as Form;
-    #[pymodule_export]
-    use fastrapi_routing::params::PyHeader as Header;
-    #[pymodule_export]
-    use fastrapi_routing::params::PyPath as Path;
-    #[pymodule_export]
-    use fastrapi_routing::params::PyQuery as Query;
     #[pymodule_export]
     use fastrapi_routing::params::PySecurity as Security;
 
@@ -177,84 +160,6 @@ mod fastrapi {
         #[pymodule_init]
         fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
             register_sse_api(m)
-        }
-    }
-
-    #[pymodule]
-    mod exceptions {
-        #[pymodule_export]
-        use fastrapi_http::exceptions::{
-            PyDependencyScopeError as DependencyScopeError,
-            PyFastAPIDeprecationWarning as FastAPIDeprecationWarning,
-            PyFastAPIError as FastAPIError, PyHTTPException as HTTPException,
-            PyPydanticV1NotSupportedError as PydanticV1NotSupportedError,
-            PyRequestValidationError as RequestValidationError,
-            PyResponseValidationError as ResponseValidationError,
-            PyValidationException as ValidationException,
-            PyWebSocketDisconnect as WebSocketDisconnect,
-            PyWebSocketException as WebSocketException,
-            PyWebSocketRequestValidationError as WebSocketRequestValidationError,
-        };
-        use pyo3::prelude::*;
-        use pyo3::types::PyDict;
-
-        #[pymodule_init]
-        fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
-            let py = m.py();
-            let builtins = py.import("builtins")?;
-            let fields = PyDict::new(py);
-            fields.set_item("function", builtins.getattr("str")?)?;
-            fields.set_item("path", builtins.getattr("str")?)?;
-            fields.set_item("file", builtins.getattr("str")?)?;
-            fields.set_item("line", builtins.getattr("int")?)?;
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("total", false)?;
-            m.add(
-                "EndpointContext",
-                py.import("typing")?
-                    .getattr("TypedDict")?
-                    .call(("EndpointContext", fields), Some(&kwargs))?,
-            )?;
-            let create_model = py.import("pydantic")?.getattr("create_model")?;
-            m.add("RequestErrorModel", create_model.call1(("Request",))?)?;
-            m.add("WebSocketErrorModel", create_model.call1(("WebSocket",))?)
-        }
-    }
-
-    #[pymodule]
-    mod params {
-        use pyo3::prelude::*;
-        use pyo3::types::PyDict;
-
-        #[pymodule_export]
-        use fastrapi_routing::params::{
-            PyBody as Body, PyCookie as Cookie, PyDepends as Depends, PyFile as File,
-            PyForm as Form, PyHeader as Header, PyPath as Path, PyQuery as Query,
-            PySecurity as Security, Undefined, Unset,
-        };
-
-        #[pymodule_init]
-        fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
-            let py = m.py();
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("module", "fastrapi.params")?;
-            let members = [
-                ("query", "query"),
-                ("header", "header"),
-                ("path", "path"),
-                ("cookie", "cookie"),
-            ];
-            let param_types = py
-                .import("enum")?
-                .getattr("Enum")?
-                .call(("ParamTypes", members), Some(&kwargs))?;
-            m.add("ParamTypes", param_types)?;
-            let param = crate::ffi::compat::py_helpers(py)?.getattr("Param")?;
-            param.setattr("__module__", "fastrapi.params")?;
-            for name in ["Query", "Header", "Path", "Cookie"] {
-                param.call_method1("register", (m.getattr(name)?,))?;
-            }
-            m.add("Param", param)
         }
     }
 
@@ -416,17 +321,6 @@ mod fastrapi {
         #[pymodule_init]
         fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
             register_dependencies(m)
-        }
-    }
-
-    #[pymodule]
-    mod exception_handlers {
-        use crate::ffi::compat::register_exception_handlers;
-        use pyo3::prelude::*;
-
-        #[pymodule_init]
-        fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
-            register_exception_handlers(m)
         }
     }
 
@@ -632,6 +526,22 @@ mod fastrapi {
         m.getattr("middleware")?
             .setattr("asyncexitstack", &middleware_exit)?;
 
+        let params = fastrapi_routing::params::params_module(py)?;
+        params.add(
+            "Depends",
+            py.get_type::<fastrapi_routing::params::PyDepends>(),
+        )?;
+        params.add(
+            "Security",
+            py.get_type::<fastrapi_routing::params::PySecurity>(),
+        )?;
+        for name in ["Query", "Path", "Header", "Cookie", "Body", "Form", "File"] {
+            m.add(name, params.getattr(name)?)?;
+        }
+        m.add("params", params)?;
+        let exceptions = fastrapi_http::exceptions::exceptions_module(py)?;
+        m.add("exceptions", exceptions)?;
+        m.add("HTTPException", exceptions.getattr("HTTPException")?)?;
         create_status_submodule(m)?;
         openapi::register(m)?;
         register_pydantic_integration(m)?;
@@ -645,6 +555,10 @@ mod fastrapi {
         encoders::register_tables(&encoders)?;
         m.add("encoders", encoders)?;
         super::register_submodules_in_sys_modules(m)?;
+        m.add(
+            "exception_handlers",
+            fastrapi_http::exceptions::exception_handlers_module(py)?,
+        )?;
 
         Ok(())
     }

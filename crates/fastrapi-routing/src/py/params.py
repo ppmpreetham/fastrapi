@@ -1,0 +1,509 @@
+import inspect
+import typing
+import warnings
+from collections import deque
+from collections.abc import Mapping, Sequence
+from copy import copy, deepcopy
+from dataclasses import is_dataclass
+from enum import Enum
+from functools import partial
+from types import NoneType, UnionType
+from typing import Annotated, Any, Union, get_args, get_origin
+
+from pydantic import BaseModel, Field, Json, TypeAdapter
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined, ValidationError
+
+from fastrapi.exceptions import FastAPIDeprecationWarning
+
+Undefined = PydanticUndefined
+RequiredParam = PydanticUndefined
+
+
+class _UnsetType:
+    def __repr__(self) -> str:
+        return "Unset"
+
+
+Unset = _UnsetType()
+
+
+class ParamTypes(Enum):
+    query = "query"
+    header = "header"
+    path = "path"
+    cookie = "cookie"
+
+
+def _init_field(
+    self,
+    default: Any = Undefined,
+    *,
+    default_factory=Unset,
+    annotation=None,
+    alias=None,
+    alias_priority=Unset,
+    validation_alias=None,
+    serialization_alias=None,
+    title=None,
+    description=None,
+    gt=None,
+    ge=None,
+    lt=None,
+    le=None,
+    min_length=None,
+    max_length=None,
+    pattern=None,
+    regex=None,
+    discriminator=None,
+    strict=Unset,
+    multiple_of=Unset,
+    allow_inf_nan=Unset,
+    max_digits=Unset,
+    decimal_places=Unset,
+    examples=None,
+    example=Unset,
+    openapi_examples=None,
+    deprecated=None,
+    include_in_schema=True,
+    json_schema_extra=None,
+    **extra: Any,
+) -> None:
+    if example is not Unset:
+        warnings.warn(
+            "`example` has been deprecated, please use `examples` instead",
+            category=FastAPIDeprecationWarning,
+            stacklevel=5,
+        )
+    self.example = None if example is Unset else example
+    self.include_in_schema = include_in_schema
+    self.openapi_examples = openapi_examples
+    kwargs = dict(
+        default=default,
+        default_factory=default_factory,
+        alias=alias,
+        title=title,
+        description=description,
+        gt=gt,
+        ge=ge,
+        lt=lt,
+        le=le,
+        min_length=min_length,
+        max_length=max_length,
+        discriminator=discriminator,
+        multiple_of=multiple_of,
+        allow_inf_nan=allow_inf_nan,
+        max_digits=max_digits,
+        decimal_places=decimal_places,
+        **extra,
+    )
+    if examples is not None:
+        kwargs["examples"] = examples
+    if regex is not None:
+        warnings.warn(
+            "`regex` has been deprecated, please use `pattern` instead",
+            category=FastAPIDeprecationWarning,
+            stacklevel=5,
+        )
+    kwargs["deprecated"] = deprecated
+    if serialization_alias in (Unset, None) and isinstance(alias, str):
+        serialization_alias = alias
+    if validation_alias in (Unset, None):
+        validation_alias = alias
+    kwargs.update(
+        annotation=annotation,
+        alias_priority=alias_priority,
+        validation_alias=validation_alias,
+        serialization_alias=serialization_alias,
+        strict=strict,
+        json_schema_extra=json_schema_extra or extra,
+        pattern=pattern or regex,
+    )
+    FieldInfo.__init__(self, **{k: v for k, v in kwargs.items() if v is not Unset})
+
+
+def _repr(self) -> str:
+    return f"{self.__class__.__name__}({self.default})"
+
+
+class Param(FieldInfo):
+    in_: ParamTypes
+    __init__ = _init_field
+    __repr__ = _repr
+
+
+class Path(Param):
+    in_ = ParamTypes.path
+
+    def __init__(self, default: Any = ..., **kwargs: Any) -> None:
+        assert default is ..., "Path parameters cannot have a default value"
+        self.in_ = self.in_
+        super().__init__(default, **kwargs)
+
+
+class Query(Param):
+    in_ = ParamTypes.query
+
+
+class Header(Param):
+    in_ = ParamTypes.header
+
+    def __init__(self, default: Any = Undefined, *, convert_underscores: bool = True, **kwargs: Any) -> None:
+        self.convert_underscores = convert_underscores
+        super().__init__(default, **kwargs)
+
+
+class Cookie(Param):
+    in_ = ParamTypes.cookie
+
+
+class Body(FieldInfo):
+    __repr__ = _repr
+
+    def __init__(
+        self,
+        default: Any = Undefined,
+        *,
+        embed: bool | None = None,
+        media_type: str = "application/json",
+        **kwargs: Any,
+    ) -> None:
+        self.embed = embed
+        self.media_type = media_type
+        _init_field(self, default, **kwargs)
+
+
+class Form(Body):
+    def __init__(self, default: Any = Undefined, *, media_type: str = "application/x-www-form-urlencoded", **kwargs: Any) -> None:
+        super().__init__(default, media_type=media_type, **kwargs)
+
+
+class File(Form):
+    def __init__(self, default: Any = Undefined, *, media_type: str = "multipart/form-data", **kwargs: Any) -> None:
+        super().__init__(default, media_type=media_type, **kwargs)
+
+
+SEQUENCE_TYPES = (list, set, frozenset, tuple, deque, Sequence)
+IMMUTABLE_DEFAULTS = (NoneType, bool, int, float, complex, str, bytes, Enum)
+FAST_KINDS = {str: "str", int: "int", float: "float", bool: "bool"}
+SOURCES = {ParamTypes.path: "path", ParamTypes.query: "query", ParamTypes.header: "header", ParamTypes.cookie: "cookie"}
+
+
+def lenient_issubclass(cls: Any, class_or_tuple: Any) -> bool:
+    try:
+        return isinstance(cls, type) and issubclass(cls, class_or_tuple)
+    except TypeError:
+        return False
+
+
+def _is_union(origin: Any) -> bool:
+    return origin is Union or origin is UnionType
+
+
+def _annotation_is_sequence(annotation: Any) -> bool:
+    return not lenient_issubclass(annotation, (str, bytes)) and lenient_issubclass(annotation, SEQUENCE_TYPES)
+
+
+def is_sequence(annotation: Any) -> bool:
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return is_sequence(get_args(annotation)[0])
+    if _is_union(origin):
+        return any(is_sequence(arg) for arg in get_args(annotation))
+    return _annotation_is_sequence(annotation) or _annotation_is_sequence(origin)
+
+
+def _annotation_is_complex(annotation: Any, upload: tuple) -> bool:
+    return (
+        lenient_issubclass(annotation, (BaseModel, Mapping, *upload))
+        or _annotation_is_sequence(annotation)
+        or is_dataclass(annotation)
+    )
+
+
+def is_complex(annotation: Any, upload: tuple) -> bool:
+    origin = get_origin(annotation)
+    if _is_union(origin):
+        return any(is_complex(arg, upload) for arg in get_args(annotation))
+    if origin is Annotated:
+        return is_complex(get_args(annotation)[0], upload)
+    return (
+        _annotation_is_complex(annotation, upload)
+        or _annotation_is_complex(origin, upload)
+        or hasattr(origin, "__pydantic_core_schema__")
+        or hasattr(origin, "__get_pydantic_core_schema__")
+    )
+
+
+def is_scalar(annotation: Any, upload: tuple) -> bool:
+    return annotation is Ellipsis or not is_complex(annotation, upload)
+
+
+def is_scalar_sequence(annotation: Any, upload: tuple) -> bool:
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return is_scalar_sequence(get_args(annotation)[0], upload)
+    if _is_union(origin):
+        found = False
+        for arg in get_args(annotation):
+            if is_scalar_sequence(arg, upload):
+                found = True
+            elif not is_scalar(arg, upload):
+                return False
+        return found
+    return is_sequence(annotation) and all(is_scalar(arg, upload) for arg in get_args(annotation))
+
+
+def is_upload(annotation: Any, upload: tuple) -> bool:
+    if lenient_issubclass(annotation, upload):
+        return True
+    if _is_union(get_origin(annotation)):
+        return any(lenient_issubclass(arg, upload) for arg in get_args(annotation))
+    return False
+
+
+def is_upload_sequence(annotation: Any, upload: tuple) -> bool:
+    if _is_union(get_origin(annotation)):
+        return any(is_upload_sequence(arg, upload) for arg in get_args(annotation))
+    return is_sequence(annotation) and all(is_upload(arg, upload) for arg in get_args(annotation))
+
+
+def is_union_of_models(annotation: Any) -> bool:
+    return _is_union(get_origin(annotation)) and all(lenient_issubclass(arg, BaseModel) for arg in get_args(annotation))
+
+
+def copy_field_info(field_info: FieldInfo, annotation: Any) -> FieldInfo:
+    merged = type(field_info).from_annotation(annotation)
+    new = copy(field_info)
+    new.metadata = merged.metadata
+    new.annotation = merged.annotation
+    return new
+
+
+def type_adapter(field_info: FieldInfo) -> TypeAdapter:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fields = field_info.asdict()
+        return TypeAdapter(Annotated[(fields["annotation"], *fields["metadata"], Field(**fields["attributes"]))])
+
+
+def validation_alias(field_info: FieldInfo, name: str) -> str:
+    alias = field_info.validation_alias
+    if isinstance(alias, str) and alias:
+        return alias
+    return field_info.alias if field_info.alias is not None else name
+
+
+def default_maker(field_info: FieldInfo):
+    if field_info.is_required():
+        return None
+    if field_info.default_factory is not None:
+        return lambda: deepcopy(field_info.get_default(call_default_factory=True))
+    if isinstance(field_info.default, IMMUTABLE_DEFAULTS):
+        return None
+    return partial(deepcopy, field_info.default)
+
+
+def fast_kind(field_info: FieldInfo, annotation: Any) -> str | None:
+    if field_info.metadata:
+        return None
+    if _is_union(get_origin(annotation)):
+        args = [arg for arg in get_args(annotation) if arg is not NoneType]
+        annotation = args[0] if len(args) == 1 else None
+    return FAST_KINDS.get(annotation) if type(annotation) is type else None
+
+
+def constraints(field_info: FieldInfo) -> dict[str, Any]:
+    found = {}
+    for item in field_info.metadata:
+        for key in ("gt", "ge", "lt", "le", "min_length", "max_length", "pattern"):
+            value = getattr(item, key, None)
+            if value is not None:
+                found[key] = value
+    return found
+
+
+class ModelKey:
+    __slots__ = ("lookup", "alias", "sequence", "required", "default")
+
+    def __init__(self, lookup: str, alias: str, info: FieldInfo) -> None:
+        self.lookup = lookup
+        self.alias = alias
+        self.sequence = is_sequence(info.annotation) and not _is_json(info)
+        self.required = info.is_required()
+        self.default = None if self.required else info.get_default(call_default_factory=True)
+
+
+class FieldSpec:
+    __slots__ = (
+        "name",
+        "alias",
+        "lookup",
+        "source",
+        "field_info",
+        "annotation",
+        "required",
+        "default",
+        "make_default",
+        "sequence",
+        "model",
+        "model_keys",
+        "fast",
+        "validate",
+        "validate_json",
+        "embed",
+        "is_form",
+        "is_file",
+        "media_type",
+        "constraints",
+        "explicit",
+    )
+
+
+def _model_keys(model: type[BaseModel], source: str, convert_underscores: bool) -> list[ModelKey]:
+    keys = []
+    for name, info in model.model_fields.items():
+        alias = validation_alias(info, name)
+        lookup = alias
+        if source == "header" and getattr(info, "convert_underscores", convert_underscores) and alias == name:
+            lookup = alias.replace("_", "-")
+        keys.append(ModelKey(lookup, alias, info))
+    return keys
+
+
+def _is_json(field_info: FieldInfo) -> bool:
+    return any(type(item) is Json for item in field_info.metadata)
+
+
+TYPE_ALIAS = getattr(typing, "TypeAliasType", ())
+
+
+def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, upload: tuple) -> FieldSpec:
+    annotation = Undefined if parameter.annotation is inspect.Parameter.empty else parameter.annotation
+    value = Undefined if parameter.default is inspect.Parameter.empty else parameter.default
+    field_info = None
+    use_annotation = Any
+    type_annotation = Any
+    if isinstance(annotation, TYPE_ALIAS):
+        annotation = annotation.__value__
+    if annotation is not Undefined:
+        use_annotation = annotation
+        type_annotation = annotation
+    explicit = False
+    if get_origin(use_annotation) is Annotated:
+        annotated_args = get_args(annotation)
+        type_annotation = annotated_args[0]
+        markers = [arg for arg in annotated_args[1:] if isinstance(arg, (Param, Body))]
+        if markers:
+            field_info = copy_field_info(markers[-1], use_annotation)
+            explicit = True
+            assert field_info.default in (Undefined, RequiredParam), (
+                f"`{field_info.__class__.__name__}` default value cannot be set in"
+                f" `Annotated` for {param_name!r}. Set the default value with `=` instead."
+            )
+            if value is not Undefined:
+                assert not is_path_param, "Path parameters cannot have default values"
+                field_info.default = value
+            else:
+                field_info.default = RequiredParam
+    if isinstance(value, FieldInfo):
+        assert field_info is None, (
+            "Cannot specify FastAPI annotations in `Annotated` and default value"
+            f" together for {param_name!r}"
+        )
+        field_info = value
+        field_info.annotation = type_annotation
+        explicit = True
+    if field_info is None:
+        default = value if value is not Undefined else RequiredParam
+        if is_path_param:
+            field_info = Path(annotation=use_annotation)
+        elif is_upload(type_annotation, upload) or is_upload_sequence(type_annotation, upload):
+            field_info = File(annotation=use_annotation, default=default)
+        elif not is_scalar(type_annotation, upload):
+            field_info = Body(annotation=use_annotation, default=default)
+        else:
+            field_info = Query(annotation=use_annotation, default=default)
+    if is_path_param:
+        assert isinstance(field_info, Path), f"Cannot use `{field_info.__class__.__name__}` for path param {param_name!r}"
+    elif isinstance(field_info, Param) and getattr(field_info, "in_", None) is None:
+        field_info.in_ = ParamTypes.query
+    if not field_info.alias and getattr(field_info, "convert_underscores", None):
+        alias = param_name.replace("_", "-")
+    else:
+        alias = field_info.alias or param_name
+    field_info.alias = alias
+    if isinstance(field_info, Path):
+        assert is_scalar(field_info.annotation, upload), "Path params must be of one of the supported types"
+    elif isinstance(field_info, Query):
+        assert (
+            is_scalar(field_info.annotation, upload)
+            or is_scalar_sequence(field_info.annotation, upload)
+            or lenient_issubclass(field_info.annotation, BaseModel)
+        ), f"Query parameter {param_name!r} must be one of the supported types"
+    spec = FieldSpec()
+    spec.name = param_name
+    spec.alias = validation_alias(field_info, param_name)
+    spec.lookup = spec.alias
+    spec.field_info = field_info
+    spec.annotation = type_annotation
+    spec.explicit = explicit
+    spec.source = SOURCES[field_info.in_] if isinstance(field_info, Param) else "body"
+    spec.required = field_info.is_required()
+    spec.default = None if spec.required else field_info.get_default(call_default_factory=False)
+    spec.make_default = default_maker(field_info)
+    spec.sequence = is_sequence(field_info.annotation) and not _is_json(field_info)
+    spec.model = lenient_issubclass(field_info.annotation, BaseModel)
+    spec.model_keys = (
+        _model_keys(field_info.annotation, spec.source, getattr(field_info, "convert_underscores", True))
+        if spec.model and (spec.source != "body" or isinstance(field_info, Form))
+        else None
+    )
+    adapter = type_adapter(field_info)
+    spec.validate = partial(adapter.validate_python, from_attributes=True)
+    spec.validate_json = adapter.validate_json
+    spec.fast = None if spec.sequence else fast_kind(field_info, field_info.annotation)
+    spec.embed = bool(getattr(field_info, "embed", None))
+    spec.is_form = isinstance(field_info, Form)
+    spec.is_file = isinstance(field_info, File)
+    spec.media_type = getattr(field_info, "media_type", None)
+    spec.constraints = constraints(field_info)
+    return spec
+
+
+def should_embed(specs: list[FieldSpec]) -> bool:
+    if len({spec.name for spec in specs}) > 1:
+        return True
+    first = specs[0]
+    return first.embed or (
+        first.is_form and not first.model and not is_union_of_models(first.field_info.annotation)
+    )
+
+
+def errors_with_loc(exc: ValidationError, loc: tuple) -> list[dict[str, Any]]:
+    return [{**error, "loc": loc + error.get("loc", ())} for error in exc.errors(include_url=False)]
+
+
+def missing(loc: tuple) -> dict[str, Any]:
+    error = ValidationError.from_exception_data(
+        "Field required", [{"type": "missing", "loc": loc, "input": {}}]
+    ).errors(include_url=False)[0]
+    error["input"] = None
+    return error
+
+
+def json_error(raw: bytes) -> tuple[list[dict[str, Any]], Any]:
+    import json
+
+    try:
+        return [], json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return [
+            {
+                "type": "json_invalid",
+                "loc": ("body", exc.pos),
+                "msg": "JSON decode error",
+                "input": {},
+                "ctx": {"error": exc.msg},
+            }
+        ], exc.doc

@@ -1,36 +1,5 @@
 //! This module contains the declarative macros of the crate.
-//! The macros make Python validation exception subclasses and Python response classes.
-
-/// Defines a subclass of the Python `ValidationException` class.
-/// Use this macro to make a specific validation exception for each type of validation error.
-macro_rules! define_validation_subclass {
-    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal) => {
-        $(#[$meta])*
-        #[pyo3::prelude::pyclass(extends = $crate::exceptions::PyValidationException, name = $py_name, get_all)]
-        pub struct $struct_name {
-            pub body: pyo3::prelude::Py<pyo3::prelude::PyAny>,
-        }
-
-        #[pyo3::prelude::pymethods]
-        impl $struct_name {
-            #[new]
-            #[pyo3(signature = (errors, *, body=None, endpoint_ctx=None))]
-            fn new(
-                py: pyo3::prelude::Python<'_>,
-                errors: pyo3::prelude::Bound<'_, pyo3::prelude::PyAny>,
-                body: Option<pyo3::prelude::Bound<'_, pyo3::prelude::PyAny>>,
-                endpoint_ctx: Option<pyo3::prelude::Bound<'_, pyo3::prelude::PyAny>>,
-            ) -> pyo3::prelude::PyClassInitializer<Self> {
-                let body_py = body.map(|b| b.into()).unwrap_or_else(|| py.None());
-                pyo3::prelude::PyClassInitializer::from($crate::exceptions::PyValidationException::new(errors, endpoint_ctx))
-                    .add_subclass(Self { body: body_py })
-            }
-
-            #[pyo3(signature = (*_args, **_kwargs))]
-            const fn __init__(&self, _args: &pyo3::prelude::Bound<'_, pyo3::types::PyTuple>, _kwargs: Option<&pyo3::prelude::Bound<'_, pyo3::types::PyDict>>) {}
-        }
-    };
-}
+//! The macros make the Python response classes.
 
 /// Defines a standard Python response class.
 /// The class keeps the content, the status code, the headers, and the media type.
@@ -147,5 +116,4 @@ macro_rules! response_api_methods {
 }
 
 pub(crate) use define_response_class;
-pub(crate) use define_validation_subclass;
 pub(crate) use response_api_methods;

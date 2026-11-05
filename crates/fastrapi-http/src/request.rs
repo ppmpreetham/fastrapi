@@ -1,7 +1,7 @@
 //! This module contains the `HTTPConnection` and `Request` Python classes, which are compatible with starlette.
 //! They give Python access to the URL, headers, cookies, parameters, and body of a request.
 
-use crate::exceptions::PyHTTPException;
+use crate::exceptions::http_exception;
 use crate::form;
 use crate::request_input::RequestInput;
 use crate::url::PyURL;
@@ -845,7 +845,7 @@ impl PyRequest {
             let entries = match form::parse_form(&content_type, raw).await {
                 Ok(entries) => entries,
                 Err(message) => {
-                    return Python::attach(|py| Err(PyHTTPException::bad_request(py, &message)));
+                    return Python::attach(|py| Err(http_exception(py, 400, Some(&message), None)));
                 }
             };
             Python::attach(|py| form::to_form_data(py, entries))
@@ -861,7 +861,7 @@ impl PyRequest {
             let parsed = form::parse_form(&content_type, raw)
                 .now_or_never()
                 .ok_or_else(|| PyRuntimeError::new_err("the form parser did not finish"))?
-                .map_err(|message| PyHTTPException::bad_request(py, &message))?;
+                .map_err(|message| http_exception(py, 400, Some(&message), None))?;
             return form::to_form_data(py, parsed).map(|value| value.bind(py).clone());
         }
         Ok(form::parse_urlencoded_form_data(py, &raw)?.into_bound(py))

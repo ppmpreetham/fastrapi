@@ -13,7 +13,7 @@ use fastrapi_core::body::BodyPayload;
 use fastrapi_core::params::PathParamRange;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_pyutil::call::CallArgs;
-use fastrapi_routing::dependencies::{self, DependencyExecutionError, RequestPlan};
+use fastrapi_routing::dependencies::{self, RequestPlan};
 use fastrapi_routing::route::RouteHandler;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::{blocking, py_bridge};
@@ -113,8 +113,7 @@ pub(crate) async fn run_managed_handler(
                     .map(Bound::unbind)
             })
             .await
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
-            .map_err(DependencyExecutionError::from);
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
         }
         let called = Python::attach(|py| -> PyResult<_> {
             inject_dependencies(py, &mut kwargs, values)?;
@@ -184,7 +183,7 @@ pub(crate) async fn run_managed_handler(
     }
 }
 
-type ManagedOutcome = Result<(Response, bool), DependencyExecutionError>;
+type ManagedOutcome = PyResult<(Response, bool)>;
 
 fn inject_dependencies(
     py: Python<'_>,
@@ -211,11 +210,7 @@ fn schedule_stack_exit(
         )
     };
     let args = match outcome {
-        Err(DependencyExecutionError::Python(err)) => exc_info(err),
-        Err(DependencyExecutionError::Response(_)) => {
-            let (kind, value, _) = exc_info(&PyValueError::new_err("Request validation failed"));
-            (kind, value, py.None())
-        }
+        Err(err) => exc_info(err),
         Ok(_) => (py.None(), py.None(), py.None()),
     };
     let coroutine = stack
@@ -249,10 +244,7 @@ fn finish_managed_response(
         _ => {}
     }
     match outcome {
-        Err(DependencyExecutionError::Python(err)) => {
-            python_error_to_response_in(py, &err, Some(input))
-        }
-        Err(DependencyExecutionError::Response(response)) => *response,
+        Err(err) => python_error_to_response_in(py, &err, Some(input)),
         Ok((mut response, explicit)) => {
             if !explicit
                 && let Some(metadata) = metadata

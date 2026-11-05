@@ -2,17 +2,19 @@
 //! It prepares the arguments, resolves the dependencies and calls sync or async handlers.
 //! It then converts the handler result into an HTTP response.
 
-use super::handler_errors::{python_error_to_response, python_error_to_response_in};
+use super::handler_errors::{
+    error_response, python_error_to_response, python_error_to_response_in,
+};
 use super::managed::run_managed_handler;
+use axum::http::StatusCode;
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use fastrapi_core::body::BodyPayload;
 use fastrapi_core::params::PathParamRange;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_routing::dependencies::{
-    self, DependencyExecutionError, TeardownTasks, execute_teardowns_async, execute_teardowns_sync,
+    self, TeardownTasks, execute_teardowns_async, execute_teardowns_sync,
 };
 use fastrapi_routing::route::{ExecutionMode, RouteHandler};
 use fastrapi_runtime::py_bridge::EventLoop;
@@ -34,9 +36,10 @@ fn specialized_response_conversion(
     py: Python<'_>,
     result: &Bound<'_, PyAny>,
     handler: &RouteHandler,
-    request_headers: Option<&HeaderMap>,
+    request_input: Option<&RequestInput<'_>>,
     server: EventLoop,
 ) -> Response {
+    let request_headers = request_input.map(|input| input.headers);
     match handler.response.response_type {
         ResponseType::PlainText => {
             if let Ok(s) = result.cast::<PyString>() {
@@ -55,13 +58,13 @@ fn specialized_response_conversion(
 
             match convert_response_by_type(py, result, &handler.response, request_headers) {
                 Ok(resp) => resp,
-                Err(err) => python_error_to_response(py, err, server),
+                Err(err) => error_response(py, &err, request_input, server),
             }
         }
 
         _ => match convert_response_by_type(py, result, &handler.response, request_headers) {
             Ok(resp) => resp,
-            Err(err) => python_error_to_response(py, err, server),
+            Err(err) => error_response(py, &err, request_input, server),
         },
     }
 }
@@ -87,14 +90,8 @@ pub(crate) fn build_request_input_from_parts<'a>(
     }
 
     RequestInput {
-        method: parts.method.as_str(),
-        path: path_str,
-        query_string: parts.uri.query().unwrap_or(""),
-        headers: &parts.headers,
         path_params,
-        query_params: OnceLock::new(),
-        cookies: OnceLock::new(),
-        server: Some(server),
+        ..RequestInput::new(&parts.method, &parts.uri, &parts.headers, Some(server))
     }
 }
 
@@ -136,7 +133,8 @@ pub(crate) fn prepare_kwargs_and_payload(
         request_input,
         payload,
         &mut kwargs,
-    )?;
+    )
+    .map_err(|err| python_error_to_response_in(py, &err, Some(request_input)))?;
 
     Ok((kwargs, bg_tasks))
 }
@@ -170,12 +168,7 @@ fn resolve_sync_deps(
         request_input,
         request_object,
     )
-    .map_err(|e| match e {
-        DependencyExecutionError::Response(r) => *r,
-        DependencyExecutionError::Python(err) => {
-            python_error_to_response_in(py, &err, Some(request_input))
-        }
-    })?;
+    .map_err(|err| python_error_to_response_in(py, &err, Some(request_input)))?;
 
     dep_results.into_iter().try_for_each(|(name, value)| {
         kwargs
@@ -190,7 +183,7 @@ fn call_handler_and_convert(
     py: Python<'_>,
     handler: &RouteHandler,
     kwargs: Option<&CallArgs>,
-    request_headers: Option<&HeaderMap>,
+    request_input: Option<&RequestInput<'_>>,
     server: EventLoop,
 ) -> Result<Response, PyErr> {
     let py_func = handler.execution.func.bind(py);
@@ -203,7 +196,7 @@ fn call_handler_and_convert(
             py,
             &res,
             handler,
-            request_headers,
+            request_input,
             server,
         )),
         Err(err) => Err(err),
@@ -224,11 +217,13 @@ pub(crate) fn render_no_request_response(
 pub(crate) fn render_no_request_json_response(
     py: Python<'_>,
     handler: &RouteHandler,
+    request_input: &RequestInput<'_>,
     server: EventLoop,
 ) -> Response {
+    let fail = |err: PyErr| error_response(py, &err, Some(request_input), server);
     let result = match handler.execution.func.bind(py).call0() {
         Ok(result) => result,
-        Err(err) => return python_error_to_response(py, err, server),
+        Err(err) => return fail(err),
     };
 
     if result.is_none() {
@@ -248,9 +243,14 @@ pub(crate) fn render_no_request_json_response(
         || result.is_instance_of::<PyFloat>();
 
     if !is_plain_value {
-        return match convert_response_by_type(py, &result, &handler.response, None) {
+        return match convert_response_by_type(
+            py,
+            &result,
+            &handler.response,
+            Some(request_input.headers),
+        ) {
             Ok(resp) => resp,
-            Err(err) => python_error_to_response(py, err, server),
+            Err(err) => fail(err),
         };
     }
 
@@ -261,7 +261,7 @@ pub(crate) fn render_no_request_json_response(
         handler.response.serialization_hint,
         handler.response.dump_options.as_ref().map(|d| d.bind(py)),
     )
-    .unwrap_or_else(|err| python_error_to_response(py, err, server))
+    .unwrap_or_else(fail)
 }
 
 pub(crate) type PyTaskFuture = py_bridge::PyTaskFuture;
@@ -284,7 +284,7 @@ async fn await_python_future(
             py,
             res.bind(py),
             handler,
-            request_input.map(|input| input.headers),
+            request_input,
             event_loop,
         )),
         Err(err) => Err(python_error_to_response_in(py, &err, request_input)),
@@ -315,35 +315,25 @@ async fn core_sync_no_args(
     request_parts: Option<Parts>,
     sync_to_threadpool: bool,
 ) -> Response {
-    if !sync_to_threadpool {
-        return Python::attach(|py| {
-            match call_handler_and_convert(
-                py,
-                handler,
-                None,
-                request_parts.as_ref().map(|parts| &parts.headers),
+    let run = move |py: Python<'_>| {
+        let input = request_parts.as_ref().map(|parts| {
+            build_request_input_from_parts(
+                parts,
+                &[],
+                &handler.payload.path_param_names,
                 event_loop,
-            ) {
-                Ok(res) => res,
-                Err(err) => python_error_to_response(py, err, event_loop),
-            }
+            )
         });
+        call_handler_and_convert(py, handler, None, input.as_ref(), event_loop)
+            .unwrap_or_else(|err| error_response(py, &err, input.as_ref(), event_loop))
+    };
+    if !sync_to_threadpool {
+        return Python::attach(run);
     }
 
-    blocking::run_python(move |py| {
-        match call_handler_and_convert(
-            py,
-            handler,
-            None,
-            request_parts.as_ref().map(|parts| &parts.headers),
-            event_loop,
-        ) {
-            Ok(res) => res,
-            Err(err) => python_error_to_response(py, err, event_loop),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    blocking::run_python(run)
+        .await
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 async fn core_async_no_args(
@@ -369,7 +359,7 @@ async fn core_async_no_args(
             .func
             .bind(py)
             .call0()
-            .map_err(|err| python_error_to_response(py, err, event_loop))?;
+            .map_err(|err| error_response(py, &err, request_input.as_ref(), event_loop))?;
         into_asyncio_future(py, event_loop, coroutine)
     });
     match await_python_future(event_loop, handler, request_input.as_ref(), future_res).await {
@@ -379,10 +369,7 @@ async fn core_async_no_args(
 }
 
 pub(crate) fn payload_raw_bytes(payload: Option<&BodyPayload>) -> Option<bytes::Bytes> {
-    match payload {
-        Some(BodyPayload::Json { raw, .. } | BodyPayload::Form { raw, .. }) => Some(raw.clone()),
-        None => None,
-    }
+    payload.map(|payload| payload.raw().clone())
 }
 
 #[inline(always)]
@@ -411,13 +398,8 @@ fn run_sync_gil_section(
 
     let teardowns = resolve_sync_deps(py, handler, request_input, req_obj, &mut kwargs)?;
 
-    let response = call_handler_and_convert(
-        py,
-        handler,
-        Some(&kwargs),
-        Some(request_input.headers),
-        server,
-    );
+    let response =
+        call_handler_and_convert(py, handler, Some(&kwargs), Some(request_input), server);
     match response {
         Ok(response) => {
             execute_teardowns_sync(py, teardowns, None);
@@ -737,11 +719,10 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
     .await
     {
         Ok(results) => results,
-        Err(DependencyExecutionError::Response(r)) => return *r,
-        Err(DependencyExecutionError::Python(err)) => {
-            return blocking::run_python(move |py| python_error_to_response(py, err, event_loop))
-                .await
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        Err(err) => {
+            return Python::attach(|py| {
+                python_error_to_response_in(py, &err, Some(&request_input))
+            });
         }
     };
 
