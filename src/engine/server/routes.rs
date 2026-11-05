@@ -10,6 +10,7 @@ use super::serve::AppState;
 
 use crate::engine::config::FastrAPI;
 use ahash::AHashMap;
+use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{ConnectInfo, Request};
 use axum::handler::Handler;
@@ -18,7 +19,6 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{MethodFilter, MethodRouter, any, get, on};
-use axum::{Json, Router};
 use bytes::Bytes;
 use pyo3::prelude::*;
 use simd_json::OwnedValue as JsonValue;
@@ -345,12 +345,20 @@ fn request_scheme(request: &Request) -> &str {
 }
 
 /// Returns the 404 Not Found response.
-fn not_found_response() -> Response {
+fn json_body(status: StatusCode, body: Bytes) -> Response {
     (
-        StatusCode::NOT_FOUND,
-        axum::Json(simd_json::json!({"detail": "Not Found"})),
+        status,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        body,
     )
         .into_response()
+}
+
+fn not_found_response() -> Response {
+    json_body(
+        StatusCode::NOT_FOUND,
+        Bytes::from_static(br#"{"detail":"Not Found"}"#),
+    )
 }
 
 /// Returns the 405 Method Not Allowed response.
@@ -372,25 +380,13 @@ pub(crate) async fn method_not_allowed_response(server: EventLoop, allow: u8) ->
     let handler_resp = dispatch_status_handler(server, StatusCode::METHOD_NOT_ALLOWED.as_u16());
     let mut response = match handler_resp {
         Some(resp) => resolve_pending_handler(resp).await,
-        None => (
+        None => json_body(
             StatusCode::METHOD_NOT_ALLOWED,
-            axum::Json(simd_json::json!({"detail": "Method Not Allowed"})),
-        )
-            .into_response(),
+            Bytes::from_static(br#"{"detail":"Method Not Allowed"}"#),
+        ),
     };
     response.headers_mut().insert(ALLOW, allow_header(allow));
     response
-}
-
-struct SharedSpec(Arc<JsonValue>);
-
-impl serde::Serialize for SharedSpec {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.as_ref().serialize(serializer)
-    }
 }
 
 pub(crate) fn register_docs_endpoints(
@@ -404,18 +400,24 @@ pub(crate) fn register_docs_endpoints(
     let Some(openapi_url) = openapi_url else {
         return Ok(register_metrics_endpoint(app, app_config));
     };
-    let openapi_json = Arc::new(match custom_openapi {
+    let openapi_json = match custom_openapi {
         Some(spec) => spec,
         None => match app_config.openapi_schema.lock().as_ref() {
             Some(schema) => fastrapi_pyutil::json::py_any_to_json(py, schema.bind(py)),
             None => app_config.openapi_spec(py)?,
         },
-    });
+    };
+    let openapi_body = serde_json::to_vec(&openapi_json).ok().map(Bytes::from);
     app = app.route(
         openapi_url,
         get(move || {
-            let json = openapi_json.clone();
-            async move { Json(SharedSpec(json)) }
+            let body = openapi_body.clone();
+            async move {
+                body.map_or_else(
+                    || StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    |body| json_body(StatusCode::OK, body),
+                )
+            }
         }),
     );
     let root_path = app_config.root_path.trim_end_matches('/');
@@ -644,7 +646,7 @@ fn precompute_const_response(
     Some(Box::leak(Box::new(CachedResponse {
         status,
         headers,
-        body: Bytes::from_static(Vec::leak(body.to_vec())),
+        body,
     })))
 }
 

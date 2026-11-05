@@ -842,7 +842,7 @@ impl PyRequest {
                 })
             });
 
-            let entries = match form::parse_form(&content_type, &raw).await {
+            let entries = match form::parse_form(&content_type, raw).await {
                 Ok(entries) => entries,
                 Err(message) => {
                     return Python::attach(|py| Err(PyHTTPException::bad_request(py, &message)));
@@ -858,7 +858,7 @@ impl PyRequest {
         let raw = request.body_cache.get().cloned().unwrap_or_default();
         let content_type = form::content_type_of(py, conn.borrow().scope.bind(py));
         if content_type.starts_with("multipart/form-data") {
-            let parsed = form::parse_form(&content_type, &raw)
+            let parsed = form::parse_form(&content_type, raw)
                 .now_or_never()
                 .ok_or_else(|| PyRuntimeError::new_err("the form parser did not finish"))?
                 .map_err(|message| PyHTTPException::bad_request(py, &message))?;

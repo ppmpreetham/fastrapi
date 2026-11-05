@@ -756,13 +756,15 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
                 match pending {
                     Ok(Some(future)) => {
                         let awaited = if let Some(ping) = ping {
-                            if let Ok(result) = timeout(Duration::from_secs_f64(ping), future).await {
-                                result
-                            } else {
+                            let period = Duration::from_secs_f64(ping);
+                            let mut future = std::pin::pin!(future);
+                            loop {
+                                if let Ok(result) = timeout(period, future.as_mut()).await {
+                                    break result;
+                                }
                                 if let Some(chunk) = ping_chunk.clone() {
                                     yield Ok::<_, std::io::Error>(chunk);
                                 }
-                                continue;
                             }
                         } else {
                             future.await

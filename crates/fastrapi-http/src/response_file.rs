@@ -6,6 +6,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
+use futures_util::StreamExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{Bound, Py, PyAny, intern};
@@ -17,6 +18,7 @@ use std::ops::RangeInclusive;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+use tokio_util::io::ReaderStream;
 
 pub(crate) fn guess_mime(path: &str) -> &'static str {
     let ext = path.rsplit('.').next().unwrap_or("");
@@ -108,20 +110,20 @@ fn file_stream(
 ) -> Body {
     Body::from_stream(async_stream::stream! {
         let Ok(mut file) = File::open(path).await else { return; };
-        let mut buffer = vec![0_u8; 64 * 1024];
         for range in ranges {
             if let Some(boundary) = &boundary {
                 yield Ok::<bytes::Bytes, Infallible>(Bytes::from(format!("--{boundary}\r\nContent-Type: {content_type}\r\nContent-Range: bytes {}-{}\r\n\r\n", range.start(), range.end())));
             }
             if file.seek(SeekFrom::Start(*range.start())).await.is_err() { return; }
-            let mut remaining = range.end().saturating_sub(*range.start()).saturating_add(1);
-            while remaining > 0 {
-                let size = remaining.min(buffer.len() as u64) as usize;
-                let Ok(read) = file.read(&mut buffer[..size]).await else { return; };
-                if read == 0 { return; }
-                remaining -= read as u64;
-                yield Ok::<bytes::Bytes, Infallible>(Bytes::copy_from_slice(&buffer[..read]));
+            let length = range.end().saturating_sub(*range.start()).saturating_add(1);
+            let mut sent = 0_u64;
+            let mut chunks = ReaderStream::with_capacity((&mut file).take(length), 64 * 1024);
+            while let Some(chunk) = chunks.next().await {
+                let Ok(chunk) = chunk else { return; };
+                sent += chunk.len() as u64;
+                yield Ok::<bytes::Bytes, Infallible>(chunk);
             }
+            if sent < length { return; }
             if boundary.is_some() {
                 yield Ok::<bytes::Bytes, Infallible>(Bytes::from_static(b"\r\n"));
             }

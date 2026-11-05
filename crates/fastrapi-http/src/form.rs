@@ -24,12 +24,12 @@ pub(crate) enum FormEntry {
     },
 }
 
-pub(crate) async fn parse_form(content_type: &str, raw: &[u8]) -> Result<Vec<FormEntry>, String> {
+pub(crate) async fn parse_form(content_type: &str, raw: Bytes) -> Result<Vec<FormEntry>, String> {
     if content_type.starts_with(MULTIPART) {
         return parse_multipart(content_type, raw).await;
     }
     if content_type.starts_with(URLENCODED) {
-        return Ok(parse_urlencoded(raw));
+        return Ok(parse_urlencoded(&raw));
     }
     Ok(Vec::new())
 }
@@ -44,10 +44,9 @@ fn parse_urlencoded(raw: &[u8]) -> Vec<FormEntry> {
         .collect()
 }
 
-async fn parse_multipart(content_type: &str, raw: &[u8]) -> Result<Vec<FormEntry>, String> {
+async fn parse_multipart(content_type: &str, raw: Bytes) -> Result<Vec<FormEntry>, String> {
     let boundary = multer::parse_boundary(content_type).map_err(|e| e.to_string())?;
-    let chunk = Bytes::copy_from_slice(raw);
-    let stream = once(async move { Ok::<_, String>(chunk) });
+    let stream = once(async move { Ok::<_, String>(raw) });
     let mut multipart = Multipart::new(stream, boundary);
     let mut entries = Vec::new();
 

@@ -2219,3 +2219,57 @@ def test_large_bodies_round_trip(client, app):
     assert client.get("/big-bytes").content == text.encode()
     assert client.post("/big-json", json=payload).json() == {"count": 5000, "last": 4999}
     assert client.post("/big-json", json=payload).json() == {"count": 5000, "last": 4999}
+
+
+def test_sse_ping_keeps_slow_async_generator_items(client, app):
+    import asyncio
+
+    from fastrapi.responses import EventSourceResponse
+
+    async def slow():
+        for index in range(3):
+            await asyncio.sleep(0.25)
+            yield {"data": str(index)}
+
+    @app.get("/slow-events")
+    def slow_events():
+        return EventSourceResponse(slow(), ping=0.1, sep="\n")
+
+    body = client.get("/slow-events").text
+    data = [line for line in body.split("\n") if line.startswith("data:")]
+    assert data == [f'data: {{"data":"{index}"}}' for index in range(3)]
+    assert ": ping" in body
+
+
+def test_large_file_response_streams_whole_file(client, app, tmp_path):
+    from fastrapi.responses import FileResponse
+
+    content = bytes(range(256)) * 1024
+    path = tmp_path / "big.bin"
+    path.write_bytes(content)
+
+    @app.get("/big-file")
+    def big_file():
+        return FileResponse(str(path))
+
+    assert client.get("/big-file").content == content
+    partial = client.get("/big-file", headers={"Range": "bytes=70000-200000"})
+    assert partial.status_code == 206
+    assert partial.content == content[70000:200001]
+
+
+def test_static_error_bodies_and_openapi(client, app):
+    @app.get("/thing")
+    def thing():
+        return {}
+
+    missing = client.get("/missing")
+    assert missing.status_code == 404
+    assert missing.headers["content-type"] == "application/json"
+    assert missing.content == b'{"detail":"Not Found"}'
+    wrong = client.post("/thing")
+    assert wrong.status_code == 405
+    assert wrong.content == b'{"detail":"Method Not Allowed"}'
+    spec = client.get("/openapi.json")
+    assert spec.headers["content-type"] == "application/json"
+    assert "/thing" in spec.json()["paths"]
