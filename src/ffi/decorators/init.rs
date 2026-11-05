@@ -9,13 +9,14 @@ use fastrapi_core::params::ParameterSource;
 use fastrapi_core::path::extract_path_param_names;
 use fastrapi_http::response_type::ResponseFormatter;
 use fastrapi_openapi::paths::parse_callbacks_to_json;
+use fastrapi_pyutil::call::CallLayout;
 use fastrapi_pyutil::json::{SerializationHint, json_to_py_object, py_any_to_json};
 use fastrapi_routing::analysis::{
     ParsedRouteMetadata, get_response_type_from_class, parse_route_metadata,
     parse_websocket_signature,
 };
 use fastrapi_routing::dependencies::{
-    DependencyNode, collect_dependency_callables, parse_dependencies, parse_external_dependencies,
+    DependencyNode, OverrideCache, collect_dependency_callables, parse_dependencies, parse_external_dependencies,
     shift_dependency_indices,
 };
 use fastrapi_routing::route::{
@@ -447,8 +448,8 @@ fn build_dump_options(
 
 struct RouteAnalysis {
     needs_kwargs: bool,
-    body_param_name_set: AHashSet<String>,
     body_param_indices: SmallVec<[usize; 4]>,
+    request_param_indices: SmallVec<[usize; 8]>,
     defer_json_parse: bool,
     has_multiple_query_params: bool,
 }
@@ -476,11 +477,14 @@ impl RouteAnalysis {
         }
 
         let mut body_param_indices: SmallVec<[usize; 4]> = SmallVec::new();
+        let mut request_param_indices: SmallVec<[usize; 8]> = SmallVec::new();
         for (idx, param) in metadata.parsed_params.iter().enumerate() {
             if matches!(param.source, ParameterSource::Body)
                 || body_param_name_set.contains(param.name.as_str())
             {
                 body_param_indices.push(idx);
+            } else {
+                request_param_indices.push(idx);
             }
         }
 
@@ -496,8 +500,8 @@ impl RouteAnalysis {
 
         Self {
             needs_kwargs,
-            body_param_name_set,
             body_param_indices,
+            request_param_indices,
             defer_json_parse,
             has_multiple_query_params,
         }
@@ -626,6 +630,7 @@ impl PyAPIRouter {
             let mut handler = RouteHandler {
                 execution: ExecutionPlan {
                     func: func.clone().unbind(),
+                    call_layout: CallLayout::of(&func).map(Arc::new),
                     is_async: metadata.is_async,
                     is_fast_path: metadata.is_fast_path,
                     execution_mode: ExecutionMode::SyncNoArgs,
@@ -643,8 +648,10 @@ impl PyAPIRouter {
                     response_param: metadata.response_param.clone(),
                     dependency_overrides: None,
                     body_param_names: metadata.body_param_names,
-                    body_param_name_set: analysis.body_param_name_set,
                     body_param_indices: analysis.body_param_indices,
+                    request_param_indices: analysis.request_param_indices,
+                    needs_body: false,
+                    override_cache: OverrideCache::default(),
                     dependencies: metadata.dependencies,
                     parsed_params: metadata.parsed_params,
                     has_multiple_query_params: analysis.has_multiple_query_params,

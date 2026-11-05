@@ -16,6 +16,7 @@ use fastrapi_http::background::PyBackgroundTasks;
 use fastrapi_http::request::create_py_request;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::upload_file::PyUploadFile;
+use fastrapi_pyutil::call::CallArgs;
 use fastrapi_pyutil::imports::{ENUM, TYPING};
 use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
 use percent_encoding::percent_decode_str;
@@ -531,15 +532,15 @@ fn raw_values_for_list<'a>(
 
 /// Puts one handler argument into `kwargs`. If Python cannot store it, the request fails with a 500 response.
 fn set_argument<'py, V>(
-    kwargs: &Bound<'py, PyDict>,
+    kwargs: &mut CallArgs,
     name: &Bound<'py, PyString>,
     value: V,
 ) -> Result<(), Response>
 where
     V: IntoPyObject<'py>,
 {
-    kwargs.set_item(name, value).map_err(|err| {
-        err.print(kwargs.py());
+    kwargs.set(name, value).map_err(|err| {
+        err.print(name.py());
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to set a handler argument",
@@ -693,7 +694,7 @@ fn apply_body_and_validation(
     py: Python,
     handler: &RouteHandler,
     payload: Option<&BodyPayload>,
-    kwargs: &Bound<'_, PyDict>,
+    kwargs: &mut CallArgs,
 ) -> Result<(), Response> {
     if handler.payload.body_param_indices.is_empty() {
         return Ok(());
@@ -917,7 +918,7 @@ pub fn apply_request_data(
     handler: &RouteHandler,
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
-    kwargs: &Bound<'_, PyDict>,
+    kwargs: &mut CallArgs,
 ) -> Result<Option<Py<PyBackgroundTasks>>, Response> {
     if handler.payload.has_multiple_query_params {
         request_input.get_all_query_params();
@@ -936,25 +937,17 @@ pub fn apply_request_data(
             }),
         )
         .map_err(fail)?;
-        kwargs.set_item(name.bind(py), req).map_err(fail)?;
+        kwargs.set(name.bind(py), req).map_err(fail)?;
     }
 
     let mut bg_tasks_instance: Option<Py<PyBackgroundTasks>> = None;
 
     handler
         .payload
-        .parsed_params
+        .request_param_indices
         .iter()
-        .try_for_each(|param| -> Result<(), Response> {
-            if matches!(param.source, ParameterSource::Body)
-                || handler
-                    .payload
-                    .body_param_name_set
-                    .contains(param.name.as_str())
-            {
-                return Ok(());
-            }
-
+        .try_for_each(|&index| -> Result<(), Response> {
+            let param = &handler.payload.parsed_params[index];
             if matches!(param.source, ParameterSource::BackgroundTasks) {
                 let instance = if let Some(bg) = &bg_tasks_instance {
                     bg.clone()

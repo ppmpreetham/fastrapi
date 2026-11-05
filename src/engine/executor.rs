@@ -25,6 +25,7 @@ use std::sync::{Arc, OnceLock};
 use fastrapi_http::background::{OwnBackground, PyBackgroundTasks};
 use fastrapi_http::request::create_py_request;
 use fastrapi_http::response_convert::convert_response_by_type;
+use fastrapi_pyutil::call::CallArgs;
 use fastrapi_pyutil::json::py_json_response_with_dump_options;
 use fastrapi_runtime::tokio_runtime::spawn;
 
@@ -112,19 +113,19 @@ pub(crate) fn spawn_background_tasks(
 }
 
 #[inline(always)]
-pub(crate) fn prepare_kwargs_and_payload<'py>(
-    py: Python<'py>,
+pub(crate) fn prepare_kwargs_and_payload(
+    py: Python<'_>,
     handler: &RouteHandler,
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
-) -> Result<(Bound<'py, PyDict>, Option<Py<PyBackgroundTasks>>), Response> {
-    let kwargs = PyDict::new(py);
+) -> Result<(CallArgs, Option<Py<PyBackgroundTasks>>), Response> {
+    let mut kwargs = CallArgs::new();
     let bg_tasks = fastrapi_routing::request_data::apply_request_data(
         py,
         handler,
         request_input,
         payload,
-        &kwargs,
+        &mut kwargs,
     )?;
 
     Ok((kwargs, bg_tasks))
@@ -133,12 +134,12 @@ pub(crate) fn prepare_kwargs_and_payload<'py>(
 pub(crate) fn request_object(
     py: Python<'_>,
     handler: &RouteHandler,
-    kwargs: &Bound<'_, PyDict>,
+    kwargs: &CallArgs,
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
 ) -> PyResult<Py<PyAny>> {
     if let Some(name) = &handler.payload.request_param
-        && let Some(existing) = kwargs.get_item(name.bind(py))?
+        && let Some(existing) = kwargs.get(name.bind(py))
     {
         return Ok(existing.unbind());
     }
@@ -146,12 +147,12 @@ pub(crate) fn request_object(
 }
 
 #[inline(always)]
-fn resolve_sync_deps<'py>(
-    py: Python<'py>,
+fn resolve_sync_deps(
+    py: Python<'_>,
     handler: &RouteHandler,
     request_input: &RequestInput<'_>,
     request_object: Option<Py<PyAny>>,
-    kwargs: &Bound<'py, PyDict>,
+    kwargs: &mut CallArgs,
 ) -> Result<TeardownTasks, Response> {
     let (dep_results, teardowns) = dependencies::execute_dependencies_sync(
         py,
@@ -168,7 +169,7 @@ fn resolve_sync_deps<'py>(
 
     dep_results.into_iter().try_for_each(|(name, value)| {
         kwargs
-            .set_item(name, value.bind(py))
+            .set(name.bind(py), value.bind(py))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     })?;
     Ok(teardowns)
@@ -178,12 +179,15 @@ fn resolve_sync_deps<'py>(
 fn call_handler_and_convert(
     py: Python<'_>,
     handler: &RouteHandler,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    kwargs: Option<&CallArgs>,
     request_headers: Option<&HeaderMap>,
     server: EventLoop,
 ) -> Result<Response, PyErr> {
     let py_func = handler.execution.func.bind(py);
-    let result = kwargs.map_or_else(|| py_func.call0(), |kw| py_func.call((), Some(kw)));
+    let result = kwargs.map_or_else(
+        || py_func.call0(),
+        |kw| kw.call(py_func, handler.execution.call_layout.as_deref()),
+    );
     match result {
         Ok(res) => Ok(specialized_response_conversion(
             py,
@@ -384,7 +388,7 @@ fn run_sync_gil_section(
         server,
     } = *state;
 
-    let (kwargs, bg_tasks) = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
+    let (mut kwargs, bg_tasks) = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
 
     let req_obj = if needs_request_object {
         Some(
@@ -395,7 +399,7 @@ fn run_sync_gil_section(
         None
     };
 
-    let teardowns = resolve_sync_deps(py, handler, request_input, req_obj, &kwargs)?;
+    let teardowns = resolve_sync_deps(py, handler, request_input, req_obj, &mut kwargs)?;
 
     let response = call_handler_and_convert(
         py,
@@ -553,11 +557,11 @@ async fn core_async_no_deps(
         let (kwargs, bg_tasks) =
             prepare_kwargs_and_payload(py, handler, &request_input, payload.as_ref())?;
 
-        let coroutine = handler
-            .execution
-            .func
-            .bind(py)
-            .call((), Some(&kwargs))
+        let coroutine = kwargs
+            .call(
+                handler.execution.func.bind(py),
+                handler.execution.call_layout.as_deref(),
+            )
             .map_err(|err| python_error_to_response_in(py, &err, Some(&request_input)))?;
 
         let future = into_asyncio_future(py, event_loop, coroutine)?;
@@ -639,7 +643,7 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
 ) -> Result<(PyTaskFuture, Option<Py<PyBackgroundTasks>>), Response> {
-    let (kwargs, bg_tasks) = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
+    let (mut kwargs, bg_tasks) = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
 
     let req_obj = if NEEDS_REQ {
         Some(
@@ -650,20 +654,20 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
         None
     };
 
-    resolve_sync_deps(py, handler, request_input, req_obj, &kwargs)?;
+    resolve_sync_deps(py, handler, request_input, req_obj, &mut kwargs)?;
 
-    let coroutine = handler
-        .execution
-        .func
-        .bind(py)
-        .call((), Some(&kwargs))
+    let coroutine = kwargs
+        .call(
+            handler.execution.func.bind(py),
+            handler.execution.call_layout.as_deref(),
+        )
         .map_err(|err| python_error_to_response_in(py, &err, Some(request_input)))?;
 
     let future = into_asyncio_future(py, event_loop, coroutine)?;
     Ok((future, bg_tasks))
 }
 
-type AsyncDepsPrep = (Option<Py<PyAny>>, Py<PyDict>, Option<Py<PyBackgroundTasks>>);
+type AsyncDepsPrep = (Option<Py<PyAny>>, CallArgs, Option<Py<PyBackgroundTasks>>);
 
 async fn core_async_async_deps<const NEEDS_REQ: bool>(
     event_loop: EventLoop,
@@ -693,11 +697,11 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
             } else {
                 None
             };
-            Ok((req_obj, kwargs.unbind(), bg_tasks))
+            Ok((req_obj, kwargs, bg_tasks))
         })())
     });
 
-    let (request_object, kwargs_unbind, bg_tasks) = match prep {
+    let (request_object, mut kwargs, bg_tasks) = match prep {
         Some(Ok(res)) => res,
         Some(Err(r)) => return r,
         None => {
@@ -732,21 +736,19 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
     };
 
     let setup = Python::attach(|py| -> Result<_, Response> {
-        let kwargs = kwargs_unbind.bind(py);
-
         dependency_results
             .into_iter()
             .try_for_each(|(name, value)| {
                 kwargs
-                    .set_item(name, value.bind(py))
+                    .set(name.bind(py), value.bind(py))
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
             })?;
 
-        let coroutine = handler
-            .execution
-            .func
-            .bind(py)
-            .call((), Some(kwargs))
+        let coroutine = kwargs
+            .call(
+                handler.execution.func.bind(py),
+                handler.execution.call_layout.as_deref(),
+            )
             .map_err(|err| python_error_to_response_in(py, &err, Some(&request_input)))?;
 
         into_asyncio_future(py, event_loop, coroutine)

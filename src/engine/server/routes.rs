@@ -31,9 +31,11 @@ use crate::engine::executor::{
     render_no_request_json_response, render_no_request_response, run_py_handler_no_request,
 };
 use crate::engine::metrics::prometheus_handle;
-use crate::engine::server::websocket::{WsRouteState, ws_handler, ws_host_handler, ws_param_names};
+use crate::engine::server::websocket::{
+    WsRouteState, ws_handler, ws_host_handler, ws_param_names, ws_param_segments,
+};
 use crate::ffi::docs;
-use fastrapi_core::method::HttpMethod;
+use fastrapi_core::method::{HttpMethod, allow_header};
 use fastrapi_core::path::{host_without_port, join_path, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, FrozenRouterBuilder, RoutePattern};
 use fastrapi_http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer};
@@ -216,19 +218,22 @@ fn register_routes(
 
     let mut ws_groups: Vec<(&str, Vec<Arc<WsRouteState>>)> = Vec::new();
     for ws in ws_routes {
+        let (param_segments, segment_count) = ws_param_segments(&ws.path);
         let state = Arc::new(WsRouteState {
             handler: Arc::new(ws.handler.clone_ref(py)),
             websocket_arg: ws.websocket_arg.as_ref().map(|name| name.clone_ref(py)),
             app: app_state.app.clone_ref(py),
             params: Arc::from(ws.params.clone()),
             deps: Arc::new(ws.deps.to_vec()),
-            template: Arc::from(ws.path.as_str()),
+            param_segments,
+            segment_count,
             param_names: ws_param_names(&ws.path),
             event_loop: app_state.event_loop,
             dependency_overrides: ws
                 .dependency_overrides
                 .as_ref()
                 .map(|overrides| overrides.clone_ref(py)),
+            override_cache: Arc::default(),
             host: ws.host.as_deref().map(Into::into),
         });
         match ws_groups.iter_mut().find(|(path, _)| *path == ws.path) {
@@ -308,7 +313,7 @@ fn slash_redirect(
         .and_then(|value| value.to_str().ok());
     let lookup = strip_root_path(&state.root_path, &toggled).unwrap_or(&toggled);
     let host_name = host.map(host_without_port);
-    if router.allowed_methods(lookup, host_name).is_empty() {
+    if router.allowed_methods(lookup, host_name) == 0 {
         return None;
     }
     let mut location = host.map_or_else(
@@ -353,22 +358,17 @@ fn allowed_methods_header(
     router: &FrozenRouter<RouteHandler>,
     root: &str,
     request: &Request,
-) -> String {
+) -> u8 {
     let host = request
         .headers()
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .map(host_without_port);
     let path = strip_root_path(root, request.uri().path()).unwrap_or_else(|| request.uri().path());
-    router
-        .allowed_methods(path, host)
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
+    router.allowed_methods(path, host)
 }
 
-pub(crate) async fn method_not_allowed_response(server: EventLoop, allow: String) -> Response {
+pub(crate) async fn method_not_allowed_response(server: EventLoop, allow: u8) -> Response {
     let handler_resp = dispatch_status_handler(server, StatusCode::METHOD_NOT_ALLOWED.as_u16());
     let mut response = match handler_resp {
         Some(resp) => resolve_pending_handler(resp).await,
@@ -378,9 +378,7 @@ pub(crate) async fn method_not_allowed_response(server: EventLoop, allow: String
         )
             .into_response(),
     };
-    if let Ok(value) = HeaderValue::from_str(&allow) {
-        response.headers_mut().insert(ALLOW, value);
-    }
+    response.headers_mut().insert(ALLOW, allow_header(allow));
     response
 }
 

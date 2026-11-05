@@ -118,10 +118,10 @@ impl<H> FrozenRouter<H> {
         Some(RouteMatch::Params(target, matched.params))
     }
 
-    pub fn allowed_methods(&self, path: &str, host: Option<&str>) -> Vec<HttpMethod> {
+    pub fn allowed_methods(&self, path: &str, host: Option<&str>) -> u8 {
         HttpMethod::iter()
             .filter(|method| self.resolve(*method, path, host).is_some())
-            .collect()
+            .fold(0, |mask, method| mask | method.bit())
     }
 }
 

@@ -12,13 +12,14 @@ use axum::response::Response;
 use fastrapi_core::body::BodyPayload;
 use fastrapi_core::params::PathParamRange;
 use fastrapi_http::request_input::RequestInput;
-use fastrapi_routing::dependencies::{self, DependencyExecutionError};
+use fastrapi_pyutil::call::CallArgs;
+use fastrapi_routing::dependencies::{self, DependencyExecutionError, RequestPlan};
 use fastrapi_routing::route::RouteHandler;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::{blocking, py_bridge};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyList;
 use smallvec::SmallVec;
 
 use fastrapi_http::background::PyBackgroundTasks;
@@ -41,7 +42,7 @@ pub(crate) async fn run_managed_handler(
         event_loop,
     );
     let setup = Python::attach(|py| -> Result<_, Response> {
-        let (kwargs, background) =
+        let (mut kwargs, background) =
             prepare_kwargs_and_payload(py, handler, &input, payload.as_ref())?;
         let objects = (|| -> PyResult<_> {
             let plan = dependencies::request_plan(
@@ -49,27 +50,21 @@ pub(crate) async fn run_managed_handler(
                 &handler.payload.dependencies,
                 handler.payload.dependency_overrides.as_ref(),
                 &handler.payload.path_param_names,
+                &handler.payload.override_cache,
             )?;
             let (needs_request, needs_response) = match &plan {
-                std::borrow::Cow::Borrowed(_) => (
+                RequestPlan::Static(_) => (
                     handler.payload.dependency_needs_request,
                     handler.payload.dependency_needs_response,
                 ),
-                std::borrow::Cow::Owned(nodes) => (
-                    nodes.iter().any(|node| node.needs_request_object),
-                    nodes.iter().any(|node| {
-                        node.injection_plan.iter().any(|(_, injection)| {
-                            matches!(injection, dependencies::InjectionType::Response)
-                        })
-                    }),
-                ),
+                RequestPlan::Overridden(plan) => (plan.needs_request, plan.needs_response),
             };
             let response = if handler.payload.response_param.is_some() || needs_response {
                 let response = py.get_type::<PyResponse>().call0()?;
                 response.setattr(intern!(py, "status_code"), 0u16)?;
                 response.setattr(intern!(py, "raw_headers"), PyList::empty(py))?;
                 if let Some(name) = &handler.payload.response_param {
-                    kwargs.set_item(name.bind(py), &response)?;
+                    kwargs.set(name.bind(py), &response)?;
                 }
                 Some(response.unbind())
             } else {
@@ -86,11 +81,11 @@ pub(crate) async fn run_managed_handler(
             } else {
                 None
             };
-            Ok((kwargs.unbind(), background, request, response, plan))
+            Ok((kwargs, background, request, response, plan))
         })();
         objects.map_err(|err| python_error_to_response_in(py, &err, Some(&input)))
     });
-    let (kwargs, mut background, request, metadata, plan) = match setup {
+    let (mut kwargs, mut background, request, metadata, plan) = match setup {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -99,7 +94,7 @@ pub(crate) async fn run_managed_handler(
     let outcome = async {
         let values = dependencies::execute_request_dependencies(
             event_loop,
-            &plan,
+            plan.nodes(),
             &input,
             request.as_ref(),
             metadata.as_ref(),
@@ -109,13 +104,12 @@ pub(crate) async fn run_managed_handler(
         .await?;
         if !handler.execution.is_async && sync_to_threadpool {
             return blocking::run_python(move |py| {
-                let kwargs = kwargs.bind(py);
-                inject_dependencies(py, kwargs, values)?;
-                handler
-                    .execution
-                    .func
-                    .bind(py)
-                    .call((), Some(kwargs))
+                inject_dependencies(py, &mut kwargs, values)?;
+                kwargs
+                    .call(
+                        handler.execution.func.bind(py),
+                        handler.execution.call_layout.as_deref(),
+                    )
                     .map(Bound::unbind)
             })
             .await
@@ -123,9 +117,11 @@ pub(crate) async fn run_managed_handler(
             .map_err(DependencyExecutionError::from);
         }
         let called = Python::attach(|py| -> PyResult<_> {
-            let kwargs = kwargs.bind(py);
-            inject_dependencies(py, kwargs, values)?;
-            let result = handler.execution.func.bind(py).call((), Some(kwargs))?;
+            inject_dependencies(py, &mut kwargs, values)?;
+            let result = kwargs.call(
+                handler.execution.func.bind(py),
+                handler.execution.call_layout.as_deref(),
+            )?;
             if handler.execution.is_async {
                 py_bridge::schedule_task(py, event_loop, result).map(Err)
             } else {
@@ -190,12 +186,12 @@ type ManagedOutcome = Result<(Response, bool), DependencyExecutionError>;
 
 fn inject_dependencies(
     py: Python<'_>,
-    kwargs: &Bound<'_, PyDict>,
+    kwargs: &mut CallArgs,
     values: dependencies::ResolvedDependencies,
 ) -> PyResult<()> {
     values
         .into_iter()
-        .try_for_each(|(name, value)| kwargs.set_item(name.bind(py), value.bind(py)))
+        .try_for_each(|(name, value)| kwargs.set(name.bind(py), value.bind(py)))
 }
 
 fn schedule_stack_exit(

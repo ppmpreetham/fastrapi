@@ -4,7 +4,6 @@
 use super::response_file::guess_mime;
 use axum::http::StatusCode;
 use papaya::HashMap;
-use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyType};
 use pyo3::{Bound, Py, PyAny, intern, pyclass, pymethods};
@@ -103,64 +102,6 @@ pub struct BaseResponseData<'py> {
     pub content: Option<Bound<'py, PyAny>>,
     pub headers: Option<Py<PyDict>>,
     pub media_type: Option<String>,
-}
-
-pub(crate) fn validate_response_model<'py>(
-    py: Python<'py>,
-    model: &Bound<'py, PyAny>,
-    value: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyAny>> {
-    if model.hasattr("model_validate").unwrap_or(false) {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("from_attributes", true)?;
-        return model.call_method("model_validate", (value,), Some(&kwargs));
-    }
-    let typing = py.import("typing")?;
-    let origin = typing.getattr("get_origin")?.call1((model,))?;
-    let args = typing.getattr("get_args")?.call1((model,))?;
-    let list_type = py.import("builtins")?.getattr("list")?;
-    if origin.is(&list_type) {
-        let item_model = args
-            .try_iter()?
-            .next()
-            .transpose()?
-            .ok_or_else(|| PyTypeError::new_err("response list model has no item type"))?;
-        let input = if let Ok(input) = value.cast::<PyList>() {
-            input.clone()
-        } else {
-            let input = PyList::empty(py);
-            for item in value.try_iter()? {
-                input.append(item?)?;
-            }
-            input
-        };
-        let output = PyList::empty(py);
-        for item in input.iter() {
-            output.append(validate_response_model(py, &item_model, &item)?)?;
-        }
-        return Ok(output.into_any());
-    }
-    let union_type = py.import("types")?.getattr("UnionType")?;
-    if origin.is(&typing.getattr("Union")?) || origin.is(&union_type) {
-        if value.is_none() {
-            return Ok(value.clone());
-        }
-        for arg in args.try_iter()? {
-            let arg = arg?;
-            if !arg.is_none()
-                && let Ok(validated) = validate_response_model(py, &arg, value)
-            {
-                return Ok(validated);
-            }
-        }
-    }
-    let adapter_kwargs = PyDict::new(py);
-    adapter_kwargs.set_item("_parent_depth", 0)?;
-    let adapter = py
-        .import("pydantic")?
-        .getattr("TypeAdapter")?
-        .call((model,), Some(&adapter_kwargs))?;
-    adapter.call_method("validate_python", (value,), Some(&PyDict::new(py)))
 }
 
 pub fn extract_base_response_data<'py>(

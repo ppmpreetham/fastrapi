@@ -2091,3 +2091,83 @@ def test_form_scalar_uses_only_the_last_value(client, app):
     response = client.post("/count", content="value=abc&value=3", headers={"content-type": "application/x-www-form-urlencoded"})
     assert response.status_code == 200
     assert response.json() == {"value": 3}
+
+
+def test_dependency_override_changes_apply_between_requests(client, app):
+    from fastrapi import Depends
+
+    def original():
+        return "original"
+
+    @app.get("/swap")
+    def endpoint(value=Depends(original)):
+        return {"value": value}
+
+    app.dependency_overrides[original] = lambda: "first"
+    assert client.get("/swap").json() == {"value": "first"}
+    app.dependency_overrides[original] = lambda: "second"
+    assert client.get("/swap").json() == {"value": "second"}
+    app.dependency_overrides.clear()
+    assert client.get("/swap").json() == {"value": "original"}
+
+
+def test_handler_arguments_reach_keyword_only_and_wrapped_handlers(client, app):
+    import functools
+    from typing import Optional
+
+    def keyword_spy(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            assert not args
+            return {"keys": sorted(kwargs), **func(*args, **kwargs)}
+
+        return wrapper
+
+    @app.get("/kwonly")
+    def kwonly(a: int, *, b: int = 2):
+        return {"a": a, "b": b}
+
+    @app.get("/wrapped")
+    @keyword_spy
+    def wrapped(a: int, b: int = 2):
+        return {"a": a, "b": b}
+
+    @app.get("/gap")
+    def gap(a: Optional[int] = None, b: int = 5):
+        return {"a": a, "b": b}
+
+    assert client.get("/kwonly?a=1&b=3").json() == {"a": 1, "b": 3}
+    assert client.get("/wrapped?a=1").json() == {"keys": ["a", "b"], "a": 1, "b": 2}
+    assert client.get("/gap?b=7").json() == {"a": None, "b": 7}
+
+
+def test_method_not_allowed_lists_allowed_methods(client, app):
+    @app.get("/only")
+    def only_get():
+        return {}
+
+    @app.put("/only")
+    def only_put():
+        return {}
+
+    response = client.post("/only")
+    assert response.status_code == 405
+    assert response.headers["allow"] == "GET, PUT"
+
+
+def test_exception_handler_is_reused_across_errors(client, app):
+    from fastrapi.responses import JSONResponse
+
+    class Boom(Exception):
+        pass
+
+    @app.exception_handler(Boom)
+    def first(request, exc):
+        return JSONResponse({"handler": "first"}, status_code=418)
+
+    @app.get("/boom")
+    def boom():
+        raise Boom()
+
+    assert client.get("/boom").json() == {"handler": "first"}
+    assert client.get("/boom").status_code == 418

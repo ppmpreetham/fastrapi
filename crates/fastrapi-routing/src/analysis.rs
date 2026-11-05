@@ -114,11 +114,11 @@ pub fn parse_route_metadata(py: Python, func: &Bound<PyAny>, path: &str) -> Pars
                 .filter(|a| !params::is_inspect_empty(py, a));
             if let Some(ann) = &raw_ann {
                 if dependencies::is_response_annotation(py, ann) {
-                    response_param = Some(PyString::new(py, &param_name).unbind());
+                    response_param = Some(PyString::intern(py, &param_name).unbind());
                     continue;
                 }
                 if is_request_annotation(py, ann) {
-                    request_param = Some(PyString::new(py, &param_name).unbind());
+                    request_param = Some(PyString::intern(py, &param_name).unbind());
                     continue;
                 }
             }

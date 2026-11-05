@@ -6,6 +6,7 @@ use super::params;
 use super::security::PySecurityScopes;
 use crate::route::ParsedParameter;
 use fastrapi_http::request_input::RequestInput;
+use fastrapi_pyutil::call::{CallArgs, CallLayout};
 use fastrapi_pyutil::imports::INSPECT;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::{blocking, py_bridge};
@@ -19,7 +20,6 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple, PyType};
 use smallvec::SmallVec;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::mem::take;
 use std::sync::{Arc, OnceLock};
@@ -85,6 +85,7 @@ pub struct DependencyNode {
     pub injection_plan: Vec<(Py<PyString>, InjectionType)>,
     pub needs_request_object: bool,
     pub context_factory: Arc<OnceLock<Py<PyAny>>>,
+    pub call_layout: Option<Arc<CallLayout>>,
 }
 
 impl DependencyNode {
@@ -178,19 +179,91 @@ fn visit(
     Ok(output.len() - 1)
 }
 
+pub struct OverridePlan {
+    pub nodes: Vec<DependencyNode>,
+    pub needs_request: bool,
+    pub needs_response: bool,
+}
+
+type OverrideSnapshot = Vec<(Py<PyAny>, Py<PyAny>)>;
+
+#[derive(Default)]
+pub struct OverrideCache(parking_lot::Mutex<Option<(OverrideSnapshot, Arc<OverridePlan>)>>);
+
+impl Clone for OverrideCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+pub enum RequestPlan<'a> {
+    Static(&'a [DependencyNode]),
+    Overridden(Arc<OverridePlan>),
+}
+
+impl RequestPlan<'_> {
+    #[must_use]
+    pub fn nodes(&self) -> &[DependencyNode] {
+        match self {
+            Self::Static(nodes) => nodes,
+            Self::Overridden(plan) => &plan.nodes,
+        }
+    }
+}
+
+fn snapshot_matches(snapshot: &OverrideSnapshot, overrides: &Bound<'_, PyDict>) -> bool {
+    snapshot.len() == overrides.len()
+        && snapshot
+            .iter()
+            .zip(overrides.iter())
+            .all(|((key, value), (current_key, current_value))| {
+                key.is(&current_key) && value.is(&current_value)
+            })
+}
+
 pub fn request_plan<'a>(
     py: Python<'_>,
     plan: &'a [DependencyNode],
     overrides: Option<&Py<PyAny>>,
     path_names: &[Arc<str>],
-) -> PyResult<Cow<'a, [DependencyNode]>> {
+    cache: &OverrideCache,
+) -> PyResult<RequestPlan<'a>> {
     let Some(overrides) = overrides else {
-        return Ok(Cow::Borrowed(plan));
+        return Ok(RequestPlan::Static(plan));
     };
     let overrides = overrides.bind(py).cast::<PyDict>()?;
     if overrides.is_empty() {
-        return Ok(Cow::Borrowed(plan));
+        return Ok(RequestPlan::Static(plan));
     }
+    if let Some((snapshot, cached)) = cache.0.lock().as_ref()
+        && snapshot_matches(snapshot, overrides)
+    {
+        return Ok(RequestPlan::Overridden(Arc::clone(cached)));
+    }
+    let nodes = override_nodes(py, plan, overrides, path_names)?;
+    let computed = Arc::new(OverridePlan {
+        needs_request: nodes.iter().any(|node| node.needs_request_object),
+        needs_response: nodes.iter().any(|node| {
+            node.injection_plan
+                .iter()
+                .any(|(_, injection)| matches!(injection, InjectionType::Response))
+        }),
+        nodes,
+    });
+    let snapshot = overrides
+        .iter()
+        .map(|(key, value)| (key.unbind(), value.unbind()))
+        .collect();
+    *cache.0.lock() = Some((snapshot, Arc::clone(&computed)));
+    Ok(RequestPlan::Overridden(computed))
+}
+
+fn override_nodes(
+    py: Python<'_>,
+    plan: &[DependencyNode],
+    overrides: &Bound<'_, PyDict>,
+    path_names: &[Arc<str>],
+) -> PyResult<Vec<DependencyNode>> {
     let paths = path_names
         .iter()
         .map(ToString::to_string)
@@ -208,7 +281,7 @@ pub fn request_plan<'a>(
             &mut visited,
         )?;
     }
-    Ok(Cow::Owned(output))
+    Ok(output)
 }
 
 enum NodeStep {
@@ -243,19 +316,20 @@ pub async fn execute_request_dependencies(
     let mut results = ResolvedDependencies::new();
     for node in plan {
         let step = Python::attach(|py| -> Result<_, DependencyExecutionError> {
-            let kwargs = build_dependency_kwargs(py, node, &registry, input, request)?;
-            let kwargs = kwargs.bind(py);
+            let mut args = dependency_args(py, node, &registry, input, request)?;
             if let Some(response) = response {
                 for (name, injection) in &node.injection_plan {
                     if matches!(injection, InjectionType::Response) {
-                        kwargs.set_item(name.bind(py), response.bind(py))?;
+                        args.set(name.bind(py), response.bind(py))?;
                     }
                 }
             }
             let func = node.func.bind(py);
             let pending = |future, exit| Ok(NodeStep::Pending { future, exit });
             if node.is_generator || node.is_async_generator {
-                let manager = node.context_factory(py)?.call((), Some(kwargs))?;
+                let manager = node
+                    .context_factory(py)?
+                    .call((), Some(&args.to_dict(py)?))?;
                 if node.is_generator && sync_to_threadpool {
                     let to_thread = TO_THREAD.get(py)?;
                     let coroutine =
@@ -279,11 +353,11 @@ pub async fn execute_request_dependencies(
                 return Ok(NodeStep::Done);
             }
             if !node.is_async && sync_to_threadpool {
-                let call = PARTIAL.get(py)?.call((func,), Some(kwargs))?;
+                let call = PARTIAL.get(py)?.call((func,), Some(&args.to_dict(py)?))?;
                 let coroutine = TO_THREAD.get(py)?.call1((call,))?;
                 return pending(py_bridge::schedule_task(py, event_loop, coroutine)?, None);
             }
-            let value = func.call((), Some(kwargs))?;
+            let value = args.call(func, node.call_layout.as_deref())?;
             if node.is_async {
                 return pending(py_bridge::schedule_task(py, event_loop, value)?, None);
             }
@@ -485,6 +559,7 @@ fn adapt_security_schemes(py: Python<'_>, nodes: &mut [DependencyNode]) {
             )];
             node.needs_request_object = true;
         }
+        node.call_layout = CallLayout::of(node.func.bind(py)).map(Arc::new);
     }
 }
 
@@ -678,6 +753,7 @@ fn extract_and_flatten(
         injection_plan,
         needs_request_object,
         context_factory: Arc::new(OnceLock::new()),
+        call_layout: None,
     });
 
     if use_cache {
@@ -750,21 +826,21 @@ fn build_injection_plan(
     Ok((plan, needs_request_object))
 }
 
-fn build_dependency_kwargs(
+fn dependency_args(
     py: Python<'_>,
     dep: &DependencyNode,
     results_registry: &[Option<SharedPyObject>],
     request_input: &RequestInput<'_>,
     request: Option<&SharedPyObject>,
-) -> Result<Py<PyDict>, DependencyExecutionError> {
-    let final_kwargs = PyDict::new(py);
+) -> Result<CallArgs, DependencyExecutionError> {
+    let mut final_kwargs = CallArgs::new();
 
     for (arg_name, injection_type) in &dep.injection_plan {
         let py_arg_name = arg_name.bind(py);
         match injection_type {
             InjectionType::Dependency(target_idx) => {
                 if let Some(cached_val) = &results_registry[*target_idx] {
-                    final_kwargs.set_item(py_arg_name, cached_val.bind(py))?;
+                    final_kwargs.set(py_arg_name, cached_val.bind(py))?;
                 }
             }
             InjectionType::Parameter(parameter) => {
@@ -772,12 +848,12 @@ fn build_dependency_kwargs(
                     crate::request_data::resolve_parameter_value(py, parameter, request_input)
                         .map_err(|e| DependencyExecutionError::Response(Box::new(e)))?
                 {
-                    final_kwargs.set_item(py_arg_name, value)?;
+                    final_kwargs.set(py_arg_name, value)?;
                 }
             }
             InjectionType::Request => {
                 if let Some(req) = request {
-                    final_kwargs.set_item(py_arg_name, req.bind(py))?;
+                    final_kwargs.set(py_arg_name, req.bind(py))?;
                 }
             }
             InjectionType::SecurityScopes => {
@@ -787,13 +863,13 @@ fn build_dependency_kwargs(
                         scopes: dep.scopes.clone(),
                     },
                 )?;
-                final_kwargs.set_item(py_arg_name, py_scopes)?;
+                final_kwargs.set(py_arg_name, py_scopes)?;
             }
             InjectionType::Response => {}
         }
     }
 
-    Ok(final_kwargs.unbind())
+    Ok(final_kwargs)
 }
 
 pub fn execute_dependencies_sync(
@@ -1009,8 +1085,8 @@ fn call_dependency<'py>(
     if dep.injection_plan.is_empty() {
         return Ok(func.call0()?);
     }
-    let kwargs = build_dependency_kwargs(py, dep, results_registry, request_input, request)?;
-    Ok(func.call((), Some(kwargs.bind(py)))?)
+    let args = dependency_args(py, dep, results_registry, request_input, request)?;
+    Ok(args.call(func, dep.call_layout.as_deref())?)
 }
 
 #[inline(always)]

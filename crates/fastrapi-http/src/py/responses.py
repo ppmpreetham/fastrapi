@@ -49,7 +49,7 @@ def _validate_response(adapter, content):
         raise ResponseValidationError(errors, body=content) from None
 
 
-def serialize_response(
+def validate_response(
     adapter,
     content,
     include=None,
@@ -65,7 +65,26 @@ def serialize_response(
         exclude_defaults=exclude_defaults,
         exclude_none=exclude_none,
     )
-    value = _validate_response(adapter, prepared)
+    return _validate_response(adapter, prepared)
+
+
+def serialize_response(
+    adapter,
+    content,
+    include=None,
+    exclude=None,
+    by_alias=False,
+    exclude_unset=False,
+    exclude_defaults=False,
+    exclude_none=False,
+):
+    value = validate_response(
+        adapter,
+        content,
+        exclude_unset=exclude_unset,
+        exclude_defaults=exclude_defaults,
+        exclude_none=exclude_none,
+    )
     return adapter.dump_json(
         value,
         include=include,

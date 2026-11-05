@@ -4,7 +4,7 @@
 use super::response_file::convert_file_response;
 use super::responses::{
     PyFileResponse, PyRedirectResponse, ResponseKind, extract_base_response_data, response_kind,
-    response_status, validate_response_model,
+    response_status,
 };
 use crate::background::{OwnBackground, spawn_response_background_value};
 use crate::response_type::{ResponseFormatter, ResponseType};
@@ -165,27 +165,63 @@ pub fn stream_factory(
         .unbind())
 }
 
-fn serialize_response_model(
+static SERIALIZE_RESPONSE: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+static VALIDATE_RESPONSE: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+
+fn response_helper<'py>(
+    py: Python<'py>,
+    cell: &'static pyo3::sync::PyOnceLock<Py<PyAny>>,
+    name: &Bound<'py, PyString>,
+) -> PyResult<&'static Py<PyAny>> {
+    cell.get_or_try_init(py, || response_helpers(py)?.getattr(name).map(Bound::unbind))
+}
+
+fn response_adapter<'a>(
     py: Python<'_>,
-    formatter: &ResponseFormatter,
+    formatter: &'a ResponseFormatter,
     model: &Py<PyAny>,
-    content: &Bound<'_, PyAny>,
-) -> PyResult<Bytes> {
-    let adapter = formatter.response_adapter.get_or_try_init(py, || {
+) -> PyResult<&'a Py<PyAny>> {
+    formatter.response_adapter.get_or_try_init(py, || {
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "_parent_depth"), 0)?;
         py.import(intern!(py, "pydantic"))?
             .getattr(intern!(py, "TypeAdapter"))?
             .call((model.bind(py),), Some(&kwargs))
             .map(Bound::unbind)
-    })?;
-    let serialize = response_helpers(py)?.getattr(intern!(py, "serialize_response"))?;
-    let json = serialize.call(
+    })
+}
+
+fn apply_response_helper<'py>(
+    py: Python<'py>,
+    cell: &'static pyo3::sync::PyOnceLock<Py<PyAny>>,
+    name: &Bound<'py, PyString>,
+    formatter: &ResponseFormatter,
+    model: &Py<PyAny>,
+    content: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let adapter = response_adapter(py, formatter, model)?;
+    response_helper(py, cell, name)?.bind(py).call(
         (adapter.bind(py), content),
         formatter
             .dump_options
             .as_ref()
             .map(|options| options.bind(py)),
+    )
+}
+
+fn serialize_response_model(
+    py: Python<'_>,
+    formatter: &ResponseFormatter,
+    model: &Py<PyAny>,
+    content: &Bound<'_, PyAny>,
+) -> PyResult<Bytes> {
+    let json = apply_response_helper(
+        py,
+        &SERIALIZE_RESPONSE,
+        intern!(py, "serialize_response"),
+        formatter,
+        model,
+        content,
     )?;
     Ok(Bytes::copy_from_slice(
         json.cast::<pyo3::types::PyBytes>()?.as_bytes(),
@@ -317,7 +353,14 @@ fn convert_response_value(
             };
             return Ok(response);
         }
-        validated_storage = validate_response_model(py, model.bind(py), final_result)?;
+        validated_storage = apply_response_helper(
+            py,
+            &VALIDATE_RESPONSE,
+            intern!(py, "validate_response"),
+            formatter,
+            model,
+            final_result,
+        )?;
         final_result = &validated_storage;
         kind = response_kind(final_result);
     }

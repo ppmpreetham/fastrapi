@@ -1,8 +1,9 @@
 //! The HTTP methods that FastrAPI routes support.
 //! `HttpMethod` gives each method a small index, so the router can keep one table for each method.
 
-use axum::http::Method;
-use strum::{AsRefStr, Display, EnumCount, EnumIter, EnumString};
+use axum::http::{HeaderValue, Method};
+use std::sync::LazyLock;
+use strum::{AsRefStr, Display, EnumCount, EnumIter, EnumString, IntoEnumIterator};
 
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Hash, AsRefStr, Display, EnumString, EnumCount, EnumIter,
@@ -38,3 +39,28 @@ impl TryFrom<&Method> for HttpMethod {
 }
 
 pub const HTTP_METHOD_COUNT: usize = HttpMethod::COUNT;
+
+impl HttpMethod {
+    #[must_use]
+    pub const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+static ALLOW_HEADERS: LazyLock<Box<[HeaderValue]>> = LazyLock::new(|| {
+    (0..=u8::MAX)
+        .map(|mask| {
+            let joined = HttpMethod::iter()
+                .filter(|method| mask & method.bit() != 0)
+                .map(|method| method.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            HeaderValue::from_str(&joined).unwrap_or_else(|_| HeaderValue::from_static(""))
+        })
+        .collect()
+});
+
+#[must_use]
+pub fn allow_header(mask: u8) -> HeaderValue {
+    ALLOW_HEADERS[usize::from(mask)].clone()
+}

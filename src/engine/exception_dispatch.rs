@@ -16,8 +16,14 @@ use fastrapi_pyutil::json::json_to_py_object;
 use fastrapi_routing::request_data::ValidationErrorDetails;
 use fastrapi_runtime::py_bridge::{EventLoop, PyTaskFuture, schedule_task};
 use fastrapi_runtime::server_state::current_server;
+use ahash::AHashMap;
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+type HandlerSlot = (Py<PyAny>, usize, Option<Py<PyAny>>);
+
+static HANDLER_CACHE: LazyLock<Mutex<AHashMap<(usize, usize), HandlerSlot>>> =
+    LazyLock::new(|| Mutex::new(AHashMap::new()));
 
 /// The result of an `async` exception handler that is still running.
 ///
@@ -163,6 +169,30 @@ pub(crate) fn find_handler<'py>(
     err: &PyErr,
 ) -> Option<Bound<'py, PyAny>> {
     let ty = err.get_type(py);
+    let key = (registry.as_ptr() as usize, ty.as_ptr() as usize);
+    let len = registry.len();
+    if let Some((_, cached_len, handler)) = HANDLER_CACHE.lock().get(&key)
+        && *cached_len == len
+    {
+        return handler.as_ref().map(|handler| handler.bind(py).clone());
+    }
+    let handler = lookup_handler(py, registry, &ty);
+    HANDLER_CACHE.lock().insert(
+        key,
+        (
+            ty.into_any().unbind(),
+            len,
+            handler.as_ref().map(|handler| handler.clone().unbind()),
+        ),
+    );
+    handler
+}
+
+fn lookup_handler<'py>(
+    py: Python<'py>,
+    registry: &Bound<'py, PyDict>,
+    ty: &Bound<'py, pyo3::types::PyType>,
+) -> Option<Bound<'py, PyAny>> {
     let Ok(mro) = ty.getattr(intern!(py, "__mro__")) else {
         return None;
     };

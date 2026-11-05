@@ -60,10 +60,12 @@ pub struct WsRouteState {
     pub app: Py<PyAny>,
     pub params: Arc<[ParsedParameter]>,
     pub deps: Arc<Vec<dependencies::DependencyNode>>,
-    pub template: Arc<str>,
+    pub param_segments: Arc<[usize]>,
+    pub segment_count: usize,
     pub param_names: Arc<[Arc<str>]>,
     pub event_loop: EventLoop,
     pub dependency_overrides: Option<Py<PyAny>>,
+    pub override_cache: Arc<dependencies::OverrideCache>,
     pub host: Option<Box<str>>,
 }
 
@@ -108,6 +110,7 @@ pub async fn ws_handler(
             &route.deps,
             route.dependency_overrides.as_ref(),
             &route.param_names,
+            &route.override_cache,
         )
     }) {
         Ok(plan) => plan,
@@ -144,7 +147,7 @@ pub async fn ws_handler(
 
     let (dependency_results, teardowns) = match dependencies::execute_dependencies(
         route.event_loop,
-        &plan,
+        plan.nodes(),
         &request_input,
         Some(websocket_arg),
     )
@@ -456,6 +459,17 @@ fn validation_errors(response: &Response) -> Vec<JsonValue> {
 }
 
 #[must_use]
+pub fn ws_param_segments(template: &str) -> (Arc<[usize]>, usize) {
+    let segments = template
+        .split('/')
+        .enumerate()
+        .filter(|(_, s)| s.starts_with('{') && s.ends_with('}'))
+        .map(|(index, _)| index)
+        .collect();
+    (segments, template.split('/').count())
+}
+
+#[must_use]
 pub fn ws_param_names(template: &str) -> Arc<[Arc<str>]> {
     template
         .split('/')
@@ -472,24 +486,20 @@ fn match_path_params(
     actual_path: &str,
 ) -> smallvec::SmallVec<[PathParamRange; 4]> {
     let mut ranges = SmallVec::new();
+    let mut params = route.param_segments.iter().peekable();
 
-    let mut template_segments = route.template.split('/');
-    let mut actual_segments = actual_path.split('/');
-    let mut name_index = 0;
-
-    loop {
-        match (template_segments.next(), actual_segments.next()) {
-            (Some(t), Some(a)) if t.starts_with('{') && t.ends_with('}') => {
-                let start = a.as_ptr() as usize - actual_path.as_ptr() as usize;
-                ranges.push(PathParamRange {
-                    name_index,
-                    start,
-                    end: start + a.len(),
-                });
-                name_index += 1;
-            }
-            (Some(_), Some(_)) => {}
-            _ => break,
+    for (index, segment) in actual_path
+        .split('/')
+        .enumerate()
+        .take(route.segment_count)
+    {
+        if params.next_if_eq(&&index).is_some() {
+            let start = segment.as_ptr() as usize - actual_path.as_ptr() as usize;
+            ranges.push(PathParamRange {
+                name_index: ranges.len(),
+                start,
+                end: start + segment.len(),
+            });
         }
     }
 

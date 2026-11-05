@@ -2,13 +2,13 @@
 //! These types hold the parsed parameters, the validators, the execution plan, and the route entries for HTTP and WebSocket routes.
 
 use crate::annotations::ScalarCoercion;
-use crate::dependencies::{DependencyNode, InjectionType};
+use crate::dependencies::{DependencyNode, InjectionType, OverrideCache};
 use crate::kernel_validation::KernelFastPath;
-use ahash::AHashSet;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::params::{ParameterConstraints, ParameterSource};
 use fastrapi_core::security::RouteSecurityRequirement;
 use fastrapi_http::response_type::ResponseFormatter;
+use fastrapi_pyutil::call::CallLayout;
 use pyo3::types::PyString;
 use pyo3::{Py, PyAny};
 use smallvec::SmallVec;
@@ -56,6 +56,7 @@ pub struct PydanticValidator {
 #[derive(Clone)]
 pub struct ExecutionPlan {
     pub func: Py<PyAny>,
+    pub call_layout: Option<Arc<CallLayout>>,
     pub is_async: bool,
     pub is_fast_path: bool,
     pub execution_mode: ExecutionMode,
@@ -79,8 +80,10 @@ pub struct PayloadSpec {
     pub response_param: Option<Py<PyString>>,
     pub dependency_overrides: Option<Py<PyAny>>,
     pub body_param_names: Vec<Py<PyString>>,
-    pub body_param_name_set: AHashSet<String>,
     pub body_param_indices: SmallVec<[usize; 4]>,
+    pub request_param_indices: SmallVec<[usize; 8]>,
+    pub needs_body: bool,
+    pub override_cache: OverrideCache,
     pub dependencies: Vec<DependencyNode>,
     pub parsed_params: Vec<ParsedParameter>,
     pub has_multiple_query_params: bool,
@@ -173,7 +176,10 @@ pub enum ExecutionMode {
 }
 
 impl RouteHandler {
-    pub const fn assign_execution_mode(&mut self) {
+    pub fn assign_execution_mode(&mut self) {
+        self.payload.needs_body = !self.payload.body_param_indices.is_empty()
+            || self.payload.request_param.is_some()
+            || self.payload.dependency_needs_request;
         let payload = &self.payload;
         if payload.response_param.is_some()
             || payload.dependency_needs_response

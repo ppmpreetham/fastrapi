@@ -46,13 +46,8 @@ pub(crate) async fn dispatch_or_not_found(
     };
     let Some(route_match) = router.resolve(method, path_str, request_host) else {
         let allowed = router.allowed_methods(path_str, request_host);
-        if !allowed.is_empty() {
-            let value = allowed
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Ok(method_not_allowed_response(state.event_loop, value).await);
+        if allowed != 0 {
+            return Ok(method_not_allowed_response(state.event_loop, allowed).await);
         }
         return Err(req);
     };
@@ -119,11 +114,7 @@ pub(crate) async fn dispatch_or_not_found(
             return Ok(tag(resolve_pending_handler(response).await));
         }
 
-        let needs_body = !handler.payload.body_param_indices.is_empty()
-            || handler.payload.request_param.is_some()
-            || handler.payload.dependency_needs_request;
-
-        let payload = if needs_body {
+        let payload = if handler.payload.needs_body {
             match extract_payload(&request_parts.headers, body, handler, state).await {
                 Ok(p) => p,
                 Err(resp) => {
