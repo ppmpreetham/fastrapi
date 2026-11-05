@@ -15,7 +15,7 @@ use fastrapi_runtime::server_state::current_server;
 use futures_util::FutureExt;
 use pyo3::exceptions::{PyAssertionError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyTuple};
 use pyo3::{Py, PyClassInitializer, intern};
 use std::str::from_utf8;
 use std::sync::Arc;
@@ -136,7 +136,7 @@ impl PyHTTPConnection {
             _ = base_scope.set_item(intern!(py, "query_string"), PyBytes::new(py, b""));
             let root_path = scope
                 .get_item(intern!(py, "root_path"))
-                .unwrap_or_else(|_| PyString::new(py, "").into_any());
+                .unwrap_or_else(|_| pyo3::intern!(py, "").clone().into_any());
             _ = base_scope.set_item(intern!(py, "root_path"), root_path);
             let url = PyURL::from_scope(&base_scope)?;
             Py::new(py, url).map(Py::into_any)
@@ -208,7 +208,9 @@ impl PyHTTPConnection {
         }
 
         if let Ok(headers) = self.headers(py)
-            && let Ok(cookie_val) = headers.bind(py).call_method1("get", ("cookie",))
+            && let Ok(cookie_val) = headers
+                .bind(py)
+                .call_method1(pyo3::intern!(py, "get"), ("cookie",))
             && let Ok(cookie_str) = cookie_val.extract::<&str>()
         {
             let simple_cookie = SIMPLE_COOKIE.get(py)?;
@@ -332,7 +334,7 @@ impl PyHTTPConnection {
         let url_path = if let Some(params) = path_params {
             provider.call_method(intern!(py, "url_path_for"), (name,), Some(params))?
         } else {
-            provider.call_method1("url_path_for", (name,))?
+            provider.call_method1(pyo3::intern!(py, "url_path_for"), (name,))?
         };
 
         let base_url = self.base_url(py)?;
@@ -809,7 +811,9 @@ impl PyRequest {
 
             Python::attach(|py| {
                 let bytes = body_bytes.bind(py);
-                let obj = JSON_MODULE.get(py)?.call_method1("loads", (bytes,))?;
+                let obj = JSON_MODULE
+                    .get(py)?
+                    .call_method1(pyo3::intern!(py, "loads"), (bytes,))?;
                 Ok(obj.unbind())
             })
         })
@@ -833,7 +837,7 @@ impl PyRequest {
                     body_bytes
                         .bind(py)
                         .cast::<PyBytes>()
-                        .map(|bytes| Bytes::copy_from_slice(bytes.as_bytes()))
+                        .map(fastrapi_pyutil::body::bytes_body)
                         .unwrap_or_default()
                 })
             });
@@ -873,15 +877,20 @@ impl PyRequest {
 
     fn stream<'py>(self_: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let conn = self_.as_super();
-        let request = py.import("starlette.requests")?.getattr("Request")?;
+        let request = py
+            .import("starlette.requests")?
+            .getattr(pyo3::intern!(py, "Request"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("receive", conn.borrow().receive.clone_ref(py))?;
-        kwargs.set_item("send", self_.borrow().send.clone_ref(py))?;
+        kwargs.set_item(
+            pyo3::intern!(py, "receive"),
+            conn.borrow().receive.clone_ref(py),
+        )?;
+        kwargs.set_item(pyo3::intern!(py, "send"), self_.borrow().send.clone_ref(py))?;
         let starlette = request.call((conn.borrow().scope.clone_ref(py),), Some(&kwargs))?;
         if let Some(body) = self_.borrow().body_cache.get() {
-            starlette.setattr("_body", PyBytes::new(py, body.as_ref()))?;
+            starlette.setattr(pyo3::intern!(py, "_body"), PyBytes::new(py, body.as_ref()))?;
         }
-        starlette.call_method0("stream")
+        starlette.call_method0(pyo3::intern!(py, "stream"))
     }
 
     fn send_push_promise<'py>(
@@ -890,12 +899,17 @@ impl PyRequest {
         path: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let conn = self_.as_super();
-        let request = py.import("starlette.requests")?.getattr("Request")?;
+        let request = py
+            .import("starlette.requests")?
+            .getattr(pyo3::intern!(py, "Request"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("receive", conn.borrow().receive.clone_ref(py))?;
-        kwargs.set_item("send", self_.borrow().send.clone_ref(py))?;
+        kwargs.set_item(
+            pyo3::intern!(py, "receive"),
+            conn.borrow().receive.clone_ref(py),
+        )?;
+        kwargs.set_item(pyo3::intern!(py, "send"), self_.borrow().send.clone_ref(py))?;
         let starlette = request.call((conn.borrow().scope.clone_ref(py),), Some(&kwargs))?;
-        starlette.call_method1("send_push_promise", (path,))
+        starlette.call_method1(pyo3::intern!(py, "send_push_promise"), (path,))
     }
 
     fn __repr__(self_: &Bound<'_, Self>) -> String {

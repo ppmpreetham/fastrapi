@@ -85,17 +85,17 @@ impl PyFormData {
 
     /// D.keys() -> a set-like object providing a view on D's keys
     fn keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.dict.bind(py).call_method0("keys")
+        self.dict.bind(py).call_method0(pyo3::intern!(py, "keys"))
     }
 
     /// D.values() -> an object providing a view on D's values
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.dict.bind(py).call_method0("values")
+        self.dict.bind(py).call_method0(pyo3::intern!(py, "values"))
     }
 
     /// D.items() -> a set-like object providing a view on D's items
     fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.dict.bind(py).call_method0("items")
+        self.dict.bind(py).call_method0(pyo3::intern!(py, "items"))
     }
 
     fn __getitem__<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyAny>> {
@@ -128,7 +128,7 @@ impl PyFormData {
     }
 
     fn __iter__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        slf.getattr("keys")?.call0()
+        slf.getattr(pyo3::intern!(slf.py(), "keys"))?.call0()
     }
 
     const fn __len__(&self) -> usize {
@@ -169,10 +169,12 @@ impl PyFormData {
                 let awaitable = Python::attach(|py| -> PyResult<Option<Py<PyAny>>> {
                     let value = upload.bind(py);
                     if value.cast::<PyUploadFile>().is_ok() {
-                        value.call_method0("close")?;
+                        value.call_method0(pyo3::intern!(py, "close"))?;
                         Ok(None)
                     } else {
-                        value.call_method0("close").map(|a| Some(a.unbind()))
+                        value
+                            .call_method0(pyo3::intern!(py, "close"))
+                            .map(|a| Some(a.unbind()))
                     }
                 })?;
                 let Some(awaitable) = awaitable else {
@@ -227,8 +229,8 @@ fn append_from(
         return Ok(());
     }
     let pairs = value
-        .call_method0("multi_items")
-        .or_else(|_| value.call_method0("items"))
+        .call_method0(pyo3::intern!(py, "multi_items"))
+        .or_else(|_| value.call_method0(pyo3::intern!(py, "items")))
         .unwrap_or_else(|_| value.clone());
     for pair in pairs.try_iter()? {
         let pair = pair?;

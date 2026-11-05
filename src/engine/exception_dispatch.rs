@@ -7,6 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt};
 use pyo3::{Py, intern};
 
+use ahash::AHashMap;
 use axum::http::StatusCode;
 use fastrapi_http::exceptions::{PyHTTPException, PyRequestValidationError, status_phrase};
 use fastrapi_http::request::{create_py_request, create_stub_request};
@@ -16,7 +17,6 @@ use fastrapi_pyutil::json::json_to_py_object;
 use fastrapi_routing::request_data::ValidationErrorDetails;
 use fastrapi_runtime::py_bridge::{EventLoop, PyTaskFuture, schedule_task};
 use fastrapi_runtime::server_state::current_server;
-use ahash::AHashMap;
 use parking_lot::Mutex;
 use std::sync::{Arc, LazyLock};
 
@@ -96,7 +96,7 @@ pub(crate) fn dispatch_validation_handler(
         return response;
     };
     let details = json_to_py_object(py, &details.0);
-    let Ok(errors) = details.bind(py).get_item("detail") else {
+    let Ok(errors) = details.bind(py).get_item(pyo3::intern!(py, "detail")) else {
         return response;
     };
     let Ok(exception) = validation_type.call1((errors,)) else {

@@ -123,7 +123,7 @@ pub(crate) fn to_form_data(py: Python<'_>, entries: Vec<FormEntry>) -> PyResult<
 }
 
 pub(crate) fn content_type_of(py: Python<'_>, scope: &Bound<'_, PyAny>) -> String {
-    let Ok(headers) = scope.get_item("headers") else {
+    let Ok(headers) = scope.get_item(pyo3::intern!(py, "headers")) else {
         return String::new();
     };
     let value = if let Ok(headers) = headers.cast::<pyo3::types::PyDict>() {

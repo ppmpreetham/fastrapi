@@ -213,12 +213,11 @@ impl RequestPlan<'_> {
 
 fn snapshot_matches(snapshot: &OverrideSnapshot, overrides: &Bound<'_, PyDict>) -> bool {
     snapshot.len() == overrides.len()
-        && snapshot
-            .iter()
-            .zip(overrides.iter())
-            .all(|((key, value), (current_key, current_value))| {
+        && snapshot.iter().zip(overrides.iter()).all(
+            |((key, value), (current_key, current_value))| {
                 key.is(&current_key) && value.is(&current_value)
-            })
+            },
+        )
 }
 
 pub fn request_plan<'a>(

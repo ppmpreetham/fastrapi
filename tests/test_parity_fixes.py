@@ -2171,3 +2171,51 @@ def test_exception_handler_is_reused_across_errors(client, app):
 
     assert client.get("/boom").json() == {"handler": "first"}
     assert client.get("/boom").status_code == 418
+
+
+def test_json_response_render_matches_json_dumps():
+    import json
+    import math
+
+    import pytest
+
+    from fastrapi.responses import JSONResponse
+
+    def expected(value):
+        return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+
+    values = [
+        {"a": 1, "b": [1.5, 1e16, 1e-07, -0.0, 2**70], "c": (True, False, None)},
+        {"text": "caf\u00e9 \"q\" \\ \n\t\x01\x7f \u2028 \U0001f600"},
+        [[[[]]], {}, "", 0],
+        {1: "int key", None: "none key", 2.5: "float key"},
+    ]
+    for value in values:
+        assert JSONResponse(value).body == expected(value)
+    with pytest.raises(ValueError):
+        JSONResponse({"x": math.nan})
+
+
+def test_large_bodies_round_trip(client, app):
+    from fastrapi import Body
+    from fastrapi.responses import PlainTextResponse, Response
+
+    text = "\u00e9x" * 6000
+    payload = {f"key{index}": index for index in range(5000)}
+
+    @app.get("/big-text", response_class=PlainTextResponse)
+    def big_text():
+        return text
+
+    @app.get("/big-bytes")
+    def big_bytes():
+        return Response(content=text.encode(), media_type="application/octet-stream")
+
+    @app.post("/big-json")
+    def big_json(data: dict = Body(...)):
+        return {"count": len(data), "last": data["key4999"]}
+
+    assert client.get("/big-text").text == text
+    assert client.get("/big-bytes").content == text.encode()
+    assert client.post("/big-json", json=payload).json() == {"count": 5000, "last": 4999}
+    assert client.post("/big-json", json=payload).json() == {"count": 5000, "last": 4999}

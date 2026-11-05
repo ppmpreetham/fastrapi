@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyString};
 use pyo3::{Bound, Py, PyAny, intern};
 use std::convert::Infallible;
 use std::fs;
@@ -137,14 +137,15 @@ pub fn convert_file_response(
     result: &Bound<'_, PyAny>,
     request_headers: Option<&HeaderMap>,
 ) -> Response {
-    let get_str = |attr: &str| -> Option<String> {
+    let get_str = |attr: &Bound<'_, PyString>| -> Option<String> {
         result
-            .getattr(attr)
+            .getattr_opt(attr)
             .ok()
+            .flatten()
             .filter(|value| !value.is_none())
             .and_then(|value| value.extract().ok())
     };
-    let Some(path) = get_str("path") else {
+    let Some(path) = get_str(intern!(py, "path")) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let status = result
@@ -193,7 +194,7 @@ pub fn convert_file_response(
     let partial = use_range;
     let multi = ranges.len() > 1;
     let boundary = multi.then(|| format!("fastrapi-{length:x}-{status}"));
-    let declared = get_str("media_type");
+    let declared = get_str(intern!(py, "media_type"));
     let media_type = declared
         .as_deref()
         .unwrap_or_else(|| guess_mime(&path))
@@ -233,10 +234,10 @@ pub fn convert_file_response(
             format!("bytes {}-{}/{}", range.start(), range.end(), length),
         );
     }
-    if let Some(filename) = get_str("filename") {
+    if let Some(filename) = get_str(intern!(py, "filename")) {
         let escaped = filename.replace(['"', '\\'], "");
-        let disposition_type =
-            get_str("content_disposition_type").unwrap_or_else(|| "attachment".to_owned());
+        let disposition_type = get_str(intern!(py, "content_disposition_type"))
+            .unwrap_or_else(|| "attachment".to_owned());
         builder = builder.header(
             header::CONTENT_DISPOSITION,
             format!("{disposition_type}; filename=\"{escaped}\""),

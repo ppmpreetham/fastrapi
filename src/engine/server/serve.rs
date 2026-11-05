@@ -174,21 +174,21 @@ pub fn serve(
             on_shutdown,
             Some(
                 helpers
-                    .getattr("merge_lifespan_context")?
+                    .getattr(pyo3::intern!(py, "merge_lifespan_context"))?
                     .call1((original, nested))?
                     .unbind(),
             ),
         ),
         (None, Some(nested)) => {
             let handlers = helpers
-                .getattr("handlers_lifespan")?
+                .getattr(pyo3::intern!(py, "handlers_lifespan"))?
                 .call1((on_startup, on_shutdown))?;
             (
                 None,
                 None,
                 Some(
                     helpers
-                        .getattr("merge_lifespan_context")?
+                        .getattr(pyo3::intern!(py, "merge_lifespan_context"))?
                         .call1((handlers, nested))?
                         .unbind(),
                 ),

@@ -16,8 +16,8 @@ use fastrapi_routing::analysis::{
     parse_websocket_signature,
 };
 use fastrapi_routing::dependencies::{
-    DependencyNode, OverrideCache, collect_dependency_callables, parse_dependencies, parse_external_dependencies,
-    shift_dependency_indices,
+    DependencyNode, OverrideCache, collect_dependency_callables, parse_dependencies,
+    parse_external_dependencies, shift_dependency_indices,
 };
 use fastrapi_routing::route::{
     ExecutionMode, ExecutionPlan, PayloadSpec, RouteEntry, RouteHandler, ValidationRules,

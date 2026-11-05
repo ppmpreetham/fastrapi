@@ -170,29 +170,34 @@ impl PyServerSentEvent {
     ) -> PyResult<Py<PyDict>> {
         let result = PyDict::new(py);
         let exclude_none = kwargs
-            .and_then(|value| value.get_item("exclude_none").ok().flatten())
+            .and_then(|value| {
+                value
+                    .get_item(pyo3::intern!(py, "exclude_none"))
+                    .ok()
+                    .flatten()
+            })
             .and_then(|value| value.extract::<bool>().ok())
             .unwrap_or(false);
         if !self.data.bind(py).is_none() || !exclude_none {
-            result.set_item("data", self.data.bind(py))?;
+            result.set_item(pyo3::intern!(py, "data"), self.data.bind(py))?;
         }
         if !exclude_none || self.raw_data.is_some() {
-            result.set_item("raw_data", self.raw_data.as_deref())?;
+            result.set_item(pyo3::intern!(py, "raw_data"), self.raw_data.as_deref())?;
         }
         if !exclude_none || self.event.is_some() {
-            result.set_item("event", self.event.as_deref())?;
+            result.set_item(pyo3::intern!(py, "event"), self.event.as_deref())?;
         }
         if !exclude_none || self.id.is_some() {
-            result.set_item("id", self.id.as_deref())?;
+            result.set_item(pyo3::intern!(py, "id"), self.id.as_deref())?;
         }
         if !exclude_none || self.retry.is_some() {
-            result.set_item("retry", self.retry)?;
+            result.set_item(pyo3::intern!(py, "retry"), self.retry)?;
         }
         if !exclude_none || self.comment.is_some() {
-            result.set_item("comment", self.comment.as_deref())?;
+            result.set_item(pyo3::intern!(py, "comment"), self.comment.as_deref())?;
         }
         if let Some(kwargs) = kwargs {
-            if let Some(include) = kwargs.get_item("include")?
+            if let Some(include) = kwargs.get_item(pyo3::intern!(py, "include"))?
                 && let Ok(include) = include.extract::<Vec<String>>()
             {
                 for key in ["data", "raw_data", "event", "id", "retry", "comment"] {
@@ -201,7 +206,7 @@ impl PyServerSentEvent {
                     }
                 }
             }
-            if let Some(exclude) = kwargs.get_item("exclude")?
+            if let Some(exclude) = kwargs.get_item(pyo3::intern!(py, "exclude"))?
                 && let Ok(exclude) = exclude.extract::<Vec<String>>()
             {
                 for key in exclude {
@@ -221,7 +226,7 @@ impl PyServerSentEvent {
     ) -> PyResult<String> {
         let dumped = self.model_dump(py, args, kwargs)?;
         py.import("json")?
-            .getattr("dumps")?
+            .getattr(pyo3::intern!(py, "dumps"))?
             .call1((dumped.bind(py),))?
             .extract()
     }
@@ -264,12 +269,12 @@ impl PyServerSentEvent {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         let deep = kwargs
-            .and_then(|value| value.get_item("deep").ok().flatten())
+            .and_then(|value| value.get_item(pyo3::intern!(py, "deep")).ok().flatten())
             .and_then(|value| value.extract::<bool>().ok())
             .unwrap_or(false);
         let data = self.model_dump(py, args, None)?;
         if let Some(kwargs) = kwargs
-            && let Some(update) = kwargs.get_item("update")?
+            && let Some(update) = kwargs.get_item(pyo3::intern!(py, "update"))?
             && !update.is_none()
         {
             data.bind(py).update(update.cast()?)?;
@@ -277,7 +282,7 @@ impl PyServerSentEvent {
         if deep {
             let copied = py
                 .import("copy")?
-                .call_method1("deepcopy", (data.bind(py),))?;
+                .call_method1(pyo3::intern!(py, "deepcopy"), (data.bind(py),))?;
             return py
                 .get_type::<Self>()
                 .call((), Some(copied.cast::<PyDict>()?))
@@ -442,12 +447,12 @@ pub fn register_sse_api(module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[must_use]
 pub fn sse_options(result: &Bound<'_, PyAny>) -> (Option<f64>, String) {
     let ping = result
-        .getattr("ping")
+        .getattr(pyo3::intern!(result.py(), "ping"))
         .ok()
         .and_then(|value| value.extract::<Option<f64>>().ok())
         .flatten();
     let sep = result
-        .getattr("sep")
+        .getattr(pyo3::intern!(result.py(), "sep"))
         .ok()
         .and_then(|value| value.extract::<String>().ok())
         .unwrap_or_else(|| "\r\n".to_owned());
@@ -466,29 +471,32 @@ pub fn sse_dict_fields<'py>(
     Option<String>,
 )> {
     let item = value.cast::<PyDict>().ok()?;
-    let data = item.get_item("data").ok().flatten();
+    let data = item
+        .get_item(pyo3::intern!(item.py(), "data"))
+        .ok()
+        .flatten();
     let raw_data = item
-        .get_item("raw_data")
+        .get_item(pyo3::intern!(item.py(), "raw_data"))
         .ok()
         .flatten()
         .and_then(|value| value.extract().ok());
     let event = item
-        .get_item("event")
+        .get_item(pyo3::intern!(item.py(), "event"))
         .ok()
         .flatten()
         .and_then(|value| value.extract().ok());
     let id = item
-        .get_item("id")
+        .get_item(pyo3::intern!(item.py(), "id"))
         .ok()
         .flatten()
         .and_then(|value| value.extract().ok());
     let retry = item
-        .get_item("retry")
+        .get_item(pyo3::intern!(item.py(), "retry"))
         .ok()
         .flatten()
         .and_then(|value| value.extract().ok());
     let comment = item
-        .get_item("comment")
+        .get_item(pyo3::intern!(item.py(), "comment"))
         .ok()
         .flatten()
         .and_then(|value| value.extract().ok());

@@ -23,8 +23,41 @@ use std::io::{self, Write};
 use std::str::from_utf8;
 use std::sync::LazyLock;
 
+const KEY_CACHE_SLOTS: usize = 512;
+const KEY_CACHE_MAX_LEN: usize = 64;
+
+type KeySlot = Option<(Box<str>, Py<PyString>)>;
+
 thread_local! {
     static RESPONSE_BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(1024));
+    static KEY_CACHE: RefCell<Box<[KeySlot]>> =
+        RefCell::new((0..KEY_CACHE_SLOTS).map(|_| None).collect());
+}
+
+fn key_slot(key: &str) -> usize {
+    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    (hash % KEY_CACHE_SLOTS as u64) as usize
+}
+
+#[must_use]
+pub fn cached_key<'py>(py: Python<'py>, key: &str) -> Bound<'py, PyString> {
+    if key.len() > KEY_CACHE_MAX_LEN {
+        return PyString::new(py, key);
+    }
+    KEY_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let slot = &mut cache[key_slot(key)];
+        if let Some((cached, value)) = slot.as_ref()
+            && **cached == *key
+        {
+            return value.bind(py).clone();
+        }
+        let value = PyString::new(py, key);
+        *slot = Some((key.into(), value.clone().unbind()));
+        value
+    })
 }
 
 crate::cached_py_import!(ENUM_TYPE, "enum", "Enum");
@@ -478,6 +511,98 @@ pub fn classify_py_value<'a, 'py>(
     }
 }
 
+const PLAIN_JSON_MAX_DEPTH: usize = 128;
+
+fn write_plain_json<W: Write>(
+    value: &Bound<'_, PyAny>,
+    writer: &mut W,
+    depth: usize,
+) -> PyResult<bool> {
+    if depth > PLAIN_JSON_MAX_DEPTH {
+        return Ok(false);
+    }
+    if value.is_none() {
+        writer.write_all(b"null").map_err(json_io_error)?;
+    } else if let Ok(text) = value.cast_exact::<PyString>() {
+        let Ok(text) = text.to_str() else {
+            return Ok(false);
+        };
+        write_json_string(writer, text)?;
+    } else if let Ok(flag) = value.cast_exact::<PyBool>() {
+        let literal: &[u8] = if flag.is_true() { b"true" } else { b"false" };
+        writer.write_all(literal).map_err(json_io_error)?;
+    } else if let Ok(number) = value.cast_exact::<PyInt>() {
+        match number.extract::<i64>() {
+            Ok(number) => writer
+                .write_all(itoa::Buffer::new().format(number).as_bytes())
+                .map_err(json_io_error)?,
+            Err(_) => writer
+                .write_all(number.str()?.to_str()?.as_bytes())
+                .map_err(json_io_error)?,
+        }
+    } else if let Ok(number) = value.cast_exact::<PyFloat>() {
+        if !number.value().is_finite() {
+            return Ok(false);
+        }
+        writer
+            .write_all(number.repr()?.to_str()?.as_bytes())
+            .map_err(json_io_error)?;
+    } else if let Ok(dict) = value.cast_exact::<PyDict>() {
+        writer.write_all(b"{").map_err(json_io_error)?;
+        for (index, (key, item)) in dict.iter().enumerate() {
+            let Ok(key) = key.cast_exact::<PyString>() else {
+                return Ok(false);
+            };
+            let Ok(key) = key.to_str() else {
+                return Ok(false);
+            };
+            if index > 0 {
+                writer.write_all(b",").map_err(json_io_error)?;
+            }
+            write_json_string(writer, key)?;
+            writer.write_all(b":").map_err(json_io_error)?;
+            if !write_plain_json(&item, writer, depth + 1)? {
+                return Ok(false);
+            }
+        }
+        writer.write_all(b"}").map_err(json_io_error)?;
+    } else if let Ok(list) = value.cast_exact::<PyList>() {
+        return write_plain_array(list.iter(), writer, depth);
+    } else if let Ok(tuple) = value.cast_exact::<PyTuple>() {
+        return write_plain_array(tuple.iter(), writer, depth);
+    } else {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn write_plain_array<'py, W: Write>(
+    items: impl Iterator<Item = Bound<'py, PyAny>>,
+    writer: &mut W,
+    depth: usize,
+) -> PyResult<bool> {
+    writer.write_all(b"[").map_err(json_io_error)?;
+    for (index, item) in items.enumerate() {
+        if index > 0 {
+            writer.write_all(b",").map_err(json_io_error)?;
+        }
+        if !write_plain_json(&item, writer, depth + 1)? {
+            return Ok(false);
+        }
+    }
+    writer.write_all(b"]").map_err(json_io_error)?;
+    Ok(true)
+}
+
+pub fn plain_json_bytes<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyBytes>>> {
+    let mut supported = false;
+    let rendered = PyBytes::new_with_writer(value.py(), 64, |mut writer| {
+        supported = write_plain_json(value, &mut writer, 0)?;
+        Ok(())
+    })?;
+    Ok(supported.then_some(rendered))
+}
+
 #[inline]
 pub fn write_py_json<W: Write>(
     py: Python<'_>,
@@ -759,7 +884,7 @@ pub fn json_value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'
         Value::Object(entries) => {
             let dict = PyDict::new(py);
             for (key, item) in entries.iter() {
-                dict.set_item(PyString::new(py, key), json_value_to_py(py, item)?)?;
+                dict.set_item(cached_key(py, key), json_value_to_py(py, item)?)?;
             }
             dict.into_any()
         }

@@ -19,6 +19,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use bytes::Bytes;
+use fastrapi_pyutil::body::{bytes_body, str_body};
 use fastrapi_pyutil::json::{
     py_json_response_with_dump_options, py_json_response_with_status, py_to_response,
 };
@@ -122,7 +123,9 @@ fn rendered_response(result: &Bound<'_, PyAny>) -> Option<Response> {
         .ok()
         .flatten()
         .filter(|body| !body.is_none())?;
-    let body = if let Ok(bytes) = body.extract::<&[u8]>() {
+    let body = if let Ok(bytes) = body.cast::<PyBytes>() {
+        bytes_body(bytes)
+    } else if let Ok(bytes) = body.extract::<&[u8]>() {
         Bytes::copy_from_slice(bytes)
     } else {
         let bytes = body.call_method0(intern!(py, "tobytes")).ok()?;
@@ -173,7 +176,9 @@ fn response_helper<'py>(
     cell: &'static pyo3::sync::PyOnceLock<Py<PyAny>>,
     name: &Bound<'py, PyString>,
 ) -> PyResult<&'static Py<PyAny>> {
-    cell.get_or_try_init(py, || response_helpers(py)?.getattr(name).map(Bound::unbind))
+    cell.get_or_try_init(py, || {
+        response_helpers(py)?.getattr(name).map(Bound::unbind)
+    })
 }
 
 fn response_adapter<'a>(
@@ -223,9 +228,7 @@ fn serialize_response_model(
         model,
         content,
     )?;
-    Ok(Bytes::copy_from_slice(
-        json.cast::<pyo3::types::PyBytes>()?.as_bytes(),
-    ))
+    Ok(bytes_body(json.cast::<PyBytes>()?))
 }
 
 const fn body_allowed(status: StatusCode) -> bool {
@@ -241,7 +244,8 @@ fn null_json_response(status: StatusCode) -> Response {
         .into_response()
 }
 
-fn is_plain_value(value: &Bound<'_, PyAny>) -> bool {
+#[must_use]
+pub fn is_plain_value(value: &Bound<'_, PyAny>) -> bool {
     value.is_exact_instance_of::<PyDict>()
         || value.is_exact_instance_of::<PyList>()
         || value.is_exact_instance_of::<PyString>()
@@ -368,14 +372,10 @@ fn convert_response_value(
     let response = match formatter.response_type {
         ResponseType::PlainText => {
             let body_bytes = final_result
-                .extract::<&str>()
-                .map(|s| Bytes::copy_from_slice(s.as_bytes()))
-                .or_else(|_| {
-                    final_result.str().and_then(|py_str| {
-                        let s: &str = py_str.to_str()?;
-                        Ok(Bytes::copy_from_slice(s.as_bytes()))
-                    })
-                })
+                .cast::<PyString>()
+                .map_err(PyErr::from)
+                .and_then(str_body)
+                .or_else(|_| final_result.str().and_then(|py_str| str_body(&py_str)))
                 .unwrap_or_else(|_| Bytes::new());
 
             (
@@ -397,9 +397,11 @@ fn convert_response_value(
             formatter.dump_options.as_ref().map(|d| d.bind(py)),
         )?,
 
-        ResponseType::Html if final_result.is_instance_of::<PyString>() => {
-            (default_status, Html(final_result.extract::<String>()?)).into_response()
-        }
+        ResponseType::Html if final_result.is_instance_of::<PyString>() => (
+            default_status,
+            Html(str_body(final_result.cast::<PyString>()?)?),
+        )
+            .into_response(),
 
         ResponseType::Html => convert_html_response(py, final_result),
 
@@ -653,16 +655,17 @@ fn stream_chunk(py: Python<'_>, value: &Bound<'_, PyAny>, sse: bool, sep: &str) 
         return Ok(sse_chunk(py, value, sep));
     }
     if let Ok(bytes) = value.cast::<PyBytes>() {
-        return Ok(Bytes::copy_from_slice(bytes.as_bytes()));
+        return Ok(bytes_body(bytes));
     }
     if value.is_instance_of::<PyByteArray>() || value.is_instance_of::<PyMemoryView>() {
         let bytes = py.get_type::<PyBytes>().call1((value,))?;
-        return Ok(Bytes::copy_from_slice(bytes.cast::<PyBytes>()?.as_bytes()));
+        return Ok(bytes_body(bytes.cast::<PyBytes>()?));
+    }
+    if let Ok(text) = value.cast::<PyString>() {
+        return str_body(text);
     }
     let encoded = value.call_method1(intern!(py, "encode"), ("utf-8",))?;
-    Ok(Bytes::copy_from_slice(
-        encoded.cast::<PyBytes>()?.as_bytes(),
-    ))
+    Ok(bytes_body(encoded.cast::<PyBytes>()?))
 }
 
 pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response {

@@ -314,9 +314,13 @@ fn websocket_exception_close(py: Python<'_>, value: &Bound<'_, PyAny>) -> Option
     if !is_websocket_exception {
         return None;
     }
-    let code = value.getattr("code").ok()?.extract::<u16>().ok()?;
+    let code = value
+        .getattr(pyo3::intern!(py, "code"))
+        .ok()?
+        .extract::<u16>()
+        .ok()?;
     let reason = value
-        .getattr("reason")
+        .getattr(pyo3::intern!(py, "reason"))
         .ok()
         .and_then(|reason| reason.extract::<Option<String>>().ok())
         .flatten()
@@ -345,7 +349,7 @@ async fn handle_error(
             }
             if value.is_instance_of::<PyWebSocketRequestValidationError>() {
                 let reason = value
-                    .call_method0("errors")
+                    .call_method0(pyo3::intern!(py, "errors"))
                     .ok()
                     .and_then(|errors| simd_json::to_string(&py_any_to_json(py, &errors)).ok())
                     .unwrap_or_default();
@@ -355,7 +359,11 @@ async fn handle_error(
             return Err(HandlerOutcome::Unhandled);
         };
         match handler.call1((websocket.clone_ref(py), value)) {
-            Ok(result) if result.hasattr("__await__").unwrap_or(false) => {
+            Ok(result)
+                if result
+                    .hasattr(pyo3::intern!(py, "__await__"))
+                    .unwrap_or(false) =>
+            {
                 schedule_python_coroutine(py, route.event_loop, result).map_err(|error| {
                     error.print(py);
                     HandlerOutcome::Unhandled
@@ -488,11 +496,7 @@ fn match_path_params(
     let mut ranges = SmallVec::new();
     let mut params = route.param_segments.iter().peekable();
 
-    for (index, segment) in actual_path
-        .split('/')
-        .enumerate()
-        .take(route.segment_count)
-    {
+    for (index, segment) in actual_path.split('/').enumerate().take(route.segment_count) {
         if params.next_if_eq(&&index).is_some() {
             let start = segment.as_ptr() as usize - actual_path.as_ptr() as usize;
             ranges.push(PathParamRange {

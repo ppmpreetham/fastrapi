@@ -23,7 +23,7 @@ use pyo3::types::PyList;
 use smallvec::SmallVec;
 
 use fastrapi_http::background::PyBackgroundTasks;
-use fastrapi_http::response_convert::convert_response_by_type;
+use fastrapi_http::response_convert::{convert_response_by_type, is_plain_value};
 use fastrapi_http::responses::PyResponse;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 
@@ -138,7 +138,9 @@ pub(crate) async fn run_managed_handler(
     let converted = Python::attach(|py| {
         let converted = outcome.and_then(|value| {
             let value = value.bind(py);
-            let explicit = value.hasattr(intern!(py, "status_code"))?
+            let explicit = !value.is_none()
+                && !is_plain_value(value)
+                && value.hasattr(intern!(py, "status_code"))?
                 && value.hasattr(intern!(py, "raw_headers"))?;
             let response =
                 convert_response_by_type(py, value, &handler.response, Some(input.headers))?;

@@ -213,12 +213,12 @@ pub fn create_status_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
 
     parent.add_submodule(&status_module)?;
 
-    let parent_name: String = parent.getattr("__name__")?.extract()?;
+    let parent_name: String = parent.getattr(pyo3::intern!(py, "__name__"))?.extract()?;
     let base_name = parent_name
         .strip_suffix(".fastrapi")
         .unwrap_or(&parent_name);
     let full_name = format!("{base_name}.status");
-    status_module.setattr("__name__", &full_name)?;
+    status_module.setattr(pyo3::intern!(py, "__name__"), &full_name)?;
     fastrapi_pyutil::imports::register_module(py, &full_name, &status_module)?;
 
     Ok(())

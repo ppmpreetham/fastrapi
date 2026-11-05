@@ -48,11 +48,7 @@ impl LazyPyAttr {
 
     #[inline]
     pub fn get<'a, 'py>(&'a self, py: Python<'py>) -> PyResult<&'a Bound<'py, PyAny>> {
-        let attr_ref = self.cell.get_or_try_init(py, || {
-            let module = py.import(self.module_name)?;
-            module.getattr(self.attr_name).map(Bound::unbind)
-        })?;
-        Ok(attr_ref.bind(py))
+        self.cell.import(py, self.module_name, self.attr_name)
     }
 
     #[inline]

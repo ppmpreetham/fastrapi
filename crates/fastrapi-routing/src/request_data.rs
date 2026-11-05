@@ -4,7 +4,8 @@
 
 use super::annotations::{ScalarCoercion, ScalarKind};
 use super::pydantic::{
-    pydantic_error_to_response, validate_json_with_pydantic, validate_python_with_pydantic,
+    parse_json_body, pydantic_error_to_response, validate_json_with_pydantic,
+    validate_python_with_pydantic,
 };
 use crate::route::{ParsedParameter, RouteHandler};
 use axum::Json;
@@ -630,7 +631,7 @@ pub fn resolve_parameter_value(
             .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
         let result = model
             .bind(py)
-            .call_method1("model_validate", (&values,))
+            .call_method1(pyo3::intern!(py, "model_validate"), (&values,))
             .or_else(|_| model.bind(py).call1((&values,)))
             .map_err(|err| pydantic_error_to_response(py, &err))?;
         return Ok(Some(result.unbind()));
@@ -745,10 +746,7 @@ fn apply_body_and_validation(
             let validator = &handler.validation.param_validators[idx];
 
             if param.embed {
-                let mut json_buf = raw.to_vec();
-                let value: Value = simd_json::to_owned_value(&mut json_buf).map_err(|_| {
-                    (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response()
-                })?;
+                let value: Value = parse_json_body(py, raw)?;
                 let inner = value
                     .as_object()
                     .and_then(|obj| {
@@ -781,10 +779,7 @@ fn apply_body_and_validation(
             if let Some(payload) = value {
                 payload
             } else {
-                let mut json_buf = raw.to_vec();
-                parsed_storage = simd_json::to_owned_value(&mut json_buf).map_err(|_| {
-                    (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response()
-                })?;
+                parsed_storage = parse_json_body(py, raw)?;
                 &parsed_storage
             }
         }
@@ -942,11 +937,8 @@ pub fn apply_request_data(
 
     let mut bg_tasks_instance: Option<Py<PyBackgroundTasks>> = None;
 
-    handler
-        .payload
-        .request_param_indices
-        .iter()
-        .try_for_each(|&index| -> Result<(), Response> {
+    handler.payload.request_param_indices.iter().try_for_each(
+        |&index| -> Result<(), Response> {
             let param = &handler.payload.parsed_params[index];
             if matches!(param.source, ParameterSource::BackgroundTasks) {
                 let instance = if let Some(bg) = &bg_tasks_instance {
@@ -971,7 +963,8 @@ pub fn apply_request_data(
             }
 
             Ok(())
-        })?;
+        },
+    )?;
 
     apply_body_and_validation(py, handler, payload, kwargs)?;
     Ok(bg_tasks_instance)

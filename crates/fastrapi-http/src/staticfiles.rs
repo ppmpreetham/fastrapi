@@ -49,12 +49,14 @@ impl PyStaticFiles {
     }
 
     fn delegate<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let cls = py.import("starlette.staticfiles")?.getattr("StaticFiles")?;
+        let cls = py
+            .import("starlette.staticfiles")?
+            .getattr(pyo3::intern!(py, "StaticFiles"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("directory", &self.directory)?;
-        kwargs.set_item("html", self.html)?;
-        kwargs.set_item("check_dir", self.check_dir)?;
-        kwargs.set_item("follow_symlink", self.follow_symlink)?;
+        kwargs.set_item(pyo3::intern!(py, "directory"), &self.directory)?;
+        kwargs.set_item(pyo3::intern!(py, "html"), self.html)?;
+        kwargs.set_item(pyo3::intern!(py, "check_dir"), self.check_dir)?;
+        kwargs.set_item(pyo3::intern!(py, "follow_symlink"), self.follow_symlink)?;
         cls.call((), Some(&kwargs))
     }
 
@@ -74,14 +76,14 @@ impl PyStaticFiles {
     fn get_path(&self, py: Python<'_>, scope: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(self
             .delegate(py)?
-            .call_method1("get_path", (scope,))?
+            .call_method1(pyo3::intern!(py, "get_path"), (scope,))?
             .unbind())
     }
 
     fn lookup_path(&self, py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
         Ok(self
             .delegate(py)?
-            .call_method1("lookup_path", (path,))?
+            .call_method1(pyo3::intern!(py, "lookup_path"), (path,))?
             .unbind())
     }
 
@@ -93,7 +95,7 @@ impl PyStaticFiles {
         scope: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         self.delegate(py)?
-            .call_method1("get_response", (path, scope))
+            .call_method1(pyo3::intern!(py, "get_response"), (path, scope))
     }
 
     fn file_response<'py>(
@@ -106,10 +108,14 @@ impl PyStaticFiles {
     ) -> PyResult<Bound<'py, PyAny>> {
         let delegate = self.delegate(py)?;
         match status_code {
-            Some(code) => {
-                delegate.call_method1("file_response", (full_path, stat_result, scope, code))
-            }
-            None => delegate.call_method1("file_response", (full_path, stat_result, scope)),
+            Some(code) => delegate.call_method1(
+                pyo3::intern!(py, "file_response"),
+                (full_path, stat_result, scope, code),
+            ),
+            None => delegate.call_method1(
+                pyo3::intern!(py, "file_response"),
+                (full_path, stat_result, scope),
+            ),
         }
     }
 
@@ -117,7 +123,8 @@ impl PyStaticFiles {
     /// pointed at a directory, so that we can raise loud errors rather than
     /// just returning 404 responses.
     fn check_config<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.delegate(py)?.call_method0("check_config")
+        self.delegate(py)?
+            .call_method0(pyo3::intern!(py, "check_config"))
     }
 
     /// Given the request and response headers, return `True` if an HTTP
@@ -129,7 +136,10 @@ impl PyStaticFiles {
         request_headers: &Bound<'py, PyAny>,
     ) -> PyResult<bool> {
         self.delegate(py)?
-            .call_method1("is_not_modified", (response_headers, request_headers))?
+            .call_method1(
+                pyo3::intern!(py, "is_not_modified"),
+                (response_headers, request_headers),
+            )?
             .extract()
     }
 }
@@ -156,8 +166,8 @@ fn resolve_directories(
             };
             let spec = py
                 .import("importlib.util")?
-                .call_method1("find_spec", (&package,))?;
-            let locations = spec.getattr("submodule_search_locations")?;
+                .call_method1(pyo3::intern!(py, "find_spec"), (&package,))?;
+            let locations = spec.getattr(pyo3::intern!(py, "submodule_search_locations"))?;
             if locations.is_none() {
                 return Err(PyRuntimeError::new_err(format!(
                     "Package '{package}' has no filesystem location"

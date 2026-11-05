@@ -107,9 +107,7 @@ pub fn validate_json_with_pydantic(
         };
     }
 
-    let mut json_buf = raw_payload.to_vec();
-    let payload: Value = simd_json::to_owned_value(&mut json_buf)
-        .map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response())?;
+    let payload = parse_json_body(py, raw_payload)?;
     validate_python_with_pydantic(py, validator.validate_python.bind(py), &payload)
 }
 
@@ -176,4 +174,19 @@ pub fn call_with_pydantic_validation<'py>(
         },
         Err(validation_error) => validation_error,
     }
+}
+
+const DETACHED_PARSE_MIN: usize = 64 * 1024;
+
+pub(crate) fn parse_json_body(py: Python<'_>, raw: &[u8]) -> Result<Value, Response> {
+    let parse = || {
+        let mut json_buf = raw.to_vec();
+        simd_json::to_owned_value(&mut json_buf)
+    };
+    let parsed = if raw.len() >= DETACHED_PARSE_MIN {
+        py.detach(parse)
+    } else {
+        parse()
+    };
+    parsed.map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON body").into_response())
 }

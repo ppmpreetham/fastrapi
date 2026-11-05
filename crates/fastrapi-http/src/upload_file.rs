@@ -181,7 +181,7 @@ impl PyUploadFile {
                 })
                 .collect();
             let kwargs = PyDict::new(py);
-            kwargs.set_item("raw", raw)?;
+            kwargs.set_item(pyo3::intern!(py, "raw"), raw)?;
             headers_class.call((), Some(&kwargs))?
         }
         .unbind();

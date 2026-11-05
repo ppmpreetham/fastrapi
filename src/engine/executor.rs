@@ -40,7 +40,17 @@ fn specialized_response_conversion(
     match handler.response.response_type {
         ResponseType::PlainText => {
             if let Ok(s) = result.cast::<PyString>() {
-                return s.to_string_lossy().into_owned().into_response();
+                return match fastrapi_pyutil::body::str_body(s) {
+                    Ok(body) => (
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+                        )],
+                        body,
+                    )
+                        .into_response(),
+                    Err(_) => s.to_string_lossy().into_owned().into_response(),
+                };
             }
 
             match convert_response_by_type(py, result, &handler.response, request_headers) {

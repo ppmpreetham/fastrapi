@@ -168,14 +168,14 @@ fn parse_request_message(py: Python<'_>, msg: &Bound<'_, PyAny>) -> (Option<byte
 
 fn python_bytes(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<bytes::Bytes> {
     if let Ok(bytes) = obj.cast::<PyBytes>() {
-        return Some(Bytes::copy_from_slice(bytes.as_bytes()));
+        return Some(fastrapi_pyutil::body::bytes_body(bytes));
     }
     if let Ok(bytearray) = obj.cast::<PyByteArray>() {
         return Some(Bytes::from(bytearray.to_vec()));
     }
     let as_bytes = obj.call_method0(intern!(py, "__bytes__")).ok()?;
     let bytes = as_bytes.cast::<PyBytes>().ok()?;
-    Some(Bytes::copy_from_slice(bytes.as_bytes()))
+    Some(fastrapi_pyutil::body::bytes_body(bytes))
 }
 
 /// Sends `http.response.start` and `http.response.body` through the `send` callable of the middleware.

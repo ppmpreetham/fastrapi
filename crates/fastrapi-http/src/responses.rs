@@ -274,7 +274,7 @@ impl PyFileResponse {
     ) -> PyResult<PyClassInitializer<Self>> {
         let path = py
             .import("os")?
-            .getattr("fspath")?
+            .getattr(pyo3::intern!(py, "fspath"))?
             .call1((path,))?
             .extract::<String>()?;
         let media_type = Some(
@@ -292,7 +292,7 @@ impl PyFileResponse {
         if let Some(filename) = &filename {
             let encoded = py
                 .import("urllib.parse")?
-                .getattr("quote")?
+                .getattr(pyo3::intern!(py, "quote"))?
                 .call1((filename,))?
                 .extract::<String>()?;
             let disposition = if encoded == *filename {
@@ -349,9 +349,10 @@ impl PyRedirectResponse {
         )?;
         let location = py
             .import("urllib.parse")?
-            .getattr("quote")?
+            .getattr(pyo3::intern!(py, "quote"))?
             .call1((&url, ":/%#?=@[]!$&'()*+,;"))?;
-        crate::response_api::headers(py, &raw_headers)?.set_item("location", location)?;
+        crate::response_api::headers(py, &raw_headers)?
+            .set_item(pyo3::intern!(py, "location"), location)?;
         Ok(
             PyClassInitializer::from(PyResponse::empty(py)?).add_subclass(Self {
                 url,

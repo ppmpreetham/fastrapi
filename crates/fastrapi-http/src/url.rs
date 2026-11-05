@@ -100,7 +100,7 @@ fn split_cached(url: &str) -> PyResult<SplitUrl> {
     Python::attach(|py| {
         let parts = py
             .import("urllib.parse")?
-            .getattr("urlsplit")?
+            .getattr(pyo3::intern!(py, "urlsplit"))?
             .call1((url,))?;
         let get = |name: &str| -> PyResult<Option<String>> {
             let text: String = parts.getattr(name)?.extract()?;
@@ -108,7 +108,7 @@ fn split_cached(url: &str) -> PyResult<SplitUrl> {
         };
         let scheme = get("scheme")?;
         let netloc = get("netloc")?;
-        let path: String = parts.getattr("path")?.extract()?;
+        let path: String = parts.getattr(pyo3::intern!(py, "path"))?.extract()?;
         let query = get("query")?;
         let fragment = get("fragment")?;
         Ok(SplitUrl::from_netloc((
@@ -238,7 +238,7 @@ fn url_from_scope(scope: &Bound<'_, PyAny>) -> PyResult<String> {
         .unwrap_or_default();
 
     let mut host_header: Option<String> = None;
-    if let Ok(headers) = scope.get_item("headers")
+    if let Ok(headers) = scope.get_item(pyo3::intern!(scope.py(), "headers"))
         && let Ok(headers) = headers.cast::<PyDict>()
     {
         host_header = headers
@@ -246,7 +246,7 @@ fn url_from_scope(scope: &Bound<'_, PyAny>) -> PyResult<String> {
             .map(|value| value.extract::<Vec<u8>>())
             .transpose()?
             .map(|value| String::from_utf8_lossy(&value).into_owned());
-    } else if let Ok(headers) = scope.get_item("headers") {
+    } else if let Ok(headers) = scope.get_item(pyo3::intern!(scope.py(), "headers")) {
         for pair in headers.try_iter()? {
             let pair = pair?;
             let key: Vec<u8> = pair.get_item(0)?.extract()?;
@@ -352,7 +352,7 @@ impl PyURL {
         let Some(components) = components else {
             return Ok(Self::from_string(url.to_string()));
         };
-        if let Some(scope) = components.get_item("scope")? {
+        if let Some(scope) = components.get_item(pyo3::intern!(components.py(), "scope"))? {
             if !url.is_empty() {
                 return Err(PyAssertionError::new_err(
                     "Cannot set both \"url\" and \"scope\".",
@@ -381,10 +381,13 @@ impl PyURL {
     fn py_components(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let parts = slf.borrow().components()?;
-        let namedtuple = py.import("collections")?.getattr("namedtuple")?.call1((
-            "Components",
-            "scheme netloc path query fragment hostname port username password",
-        ))?;
+        let namedtuple = py
+            .import("collections")?
+            .getattr(pyo3::intern!(py, "namedtuple"))?
+            .call1((
+                "Components",
+                "scheme netloc path query fragment hostname port username password",
+            ))?;
         Ok(namedtuple
             .call1((
                 parts.scheme.unwrap_or_default(),
@@ -504,10 +507,16 @@ impl PyURL {
         let mut kwargs = kwargs;
         let netloc_dict: Option<Bound<'a, PyDict>>;
         if let Some(dict) = kwargs
-            && (dict.get_item("username")?.is_some()
-                || dict.get_item("password")?.is_some()
-                || dict.get_item("hostname")?.is_some()
-                || dict.get_item("port")?.is_some())
+            && (dict
+                .get_item(pyo3::intern!(slf.py(), "username"))?
+                .is_some()
+                || dict
+                    .get_item(pyo3::intern!(slf.py(), "password"))?
+                    .is_some()
+                || dict
+                    .get_item(pyo3::intern!(slf.py(), "hostname"))?
+                    .is_some()
+                || dict.get_item(pyo3::intern!(slf.py(), "port"))?.is_some())
         {
             let get = |name: &str| -> PyResult<Option<String>> {
                 match dict.get_item(name)? {
@@ -517,7 +526,7 @@ impl PyURL {
             };
             let hostname = get("hostname")?;
             let port = dict
-                .get_item("port")?
+                .get_item(pyo3::intern!(slf.py(), "port"))?
                 .filter(|v| !v.is_none())
                 .map(|v| v.extract::<u16>())
                 .transpose()?
@@ -569,7 +578,7 @@ impl PyURL {
                 }
                 merged.set_item(key, value)?;
             }
-            merged.set_item("netloc", netloc)?;
+            merged.set_item(pyo3::intern!(merged.py(), "netloc"), netloc)?;
             netloc_dict = Some(merged);
             kwargs = netloc_dict.as_ref();
         }
@@ -688,6 +697,6 @@ fn urlencode_pairs(kwargs: &Bound<'_, PyDict>) -> PyResult<Vec<(String, String)>
 
 fn replace_kwargs<'py>(py: Python<'py>, query: &str) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
-    dict.set_item("query", query)?;
+    dict.set_item(pyo3::intern!(py, "query"), query)?;
     Ok(dict)
 }

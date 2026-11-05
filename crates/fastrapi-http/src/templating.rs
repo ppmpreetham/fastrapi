@@ -38,10 +38,10 @@ impl PyJinja2Templates {
         let cls = module.getattr("Jinja2Templates")?;
         let kwargs_out = kwargs.cloned().unwrap_or_else(|| PyDict::new(py));
         if let Some(value) = context_processors {
-            kwargs_out.set_item("context_processors", value)?;
+            kwargs_out.set_item(pyo3::intern!(py, "context_processors"), value)?;
         }
         if let Some(value) = env {
-            kwargs_out.set_item("env", value)?;
+            kwargs_out.set_item(pyo3::intern!(py, "env"), value)?;
         }
         let inner = match directory {
             Some(value) => cls.call((value,), Some(&kwargs_out))?,
@@ -83,15 +83,15 @@ impl PyJinja2Templates {
         background: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("status_code", status_code)?;
+        kwargs.set_item(pyo3::intern!(py, "status_code"), status_code)?;
         if let Some(value) = headers {
-            kwargs.set_item("headers", value)?;
+            kwargs.set_item(pyo3::intern!(py, "headers"), value)?;
         }
         if let Some(value) = media_type {
-            kwargs.set_item("media_type", value)?;
+            kwargs.set_item(pyo3::intern!(py, "media_type"), value)?;
         }
         if let Some(value) = background {
-            kwargs.set_item("background", value)?;
+            kwargs.set_item(pyo3::intern!(py, "background"), value)?;
         }
         let (name, context) = if let Ok(name) = request_or_name.extract::<&str>() {
             (
@@ -103,14 +103,18 @@ impl PyJinja2Templates {
                 .ok_or_else(|| PyTypeError::new_err("missing template name"))?
                 .extract::<String>()?;
             let context = context.unwrap_or_else(|| PyDict::new(py));
-            context.set_item("request", request_or_name)?;
+            context.set_item(pyo3::intern!(py, "request"), request_or_name)?;
             (name, Some(context))
         };
         let context = context.unwrap_or_else(|| PyDict::new(py));
         Ok(self
             .inner
             .bind(py)
-            .call_method("TemplateResponse", (name, context), Some(&kwargs))?
+            .call_method(
+                pyo3::intern!(py, "TemplateResponse"),
+                (name, context),
+                Some(&kwargs),
+            )?
             .unbind())
     }
 }

@@ -109,20 +109,20 @@ fn asgi_message(py: Python<'_>, message: WSMessage) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     match message {
         WSMessage::Text(bytes) => {
-            dict.set_item("type", "websocket.receive")?;
+            dict.set_item(pyo3::intern!(py, "type"), "websocket.receive")?;
             dict.set_item(
                 "text",
                 from_utf8(&bytes).map_err(|e| PyValueError::new_err(e.to_string()))?,
             )?;
         }
         WSMessage::Binary(data) => {
-            dict.set_item("type", "websocket.receive")?;
-            dict.set_item("bytes", PyBytes::new(py, &data))?;
+            dict.set_item(pyo3::intern!(py, "type"), "websocket.receive")?;
+            dict.set_item(pyo3::intern!(py, "bytes"), PyBytes::new(py, &data))?;
         }
         WSMessage::Close(code, reason) => {
-            dict.set_item("type", "websocket.disconnect")?;
-            dict.set_item("code", code)?;
-            dict.set_item("reason", reason)?;
+            dict.set_item(pyo3::intern!(py, "type"), "websocket.disconnect")?;
+            dict.set_item(pyo3::intern!(py, "code"), code)?;
+            dict.set_item(pyo3::intern!(py, "reason"), reason)?;
         }
     }
     Ok(dict.into_any().unbind())
@@ -253,7 +253,7 @@ impl PyWebSocket {
             if connect {
                 return Python::attach(|py| -> PyResult<Py<PyAny>> {
                     let dict = PyDict::new(py);
-                    dict.set_item("type", "websocket.connect")?;
+                    dict.set_item(pyo3::intern!(py, "type"), "websocket.connect")?;
                     Ok(dict.into_any().unbind())
                 });
             }
@@ -271,7 +271,7 @@ impl PyWebSocket {
         message: &Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let kind: String = message
-            .get_item("type")?
+            .get_item(pyo3::intern!(py, "type"))?
             .ok_or_else(|| PyValueError::new_err("ASGI message has no 'type'"))?
             .extract()?;
         let field = |key: &str| -> PyResult<Option<Bound<'py, PyAny>>> {

@@ -126,7 +126,13 @@ impl CallArgs {
                 })
                 .collect::<Option<SmallVec<[&Py<PyAny>; 8]>>>();
             if let Some(ordered) = ordered {
-                return func.call1(PyTuple::new(py, ordered)?);
+                return match ordered.as_slice() {
+                    [a] => func.call1((*a,)),
+                    [a, b] => func.call1((*a, *b)),
+                    [a, b, c] => func.call1((*a, *b, *c)),
+                    [a, b, c, d] => func.call1((*a, *b, *c, *d)),
+                    _ => func.call1(PyTuple::new(py, ordered)?),
+                };
             }
         }
         func.call((), Some(&self.to_dict(py)?))

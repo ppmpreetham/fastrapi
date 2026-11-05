@@ -76,14 +76,19 @@ pub fn render<'py>(
     charset: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
     if matches!(kind, "JSONResponse" | "ORJSONResponse" | "UJSONResponse") {
+        if charset.eq_ignore_ascii_case("utf-8")
+            && let Some(rendered) = fastrapi_pyutil::json::plain_json_bytes(content)?
+        {
+            return Ok(rendered.into_any());
+        }
         let kwargs = PyDict::new(py);
-        kwargs.set_item("ensure_ascii", false)?;
-        kwargs.set_item("allow_nan", false)?;
-        kwargs.set_item("separators", (",", ":"))?;
+        kwargs.set_item(pyo3::intern!(py, "ensure_ascii"), false)?;
+        kwargs.set_item(pyo3::intern!(py, "allow_nan"), false)?;
+        kwargs.set_item(pyo3::intern!(py, "separators"), (",", ":"))?;
         return JSON_DUMPS
             .get(py)?
             .call((content,), Some(&kwargs))?
-            .call_method1("encode", (charset,));
+            .call_method1(pyo3::intern!(py, "encode"), (charset,));
     }
     if content.is_none() {
         return Ok(PyBytes::new(py, b"").into_any());
@@ -91,12 +96,12 @@ pub fn render<'py>(
     if content.is_instance_of::<PyBytes>() || content.get_type().name()?.to_str()? == "memoryview" {
         return Ok(content.clone());
     }
-    content.call_method1("encode", (charset,))
+    content.call_method1(pyo3::intern!(py, "encode"), (charset,))
 }
 
 pub fn headers<'py>(py: Python<'py>, raw: &Py<PyList>) -> PyResult<Bound<'py, PyAny>> {
     let kwargs = PyDict::new(py);
-    kwargs.set_item("raw", raw.bind(py))?;
+    kwargs.set_item(pyo3::intern!(py, "raw"), raw.bind(py))?;
     MUTABLE_HEADERS.get(py)?.call((), Some(&kwargs))
 }
 
@@ -110,13 +115,18 @@ pub fn init_headers(
 ) -> PyResult<Py<PyList>> {
     let raw = PyList::empty(py);
     if let Some(supplied) = supplied {
-        for item in supplied.call_method0("items")?.try_iter()? {
+        for item in supplied
+            .call_method0(pyo3::intern!(py, "items"))?
+            .try_iter()?
+        {
             let item = item?;
             let name = item
                 .get_item(0)?
-                .call_method0("lower")?
-                .call_method1("encode", ("latin-1",))?;
-            let value = item.get_item(1)?.call_method1("encode", ("latin-1",))?;
+                .call_method0(pyo3::intern!(py, "lower"))?
+                .call_method1(pyo3::intern!(py, "encode"), ("latin-1",))?;
+            let value = item
+                .get_item(1)?
+                .call_method1(pyo3::intern!(py, "encode"), ("latin-1",))?;
             raw.append((name, value))?;
         }
     }
@@ -193,43 +203,46 @@ pub fn set_cookie(
     jar.set_item(cookie.name(), cookie.value())?;
     let morsel = jar.get_item(cookie.name())?;
     if let Some(value) = cookie.path() {
-        morsel.set_item("path", value)?;
+        morsel.set_item(pyo3::intern!(py, "path"), value)?;
     }
     if let Some(value) = cookie.domain() {
-        morsel.set_item("domain", value)?;
+        morsel.set_item(pyo3::intern!(py, "domain"), value)?;
     }
     if let Some(value) = cookie.max_age() {
         morsel.set_item("max-age", value.whole_seconds())?;
     }
     if secure {
-        morsel.set_item("secure", true)?;
+        morsel.set_item(pyo3::intern!(py, "secure"), true)?;
     }
     if httponly {
-        morsel.set_item("httponly", true)?;
+        morsel.set_item(pyo3::intern!(py, "httponly"), true)?;
     }
     if let Some(value) = samesite {
-        morsel.set_item("samesite", value)?;
+        morsel.set_item(pyo3::intern!(py, "samesite"), value)?;
     }
     if partitioned {
-        morsel.set_item("partitioned", true)?;
+        morsel.set_item(pyo3::intern!(py, "partitioned"), true)?;
     }
     if let Some(value) = expires {
-        if value.is_instance(&py.import("datetime")?.getattr("datetime")?)? {
+        if value.is_instance(
+            &py.import("datetime")?
+                .getattr(pyo3::intern!(py, "datetime"))?,
+        )? {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("usegmt", true)?;
+            kwargs.set_item(pyo3::intern!(py, "usegmt"), true)?;
             morsel.set_item(
                 "expires",
                 py.import("email.utils")?
-                    .getattr("format_datetime")?
+                    .getattr(pyo3::intern!(py, "format_datetime"))?
                     .call((value,), Some(&kwargs))?,
             )?;
         } else {
-            morsel.set_item("expires", value)?;
+            morsel.set_item(pyo3::intern!(py, "expires"), value)?;
         }
     }
     let encoded = morsel
-        .call_method0("OutputString")?
-        .call_method1("encode", ("latin-1",))?;
+        .call_method0(pyo3::intern!(py, "OutputString"))?
+        .call_method1(pyo3::intern!(py, "encode"), ("latin-1",))?;
     raw.bind(py)
         .append((PyBytes::new(py, b"set-cookie"), encoded))
 }

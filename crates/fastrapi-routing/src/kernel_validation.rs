@@ -3,6 +3,7 @@
 //! The kernel applies the same validation rules as pydantic.
 //! Thus, the 422 responses are the same as the 422 responses from pydantic.
 
+use fastrapi_pyutil::json::cached_key;
 use std::sync::{Arc, OnceLock};
 
 use ahash::AHashMap;
@@ -209,7 +210,9 @@ fn compile_model<'py>(
     model_class: &Bound<'py, PyAny>,
     name: &str,
 ) -> Option<KernelFastPath> {
-    let core_schema = model_class.getattr("__pydantic_core_schema__").ok()?;
+    let core_schema = model_class
+        .getattr(pyo3::intern!(model_class.py(), "__pydantic_core_schema__"))
+        .ok()?;
     let json_value = py_schema_to_json(&core_schema)?;
     let schema: CoreSchema = serde_json::from_value(json_value).ok()?;
 
@@ -503,7 +506,7 @@ fn construct_model(
         let key: &str = key;
         match fast.field_names.iter().find(|(name, _)| &**name == key) {
             Some((_, name)) => kwargs.set_item(name.bind(py), py_value).ok()?,
-            None => kwargs.set_item(key, py_value).ok()?,
+            None => kwargs.set_item(cached_key(py, key), py_value).ok()?,
         }
     }
     match fast.construct.bind(py).call((), Some(&kwargs)) {
@@ -521,7 +524,7 @@ fn value_to_py(py: Python<'_>, value: &Value) -> Option<Py<PyAny>> {
             Int::Big(big) => py
                 .import("builtins")
                 .ok()?
-                .call_method1("int", (big.to_string(),))
+                .call_method1(pyo3::intern!(py, "int"), (big.to_string(),))
                 .ok()?
                 .unbind(),
         },
@@ -538,7 +541,8 @@ fn value_to_py(py: Python<'_>, value: &Value) -> Option<Py<PyAny>> {
         Value::Object(entries) => {
             let dict = PyDict::new(py);
             for (key, item) in entries {
-                dict.set_item(key, value_to_py(py, item)?).ok()?;
+                dict.set_item(cached_key(py, key), value_to_py(py, item)?)
+                    .ok()?;
             }
             dict.unbind().into_any()
         }
@@ -585,7 +589,7 @@ fn value_to_py(py: Python<'_>, value: &Value) -> Option<Py<PyAny>> {
             };
             py.import("datetime")
                 .ok()?
-                .getattr("timedelta")
+                .getattr(pyo3::intern!(py, "timedelta"))
                 .ok()?
                 .call1((0i64, signed, i64::from(d.microsecond)))
                 .ok()?
@@ -597,15 +601,19 @@ fn value_to_py(py: Python<'_>, value: &Value) -> Option<Py<PyAny>> {
 fn py_tz(py: Python<'_>, offset_seconds: i32) -> Option<Bound<'_, PyTzInfo>> {
     let datetime = py.import("datetime").ok()?;
     let tz = if offset_seconds == 0 {
-        datetime.getattr("timezone").ok()?.getattr("utc").ok()?
+        datetime
+            .getattr(pyo3::intern!(py, "timezone"))
+            .ok()?
+            .getattr(pyo3::intern!(py, "utc"))
+            .ok()?
     } else {
         let timedelta = datetime
-            .getattr("timedelta")
+            .getattr(pyo3::intern!(py, "timedelta"))
             .ok()?
             .call1((offset_seconds,))
             .ok()?;
         datetime
-            .getattr("timezone")
+            .getattr(pyo3::intern!(py, "timezone"))
             .ok()?
             .call1((timedelta,))
             .ok()?
@@ -619,11 +627,13 @@ fn kernel_error_response(py: Python<'_>, err: &ValidationError) -> Response {
     let detail_list = PyList::empty(py);
     for detail in err.errors() {
         let item = PyDict::new(py);
-        if item.set_item("type", detail.r#type.as_str()).is_err()
+        if item
+            .set_item(pyo3::intern!(py, "type"), detail.r#type.as_str())
+            .is_err()
             || item
                 .set_item(
                     "loc",
-                    once(PyString::new(py, "body").unbind().into_any())
+                    once(pyo3::intern!(py, "body").clone().unbind().into_any())
                         .chain(detail.loc.iter().map(|loc_item| match loc_item {
                             LocItem::S(s) => PyString::new(py, s).unbind().into_any(),
                             LocItem::I(i) => PyInt::new(py, *i).unbind().into_any(),
@@ -631,14 +641,16 @@ fn kernel_error_response(py: Python<'_>, err: &ValidationError) -> Response {
                         .collect::<Vec<_>>(),
                 )
                 .is_err()
-            || item.set_item("msg", detail.msg.as_str()).is_err()
+            || item
+                .set_item(pyo3::intern!(py, "msg"), detail.msg.as_str())
+                .is_err()
         {
             return fallback_response();
         }
         if let Some(input) = &detail.input {
             match value_to_py(py, input) {
                 Some(v) => {
-                    if item.set_item("input", v).is_err() {
+                    if item.set_item(pyo3::intern!(py, "input"), v).is_err() {
                         return fallback_response();
                     }
                 }
@@ -658,7 +670,7 @@ fn kernel_error_response(py: Python<'_>, err: &ValidationError) -> Response {
                     None => return fallback_response(),
                 }
             }
-            if item.set_item("ctx", ctx_dict).is_err() {
+            if item.set_item(pyo3::intern!(py, "ctx"), ctx_dict).is_err() {
                 return fallback_response();
             }
         }
@@ -668,7 +680,10 @@ fn kernel_error_response(py: Python<'_>, err: &ValidationError) -> Response {
     }
 
     let dict = PyDict::new(py);
-    if dict.set_item("detail", detail_list).is_err() {
+    if dict
+        .set_item(pyo3::intern!(py, "detail"), detail_list)
+        .is_err()
+    {
         return fallback_response();
     }
     match py_json_response_with_status(py, StatusCode::UNPROCESSABLE_ENTITY, dict.as_any()) {

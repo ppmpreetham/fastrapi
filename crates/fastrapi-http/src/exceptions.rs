@@ -67,7 +67,7 @@ pub struct PyValidationException {
 impl PyValidationException {
     fn context_value(&self, py: Python<'_>, key: &str) -> Option<Py<PyAny>> {
         let ctx = self.endpoint_ctx.as_ref()?.bind(py);
-        ctx.call_method1("get", (key,))
+        ctx.call_method1(pyo3::intern!(py, "get"), (key,))
             .ok()
             .filter(|value| !value.is_none())
             .map(Bound::unbind)
@@ -256,8 +256,11 @@ fn response_headers(py: Python<'_>, headers: Option<&Py<PyDict>>) -> HeaderMap {
 
 pub fn status_phrase(py: Python<'_>, status_code: u16) -> Py<PyAny> {
     py.import("http")
-        .and_then(|http| http.getattr("HTTPStatus")?.call1((status_code,)))
-        .and_then(|status| status.getattr("phrase"))
+        .and_then(|http| {
+            http.getattr(pyo3::intern!(py, "HTTPStatus"))?
+                .call1((status_code,))
+        })
+        .and_then(|status| status.getattr(pyo3::intern!(py, "phrase")))
         .map_or_else(
             |_| {
                 let phrase = StatusCode::from_u16(status_code)
