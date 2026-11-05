@@ -502,6 +502,11 @@ pub(crate) fn collect_router_routes(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
 ) -> Option<Vec<RouteEntry>> {
-    let router = obj.cast::<PyAPIRouter>().ok()?;
-    Some(router.borrow().flatten(py).0.clone())
+    if let Ok(router) = obj.cast::<PyAPIRouter>() {
+        return Some(router.borrow().flatten(py).0.clone());
+    }
+    let routes = PyList::new(py, [obj]).ok()?;
+    let router = PyAPIRouter::default();
+    crate::ffi::openapi::add_route_objects(py, &router, routes.as_any()).ok()?;
+    Some(router.snapshot(py).0)
 }

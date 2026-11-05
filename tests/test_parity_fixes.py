@@ -1294,7 +1294,7 @@ def test_openapi_request_bodies_for_forms_files_and_plain_values(client, app):
         return {}
 
     @app.put("/count")
-    def count(value: Annotated[int, Body()]):
+    def count(value: Annotated[int, Body(...)]):
         return {}
 
     @app.post("/optional")
@@ -1667,7 +1667,7 @@ def test_router_and_include_options(client, app):
     from fastrapi.routing import APIRoute
 
     def listed():
-        return {"from": "routes"}
+        return "<i>routes</i>"
 
     def callback_endpoint():
         return {}
@@ -1706,7 +1706,7 @@ def test_router_and_include_options(client, app):
     app.include_router(hidden_router)
     app.include_router(text_router)
     assert router.redirect_slashes is False and router.strict_content_type is False
-    assert client.get("/listed").json() == {"from": "routes"}
+    assert client.get("/listed").text == "<i>routes</i>"
     html_response = client.get("/html")
     assert html_response.headers["content-type"].startswith("text/html")
     assert html_response.text == "<b>hi</b>"
@@ -1714,7 +1714,7 @@ def test_router_and_include_options(client, app):
     paths = client.get("/openapi.json").json()["paths"]
     assert "/hidden-router" not in paths
     assert paths["/listed"]["get"]["deprecated"] is True
-    assert "callbacks" in paths["/listed"]["get"]
+    assert list(paths["/listed"]["get"]["callbacks"]["callback_endpoint"]) == ["/{$request.body.url}"]
 
 
 def test_route_objects_drive_openapi(client, app):

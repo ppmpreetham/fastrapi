@@ -818,26 +818,7 @@ pub fn parse_callbacks_to_json(
     let mut dummy_schemas = HashMap::new();
     let mut dummy_security = HashMap::new();
 
-    if let Ok(list) = callbacks_bound.try_iter() {
-        for item in list.flatten() {
-            if let Some(collected) = collect(py, &item) {
-                let paths = build_paths_from_routes(
-                    py,
-                    &collected,
-                    &mut dummy_schemas,
-                    None,
-                    false,
-                    None,
-                    &mut dummy_security,
-                );
-
-                for (path, path_item) in paths {
-                    let value = to_owned_value(&path_item).unwrap_or_else(|_| json!({}));
-                    callbacks_map.insert(path, value);
-                }
-            }
-        }
-    } else if let Ok(dict) = callbacks_bound.cast::<PyDict>() {
+    if let Ok(dict) = callbacks_bound.cast::<PyDict>() {
         for (k, v) in dict.iter() {
             if let Ok(k_str) = k.extract::<String>()
                 && let Ok(list) = v.try_iter()
@@ -862,6 +843,40 @@ pub fn parse_callbacks_to_json(
                     }
                 }
                 callbacks_map.insert(k_str, json!(inner_map));
+            }
+        }
+    } else if let Ok(list) = callbacks_bound.try_iter() {
+        for item in list.flatten() {
+            let Some(collected) = collect(py, &item) else {
+                continue;
+            };
+            let is_router = item.hasattr("include_router").unwrap_or(false);
+            for entry in collected {
+                let paths = build_paths_from_routes(
+                    py,
+                    std::slice::from_ref(&entry),
+                    &mut dummy_schemas,
+                    None,
+                    false,
+                    None,
+                    &mut dummy_security,
+                );
+                for (path, path_item) in paths {
+                    let value = to_owned_value(&path_item).unwrap_or_else(|_| json!({}));
+                    if is_router {
+                        callbacks_map.insert(path, value);
+                    } else if let Some(named) = callbacks_map
+                        .get_mut(entry.name.as_str())
+                        .and_then(JsonValue::as_object_mut)
+                    {
+                        named.insert(path, value);
+                    } else {
+                        let mut named = Object::new();
+                        named.insert(path, value);
+                        callbacks_map
+                            .insert(entry.name.clone(), JsonValue::Object(Box::new(named)));
+                    }
+                }
             }
         }
     }
