@@ -62,9 +62,6 @@ fn apply_declared(
     max_body_size: usize,
     threadpool: bool,
 ) -> Router {
-    // axum's `.layer()` makes each successive call OUTERMOST, so applying
-    // in declaration order yields Starlette semantics: the last-declared
-    // middleware runs first.
     for layer in &container.order {
         app = match layer {
             DeclaredLayer::Session => session_layer(app, container),
@@ -81,7 +78,6 @@ fn apply_declared(
             }
         };
     }
-    // Decorator-style middlewares stay innermost.
     decorator_layer(app, container, event_loop, threadpool)
 }
 

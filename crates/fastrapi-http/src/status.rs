@@ -4,7 +4,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
-// HTTP Status Codes
 pub const HTTP_100_CONTINUE: u16 = 100;
 pub const HTTP_101_SWITCHING_PROTOCOLS: u16 = 101;
 pub const HTTP_102_PROCESSING: u16 = 102;
@@ -69,7 +68,6 @@ pub const HTTP_508_LOOP_DETECTED: u16 = 508;
 pub const HTTP_510_NOT_EXTENDED: u16 = 510;
 pub const HTTP_511_NETWORK_AUTHENTICATION_REQUIRED: u16 = 511;
 
-// WebSocket Codes
 pub const WS_1000_NORMAL_CLOSURE: u16 = 1000;
 pub const WS_1001_GOING_AWAY: u16 = 1001;
 pub const WS_1002_PROTOCOL_ERROR: u16 = 1002;
@@ -91,7 +89,6 @@ pub fn create_status_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let status_module = PyModule::new(py, "status")?;
 
-    // HTTP Codes
     status_module.add("HTTP_100_CONTINUE", HTTP_100_CONTINUE)?;
     status_module.add("HTTP_101_SWITCHING_PROTOCOLS", HTTP_101_SWITCHING_PROTOCOLS)?;
     status_module.add("HTTP_102_PROCESSING", HTTP_102_PROCESSING)?;
@@ -195,7 +192,6 @@ pub fn create_status_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         HTTP_511_NETWORK_AUTHENTICATION_REQUIRED,
     )?;
 
-    // webSocket Codes
     status_module.add("WS_1000_NORMAL_CLOSURE", WS_1000_NORMAL_CLOSURE)?;
     status_module.add("WS_1001_GOING_AWAY", WS_1001_GOING_AWAY)?;
     status_module.add("WS_1002_PROTOCOL_ERROR", WS_1002_PROTOCOL_ERROR)?;
@@ -223,9 +219,7 @@ pub fn create_status_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         .unwrap_or(&parent_name);
     let full_name = format!("{base_name}.status");
     status_module.setattr("__name__", &full_name)?;
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item(&full_name, &status_module)?;
+    fastrapi_pyutil::imports::register_module(py, &full_name, &status_module)?;
 
     Ok(())
 }

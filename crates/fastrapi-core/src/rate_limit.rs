@@ -17,7 +17,6 @@ struct RateLimitKey {
 }
 
 struct RateLimitWindow {
-    // u64 [32-bit timestamp seconds | 32-bit count]
     data: AtomicU64,
 }
 

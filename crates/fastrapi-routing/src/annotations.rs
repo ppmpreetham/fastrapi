@@ -3,7 +3,10 @@
 //! The request code uses the results to convert raw request values.
 
 use crate::params;
+use fastrapi_http::request::PyHTTPConnection;
+use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_pyutil::imports::TYPING;
+use fastrapi_pyutil::lazy::LazyPyAttr;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyFloat, PyInt, PyModule, PyString, PyTuple, PyType};
 use pyo3::{Bound, Py, intern};
@@ -127,10 +130,36 @@ pub fn union_args<'py>(
         .ok()
 }
 
+#[must_use]
 pub fn is_none_type(obj: &Bound<'_, PyAny>) -> bool {
-    obj.getattr(intern!(obj.py(), "__name__"))
-        .and_then(|name| name.extract::<String>())
-        .is_ok_and(|name| name == "NoneType")
+    obj.is(obj.py().None().bind(obj.py()).get_type())
+}
+
+fastrapi_pyutil::cached_py_import!(STARLETTE_CONNECTION, "starlette.requests", "HTTPConnection");
+fastrapi_pyutil::cached_py_import!(STARLETTE_WEBSOCKET, "starlette.websockets", "WebSocket");
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionKind {
+    Request,
+    WebSocket,
+}
+
+pub(crate) fn connection_kind(
+    py: Python<'_>,
+    annotation: &Bound<'_, PyAny>,
+) -> Option<ConnectionKind> {
+    let annotation = params::base_annotation(annotation);
+    let class = annotation.cast::<PyType>().ok()?;
+    let subclass_of = |base: &LazyPyAttr| {
+        base.get(py)
+            .is_ok_and(|base| class.is_subclass(base).unwrap_or(false))
+    };
+    if class.is_subclass_of::<PyWebSocket>().unwrap_or(false) || subclass_of(&STARLETTE_WEBSOCKET) {
+        return Some(ConnectionKind::WebSocket);
+    }
+    (class.is_subclass_of::<PyHTTPConnection>().unwrap_or(false)
+        || subclass_of(&STARLETTE_CONNECTION))
+    .then_some(ConnectionKind::Request)
 }
 
 #[must_use]

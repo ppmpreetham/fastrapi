@@ -5,9 +5,7 @@
 use super::params;
 use super::security::PySecurityScopes;
 use crate::route::ParsedParameter;
-use fastrapi_http::request::PyHTTPConnection;
 use fastrapi_http::request_input::RequestInput;
-use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_pyutil::imports::INSPECT;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::{blocking, py_bridge};
@@ -33,7 +31,6 @@ fastrapi_pyutil::cached_py_import!(CONTEXT_MANAGER, "contextlib", "contextmanage
 fastrapi_pyutil::cached_py_import!(ASYNC_CONTEXT_MANAGER, "contextlib", "asynccontextmanager");
 fastrapi_pyutil::cached_py_import!(TO_THREAD, "asyncio", "to_thread");
 fastrapi_pyutil::cached_py_import!(PARTIAL, "functools", "partial");
-fastrapi_pyutil::cached_py_import!(STARLETTE_CONNECTION, "starlette.requests", "HTTPConnection");
 
 struct ParserKeys<'py> {
     parameters: &'py Bound<'py, PyString>,
@@ -417,19 +414,11 @@ fn annotation_display_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Opt
 }
 
 fn is_connection_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
-    let annotation = params::base_annotation(py, annotation);
-    let Ok(class) = annotation.cast::<PyType>() else {
-        return false;
-    };
-    class.is_subclass_of::<PyHTTPConnection>().unwrap_or(false)
-        || class.is_subclass_of::<PyWebSocket>().unwrap_or(false)
-        || STARLETTE_CONNECTION
-            .get(py)
-            .is_ok_and(|base| class.is_subclass(base).unwrap_or(false))
+    crate::annotations::connection_kind(py, annotation).is_some()
 }
 
 pub(crate) fn is_response_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
-    let annotation = params::base_annotation(py, annotation);
+    let annotation = params::base_annotation(annotation);
     annotation_display_name(py, &annotation)
         .is_some_and(|name| name == "Response" || name == "PyResponse")
 }
@@ -619,7 +608,7 @@ fn extract_and_flatten(
             let target_callable = if let Ok(dep) = marker.getattr(keys.dependency) {
                 if dep.is_none() {
                     if let Ok(annotation) = param_obj.getattr(keys.annotation) {
-                        params::base_annotation(py, &annotation)
+                        params::base_annotation(&annotation)
                     } else {
                         continue;
                     }
@@ -1061,8 +1050,6 @@ pub async fn execute_teardowns_async(event_loop: EventLoop, teardowns: TeardownT
     for task in teardowns.into_iter().rev() {
         if task.is_async {
             flush_sync_teardowns(&mut sync_batch).await;
-            // Resume past the yield so post-yield cleanup runs; a clean generator
-            // ends with StopAsyncIteration (same protocol FastAPI's exit stack uses).
             let resume = Python::attach(|py| -> PyResult<_> {
                 let coroutine = task
                     .generator

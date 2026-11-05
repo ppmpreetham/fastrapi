@@ -15,6 +15,60 @@ fastrapi_pyutil::cached_py_import!(
     "MutableHeaders"
 );
 
+pub struct ResponseParts {
+    pub content: Py<PyAny>,
+    pub status_code: u16,
+    pub headers: Option<Py<PyDict>>,
+    pub media_type: Option<String>,
+    pub background: Option<Py<PyAny>>,
+    pub raw_headers: Py<PyList>,
+    pub body: Py<PyAny>,
+}
+
+pub fn response_parts(
+    py: Python<'_>,
+    class_name: &str,
+    content: Option<Py<PyAny>>,
+    status_code: u16,
+    headers: Option<Py<PyDict>>,
+    media_type: Option<String>,
+    background: Option<Py<PyAny>>,
+) -> PyResult<ResponseParts> {
+    let content = content.unwrap_or_else(|| py.None());
+    let media_type = media_type.or_else(|| {
+        match class_name {
+            "HTMLResponse" => Some("text/html"),
+            "PlainTextResponse" => Some("text/plain"),
+            "JSONResponse" | "ORJSONResponse" | "UJSONResponse" => Some("application/json"),
+            _ => None,
+        }
+        .map(str::to_owned)
+    });
+    let streaming = class_name == "StreamingResponse";
+    let body = if streaming {
+        py.None()
+    } else {
+        render(py, content.bind(py), class_name, "utf-8")?.unbind()
+    };
+    let raw_headers = init_headers(
+        py,
+        headers.as_ref().map(|headers| headers.bind(py).as_any()),
+        (!streaming).then(|| body.bind(py)),
+        status_code,
+        media_type.as_deref(),
+        "utf-8",
+    )?;
+    Ok(ResponseParts {
+        content,
+        status_code,
+        headers,
+        media_type,
+        background,
+        raw_headers,
+        body,
+    })
+}
+
 pub fn render<'py>(
     py: Python<'py>,
     content: &Bound<'py, PyAny>,

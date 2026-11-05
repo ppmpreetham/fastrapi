@@ -176,7 +176,6 @@ impl PyAPIRoute {
                 validate_http_methods(methods)?;
                 methods.clone().unbind().into_any()
             }
-            // starlette defaults `Route.methods = ["GET"]`
             _ => PyList::new(slf.py(), ["GET"])?.into_any().unbind(),
         };
         let default_name: Py<PyAny> = match name {
@@ -233,7 +232,6 @@ impl PyAPIRoute {
         Ok(())
     }
 
-    // This method is the same as the `Route.matches` method of starlette.
     fn matches<'py>(
         slf: &Bound<'py, Self>,
         scope: &Bound<'py, PyAny>,
@@ -485,7 +483,6 @@ impl PyRouteContext {
     }
 }
 
-// This function is the same as `fastapi.routing.iter_route_contexts`.
 #[pyfunction]
 #[pyo3(signature = (routes))]
 pub fn iter_route_contexts(py: Python<'_>, routes: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {

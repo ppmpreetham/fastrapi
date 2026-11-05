@@ -5,6 +5,7 @@ use ahash::AHashMap;
 use bytes::Bytes;
 use smallvec::SmallVec;
 use smol_str::SmolStr;
+use std::sync::Arc;
 
 pub type FormText = SmolStr;
 
@@ -12,7 +13,7 @@ pub type FormText = SmolStr;
 pub struct UploadedFile {
     pub filename: Option<String>,
     pub content_type: Option<String>,
-    pub headers: Vec<(String, String)>,
+    pub headers: Arc<[(String, String)]>,
     pub content: Bytes,
 }
 

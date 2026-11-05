@@ -62,8 +62,8 @@ fn expected(expected: &str, got: &str) -> PyErr {
     PyTypeError::new_err(format!("Expected {expected}, got {got}"))
 }
 
-fn parse_json_bytes(bytes: &Bytes) -> PyResult<Py<PyAny>> {
-    let mut json_buf = bytes.to_vec();
+fn parse_json_bytes(bytes: Bytes) -> PyResult<Py<PyAny>> {
+    let mut json_buf = Vec::from(bytes);
     let value = simd_json::to_owned_value(&mut json_buf)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(Python::attach(|py| json_to_py_object(py, &value)))
@@ -205,7 +205,7 @@ impl PyWebSocket {
         let rx = self.rx.clone();
         py_bridge::future_into_py(py, async move {
             match next_message(rx).await? {
-                WSMessage::Text(bytes) => String::from_utf8(bytes.to_vec())
+                WSMessage::Text(bytes) => String::from_utf8(Vec::from(bytes))
                     .map_err(|e| PyValueError::new_err(e.to_string())),
                 WSMessage::Binary(_) => Err(expected("text", "binary")),
                 WSMessage::Close(code, reason) => Err(disconnected_with_code(code, reason)),
@@ -217,7 +217,7 @@ impl PyWebSocket {
         let rx = self.rx.clone();
         py_bridge::future_into_py(py, async move {
             match next_message(rx).await? {
-                WSMessage::Binary(data) => Ok(data.to_vec()),
+                WSMessage::Binary(data) => Ok(data),
                 WSMessage::Text(_) => Err(expected("binary", "text")),
                 WSMessage::Close(code, reason) => Err(disconnected_with_code(code, reason)),
             }
@@ -228,7 +228,7 @@ impl PyWebSocket {
         let rx = self.rx.clone();
         py_bridge::future_into_py(py, async move {
             match next_message(rx).await? {
-                WSMessage::Text(bytes) => parse_json_bytes(&bytes),
+                WSMessage::Text(bytes) => parse_json_bytes(bytes),
                 WSMessage::Binary(_) => Err(expected("text", "binary")),
                 WSMessage::Close(code, reason) => Err(disconnected_with_code(code, reason)),
             }
@@ -452,7 +452,7 @@ impl WSIterator {
                 Ok(WSMessage::Text(_)) if payload == WsPayload::Bytes => {
                     Err(expected("binary", "text"))
                 }
-                Ok(WSMessage::Text(bytes)) => parse_json_bytes(&bytes),
+                Ok(WSMessage::Text(bytes)) => parse_json_bytes(bytes),
                 Ok(WSMessage::Binary(_)) => Err(expected("text", "binary")),
                 Ok(WSMessage::Close(..)) | Err(_) => Err(PyStopAsyncIteration::new_err(())),
             }

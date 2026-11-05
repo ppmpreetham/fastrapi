@@ -4,216 +4,22 @@
 use fastrapi_core::path::extract_path_param_names;
 use fastrapi_http::exceptions::PyFastAPIDeprecationWarning;
 use fastrapi_http::responses::PyJSONResponse;
+use fastrapi_openapi::schema::native_operation_id;
+pub(crate) use fastrapi_pyutil::imports::python_source_module;
 use fastrapi_routing::dependencies::parse_dependencies;
 use pyo3::Bound;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
 use std::collections::HashSet;
 
-const PY_HELPERS: &std::ffi::CStr = c"import abc
-import datetime
-import re
-from collections import defaultdict, deque
-from contextlib import AsyncExitStack, asynccontextmanager
-from decimal import Decimal
-from enum import Enum
-from ipaddress import (
-    IPv4Address,
-    IPv4Interface,
-    IPv4Network,
-    IPv6Address,
-    IPv6Interface,
-    IPv6Network,
-)
-from pathlib import Path
-from types import GeneratorType
-from uuid import UUID
-
-import anyio
-import anyio.to_thread
-from pydantic import AnyUrl, NameEmail, SecretBytes, SecretStr
-from pydantic_core import Url
-from starlette.concurrency import run_in_threadpool
-
-
-def isoformat(o):
-    return o.isoformat()
-
-
-def decimal_encoder(dec_value):
-    exponent = dec_value.as_tuple().exponent
-    if isinstance(exponent, int) and exponent >= 0:
-        return int(dec_value)
-    return float(dec_value)
-
-
-ENCODERS_BY_TYPE = {
-    bytes: lambda o: o.decode(),
-    datetime.date: isoformat,
-    datetime.datetime: isoformat,
-    datetime.time: isoformat,
-    datetime.timedelta: lambda td: td.total_seconds(),
-    Decimal: decimal_encoder,
-    Enum: lambda o: o.value,
-    frozenset: list,
-    deque: list,
-    GeneratorType: list,
-    IPv4Address: str,
-    IPv4Interface: str,
-    IPv4Network: str,
-    IPv6Address: str,
-    IPv6Interface: str,
-    IPv6Network: str,
-    NameEmail: str,
-    Path: str,
-    re.Pattern: lambda o: o.pattern,
-    SecretBytes: str,
-    SecretStr: str,
-    set: list,
-    UUID: str,
-    Url: str,
-    AnyUrl: str,
-}
-
-
-def generate_encoders_by_class_tuples(type_encoder_map):
-    encoders_by_class_tuples = defaultdict(tuple)
-    for type_, encoder in type_encoder_map.items():
-        encoders_by_class_tuples[encoder] += (type_,)
-    return encoders_by_class_tuples
-
-
-encoders_by_class_tuples = generate_encoders_by_class_tuples(ENCODERS_BY_TYPE)
-
-
-class Param(abc.ABC):
-    pass
-
-
-def _async_lifespan(factory):
-    import inspect
-    from contextlib import contextmanager
-
-    if inspect.isasyncgenfunction(factory):
-        return asynccontextmanager(factory)
-    if inspect.isgeneratorfunction(factory):
-        sync_factory = contextmanager(factory)
-
-        @asynccontextmanager
-        async def wrapped(app):
-            with sync_factory(app) as state:
-                yield state
-
-        return wrapped
-    return factory
-
-
-def merge_lifespan_context(original, nested):
-    original = _async_lifespan(original)
-    nested = _async_lifespan(nested)
-
-    @asynccontextmanager
-    async def merged_lifespan(app):
-        async with original(app) as maybe_original_state:
-            async with nested(app) as maybe_nested_state:
-                if maybe_nested_state is None and maybe_original_state is None:
-                    yield None
-                else:
-                    yield {**(maybe_nested_state or {}), **(maybe_original_state or {})}
-
-    return merged_lifespan
-
-
-def handlers_lifespan(on_startup, on_shutdown):
-    import inspect
-
-    @asynccontextmanager
-    async def lifespan(app):
-        for handler in on_startup or []:
-            result = handler()
-            if inspect.isawaitable(result):
-                await result
-        yield None
-        for handler in on_shutdown or []:
-            result = handler()
-            if inspect.isawaitable(result):
-                await result
-
-    return lifespan
-
-
-def default_lifespan(router):
-    return handlers_lifespan(router.on_startup, router.on_shutdown)
-
-
-def request_endpoint(endpoint):
-    import inspect
-
-    from fastrapi import Request
-
-    if inspect.iscoroutinefunction(endpoint):
-
-        async def route(request: Request):
-            return await endpoint(request)
-
-    else:
-
-        def route(request: Request):
-            return endpoint(request)
-
-    route.__name__ = getattr(endpoint, \"__name__\", \"route\")
-    route.__doc__ = endpoint.__doc__
-    return route
-
-
-class SecurityBase(abc.ABC):
-    pass
-
-
-class APIKeyBase(SecurityBase):
-    pass
-
-
-class HTTPBase(SecurityBase):
-    pass
-
-
-class AsyncExitStackMiddleware:
-    def __init__(self, app, context_name=\"fastapi_middleware_astack\"):
-        self.app = app
-        self.context_name = context_name
-
-    async def __call__(self, scope, receive, send):
-        async with AsyncExitStack() as stack:
-            scope[self.context_name] = stack
-            await self.app(scope, receive, send)
-
-
-@asynccontextmanager
-async def contextmanager_in_threadpool(cm):
-    exit_limiter = anyio.CapacityLimiter(1)
-    try:
-        yield await run_in_threadpool(cm.__enter__)
-    except Exception as e:
-        ok = bool(
-            await anyio.to_thread.run_sync(
-                cm.__exit__, type(e), e, e.__traceback__, limiter=exit_limiter
-            )
-        )
-        if not ok:
-            raise e
-    else:
-        await anyio.to_thread.run_sync(
-            cm.__exit__, None, None, None, limiter=exit_limiter
-        )
-";
+const PY_HELPERS: &str = include_str!("py/helpers.py");
 
 static PY_HELPERS_MODULE: pyo3::sync::PyOnceLock<Py<PyModule>> = pyo3::sync::PyOnceLock::new();
 
 pub(crate) fn py_helpers(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     PY_HELPERS_MODULE
         .get_or_try_init(py, || {
-            PyModule::from_code(
+            python_source_module(
                 py,
                 PY_HELPERS,
                 c"fastrapi/_helpers.py",
@@ -283,9 +89,7 @@ pub(crate) fn register_security(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         }
     }
     parent.add_submodule(&base)?;
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item("fastrapi.security.base", &base)?;
+    fastrapi_pyutil::imports::register_module(py, "fastrapi.security.base", &base)?;
     Ok(())
 }
 
@@ -333,7 +137,7 @@ fn get_flat_dependant(
 
 #[pyfunction]
 #[pyo3(signature = (route))]
-fn generate_unique_id(_py: Python<'_>, route: &Bound<'_, PyAny>) -> String {
+fn generate_unique_id(route: &Bound<'_, PyAny>) -> String {
     let name = route
         .getattr("name")
         .ok()
@@ -352,23 +156,7 @@ fn generate_unique_id(_py: Python<'_>, route: &Bound<'_, PyAny>) -> String {
         .and_then(|mut it| it.next().transpose().ok().flatten())
         .and_then(|v| v.extract().ok())
         .unwrap_or_else(|| "get".to_owned());
-    format!(
-        "{}_{}",
-        word_characters(&format!("{name}{path}")),
-        method.to_ascii_lowercase()
-    )
-}
-
-fn word_characters(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    native_operation_id(&name, &path, &method)
 }
 
 #[pyclass(
@@ -484,12 +272,8 @@ pub(crate) fn register_dependencies(parent: &Bound<'_, PyModule>) -> PyResult<()
     )?;
     utils.add_function(wrap_pyfunction!(get_flat_dependant, &utils)?)?;
     parent.add_submodule(&utils)?;
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item("fastrapi.dependencies", parent)?;
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item("fastrapi.dependencies.utils", &utils)?;
+    fastrapi_pyutil::imports::register_module(py, "fastrapi.dependencies", parent)?;
+    fastrapi_pyutil::imports::register_module(py, "fastrapi.dependencies.utils", &utils)?;
     let models = PyModule::new(py, "models")?;
     let object = py.import("builtins")?.getattr("object")?;
     let bases = PyTuple::new(py, [object])?;
@@ -499,9 +283,7 @@ pub(crate) fn register_dependencies(parent: &Bound<'_, PyModule>) -> PyResult<()
         python_type(py, "SecurityRequirement", &bases)?,
     )?;
     parent.add_submodule(&models)?;
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item("fastrapi.dependencies.models", &models)?;
+    fastrapi_pyutil::imports::register_module(py, "fastrapi.dependencies.models", &models)?;
     Ok(())
 }
 
@@ -564,21 +346,8 @@ pub(crate) fn register_exception_handlers(parent: &Bound<'_, PyModule>) -> PyRes
         websocket_request_validation_exception_handler,
         parent
     )?)?;
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item("fastrapi.exception_handlers", parent)?;
+    fastrapi_pyutil::imports::register_module(py, "fastrapi.exception_handlers", parent)?;
     Ok(())
-}
-
-pub(crate) fn python_source_module<'py>(
-    py: Python<'py>,
-    source: &str,
-    file_name: &std::ffi::CStr,
-    module_name: &std::ffi::CStr,
-) -> PyResult<Bound<'py, PyModule>> {
-    let source = std::ffi::CString::new(source)
-        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-    PyModule::from_code(py, &source, file_name, module_name)
 }
 
 pub(crate) fn register_openapi_helpers(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -586,9 +355,7 @@ pub(crate) fn register_openapi_helpers(module: &Bound<'_, PyModule>) -> PyResult
     let docs = PyModule::new(py, "docs")?;
     crate::ffi::docs::register(&docs)?;
     module.add_submodule(&docs)?;
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item("fastrapi.openapi.docs", &docs)?;
+    fastrapi_pyutil::imports::register_module(py, "fastrapi.openapi.docs", &docs)?;
     let models = python_source_module(
         py,
         include_str!("py/openapi_models.py"),
@@ -596,9 +363,7 @@ pub(crate) fn register_openapi_helpers(module: &Bound<'_, PyModule>) -> PyResult
         c"fastrapi.openapi.models",
     )?;
     module.add_submodule(&models)?;
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item("fastrapi.openapi.models", &models)?;
+    fastrapi_pyutil::imports::register_module(py, "fastrapi.openapi.models", &models)?;
     Ok(())
 }
 
@@ -616,11 +381,7 @@ fn generate_operation_id_for_path(
         c"fastapi.utils.generate_operation_id_for_path() was deprecated, it is not used internally, and will be removed soon",
         2,
     )?;
-    Ok(format!(
-        "{}_{}",
-        word_characters(&format!("{name}{path}")),
-        method.to_ascii_lowercase()
-    ))
+    Ok(native_operation_id(name, path, method))
 }
 
 #[pyfunction]
@@ -700,9 +461,7 @@ pub(crate) fn register_compat_modules(parent: &Bound<'_, PyModule>) -> PyResult<
         ("fastrapi.utils", &utils),
         ("fastrapi.param_functions", &params),
     ] {
-        py.import("sys")?
-            .getattr("modules")?
-            .set_item(name, module)?;
+        fastrapi_pyutil::imports::register_module(py, name, module)?;
     }
     Ok(())
 }

@@ -3,7 +3,6 @@
 
 use pyo3::prelude::*;
 
-// Splits an `Authorization` header value into `(scheme, param)`.
 #[pyfunction]
 #[must_use]
 pub fn get_authorization_scheme_param(

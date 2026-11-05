@@ -29,7 +29,6 @@ where
     PYTHON_RUNTIME.spawn(future)
 }
 
-// Config
 #[derive(Debug)]
 pub struct Config {
     pub sync_threads: usize,

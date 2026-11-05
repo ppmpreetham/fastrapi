@@ -108,15 +108,12 @@ impl LazyPyNestedAttr {
 
 #[macro_export]
 macro_rules! cached_py_import {
-    // Module
     ($vis:vis $name:ident, $module:literal) => {
         $vis static $name: $crate::lazy::LazyPyModule = $crate::lazy::LazyPyModule::new($module);
     };
-    // Attribute
     ($vis:vis $name:ident, $module:literal, $attr:literal) => {
         $vis static $name: $crate::lazy::LazyPyAttr = $crate::lazy::LazyPyAttr::new($module, $attr);
     };
-    // Nested attribute
     ($vis:vis $name:ident, $module:literal, $parent:literal, $child:literal) => {
         $vis static $name: $crate::lazy::LazyPyNestedAttr =
             $crate::lazy::LazyPyNestedAttr::new($module, $parent, $child);

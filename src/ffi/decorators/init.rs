@@ -25,7 +25,7 @@ use fastrapi_routing::route::{
 use fastrapi_routing::security::describe_scheme;
 use hyper::StatusCode;
 use pyo3::Bound;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict, PyTuple};
 use smallvec::SmallVec;
@@ -278,7 +278,7 @@ fn extract_bound<'py>(kwargs: Option<&Bound<'py, PyDict>>, key: &str) -> Option<
 }
 
 #[inline]
-fn func_name(_py: Python<'_>, func: &Bound<'_, PyAny>) -> String {
+fn func_name(func: &Bound<'_, PyAny>) -> String {
     func.getattr("__name__")
         .ok()
         .and_then(|n| n.extract::<String>().ok())
@@ -512,11 +512,7 @@ impl PyAPIRouter {
         path: String,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        if self.frozen.load(Ordering::Relaxed) {
-            return Err(PyRuntimeError::new_err(
-                "Cannot modify router after it has been frozen",
-            ));
-        }
+        self.ensure_mutable()?;
 
         let router_tags = self.tags.clone();
         let merged_kwargs;
@@ -551,6 +547,8 @@ impl PyAPIRouter {
             .map(|class| class.clone_ref(py));
         let path_for_closure = path;
         let routes = Arc::clone(&self.route_entries);
+        let frozen = Arc::clone(&self.frozen);
+        let revision = Arc::clone(&self.revision);
         let router_route_class = extract_bound(kwargs, "route_class_override")
             .filter(|class| !class.is_none())
             .map(Bound::unbind)
@@ -672,7 +670,7 @@ impl PyAPIRouter {
             handler.payload.refresh_dependency_flags();
             handler.assign_execution_mode();
 
-            let route_name = opts.name.clone().unwrap_or_else(|| func_name(py, &func));
+            let route_name = opts.name.clone().unwrap_or_else(|| func_name(&func));
             let route_instance = router_route_class
                 .as_ref()
                 .map(|rc| -> PyResult<Py<PyAny>> {
@@ -711,7 +709,7 @@ impl PyAPIRouter {
                         {
                             continue;
                         }
-                        let _ = instance.setattr(key_str.as_str(), &value);
+                        instance.setattr(key_str.as_str(), &value)?;
                     }
                     Ok(instance.unbind())
                 })
@@ -753,6 +751,8 @@ impl PyAPIRouter {
                 })
                 .unwrap_or_default();
 
+            super::tree::ensure_unfrozen(&frozen)?;
+            revision.fetch_add(1, Ordering::Release);
             routes.lock().push(RouteEntry {
                 method,
                 path: path_for_closure.clone(),
@@ -797,15 +797,13 @@ impl PyAPIRouter {
         name: Option<String>,
         dependencies: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        if self.frozen.load(Ordering::Relaxed) {
-            return Err(PyRuntimeError::new_err(
-                "Cannot modify router after it has been frozen",
-            ));
-        }
+        self.ensure_mutable()?;
         if !path.starts_with('/') {
             return Err(PyValueError::new_err("WebSocket path must start with '/'"));
         }
         let websockets = Arc::clone(&self.websocket_entries);
+        let frozen = Arc::clone(&self.frozen);
+        let revision = Arc::clone(&self.revision);
         let closure = move |args: &Bound<'_, PyTuple>,
                             _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
@@ -813,8 +811,8 @@ impl PyAPIRouter {
             let func: Py<PyAny> = args.get_item(0)?.unbind();
 
             let path_param_names = extract_path_param_names(&path);
-            let mut nodes =
-                parse_dependencies(py, func.bind(py), &path_param_names).unwrap_or_default();
+            super::tree::ensure_unfrozen(&frozen)?;
+            let mut nodes = parse_dependencies(py, func.bind(py), &path_param_names)?;
             if let Some(dependencies) = &dependencies {
                 let callables = collect_dependency_callables(py, Some(dependencies));
                 let mut external = parse_external_dependencies(py, &callables, &path_param_names)?;
@@ -827,7 +825,7 @@ impl PyAPIRouter {
 
             let entry = WebSocketEntry {
                 path: path.clone(),
-                name: name.clone().unwrap_or_else(|| func_name(py, func.bind(py))),
+                name: name.clone().unwrap_or_else(|| func_name(func.bind(py))),
                 handler: func.clone_ref(py),
                 websocket_arg: signature.websocket_arg,
                 params: signature.params,
@@ -836,6 +834,7 @@ impl PyAPIRouter {
                 host: None,
             };
             websockets.lock().push(entry);
+            revision.fetch_add(1, Ordering::Release);
             Ok(func)
         };
         PyCFunction::new_closure(py, None, None, closure).map(Into::into)
@@ -882,7 +881,7 @@ impl PyAPIRouter {
             .getattr("request_endpoint")?
             .call1((endpoint,))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("name", name.unwrap_or_else(|| func_name(py, endpoint)))?;
+        kwargs.set_item("name", name.unwrap_or_else(|| func_name(endpoint)))?;
         kwargs.set_item("include_in_schema", false)?;
         self.add_api_route_impl(py, path, &wrapped, methods, &kwargs)
     }

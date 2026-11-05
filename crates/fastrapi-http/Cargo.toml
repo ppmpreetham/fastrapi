@@ -12,7 +12,6 @@ fastrapi-pyutil.workspace = true
 fastrapi-runtime.workspace = true
 async-stream.workspace = true
 axum.workspace = true
-axum-governor.workspace = true
 bytes.workspace = true
 cookie.workspace = true
 form_urlencoded.workspace = true

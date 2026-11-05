@@ -120,6 +120,7 @@ pub(crate) fn add_route_objects(
             let mut entry = handle.get().entry.clone();
             fastrapi_openapi::paths::apply_route_overrides(&route, &mut entry);
             router.route_entries.lock().push(entry);
+            router.touch();
             continue;
         }
         let (Ok(path), Ok(endpoint)) = (
@@ -199,9 +200,7 @@ pub(crate) fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         ("fastrapi.openapi.constants", &constants),
         ("fastrapi.openapi.utils", &utils),
     ] {
-        py.import("sys")?
-            .getattr("modules")?
-            .set_item(name, module)?;
+        fastrapi_pyutil::imports::register_module(py, name, module)?;
     }
     register_openapi_helpers(&openapi_module)?;
     Ok(())

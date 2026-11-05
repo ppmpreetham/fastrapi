@@ -2043,3 +2043,51 @@ def test_host_routes_accept_ipv6_hosts_and_websockets_respect_hosts():
 
     assert b" 101 " in upgrade(f"[::1]:{port}")
     assert b" 404 " in upgrade(f"127.0.0.1:{port}")
+
+
+def test_openapi_cache_sees_routes_added_to_included_router():
+    from fastrapi import APIRouter
+
+    app = FastrAPI()
+    router = APIRouter()
+    app.include_router(router)
+    assert app.openapi()["paths"] == {}
+
+    @router.get("/later")
+    def later():
+        return {}
+
+    assert "/later" in app.openapi()["paths"]
+
+
+def test_deferred_decorator_respects_frozen_router():
+    import pytest
+    from test_websocket_smoke import _free_port, _serve
+
+    from fastrapi import APIRouter
+
+    app = FastrAPI()
+    router = APIRouter()
+    decorate = router.get("/late")
+    app.include_router(router)
+    _serve(app, _free_port())
+
+    with pytest.raises(RuntimeError, match="frozen"):
+
+        @decorate
+        def late():
+            return {}
+
+
+def test_form_scalar_uses_only_the_last_value(client, app):
+    from typing import Annotated
+
+    from fastrapi import Form
+
+    @app.post("/count")
+    def count(value: Annotated[int, Form(...)]):
+        return {"value": value}
+
+    response = client.post("/count", content="value=abc&value=3", headers={"content-type": "application/x-www-form-urlencoded"})
+    assert response.status_code == 200
+    assert response.json() == {"value": 3}

@@ -36,15 +36,13 @@ use crate::ffi::docs;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::path::{host_without_port, join_path, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, FrozenRouterBuilder, RoutePattern};
-use fastrapi_http::middleware::{
-    DeclaredLayer, MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware,
-};
+use fastrapi_http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer};
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_routing::route::{ExecutionMode, RouteEntry, RouteHandler, WebSocketEntry};
 use fastrapi_runtime::py_bridge::{self, EventLoop};
 use fastrapi_runtime::tokio_runtime::PYTHON_RUNTIME;
 use metrics::SharedString;
-use pyo3::types::{PyDict, PyString, PyTuple};
+use pyo3::types::{PyDict, PyTuple};
 
 pub(crate) fn build_router(
     py: Python,
@@ -77,22 +75,10 @@ pub(crate) fn build_router(
     base_ref.freeze(py)?;
     let base_flat = base_ref.flatten(py)?;
 
-    // Merge mounted sub-applications' routes under their prefixes.
     let mut routes = base_flat.0.clone();
     let mut ws_routes = base_flat.1.clone();
     for mount in &app_config.app_mounts {
-        let sub = mount.app.bind(py);
-        let sub_ref = sub.borrow();
-        let sub_router = sub_ref.router.bind(py);
-        {
-            let mut sub_mut = sub_router.borrow_mut();
-            if sub_mut.dependencies.is_none() {
-                sub_mut.dependencies.clone_from(&sub_ref.dependencies);
-            }
-        }
-        sub_router.borrow().freeze(py)?;
-        let sub_flat = sub_router.borrow().flatten(py)?;
-
+        let sub_flat = mounted_routes(py, mount.app.bind(py))?;
         routes.extend(sub_flat.0.iter().map(|route| {
             let mut route = route.clone();
             route.path = join_path(&mount.path, &route.path);
@@ -105,15 +91,8 @@ pub(crate) fn build_router(
         }));
     }
 
-    // Host-mounted sub-apps: routes are served un-prefixed but only match
-    // when the request's Host header equals the mount's host.
     for mount in &app_config.host_mounts {
-        let sub = mount.app.bind(py);
-        let sub_ref = sub.borrow();
-        let sub_router = sub_ref.router.bind(py);
-        sub_router.borrow().freeze(py)?;
-        let sub_flat = sub_router.borrow().flatten(py)?;
-
+        let sub_flat = mounted_routes(py, mount.app.bind(py))?;
         routes.extend(sub_flat.0.iter().map(|route| {
             let mut route = route.clone();
             route.host = Some(mount.host.clone());
@@ -166,6 +145,22 @@ pub(crate) fn build_router(
     ))
 }
 
+type FlatRoutes = Arc<(Vec<RouteEntry>, Vec<WebSocketEntry>)>;
+
+fn mounted_routes(py: Python<'_>, app: &Bound<'_, FastrAPI>) -> PyResult<FlatRoutes> {
+    let app = app.borrow();
+    let router = app.router.bind(py);
+    {
+        let mut router = router.borrow_mut();
+        if router.dependencies.is_none() {
+            router.dependencies.clone_from(&app.dependencies);
+        }
+    }
+    let router = router.borrow();
+    router.freeze(py)?;
+    router.flatten(py)
+}
+
 fn register_routes(
     mut app: Router,
     py: Python<'_>,
@@ -182,7 +177,6 @@ fn register_routes(
             .unwrap_or_else(|_| not_found_response())
     });
 
-    // 1. Cached routes
     app = group_and_register_routes(app, routes, &head_dispatch, |route| {
         if route.host.is_none()
             && route.handler.execution.rate_limit_per_second.is_none()
@@ -203,7 +197,6 @@ fn register_routes(
         }
     });
 
-    // 2. Direct no request routes
     app = group_and_register_routes(app, routes, &head_dispatch, |route| {
         if route.host.is_none()
             && route.handler.execution.rate_limit_per_second.is_none()
@@ -568,24 +561,11 @@ pub(crate) fn apply_declared_middleware(
     let Ok(kwargs) = kwargs_any.cast::<PyDict>() else {
         return Ok(());
     };
-    let class_name_obj = cls.getattr("__name__")?;
-    let class_name = class_name_obj.cast::<PyString>()?.to_str()?.to_owned();
-
-    if let Some(builder) = MIDDLEWARE_REGISTRY.get(&class_name) {
-        builder.parse_kwargs(kwargs, container)?;
-        container.record_layer(&class_name);
-    } else {
-        let args = middleware_item
-            .getattr("args")
-            .and_then(|args| args.cast_into::<PyTuple>().map_err(Into::into))
-            .unwrap_or_else(|_| PyTuple::empty(py));
-        let py_middleware = PyMiddleware::from_custom(py, &cls, &args, Some(kwargs))?;
-        container
-            .order
-            .push(DeclaredLayer::Custom(Arc::new(py_middleware)));
-    }
-
-    Ok(())
+    let args = middleware_item
+        .getattr("args")
+        .and_then(|args| args.cast_into::<PyTuple>().map_err(Into::into))
+        .unwrap_or_else(|_| PyTuple::empty(py));
+    container.register(&cls, &args, kwargs)
 }
 fn method_router<H, T>(method: HttpMethod, handler: H) -> MethodRouter
 where
@@ -645,18 +625,8 @@ fn sync_no_request_method_router(
     handler: &'static RouteHandler,
     server: EventLoop,
 ) -> MethodRouter {
-    let use_json_fast_path = handler.response.response_model.is_none()
-        && handler.response.response_class.is_none()
-        && matches!(handler.response.response_type, ResponseType::Json);
-
     method_router(method, move || async move {
-        let response = Python::attach(|py| {
-            if use_json_fast_path {
-                render_no_request_json_response(py, handler, server)
-            } else {
-                render_no_request_response(py, handler, server)
-            }
-        });
+        let response = Python::attach(|py| render_no_request_json_response(py, handler, server));
         resolve_pending_handler(response).await
     })
 }

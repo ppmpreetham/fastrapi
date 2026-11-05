@@ -88,7 +88,7 @@ pub fn parse_parameter_spec(
         .ok()
         .filter(|annotation| !is_inspect_empty(py, annotation));
     let has_annotation = raw_annotation.is_some();
-    let annotation = raw_annotation.map(|raw| base_annotation(py, &raw).unbind());
+    let annotation = raw_annotation.map(|raw| base_annotation(&raw).unbind());
     let (is_list, element_annotation) = annotation.as_ref().map_or((false, None), |ann| {
         let (is_list, elem) = list_element_annotation(py, ann.bind(py));
         (is_list, elem.map(Bound::unbind))
@@ -118,11 +118,7 @@ pub fn parse_parameter_spec(
         ParameterSource::BackgroundTasks
     } else if is_path_param {
         ParameterSource::Path
-    } else if is_upload_file || is_pydantic_model {
-        ParameterSource::Body
-    } else if !has_annotation && !has_plain_default {
-        // FastAPI rule: a required parameter with no annotation IS the body
-        // (`def echo(data)`), not a query parameter.
+    } else if is_upload_file || is_pydantic_model || (!has_annotation && !has_plain_default) {
         ParameterSource::Body
     } else {
         ParameterSource::Query
@@ -207,9 +203,14 @@ pub fn parse_parameter_spec(
         .and_then(|value| value.extract::<bool>().ok())
         .unwrap_or(false);
 
+    let header_name = matches!(source, ParameterSource::Header)
+        .then(|| axum::http::HeaderName::from_bytes(external_name.as_bytes()).ok())
+        .flatten();
     Ok(ParsedParameter {
         name: param_name.to_string(),
-        name_py: PyString::new(py, param_name).unbind(),
+        name_py: PyString::intern(py, param_name).unbind(),
+        has_alias: external_name != param_name,
+        header_name,
         external_name,
         source,
         annotation,

@@ -3,14 +3,14 @@
 
 use fastrapi_core::method::HttpMethod;
 use fastrapi_routing::route::{RouteEntry, WebSocketEntry};
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+use pyo3::exceptions::PyTypeError;
 use pyo3::types::{PyDict, PyList, PyType};
 
 use parking_lot::Mutex;
 use pyo3::Bound;
 use pyo3::prelude::{Py, PyAny, PyAnyMethods, PyResult, Python, pyclass, pymethods};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 /// `APIRouter` class, used to group *path operations*, for example to structure
 /// an app in multiple files. It would then be included in the `FastAPI` app, or
@@ -61,6 +61,7 @@ pub struct PyAPIRouter {
     pub websocket_entries: Arc<Mutex<Vec<WebSocketEntry>>>,
     pub sub_routers: Arc<Mutex<Vec<SubRouterMount>>>,
     pub frozen: Arc<AtomicBool>,
+    pub revision: Arc<AtomicU64>,
     pub cached_flat: Arc<Mutex<Option<Arc<(Vec<RouteEntry>, Vec<WebSocketEntry>)>>>>,
     pub startup_handlers: Arc<Mutex<Vec<Py<PyAny>>>>,
     pub shutdown_handlers: Arc<Mutex<Vec<Py<PyAny>>>>,
@@ -96,6 +97,7 @@ impl Default for PyAPIRouter {
             websocket_entries: Arc::new(Mutex::new(Vec::new())),
             sub_routers: Arc::new(Mutex::new(Vec::new())),
             frozen: Arc::new(AtomicBool::new(false)),
+            revision: Arc::new(AtomicU64::new(0)),
             cached_flat: Arc::new(Mutex::new(None)),
             startup_handlers: Arc::new(Mutex::new(Vec::new())),
             shutdown_handlers: Arc::new(Mutex::new(Vec::new())),
@@ -191,7 +193,9 @@ impl PyAPIRouter {
                 "Mount path must start with '/'",
             ));
         }
+        self.ensure_mutable()?;
         self.mounts.lock().push((path, app, name));
+        self.touch();
         Ok(())
     }
 
@@ -202,7 +206,9 @@ impl PyAPIRouter {
                 "Host must not start with '/'",
             ));
         }
+        self.ensure_mutable()?;
         self.hosts.lock().push((host, app, name));
+        self.touch();
         Ok(())
     }
 
@@ -391,11 +397,7 @@ impl PyAPIRouter {
         callbacks: Option<&Bound<'_, PyAny>>,
         generate_unique_id_function: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        if self.frozen.load(Ordering::Relaxed) {
-            return Err(PyRuntimeError::new_err(
-                "Cannot modify router after it has been frozen",
-            ));
-        }
+        self.ensure_mutable()?;
 
         let tag_vec: Vec<String> = tags
             .and_then(|t| t.try_iter().ok())
@@ -440,6 +442,7 @@ impl PyAPIRouter {
             *own = Some(merged);
         }
 
+        self.touch();
         self.sub_routers.lock().push(SubRouterMount {
             router: router.clone().unbind(),
             prefix: prefix.to_owned(),

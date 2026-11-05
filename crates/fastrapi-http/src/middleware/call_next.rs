@@ -89,7 +89,9 @@ impl PyCallNext {
             } = downstream;
             let response = drive(middlewares, idx + 1, request, next, event_loop).await;
             let (parts, body) = split_response(response);
-            let body_bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
+            let body_bytes = to_bytes(body, usize::MAX)
+                .await
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
             Python::attach(|py| Ok(parts_to_py(py, &parts, body_bytes)?.unbind()))
         };
         let locals = TaskLocals::new(event_loop.bind(py).clone());

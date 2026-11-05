@@ -133,145 +133,7 @@ fn rendered_response(result: &Bound<'_, PyAny>) -> Option<Response> {
     Some(apply_raw_headers(response, result, RawHeaders::All))
 }
 
-const RESPONSE_HELPERS: &std::ffi::CStr = c"import dataclasses
-
-from pydantic import BaseModel, ValidationError
-
-
-def _prepare_response_content(res, *, exclude_unset, exclude_defaults, exclude_none):
-    if isinstance(res, BaseModel):
-        return res.model_dump(
-            by_alias=True,
-            exclude_unset=exclude_unset,
-            exclude_defaults=exclude_defaults,
-            exclude_none=exclude_none,
-        )
-    if isinstance(res, list):
-        return [
-            _prepare_response_content(
-                item,
-                exclude_unset=exclude_unset,
-                exclude_defaults=exclude_defaults,
-                exclude_none=exclude_none,
-            )
-            for item in res
-        ]
-    if isinstance(res, dict):
-        return {
-            key: _prepare_response_content(
-                value,
-                exclude_unset=exclude_unset,
-                exclude_defaults=exclude_defaults,
-                exclude_none=exclude_none,
-            )
-            for key, value in res.items()
-        }
-    if dataclasses.is_dataclass(res) and not isinstance(res, type):
-        return dataclasses.asdict(res)
-    return res
-
-
-def serialize_response(
-    adapter,
-    content,
-    include=None,
-    exclude=None,
-    by_alias=False,
-    exclude_unset=False,
-    exclude_defaults=False,
-    exclude_none=False,
-):
-    prepared = _prepare_response_content(
-        content,
-        exclude_unset=exclude_unset,
-        exclude_defaults=exclude_defaults,
-        exclude_none=exclude_none,
-    )
-    try:
-        value = adapter.validate_python(prepared, from_attributes=True)
-    except ValidationError as exc:
-        from fastrapi.exceptions import ResponseValidationError
-
-        errors = [
-            {**error, 'loc': ('response', *error['loc'])}
-            for error in exc.errors(include_url=False)
-        ]
-        raise ResponseValidationError(errors, body=prepared) from None
-    return adapter.dump_json(
-        value,
-        include=include,
-        exclude=exclude,
-        by_alias=by_alias,
-        exclude_unset=exclude_unset,
-        exclude_defaults=exclude_defaults,
-        exclude_none=exclude_none,
-    )
-
-
-def stream_factory(mode, item_type, response_class, options):
-    import json
-
-    from pydantic import TypeAdapter
-
-    from fastrapi.encoders import jsonable_encoder
-
-    adapter = TypeAdapter(item_type) if item_type is not None else None
-    options = dict(options or {})
-
-    def validated(item):
-        try:
-            return adapter.validate_python(item, from_attributes=True)
-        except ValidationError as exc:
-            from fastrapi.exceptions import ResponseValidationError
-
-            errors = [
-                {**error, 'loc': ('response', *error['loc'])}
-                for error in exc.errors(include_url=False)
-            ]
-            raise ResponseValidationError(errors, body=item) from None
-
-    def serialize(item):
-        if adapter is not None:
-            return adapter.dump_json(validated(item), **options)
-        return json.dumps(jsonable_encoder(item)).encode('utf-8')
-
-    def sse_value(item):
-        from fastrapi.sse import ServerSentEvent
-
-        if isinstance(item, ServerSentEvent) or adapter is None:
-            return item
-        return adapter.dump_python(validated(item), mode='json', **options)
-
-    def factory(gen):
-        from fastrapi.responses import StreamingResponse
-
-        if mode == 'raw':
-            return response_class(gen)
-        convert = serialize if mode == 'jsonl' else sse_value
-        suffix = b'\\n' if mode == 'jsonl' else None
-        if hasattr(gen, '__anext__'):
-
-            async def body():
-                async for item in gen:
-                    value = convert(item)
-                    yield value + suffix if suffix is not None else value
-
-        else:
-
-            def body():
-                for item in gen:
-                    value = convert(item)
-                    yield value + suffix if suffix is not None else value
-
-        if mode == 'jsonl':
-            return StreamingResponse(body(), media_type='application/jsonl')
-        return response_class(
-            body(),
-            headers={'cache-control': 'no-cache', 'x-accel-buffering': 'no'},
-        )
-
-    return factory
-";
+const RESPONSE_HELPERS: &str = include_str!("py/responses.py");
 
 static RESPONSE_HELPERS_MODULE: pyo3::sync::PyOnceLock<Py<pyo3::types::PyModule>> =
     pyo3::sync::PyOnceLock::new();
@@ -279,7 +141,7 @@ static RESPONSE_HELPERS_MODULE: pyo3::sync::PyOnceLock<Py<pyo3::types::PyModule>
 fn response_helpers(py: Python<'_>) -> PyResult<&Bound<'_, pyo3::types::PyModule>> {
     RESPONSE_HELPERS_MODULE
         .get_or_try_init(py, || {
-            pyo3::types::PyModule::from_code(
+            fastrapi_pyutil::imports::python_source_module(
                 py,
                 RESPONSE_HELPERS,
                 c"fastrapi/_responses.py",

@@ -3,7 +3,7 @@
 //! It also adds the submodules to `sys.modules`, thus Python can import them by name.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule, PyString};
+use pyo3::types::{PyModule, PyString};
 use std::collections::HashSet;
 
 fn register_asyncio_alias(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -11,12 +11,7 @@ fn register_asyncio_alias(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let asyncio = py.import("asyncio")?;
     m.add("asyncio", &asyncio)?;
 
-    let sys_modules = py
-        .import("sys")?
-        .getattr("modules")?
-        .cast_into::<PyDict>()?;
-    sys_modules.set_item("fastrapi.asyncio", asyncio)?;
-    Ok(())
+    fastrapi_pyutil::imports::register_module(py, "fastrapi.asyncio", &asyncio)
 }
 
 fn register_submodules_in_sys_modules(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -60,7 +55,6 @@ mod fastrapi {
     use pyo3::prelude::*;
     use pyo3::types::{PyList, PyModule};
 
-    // Top-level exported classes
     #[pymodule_export]
     use crate::engine::config::FastrAPI as FastAPI;
 
@@ -628,9 +622,11 @@ mod fastrapi {
             crate::ffi::compat::py_helpers(py)?.getattr("AsyncExitStackMiddleware")?;
         exit_stack_middleware.setattr("__module__", "fastrapi.middleware.asyncexitstack")?;
         middleware_exit.add("AsyncExitStackMiddleware", exit_stack_middleware)?;
-        py.import("sys")?
-            .getattr("modules")?
-            .set_item("fastrapi.middleware.asyncexitstack", &middleware_exit)?;
+        fastrapi_pyutil::imports::register_module(
+            py,
+            "fastrapi.middleware.asyncexitstack",
+            &middleware_exit,
+        )?;
         m.getattr("middleware")?
             .setattr("__path__", PyList::empty(py))?;
         m.getattr("middleware")?
@@ -641,7 +637,6 @@ mod fastrapi {
         register_pydantic_integration(m)?;
         super::register_asyncio_alias(m)?;
         routing::register(m)?;
-        // fastrapi.jsonable_encoder + fastrapi.encoders.jsonable_encoder
         encoders::register(m)?;
         register_compat_modules(m)?;
         m.add_function(wrap_pyfunction!(kernel_validation_count, m)?)?;

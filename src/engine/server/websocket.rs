@@ -16,6 +16,7 @@ use fastwebsockets::{
 };
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict, PyList, PyString};
 use simd_json::OwnedValue as JsonValue;
@@ -50,7 +51,6 @@ use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
 use fastrapi_runtime::tokio_runtime::spawn;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
-use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 #[derive(Clone)]
@@ -109,7 +109,6 @@ pub async fn ws_handler(
             route.dependency_overrides.as_ref(),
             &route.param_names,
         )
-        .map(Cow::into_owned)
     }) {
         Ok(plan) => plan,
         Err(error) => {
@@ -504,13 +503,16 @@ fn build_scope(
     app: &Bound<'_, PyAny>,
 ) -> Py<PyDict> {
     let scope = PyDict::new(py);
-    _ = scope.set_item("type", "websocket");
-    _ = scope.set_item("asgi", [("version", "3.0")].into_py_dict(py).ok());
-    _ = scope.set_item("http_version", "1.1");
-    _ = scope.set_item("scheme", "ws");
-    _ = scope.set_item("root_path", "");
-    _ = scope.set_item("path", parts.uri.path());
-    _ = scope.set_item("raw_path", parts.uri.path().as_bytes());
+    _ = scope.set_item(intern!(py, "type"), "websocket");
+    _ = scope.set_item(
+        intern!(py, "asgi"),
+        [("version", "3.0")].into_py_dict(py).ok(),
+    );
+    _ = scope.set_item(intern!(py, "http_version"), "1.1");
+    _ = scope.set_item(intern!(py, "scheme"), "ws");
+    _ = scope.set_item(intern!(py, "root_path"), "");
+    _ = scope.set_item(intern!(py, "path"), parts.uri.path());
+    _ = scope.set_item(intern!(py, "raw_path"), parts.uri.path().as_bytes());
     let subprotocols = parts
         .headers
         .get_all("sec-websocket-protocol")
@@ -520,10 +522,10 @@ fn build_scope(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
-    _ = scope.set_item("subprotocols", subprotocols);
+    _ = scope.set_item(intern!(py, "subprotocols"), subprotocols);
     let extensions = PyDict::new(py);
-    _ = extensions.set_item("websocket.http.response", PyDict::new(py));
-    _ = scope.set_item("extensions", extensions);
+    _ = extensions.set_item(intern!(py, "websocket.http.response"), PyDict::new(py));
+    _ = scope.set_item(intern!(py, "extensions"), extensions);
     _ = scope.set_item(
         "query_string",
         parts.uri.query().unwrap_or_default().as_bytes(),
@@ -532,19 +534,22 @@ fn build_scope(
     for (name, value) in &parts.headers {
         _ = headers.append((name.as_str().as_bytes(), value.as_bytes()));
     }
-    _ = scope.set_item("headers", headers);
+    _ = scope.set_item(intern!(py, "headers"), headers);
     let path_params = PyDict::new(py);
     if let Some(params) = input.path_params.get() {
         for (name, value) in params {
             _ = path_params.set_item(*name, *value);
         }
     }
-    _ = scope.set_item("path_params", path_params);
-    _ = scope.set_item("app", app);
+    _ = scope.set_item(intern!(py, "path_params"), path_params);
+    _ = scope.set_item(intern!(py, "app"), app);
     if let Some(connect) = parts.extensions.get::<ConnectInfo<SocketAddr>>() {
-        _ = scope.set_item("client", (connect.0.ip().to_string(), connect.0.port()));
+        _ = scope.set_item(
+            intern!(py, "client"),
+            (connect.0.ip().to_string(), connect.0.port()),
+        );
     } else {
-        _ = scope.set_item("client", py.None());
+        _ = scope.set_item(intern!(py, "client"), py.None());
     }
     scope.unbind()
 }
@@ -609,7 +614,6 @@ async fn write_loop(
     writer: &SocketWriter,
     rx_from_python: &mut mpsc::Receiver<WSMessage>,
 ) -> Result<(), SocketPumpError> {
-    // A dropped Python sender only stops this loop; reading goes on, as before.
     while let Some(msg) = rx_from_python.recv().await {
         let (frame, close) = message_frame(msg);
         writer.lock().await.write_frame(frame).await?;

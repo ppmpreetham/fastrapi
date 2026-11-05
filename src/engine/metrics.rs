@@ -1,8 +1,6 @@
 //! The Prometheus metrics support of fastrapi.
-//! It contains the global Prometheus handle, the metrics route and the `Instrumentator` Python class.
+//! It contains the global Prometheus handle and the `Instrumentator` Python class.
 
-use axum::Router;
-use axum::routing::get;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use pyo3::prelude::*;
 use std::sync::{Arc, OnceLock};
@@ -22,18 +20,6 @@ pub fn prometheus_handle() -> Arc<PrometheusHandle> {
             )
         })
         .clone()
-}
-
-pub fn init_prometheus(path: &str) -> Router {
-    let prometheus_handle = prometheus_handle();
-
-    Router::new().route(
-        path,
-        get(move || {
-            let prometheus_handle = prometheus_handle.clone();
-            async move { prometheus_handle.render() }
-        }),
-    )
 }
 
 #[pyclass(

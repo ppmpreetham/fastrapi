@@ -156,7 +156,6 @@ macro_rules! define_param_internal {
 /// Defines the HTTP parameter classes (`Query`, `Path`, `Header`, and other classes) for the Python API.
 /// It has different signatures for aliases, descriptions, constraints, and dependencies.
 macro_rules! define_param {
-    // Base parameter (Query, Path, Cookie)
     ($(#[$meta:meta])* $struct_name:ident, $py_name:literal) => {
         $crate::macros::define_param_internal!(
             $(#[$meta])*
@@ -169,7 +168,6 @@ macro_rules! define_param {
         );
     };
 
-    // Header parameter (includes convert_underscores)
     ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, header) => {
         $crate::macros::define_param_internal!(
             $(#[$meta])*
@@ -190,7 +188,6 @@ macro_rules! define_param {
         );
     };
 
-    // Body parameter (includes embed and media_type)
     ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, body) => {
         $crate::macros::define_param_internal!(
             $(#[$meta])*
@@ -215,7 +212,6 @@ macro_rules! define_param {
         );
     };
 
-    // Media type parameter (Form, File)
     ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, media: $default_media:literal) => {
         $crate::macros::define_param_internal!(
             $(#[$meta])*

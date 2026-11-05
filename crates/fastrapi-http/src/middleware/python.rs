@@ -388,16 +388,6 @@ impl PreparedMiddlewares {
     }
 }
 
-pub async fn execute_py_middleware(
-    middleware: Arc<PyMiddleware>,
-    request: Request,
-    next: Next,
-    event_loop: EventLoop,
-) -> Response {
-    let prepared = Arc::new(PreparedMiddlewares::new(&[middleware], true));
-    execute_py_middlewares(prepared, request, next, event_loop).await
-}
-
 pub async fn execute_py_middlewares(
     middlewares: Arc<PreparedMiddlewares>,
     request: Request,
@@ -493,7 +483,6 @@ pub async fn execute_py_middlewares(
         }
     }
 
-    // Starlette `(request, call_next)` middlewares
     if !middlewares.call_next.is_empty() {
         return super::call_next::run_call_next_stack(
             &middlewares.call_next,

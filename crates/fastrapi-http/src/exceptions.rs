@@ -12,8 +12,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyDictMethods, PyList, PyListMethods, PyString, PyTuple};
 use simd_json::json;
 
-// Base Errors
-
 /// A generic, FastAPI-specific error.
 #[pyclass(extends = PyRuntimeError, subclass, name = "FastAPIError")]
 pub struct PyFastAPIError;
@@ -137,8 +135,6 @@ impl PyValidationException {
     }
 }
 
-// Request/Response Validation Errors
-
 crate::macros::define_validation_subclass!(
     /// Common base class for all non-exit exceptions.
     PyRequestValidationError, "RequestValidationError");
@@ -149,8 +145,6 @@ crate::macros::define_validation_subclass!(
 crate::macros::define_validation_subclass!(
     /// Common base class for all non-exit exceptions.
     PyResponseValidationError, "ResponseValidationError");
-
-// HTTP Exceptions
 
 /// An HTTP exception you can raise in your own code to show errors to the client.
 ///
@@ -325,8 +319,6 @@ impl PyHTTPException {
         (status, headers, Json(json!({ "detail": detail }))).into_response()
     }
 }
-
-// WebSocket Exceptions
 
 /// A WebSocket exception you can raise in your own code to show errors to the client.
 ///

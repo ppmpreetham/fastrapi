@@ -20,7 +20,6 @@ fastrapi_pyutil::cached_py_import!(TYPING_GET_ORIGIN, "typing", "get_origin");
 
 #[must_use]
 pub fn extract_pydantic_schema(py: Python, model: &Bound<PyAny>, mode: &str) -> Option<JsonValue> {
-    // Pydantic v2
     if let Ok(schema_method) = model.getattr("model_json_schema") {
         let kwargs = PyDict::new(py);
         _ = kwargs.set_item("mode", mode);
@@ -75,7 +74,6 @@ pub fn extract_pydantic_schema(py: Python, model: &Bound<PyAny>, mode: &str) -> 
         }
     }
 
-    // Pydantic v1
     if let Ok(schema_method) = model.getattr("schema")
         && let Ok(result) = schema_method.call0()
         && let Ok(dict) = result.cast::<PyDict>()
@@ -181,19 +179,19 @@ pub(crate) fn schema_title(name: &str) -> String {
 
 /// Makes the default operation ID in the FastAPI format.
 /// The format is `{name}{path}_{method}`, with each `\W` character changed to `_`.
-pub(crate) fn native_operation_id(name: &str, path: &str, method: &str) -> String {
-    let joined = format!("{name}{path}");
-    let sanitized: String = joined
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("{sanitized}_{}", method.to_lowercase())
+#[must_use]
+pub fn native_operation_id(name: &str, path: &str, method: &str) -> String {
+    let mut id = String::with_capacity(name.len() + path.len() + method.len() + 1);
+    id.extend(name.chars().chain(path.chars()).map(|c| {
+        if c.is_alphanumeric() || c == '_' {
+            c
+        } else {
+            '_'
+        }
+    }));
+    id.push('_');
+    id.extend(method.chars().flat_map(char::to_lowercase));
+    id
 }
 
 pub(crate) fn python_type_to_openapi_type(
@@ -208,7 +206,6 @@ pub(crate) fn python_type_to_openapi_type(
         });
     }
 
-    // `Optional[X]` / `Union[A, B]` → anyOf, the way pydantic renders them
     if let Some(args) = fastrapi_routing::annotations::union_args(py, type_hint) {
         let has_none = args
             .iter()
@@ -226,7 +223,6 @@ pub(crate) fn python_type_to_openapi_type(
         }
     }
 
-    // `Literal["x", "y"]` → enum schema
     if is_literal(py, type_hint) {
         let values: Vec<JsonValue> = type_hint
             .getattr("__args__")
@@ -253,7 +249,6 @@ pub(crate) fn python_type_to_openapi_type(
         }
     }
 
-    // enum classes get a components schema and a `$ref`, like pydantic models
     if is_enum_class(py, type_hint) {
         let schema_name = get_schema_name(type_hint);
         schemas.entry(schema_name.clone()).or_insert_with(|| {

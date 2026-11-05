@@ -76,7 +76,6 @@ async-stream = "0.3.6"
 simd-json = "0.18.1"
 metrics-exporter-prometheus = "0.18.3"
 metrics = "0.24.6"
-axum-governor = "2.0.3"
 strum = { version = "0.28.0", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "2.0.19"

@@ -17,8 +17,9 @@ use multer::{Constraints, Error, Multipart, SizeLimit};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::str::from_utf8;
+use std::sync::Arc;
 
-fn part_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+fn part_headers(headers: &HeaderMap) -> Arc<[(String, String)]> {
     headers
         .iter()
         .map(|(name, value)| {

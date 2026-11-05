@@ -28,14 +28,6 @@ use fastrapi_http::response_convert::convert_response_by_type;
 use fastrapi_pyutil::json::py_json_response_with_dump_options;
 use fastrapi_runtime::tokio_runtime::spawn;
 
-// TODO
-// pub struct ExecutionStruct{
-//   sync: bool,
-//   args: bool,
-//   deps: bool,
-//   requirements: bool,
-// }
-
 #[inline(always)]
 fn specialized_response_conversion(
     py: Python<'_>,

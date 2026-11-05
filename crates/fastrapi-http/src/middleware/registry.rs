@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{PyAny, PyDict, PyTuple};
 
 use super::PyMiddleware;
 use super::cors::{CORSMiddleware, parse_cors_params};
@@ -37,6 +37,26 @@ pub struct MiddlewareContainer {
 }
 
 impl MiddlewareContainer {
+    pub fn register(
+        &mut self,
+        class: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: &Bound<'_, PyDict>,
+    ) -> PyResult<()> {
+        let class_name = class.getattr(pyo3::intern!(class.py(), "__name__"))?;
+        let class_name = class_name.cast::<pyo3::types::PyString>()?.to_str()?;
+        if let Some(builder) = MIDDLEWARE_REGISTRY.get(class_name) {
+            builder.parse_kwargs(kwargs, self)?;
+            self.record_layer(class_name);
+            tracing::info!("Enabled {class_name}");
+        } else {
+            let middleware = PyMiddleware::from_custom(class.py(), class, args, Some(kwargs))?;
+            tracing::info!("Enabled custom {:?} middleware", middleware.kind);
+            self.order.push(DeclaredLayer::Custom(Arc::new(middleware)));
+        }
+        Ok(())
+    }
+
     pub fn record_layer(&mut self, class_name: &str) {
         if let Some(builder) = MIDDLEWARE_REGISTRY.get(class_name) {
             self.order.push(builder.layer());

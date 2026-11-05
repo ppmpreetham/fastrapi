@@ -185,7 +185,7 @@ pub fn extract_base_response_data<'py>(
     }
 }
 
-crate::macros::define_response_class!(@base PyResponse, "Response", Py<PyAny>, 200);
+crate::macros::define_response_class!(@base PyResponse, "Response", 200);
 
 impl PyResponse {
     pub fn empty(py: Python<'_>) -> PyResult<Self> {
@@ -201,8 +201,8 @@ impl PyResponse {
         })
     }
 }
-crate::macros::define_response_class!(PyHTMLResponse, "HTMLResponse", String, 200);
-crate::macros::define_response_class!(PyJSONResponse, "JSONResponse", Py<PyAny>, 200);
+crate::macros::define_response_class!(PyHTMLResponse, "HTMLResponse", 200);
+crate::macros::define_response_class!(PyJSONResponse, "JSONResponse", 200);
 crate::macros::define_response_class!(
     /// JSON response using the orjson library to serialize data to JSON.
     ///
@@ -217,7 +217,7 @@ crate::macros::define_response_class!(
     ///
     /// **Note**: `orjson` is not included with FastAPI and must be installed
     /// separately, e.g. `pip install orjson`.
-    PyORJSONResponse, "ORJSONResponse", Py<PyAny>, 200);
+    PyORJSONResponse, "ORJSONResponse", 200);
 crate::macros::define_response_class!(
     /// JSON response using the ujson library to serialize data to JSON.
     ///
@@ -232,9 +232,9 @@ crate::macros::define_response_class!(
     ///
     /// **Note**: `ujson` is not included with FastAPI and must be installed
     /// separately, e.g. `pip install ujson`.
-    PyUJSONResponse, "UJSONResponse", Py<PyAny>, 200);
-crate::macros::define_response_class!(PyPlainTextResponse, "PlainTextResponse", String, 200);
-crate::macros::define_response_class!(PyStreamingResponse, "StreamingResponse", Py<PyAny>, 200);
+    PyUJSONResponse, "UJSONResponse", 200);
+crate::macros::define_response_class!(PyPlainTextResponse, "PlainTextResponse", 200);
+crate::macros::define_response_class!(PyStreamingResponse, "StreamingResponse", 200);
 
 #[pyclass(
     name = "RedirectResponse",

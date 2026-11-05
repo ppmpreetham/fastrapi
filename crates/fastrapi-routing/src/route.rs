@@ -24,6 +24,8 @@ pub struct ParsedParameter {
     pub name: String,
     pub name_py: Py<PyString>,
     pub external_name: String,
+    pub has_alias: bool,
+    pub header_name: Option<axum::http::HeaderName>,
     pub source: ParameterSource,
     pub annotation: Option<Py<PyAny>>,
     pub default_value: Option<Py<PyAny>>,

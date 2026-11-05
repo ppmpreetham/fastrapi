@@ -8,6 +8,7 @@ use pyo3::Bound;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
 use std::cmp::min;
+use std::sync::Arc;
 
 fastrapi_pyutil::cached_py_import!(TEMPFILE_MODULE, "tempfile");
 fastrapi_pyutil::cached_py_import!(IO_MODULE, "io");
@@ -57,7 +58,7 @@ pub struct PyUploadFile {
     cursor: usize,
     file_obj: Option<Py<PyAny>>,
     headers: Option<Py<PyAny>>,
-    raw_headers: Vec<(String, String)>,
+    raw_headers: Arc<[(String, String)]>,
 }
 
 impl PyUploadFile {
@@ -65,7 +66,7 @@ impl PyUploadFile {
         py: Python<'_>,
         filename: Option<String>,
         content_type: Option<String>,
-        raw_headers: Vec<(String, String)>,
+        raw_headers: Arc<[(String, String)]>,
         file_content: Bytes,
     ) -> Self {
         let size = file_content.len();
@@ -134,7 +135,7 @@ impl PyUploadFile {
             cursor: 0,
             file_obj: (!file.is_none(py)).then_some(file),
             headers: headers.filter(|headers| !headers.is_none(py)),
-            raw_headers: Vec::new(),
+            raw_headers: Arc::from([]),
         })
     }
 

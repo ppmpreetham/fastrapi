@@ -12,12 +12,23 @@ use fastrapi_routing::dependencies::{
 };
 use fastrapi_routing::route::{RouteEntry, RouteHandler, WebSocketEntry};
 use pyo3::Py;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use simd_json::OwnedValue as JsonValue;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub(crate) fn ensure_unfrozen(frozen: &AtomicBool) -> PyResult<()> {
+    if frozen.load(Ordering::Acquire) {
+        return Err(PyRuntimeError::new_err(
+            "Cannot modify router after it has been frozen",
+        ));
+    }
+    Ok(())
+}
 
 fn merge_responses(py: Python<'_>, layers: &[Option<&Py<PyAny>>]) -> Option<Py<PyAny>> {
     let dicts: Vec<Bound<'_, PyDict>> = layers
@@ -114,6 +125,26 @@ impl PyAPIRouter {
 
     pub fn mark_frozen(&self) {
         self.frozen.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn ensure_mutable(&self) -> PyResult<()> {
+        ensure_unfrozen(&self.frozen)
+    }
+
+    pub(crate) fn touch(&self) {
+        self.revision.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn tree_revision(&self, py: Python<'_>) -> u64 {
+        let mut total = self.revision.load(Ordering::Acquire);
+        for sub in self.sub_routers.lock().iter() {
+            if let Ok(router) = sub.router.bind(py).try_borrow() {
+                total = total
+                    .wrapping_mul(31)
+                    .wrapping_add(router.tree_revision(py));
+            }
+        }
+        total
     }
     pub fn freeze(&self, py: Python<'_>) -> PyResult<()> {
         if self.frozen.load(Ordering::Acquire) && self.cached_flat.lock().is_some() {
@@ -235,12 +266,13 @@ pub fn flatten_router(
             router.dependencies.as_ref(),
         ));
 
+        let mut chain_cache: HashMap<Vec<String>, Vec<DependencyNode>> = HashMap::new();
         let chain_security = if chain_deps.is_empty() {
             Vec::new()
         } else {
             super::init::security_requirements(
                 py,
-                &parse_external_dependencies(py, &chain_deps, &[])?,
+                chain_nodes(py, &chain_deps, Vec::new(), &mut chain_cache)?,
             )
         };
         let route_entries = router.route_entries.lock().clone();
@@ -278,7 +310,8 @@ pub fn flatten_router(
             }
 
             if !chain_deps.is_empty() {
-                entry.handler = prepend_chain_dependencies(py, &entry.handler, &chain_deps)?;
+                entry.handler =
+                    prepend_chain_dependencies(py, &entry.handler, &chain_deps, &mut chain_cache)?;
                 let mut security = chain_security.clone();
                 security.append(&mut entry.security);
                 entry.security = security;
@@ -287,15 +320,15 @@ pub fn flatten_router(
         }
 
         let ws_entries = router.websocket_entries.lock().clone();
-        let ws_chain = if chain_deps.is_empty() || ws_entries.is_empty() {
-            Vec::new()
+        let ws_chain: &[DependencyNode] = if chain_deps.is_empty() || ws_entries.is_empty() {
+            &[]
         } else {
-            parse_external_dependencies(py, &chain_deps, &[])?
+            chain_nodes(py, &chain_deps, Vec::new(), &mut chain_cache)?
         };
         ws_routes.extend(ws_entries.into_iter().map(|mut ws| {
             ws.path = join_path(&full_prefix, &ws.path);
             if !ws_chain.is_empty() {
-                ws.deps = prepend_nodes(ws.deps.to_vec(), &ws_chain).into();
+                ws.deps = prepend_nodes(ws.deps.to_vec(), ws_chain).into();
             }
             ws
         }));
@@ -372,10 +405,27 @@ fn prepend_nodes(
     merged
 }
 
+fn chain_nodes<'c>(
+    py: Python<'_>,
+    chain: &[Py<pyo3::PyAny>],
+    path_param_names: Vec<String>,
+    cache: &'c mut HashMap<Vec<String>, Vec<DependencyNode>>,
+) -> PyResult<&'c [DependencyNode]> {
+    let nodes = match cache.entry(path_param_names) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            let nodes = parse_external_dependencies(py, chain, entry.key())?;
+            entry.insert(nodes)
+        }
+    };
+    Ok(nodes.as_slice())
+}
+
 fn prepend_chain_dependencies(
     py: Python<'_>,
     handler: &Arc<RouteHandler>,
     chain: &[Py<pyo3::PyAny>],
+    cache: &mut HashMap<Vec<String>, Vec<DependencyNode>>,
 ) -> PyResult<Arc<RouteHandler>> {
     let path_param_names: Vec<String> = handler
         .payload
@@ -384,13 +434,13 @@ fn prepend_chain_dependencies(
         .map(ToString::to_string)
         .collect();
 
-    let externals = parse_external_dependencies(py, chain, &path_param_names)?;
+    let externals = chain_nodes(py, chain, path_param_names, cache)?;
     if externals.is_empty() {
         return Ok(handler.clone());
     }
 
     let mut merged = <RouteHandler>::clone(handler);
-    merged.payload.dependencies = prepend_nodes(merged.payload.dependencies, &externals);
+    merged.payload.dependencies = prepend_nodes(merged.payload.dependencies, externals);
 
     merged.payload.needs_kwargs = true;
     merged.payload.refresh_dependency_flags();

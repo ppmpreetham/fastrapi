@@ -3,20 +3,19 @@
 //! It also selects the serialization hint for the return value.
 
 use super::pydantic::is_pydantic_model;
+use crate::annotations::{ConnectionKind, connection_kind};
 use crate::dependencies::{self, DependencyNode};
 use crate::params;
 use crate::route::{ParsedParameter, PydanticValidator};
 use fastrapi_core::params::ParameterSource;
-use fastrapi_http::request::PyHTTPConnection;
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_http::responses::{
     PyFileResponse, PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse,
 };
-use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_pyutil::imports::INSPECT;
 use fastrapi_pyutil::json::SerializationHint;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyString, PyTuple, PyType};
+use pyo3::types::{PyAny, PyDict, PyString, PyTuple};
 use pyo3::{Bound, Py, intern};
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -35,26 +34,7 @@ pub struct ParsedRouteMetadata {
 }
 
 fn is_request_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
-    let Ok(class) = annotation.cast::<PyType>() else {
-        return false;
-    };
-    if class.is_subclass_of::<PyWebSocket>().unwrap_or(false) {
-        return false;
-    }
-    if class.is_subclass_of::<PyHTTPConnection>().unwrap_or(false) {
-        return true;
-    }
-    let starlette_class = |module: &str, name: &str| {
-        py.import(module)
-            .and_then(|module| module.getattr(name))
-            .ok()
-            .and_then(|class| class.cast_into::<PyType>().ok())
-    };
-    let is_starlette_connection = starlette_class("starlette.requests", "HTTPConnection")
-        .is_some_and(|base| class.is_subclass(&base).unwrap_or(false));
-    let is_starlette_websocket = starlette_class("starlette.websockets", "WebSocket")
-        .is_some_and(|base| class.is_subclass(&base).unwrap_or(false));
-    is_starlette_connection && !is_starlette_websocket
+    connection_kind(py, annotation) == Some(ConnectionKind::Request)
 }
 
 fn is_coroutine_callable(py: Python<'_>, func: &Bound<'_, PyAny>) -> bool {
@@ -219,17 +199,7 @@ pub struct WebSocketSignature {
 }
 
 fn is_websocket_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
-    let annotation = params::base_annotation(py, annotation);
-    let Ok(class) = annotation.cast::<PyType>() else {
-        return false;
-    };
-    class.is_subclass_of::<PyWebSocket>().unwrap_or(false)
-        || py
-            .import("starlette.websockets")
-            .and_then(|module| module.getattr("WebSocket"))
-            .ok()
-            .and_then(|base| base.cast_into::<PyType>().ok())
-            .is_some_and(|base| class.is_subclass(&base).unwrap_or(false))
+    connection_kind(py, annotation) == Some(ConnectionKind::WebSocket)
 }
 
 pub fn parse_websocket_signature(

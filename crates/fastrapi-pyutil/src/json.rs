@@ -29,6 +29,12 @@ thread_local! {
 
 crate::cached_py_import!(ENUM_TYPE, "enum", "Enum");
 crate::cached_py_import!(DATACLASSES_ASDICT, "dataclasses", "asdict");
+crate::cached_py_import!(GENERATOR_TYPE, "types", "GeneratorType");
+crate::cached_py_import!(DEQUE_TYPE, "collections", "deque");
+crate::cached_py_import!(DECIMAL_TYPE, "decimal", "Decimal");
+crate::cached_py_import!(UUID_TYPE, "uuid", "UUID");
+crate::cached_py_import!(PURE_PATH_TYPE, "pathlib", "PurePath");
+crate::cached_py_import!(IP_ADDRESS_BASE, "ipaddress", "_IPAddressBase");
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SerializationHint {
@@ -280,7 +286,7 @@ pub enum PyJsonKind<'a, 'py> {
     MemoryView,
     PydanticModel,
     Dataclass,
-    HasIsoformat, // date / time / datetime
+    HasIsoformat,
     Timedelta,
     UuidOrDecimal,
     Decimal,
@@ -328,9 +334,8 @@ fn classify_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
 }
 
 fn probe_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
-    if let Ok(type_obj) = value.get_type().name()
-        && matches!(type_obj.to_str().unwrap_or_default(), "generator" | "deque")
-    {
+    let instance_of = |class: &crate::lazy::LazyPyAttr| class.is_instance(py, value);
+    if instance_of(&GENERATOR_TYPE) || instance_of(&DEQUE_TYPE) {
         return ObjKind::Iterable;
     }
 
@@ -362,20 +367,17 @@ fn probe_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
         return ObjKind::Enum;
     }
 
-    if let Ok(type_obj) = value.get_type().name() {
-        let type_name = type_obj.to_str().unwrap_or_default();
-        if type_name == "Decimal" {
-            return ObjKind::Decimal;
-        }
-        if type_name == "UUID" {
-            return ObjKind::UuidOrDecimal;
-        }
-        if type_name.ends_with("Path") {
-            return ObjKind::Path;
-        }
-        if type_name.starts_with("IPv") {
-            return ObjKind::IpAddress;
-        }
+    if instance_of(&DECIMAL_TYPE) {
+        return ObjKind::Decimal;
+    }
+    if instance_of(&UUID_TYPE) {
+        return ObjKind::UuidOrDecimal;
+    }
+    if instance_of(&PURE_PATH_TYPE) {
+        return ObjKind::Path;
+    }
+    if instance_of(&IP_ADDRESS_BASE) {
+        return ObjKind::IpAddress;
     }
 
     let is_pydantic_type = value
@@ -724,12 +726,10 @@ pub fn py_json_response(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Ax
     py_json_response_with_status(py, StatusCode::OK, value)
 }
 
-// for local reads (fast, non-Send for sync blocks like spawn_blocking)
 pub fn local_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::LocalGuard<'_> {
     map.guard()
 }
 
-// for async/Send (in handlers)
 pub fn owned_guard<K, V, S>(map: &papaya::HashMap<K, V, S>) -> papaya::OwnedGuard<'_> {
     map.owned_guard()
 }
@@ -741,7 +741,7 @@ pub fn json_to_py_object(py: Python<'_>, value: &Value) -> Py<PyAny> {
     json_value_to_py(py, value).map_or_else(|_| py.None(), Bound::unbind)
 }
 
-fn json_value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
+pub fn json_value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
     Ok(match value {
         Value::Static(StaticNode::Null) => py.None().into_bound(py),
         Value::Static(StaticNode::Bool(flag)) => PyBool::new(py, *flag).to_owned().into_any(),

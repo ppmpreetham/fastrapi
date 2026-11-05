@@ -98,7 +98,13 @@ impl FormEntry {
             } => {
                 let file = Py::new(
                     py,
-                    PyUploadFile::from_bytes(py, Some(filename), content_type, headers, content),
+                    PyUploadFile::from_bytes(
+                        py,
+                        Some(filename),
+                        content_type,
+                        headers.into(),
+                        content,
+                    ),
                 )?;
                 (name, file.into_any())
             }

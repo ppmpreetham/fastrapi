@@ -404,7 +404,6 @@ pub fn build_paths_from_routes(
             continue;
         }
 
-        // documented paths never carry starlette convertors: `{p:int}` is `{p}`
         let path = strip_path_convertors(&route.path);
 
         let handler = route.handler.clone();
@@ -509,8 +508,6 @@ pub fn build_paths_from_routes(
                     ParameterSource::Body | ParameterSource::BackgroundTasks => return None,
                 };
 
-                // the `Query()`/`Path()`/... marker instance carries the fastapi
-                // per-parameter metadata; plain params have no marker and default.
                 let marker = param.param_object.as_ref().map(|marker| marker.bind(py));
 
                 let include_in_schema = marker
@@ -526,7 +523,6 @@ pub fn build_paths_from_routes(
                     |annotation| python_type_to_openapi_type(py, annotation.bind(py), schemas),
                 );
 
-                // fastapi puts the `examples=[...]` list on the parameter's json schema
                 if let Some(examples) = marker
                     .and_then(|marker| marker.getattr(intern!(py, "examples")).ok())
                     .filter(|value| !value.is_none())
@@ -535,9 +531,6 @@ pub fn build_paths_from_routes(
                     obj.insert("examples".to_string(), py_any_to_json(py, &examples));
                 }
 
-                // pydantic derives a `title` from the parameter name and keeps
-                // explicit non-`None` defaults visible in the schema; `$ref`
-                // schemas (pydantic models, enums) stay untouched.
                 let is_ref = schema
                     .as_object()
                     .is_some_and(|obj| obj.contains_key("$ref"));
@@ -663,7 +656,6 @@ pub fn build_paths_from_routes(
             },
         );
 
-        // 422 for validation errors, documented with the shared component schemas
         if !handler.validation.param_validators.is_empty() || !all_params.is_empty() {
             schemas
                 .entry("HTTPValidationError".to_string())
@@ -762,7 +754,6 @@ pub fn build_paths_from_routes(
             deep_merge_json(op_resp, processed);
         }
 
-        // Callbacks handling
         if let Some(callbacks_val) = &route.callbacks
             && let Some(op_obj) = operation_val.as_object_mut()
         {

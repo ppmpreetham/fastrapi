@@ -471,21 +471,28 @@ fn raw_value_for_parameter<'a>(
     param: &ParsedParameter,
     request_input: &'a RequestInput<'_>,
 ) -> Option<Cow<'a, str>> {
+    let alias = param.has_alias.then_some(param.name.as_str());
     match param.source {
         ParameterSource::Path => request_input
             .get_path_param(&param.external_name)
-            .or_else(|| request_input.get_path_param(&param.name))
+            .or_else(|| alias.and_then(|name| request_input.get_path_param(name)))
             .map(|value| percent_decode_str(value).decode_utf8_lossy()),
         ParameterSource::Query => request_input
             .get_query_param(&param.external_name)
-            .or_else(|| request_input.get_query_param(&param.name)),
-        ParameterSource::Header => request_input
-            .get_header(&param.external_name)
-            .or_else(|| request_input.get_header(&param.name))
+            .or_else(|| alias.and_then(|name| request_input.get_query_param(name)))
+            .map(Cow::Borrowed),
+        ParameterSource::Header => param
+            .header_name
+            .as_ref()
+            .map_or_else(
+                || request_input.get_header(&param.external_name),
+                |name| request_input.get_header_by_name(name),
+            )
+            .or_else(|| alias.and_then(|name| request_input.get_header(name)))
             .map(Cow::Borrowed),
         ParameterSource::Cookie => request_input
             .get_cookie(&param.external_name)
-            .or_else(|| request_input.get_cookie(&param.name))
+            .or_else(|| alias.and_then(|name| request_input.get_cookie(name)))
             .map(unquote_cookie),
         ParameterSource::Body | ParameterSource::BackgroundTasks => None,
     }
@@ -495,18 +502,19 @@ fn raw_values_for_list<'a>(
     param: &ParsedParameter,
     request_input: &'a RequestInput<'_>,
 ) -> SmallVec<[Cow<'a, str>; 4]> {
-    let matches_name = |key: &str| key == param.external_name || key == param.name;
+    let matches_name =
+        |key: &str| key == param.external_name || (param.has_alias && key == param.name);
 
     match param.source {
         ParameterSource::Query => request_input
             .get_all_query_params()
             .iter()
             .filter(|(k, _)| matches_name(k))
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| Cow::Borrowed(&**v))
             .collect(),
         ParameterSource::Header => {
             let values = request_input.get_header_values(&param.external_name);
-            if values.is_empty() {
+            if values.is_empty() && param.has_alias {
                 request_input.get_header_values(&param.name)
             } else {
                 values
@@ -784,7 +792,12 @@ fn apply_body_and_validation(
                 let param = &handler.payload.parsed_params[idx];
                 let values = form
                     .get(param.external_name.as_str())
-                    .or_else(|| form.get(param.name.as_str()))
+                    .or_else(|| {
+                        param
+                            .has_alias
+                            .then(|| form.get(param.name.as_str()))
+                            .flatten()
+                    })
                     .filter(|values| {
                         param.is_list
                             || !matches!(values.last(), Some(BodyField::Text(text)) if text.is_empty())
@@ -808,13 +821,11 @@ fn apply_body_and_validation(
                     continue;
                 };
 
-                let converted: Result<Vec<Py<PyAny>>, Response> = values
-                    .iter()
-                    .map(|v| form_field_to_py(py, v, param))
-                    .collect();
-                let converted = converted?;
-
                 let value: Py<PyAny> = if param.is_list {
+                    let converted = values
+                        .iter()
+                        .map(|v| form_field_to_py(py, v, param))
+                        .collect::<Result<SmallVec<[Py<PyAny>; 4]>, Response>>()?;
                     PyList::new(py, converted)
                         .map_err(|err| {
                             err.print(py);
@@ -823,10 +834,8 @@ fn apply_body_and_validation(
                         .into_any()
                         .unbind()
                 } else {
-                    let value = converted
-                        .into_iter()
-                        .last()
-                        .expect("form entry is never empty");
+                    let last = values.last().expect("form entry is never empty");
+                    let value = form_field_to_py(py, last, param)?;
                     validate_scalar_constraints(py, param, value.bind(py))?;
                     value
                 };

@@ -464,7 +464,6 @@ fn schema_has_nested_models(schema: &CoreSchema) -> bool {
                 lax_schema,
                 strict_schema,
             } => walk(lax_schema, inside) || walk(strict_schema, inside),
-            // conservative: refs may point at models
             CoreSchema::DefinitionRef { .. } => inside_struct,
             _ => false,
         }
@@ -623,7 +622,6 @@ fn kernel_error_response(py: Python<'_>, err: &ValidationError) -> Response {
         if item.set_item("type", detail.r#type.as_str()).is_err()
             || item
                 .set_item(
-                    // fastapi roots body errors at `["body", ...]`
                     "loc",
                     once(PyString::new(py, "body").unbind().into_any())
                         .chain(detail.loc.iter().map(|loc_item| match loc_item {
@@ -664,7 +662,6 @@ fn kernel_error_response(py: Python<'_>, err: &ValidationError) -> Response {
                 return fallback_response();
             }
         }
-        // fastapi drops pydantic's `url` field from the wire format
         if detail_list.append(item).is_err() {
             return fallback_response();
         }

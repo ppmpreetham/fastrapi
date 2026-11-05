@@ -2,8 +2,8 @@
 //! It gives the path parameters, query parameters, cookies, and headers.
 //! It parses the query parameters and cookies only when the code reads them.
 
-use axum::http::HeaderMap;
 use axum::http::header::COOKIE;
+use axum::http::{HeaderMap, HeaderName};
 use cookie::Cookie;
 use fastrapi_runtime::py_bridge::EventLoop;
 use smallvec::SmallVec;
@@ -39,11 +39,11 @@ impl<'a> RequestInput<'a> {
             .get_or_init(|| form_urlencoded::parse(self.query_string.as_bytes()).collect())
     }
 
-    pub fn get_query_param(&self, key: &str) -> Option<Cow<'a, str>> {
+    pub fn get_query_param(&self, key: &str) -> Option<&str> {
         self.get_all_query_params()
             .iter()
             .rfind(|(k, _)| k == key)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| &**v)
     }
 
     pub fn get_all_cookies(&self) -> &SmallVec<[(&'a str, &'a str); 8]> {
@@ -67,6 +67,10 @@ impl<'a> RequestInput<'a> {
     }
 
     pub fn get_header(&self, key: &str) -> Option<&'a str> {
+        self.headers.get(key).and_then(|v| v.to_str().ok())
+    }
+
+    pub fn get_header_by_name(&self, key: &HeaderName) -> Option<&'a str> {
         self.headers.get(key).and_then(|v| v.to_str().ok())
     }
 

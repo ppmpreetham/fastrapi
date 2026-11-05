@@ -8,22 +8,19 @@ use crate::ffi::decorators;
 use crate::ffi::decorators::{PyAPIRouter, collect_router_routes};
 use ahash::AHasher;
 use fastrapi_core::method::HttpMethod;
-use fastrapi_http::middleware::{
-    DeclaredLayer, MIDDLEWARE_REGISTRY, MiddlewareContainer, PyMiddleware,
-};
+use fastrapi_http::middleware::{MiddlewareContainer, PyMiddleware};
 use fastrapi_http::staticfiles::PyStaticFiles;
 use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
 use fastrapi_pyutil::imports::STARLETTE_STATE;
 use parking_lot::Mutex;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyCFunction, PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{PyAny, PyCFunction, PyDict, PyList, PyTuple};
 use pyo3::{Bound, intern};
 use std::env::var_os;
 use std::hash::Hasher;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use tracing::info;
 
 fn is_startup_event(event_type: &str) -> PyResult<bool> {
@@ -311,10 +308,6 @@ impl FastrAPI {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let class_name =
-            middleware_class.getattr(pyo3::intern!(middleware_class.py(), "__name__"))?;
-        let class_name = class_name.cast::<PyString>()?.to_str()?;
-
         let empty_dict;
         let opts = if let Some(dict) = kwargs {
             dict
@@ -322,20 +315,7 @@ impl FastrAPI {
             empty_dict = PyDict::new(middleware_class.py());
             &empty_dict
         };
-
-        if let Some(builder) = MIDDLEWARE_REGISTRY.get(class_name) {
-            builder.parse_kwargs(opts, &mut self.middlewares)?;
-            self.middlewares.record_layer(class_name);
-            info!("Enabled {class_name}");
-        } else {
-            let py = middleware_class.py();
-            let mw = PyMiddleware::from_custom(py, middleware_class, args, Some(opts))?;
-            info!("Enabled custom {:?} middleware", mw.kind);
-            self.middlewares
-                .order
-                .push(DeclaredLayer::Custom(Arc::new(mw)));
-        }
-        Ok(())
+        self.middlewares.register(middleware_class, args, opts)
     }
 
     #[pyo3(signature = (path))]
@@ -453,7 +433,6 @@ impl FastrAPI {
         self.push_event_handler(py, startup, func)
     }
 
-    // This method is the same as `starlette.applications.host`.
     #[pyo3(signature = (host, app, *, name=None))]
     fn host(
         &mut self,
@@ -477,7 +456,6 @@ impl FastrAPI {
         Ok(())
     }
 
-    // This method is the same as `fastapi.FastAPI.add_exception_handler`.
     fn add_exception_handler(
         &self,
         py: Python<'_>,
@@ -492,7 +470,6 @@ impl FastrAPI {
         Ok(())
     }
 
-    // This method is the same as `fastapi.FastAPI.add_api_route`.
     #[pyo3(signature = (path, endpoint, *, methods=None, **kwargs))]
     fn add_api_route(
         &self,
@@ -633,7 +610,7 @@ impl FastrAPI {
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let py = args.py();
-            let func: Py<PyAny> = args.get_item(0)?.unbind(); // 0th item is the function being decorated
+            let func: Py<PyAny> = args.get_item(0)?.unbind();
             let py_middleware = PyMiddleware::new(py, func.clone_ref(py));
             slf.borrow_mut(py)
                 .middlewares
@@ -787,9 +764,7 @@ impl FastrAPI {
         }
 
         let spec = self.openapi_spec(py)?;
-        let json_str = simd_json::to_string(&spec).unwrap_or_else(|_| "{}".to_string());
-        let json_module = py.import(pyo3::intern!(py, "json"))?;
-        let dict = json_module.call_method1(pyo3::intern!(py, "loads"), (json_str,))?;
+        let dict = fastrapi_pyutil::json::json_value_to_py(py, &spec)?;
         *self.openapi_cache.lock() = Some(super::config::OpenApiCacheEntry {
             fingerprint,
             openapi_version: self.openapi_version.clone(),
@@ -891,10 +866,10 @@ impl FastrAPI {
             h.write_u8(0xFF);
             return;
         };
+        h.write_u64(router.tree_revision(py));
         h.write_usize(router.route_entries.lock().len());
         h.write_usize(router.websocket_entries.lock().len());
         h.write_usize(router.sub_routers.lock().len());
-        h.write_u8(u8::from(router.frozen.load(Ordering::Relaxed)));
         h.write_usize(self.static_mounts.len());
         h.write_usize(self.frontend_mounts.len());
         h.write_usize(self.app_mounts.len());

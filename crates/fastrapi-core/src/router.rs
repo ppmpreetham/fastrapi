@@ -112,7 +112,6 @@ impl<H> FrozenRouter<H> {
         }
         let matched = self.param_routes[idx].as_ref()?.at(path).ok()?;
         let target = matched.value;
-        // rejects the match, the way starlette's regex would
         if !convertors_match(&target.convertors, &matched.params) || !host_allowed(target) {
             return None;
         }

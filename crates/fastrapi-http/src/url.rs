@@ -597,7 +597,7 @@ impl PyURL {
     ) -> PyResult<Bound<'a, Self>> {
         let py = slf.py();
         let existing = slf.borrow().components()?.query.unwrap_or_default();
-        let mut pairs: Vec<(String, String)> = parse_qsl_pairs(py, &existing);
+        let mut pairs: Vec<(String, String)> = parse_qsl_pairs(&existing);
         if let Some(kwargs) = kwargs {
             let updates = urlencode_pairs(kwargs)?;
             let keys: Vec<&str> = updates.iter().map(|(k, _)| k.as_str()).collect();
@@ -630,7 +630,7 @@ impl PyURL {
         let py = slf.py();
         let existing = slf.borrow().components()?.query.unwrap_or_default();
         let remove: Vec<String> = keys.iter().map(|k| k.extract()).collect::<PyResult<_>>()?;
-        let pairs: Vec<(String, String)> = parse_qsl_pairs(py, &existing)
+        let pairs: Vec<(String, String)> = parse_qsl_pairs(&existing)
             .into_iter()
             .filter(|(key, _)| !remove.contains(key))
             .collect();
@@ -667,7 +667,7 @@ impl PyURL {
 }
 
 /// Parses a query string, as `urllib.parse.parse_qsl` with `keep_blank_values=True` does.
-fn parse_qsl_pairs(_py: Python<'_>, query: &str) -> Vec<(String, String)> {
+fn parse_qsl_pairs(query: &str) -> Vec<(String, String)> {
     form_urlencoded::parse(query.as_bytes())
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect()

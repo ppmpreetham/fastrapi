@@ -12,7 +12,7 @@ pub fn is_inspect_empty(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
 }
 
 pub fn is_ellipsis(value: &Bound<'_, PyAny>) -> bool {
-    value.get_type().name().is_ok_and(|name| name == "ellipsis")
+    value.is(value.py().Ellipsis())
 }
 
 pub fn annotation_name(py: Python<'_>, annotation: &Py<PyAny>) -> Option<String> {
@@ -46,7 +46,7 @@ pub fn is_background_tasks_type(name: &str) -> bool {
 }
 
 #[must_use]
-pub fn base_annotation<'py>(_py: Python<'py>, annotation: &Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+pub fn base_annotation<'py>(annotation: &Bound<'py, PyAny>) -> Bound<'py, PyAny> {
     if annotation.hasattr("__metadata__").unwrap_or(false)
         && let Ok(args) = annotation.getattr("__args__")
         && let Ok(first) = args.get_item(0)
@@ -61,7 +61,6 @@ pub fn list_element_annotation<'py>(
     py: Python<'py>,
     annotation: &Bound<'py, PyAny>,
 ) -> (bool, Option<Bound<'py, PyAny>>) {
-    // `Optional[List[int]]` and `Union[List[int], None]` behave as list params.
     let annotation = strip_optional(py, annotation).unwrap_or_else(|| annotation.clone());
     let is_type_named = |obj: &Bound<'py, PyAny>, name: &str| {
         obj.get_type()

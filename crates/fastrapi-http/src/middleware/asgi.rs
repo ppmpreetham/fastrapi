@@ -42,7 +42,6 @@ pub struct PyDownstreamASGI {
 )]
 pub struct PyScopeDownstream;
 
-// Gives the buffered request body one time, then gives `http.disconnect` at each call after that.
 #[pyclass(
     frozen,
     name = "Receive",
@@ -53,7 +52,6 @@ pub struct PyAsgiReceive {
     body: Arc<Mutex<Option<bytes::Bytes>>>,
 }
 
-// Collects the `http.response.*` messages that the middleware chain sends.
 #[pyclass(
     frozen,
     name = "Send",
@@ -187,7 +185,9 @@ async fn send_response(
     resp: Response,
 ) -> PyResult<()> {
     let (parts, body) = resp.into_parts();
-    let body_bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
+    let body_bytes = to_bytes(body, usize::MAX)
+        .await
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
 
     let start = Python::attach(|py| -> PyResult<Py<PyAny>> {
         let msg = PyDict::new(py);
@@ -285,7 +285,9 @@ pub async fn run_asgi_request(
     max_body_size: usize,
 ) -> Response {
     let (parts, body) = req.into_parts();
-    let body_bytes = to_bytes(body, max_body_size).await.unwrap_or_default();
+    let Ok(body_bytes) = to_bytes(body, max_body_size).await else {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response();
+    };
     let (send_tx, mut send_rx) = channel::<Py<PyAny>>(16);
     let close_tx = send_tx.clone();
 

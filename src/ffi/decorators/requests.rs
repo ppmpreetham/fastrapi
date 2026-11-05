@@ -1,9 +1,6 @@
 //! The HTTP method decorators of `APIRouter`: `get`, `post`, `put`, `delete`, `patch`, `options` and `head`.
 //! The `generate_http_methods!` macro generates these methods.
 
-// here lies all the decoraters signatures for get, put, patch, post, delete, options, head
-// once upon a time, here lied all the methods for the above, but they were later abstracted away by heros called macros
-
 use super::router::PyAPIRouter;
 use pyo3::prelude::Python;
 

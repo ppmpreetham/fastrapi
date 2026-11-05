@@ -156,7 +156,6 @@ impl PyFormData {
         })
     }
 
-    // Closes each `UploadFile` value, as the asynchronous starlette `close` method does.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let uploads: Vec<Py<PyAny>> = self
             .items
@@ -164,14 +163,12 @@ impl PyFormData {
             .filter(|(_, value)| Self::is_upload(value.bind(py)))
             .map(|(_, value)| value.clone())
             .collect();
-        // TaskLocals must be captured on the calling thread, where the loop runs.
         let locals = py_bridge::get_current_locals(py).ok();
         py_bridge::future_into_py(py, async move {
             for upload in uploads {
                 let awaitable = Python::attach(|py| -> PyResult<Option<Py<PyAny>>> {
                     let value = upload.bind(py);
                     if value.cast::<PyUploadFile>().is_ok() {
-                        // Our UploadFile.close() is eager: the call closes.
                         value.call_method0("close")?;
                         Ok(None)
                     } else {
