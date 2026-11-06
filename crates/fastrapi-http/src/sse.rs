@@ -51,12 +51,13 @@ impl PyEventSourceResponse {
         py: Python<'_>,
         content: Py<PyAny>,
         status_code: u16,
-        headers: Option<Py<PyDict>>,
+        headers: Option<crate::response_api::HeadersArg>,
         media_type: Option<String>,
         background: Option<Py<PyAny>>,
         ping: Option<f64>,
         sep: String,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let headers = headers.map(|headers| headers.0);
         if ping.is_some_and(|value| value < 0.0) {
             return Err(PyValueError::new_err("ping must be non-negative"));
         }

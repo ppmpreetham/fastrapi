@@ -2,6 +2,7 @@
 //! It also finds the kind of a response object and validates the response model.
 
 use super::response_file::guess_mime;
+use crate::response_api::HeadersArg;
 use axum::http::StatusCode;
 use papaya::HashMap;
 use pyo3::prelude::*;
@@ -260,7 +261,7 @@ impl PyFileResponse {
         py: Python<'_>,
         path: &Bound<'_, PyAny>,
         status_code: u16,
-        headers: Option<Bound<'_, PyDict>>,
+        headers: Option<HeadersArg>,
         media_type: Option<String>,
         background: Option<Py<PyAny>>,
         filename: Option<String>,
@@ -272,6 +273,7 @@ impl PyFileResponse {
         method: Option<&str>,
         content_disposition_type: String,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let headers = headers.map(|headers| headers.0.into_bound(py));
         let path = py
             .import("os")?
             .getattr(pyo3::intern!(py, "fspath"))?
@@ -335,10 +337,11 @@ impl PyRedirectResponse {
         py: Python<'_>,
         url: &Bound<'_, PyAny>,
         status_code: u16,
-        headers: Option<Py<PyDict>>,
+        headers: Option<HeadersArg>,
         background: Option<Py<PyAny>>,
     ) -> PyResult<PyClassInitializer<Self>> {
         let url: String = url.str()?.extract()?;
+        let headers = headers.map(|headers| headers.0);
         let body = PyBytes::new(py, b"").into_any().unbind();
         let raw_headers = crate::response_api::init_headers(
             py,

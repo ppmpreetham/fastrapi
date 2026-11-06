@@ -7,6 +7,26 @@ use fastrapi_pyutil::imports::SIMPLE_COOKIE;
 use pyo3::exceptions::{PyAssertionError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::{Borrowed, intern};
+
+pub struct HeadersArg(pub Py<PyDict>);
+
+impl FromPyObject<'_, '_> for HeadersArg {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+        if let Ok(dict) = obj.cast::<PyDict>() {
+            return Ok(Self(dict.to_owned().unbind()));
+        }
+        let py = obj.py();
+        let dict = PyDict::new(py);
+        for item in obj.call_method0(intern!(py, "items"))?.try_iter()? {
+            let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
+            dict.set_item(key, value)?;
+        }
+        Ok(Self(dict.unbind()))
+    }
+}
 
 fastrapi_pyutil::cached_py_import!(JSON_DUMPS, "json", "dumps");
 fastrapi_pyutil::cached_py_import!(

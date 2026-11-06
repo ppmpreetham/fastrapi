@@ -54,11 +54,11 @@ macro_rules! define_response_class {
                 py: pyo3::Python<'_>,
                 content: Option<pyo3::Py<pyo3::PyAny>>,
                 status_code: u16,
-                headers: Option<pyo3::prelude::Py<pyo3::types::PyDict>>,
+                headers: Option<$crate::response_api::HeadersArg>,
                 media_type: Option<String>,
                 background: Option<pyo3::prelude::Py<pyo3::prelude::PyAny>>,
             ) -> pyo3::PyResult<Self> {
-                $crate::response_api::response_parts(py, $py_name, content, status_code, headers, media_type, background)
+                $crate::response_api::response_parts(py, $py_name, content, status_code, headers.map(|headers| headers.0), media_type, background)
                     .map(Self::from_response_parts)
             }
         }
@@ -74,11 +74,11 @@ macro_rules! define_response_class {
                 py: pyo3::Python<'_>,
                 content: Option<pyo3::Py<pyo3::PyAny>>,
                 status_code: u16,
-                headers: Option<pyo3::prelude::Py<pyo3::types::PyDict>>,
+                headers: Option<$crate::response_api::HeadersArg>,
                 media_type: Option<String>,
                 background: Option<pyo3::prelude::Py<pyo3::prelude::PyAny>>,
             ) -> pyo3::PyResult<pyo3::PyClassInitializer<Self>> {
-                let parts = $crate::response_api::response_parts(py, $py_name, content, status_code, headers, media_type, background)?;
+                let parts = $crate::response_api::response_parts(py, $py_name, content, status_code, headers.map(|headers| headers.0), media_type, background)?;
                 Ok(pyo3::PyClassInitializer::from($crate::responses::PyResponse::empty(py)?)
                     .add_subclass(Self::from_response_parts(parts)))
             }

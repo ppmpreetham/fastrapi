@@ -38,3 +38,20 @@ def test_redirect_response_accepts_url_objects(client, app):
     response = client.get("/redirect", follow_redirects=False)
     assert response.status_code == 307
     assert response.headers["location"].endswith("/target")
+
+
+def test_response_headers_accept_mappings(client, app):
+    from types import MappingProxyType
+
+    from fastrapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+
+    headers = MappingProxyType({"x-a": "1"})
+    assert JSONResponse({}, headers=headers).headers["x-a"] == "1"
+    assert RedirectResponse("/x", headers=headers).headers["x-a"] == "1"
+    assert FileResponse(__file__, headers=headers).headers["x-a"] == "1"
+
+    @app.get("/mapped")
+    def mapped():
+        return PlainTextResponse("ok", headers=headers)
+
+    assert client.get("/mapped").headers["x-a"] == "1"
