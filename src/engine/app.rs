@@ -359,7 +359,7 @@ impl FastrAPI {
             .create_ws_decorator(py, path, name, dependencies)
     }
 
-    #[pyo3(signature = (path, app, *, name=None))]
+    #[pyo3(signature = (path, app, name=None))]
     fn mount(
         &mut self,
         py: Python<'_>,

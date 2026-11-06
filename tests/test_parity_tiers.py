@@ -55,3 +55,10 @@ def test_response_headers_accept_mappings(client, app):
         return PlainTextResponse("ok", headers=headers)
 
     assert client.get("/mapped").headers["x-a"] == "1"
+
+
+def test_mount_name_is_positional(tmp_path):
+    from fastrapi.staticfiles import StaticFiles
+
+    app = fastrapi.FastAPI()
+    app.mount("/static", StaticFiles(directory=str(tmp_path)), "static")
