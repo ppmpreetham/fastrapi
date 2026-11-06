@@ -6,7 +6,8 @@ use std::str::FromStr;
 
 use pyo3::exceptions::{PyAssertionError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyTuple};
+use pyo3::intern;
+use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PySet, PyTuple};
 
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::path::{extract_path_param_names, strip_path_convertors};
@@ -174,9 +175,13 @@ impl PyAPIRoute {
         let methods = match methods {
             Some(methods) if !methods.is_none() => {
                 validate_http_methods(methods)?;
-                methods.clone().unbind().into_any()
+                let upper = PySet::empty(slf.py())?;
+                for method in methods.try_iter()? {
+                    upper.add(method?.call_method0(intern!(slf.py(), "upper"))?)?;
+                }
+                upper.into_any().unbind()
             }
-            _ => PyList::new(slf.py(), ["GET"])?.into_any().unbind(),
+            _ => PySet::new(slf.py(), ["GET"])?.into_any().unbind(),
         };
         let default_name: Py<PyAny> = match name {
             Some(name) if !name.is_none() => name.clone().unbind(),

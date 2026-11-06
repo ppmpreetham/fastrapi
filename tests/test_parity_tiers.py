@@ -79,3 +79,19 @@ def test_docs_defaults_match_fastapi(client, app):
     assert client.get("/scalar").status_code == 404
     assert client.get("/elements").status_code == 404
     assert client.get("/docs").status_code == 200 and client.get("/redoc").status_code == 200
+
+
+def test_api_route_methods_are_sets():
+    from fastapi.routing import APIRoute as Expected
+
+    from fastrapi.routing import APIRoute
+
+    assert APIRoute("/x", lambda: 1, methods=["get", "post"]).methods == Expected("/x", lambda: 1, methods=["get", "post"]).methods
+    assert APIRoute("/x", lambda: 1).methods == {"GET"}
+    app = fastrapi.FastAPI()
+
+    @app.get("/y")
+    def y():
+        return 1
+
+    assert next(route for route in app.routes if getattr(route, "path", "") == "/y").methods == {"GET"}

@@ -118,7 +118,7 @@ def test_route_helpers_preserve_context_and_exclusions():
     assert all(isinstance(context, RouteContext) for context in contexts)
     assert contexts[0].route is hidden
     assert contexts[1].param_names == ["item"]
-    assert contexts[1].methods == ["GET", "POST"]
+    assert set(contexts[1].methods) == {"GET", "POST"}
 
 
 def test_staticfiles_directory_packages_and_validation(tmp_path):
