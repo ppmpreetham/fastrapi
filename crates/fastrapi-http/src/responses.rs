@@ -333,11 +333,12 @@ impl PyRedirectResponse {
     #[pyo3(signature = (url, status_code=307, headers=None, background=None))]
     fn new(
         py: Python<'_>,
-        url: String,
+        url: &Bound<'_, PyAny>,
         status_code: u16,
         headers: Option<Py<PyDict>>,
         background: Option<Py<PyAny>>,
     ) -> PyResult<PyClassInitializer<Self>> {
+        let url: String = url.str()?.extract()?;
         let body = PyBytes::new(py, b"").into_any().unbind();
         let raw_headers = crate::response_api::init_headers(
             py,

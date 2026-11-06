@@ -21,3 +21,20 @@ def test_status_module_matches_fastapi():
         warnings.simplefilter("ignore")
         assert status.HTTP_422_UNPROCESSABLE_ENTITY == fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY
     assert status.HTTP_418_IM_A_TEAPOT == 418 and status.WS_1008_POLICY_VIOLATION == 1008
+
+
+def test_redirect_response_accepts_url_objects(client, app):
+    from fastrapi import Request
+    from fastrapi.responses import RedirectResponse
+
+    @app.get("/target")
+    def target():
+        return {}
+
+    @app.get("/redirect")
+    def redirect(request: Request):
+        return RedirectResponse(request.url_for("target"))
+
+    response = client.get("/redirect", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"].endswith("/target")
