@@ -73,3 +73,9 @@ def test_webhooks_default_router():
         return None
 
     assert "new-subscription" in app.openapi()["webhooks"]
+
+
+def test_docs_defaults_match_fastapi(client, app):
+    assert client.get("/scalar").status_code == 404
+    assert client.get("/elements").status_code == 404
+    assert client.get("/docs").status_code == 200 and client.get("/redoc").status_code == 200
