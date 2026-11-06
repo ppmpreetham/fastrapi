@@ -254,18 +254,18 @@ def is_scalar_sequence(annotation: Any, upload: tuple) -> bool:
     return is_sequence(annotation) and all(is_scalar(arg, upload) for arg in get_args(annotation))
 
 
-def is_upload(annotation: Any, upload: tuple) -> bool:
-    if lenient_issubclass(annotation, upload):
+def is_type(annotation: Any, types: tuple) -> bool:
+    if lenient_issubclass(annotation, types):
         return True
     if _is_union(get_origin(annotation)):
-        return any(lenient_issubclass(arg, upload) for arg in get_args(annotation))
+        return any(lenient_issubclass(arg, types) for arg in get_args(annotation))
     return False
 
 
-def is_upload_sequence(annotation: Any, upload: tuple) -> bool:
+def is_type_sequence(annotation: Any, types: tuple) -> bool:
     if _is_union(get_origin(annotation)):
-        return any(is_upload_sequence(arg, upload) for arg in get_args(annotation))
-    return is_sequence(annotation) and all(is_upload(arg, upload) for arg in get_args(annotation))
+        return any(is_type_sequence(arg, types) for arg in get_args(annotation))
+    return is_sequence(annotation) and all(is_type(arg, types) for arg in get_args(annotation))
 
 
 def is_union_of_models(annotation: Any) -> bool:
@@ -357,6 +357,7 @@ class FieldSpec:
         "media_type",
         "constraints",
         "explicit",
+        "read_bytes",
     )
 
 
@@ -418,7 +419,7 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
         default = value if value is not Undefined else RequiredParam
         if is_path_param:
             field_info = Path(annotation=use_annotation)
-        elif is_upload(type_annotation, upload) or is_upload_sequence(type_annotation, upload):
+        elif is_type(type_annotation, upload) or is_type_sequence(type_annotation, upload):
             field_info = File(annotation=use_annotation, default=default)
         elif not is_scalar(type_annotation, upload):
             field_info = Body(annotation=use_annotation, default=default)
@@ -466,6 +467,9 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
     spec.embed = bool(getattr(field_info, "embed", None))
     spec.is_form = isinstance(field_info, Form)
     spec.is_file = isinstance(field_info, File)
+    spec.read_bytes = spec.is_file and (
+        is_type(field_info.annotation, (bytes,)) or is_type_sequence(field_info.annotation, (bytes,))
+    )
     spec.media_type = getattr(field_info, "media_type", None)
     spec.constraints = constraints(field_info)
     return spec

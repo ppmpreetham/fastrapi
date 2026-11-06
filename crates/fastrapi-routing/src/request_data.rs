@@ -361,9 +361,14 @@ pub fn request_param_value<'py>(
     resolve(py, param, raw, Loc::Field(param), errors)
 }
 
-fn form_field_to_py<'py>(py: Python<'py>, field: &BodyField) -> PyResult<Bound<'py, PyAny>> {
+fn form_field_to_py<'py>(
+    py: Python<'py>,
+    field: &BodyField,
+    read_bytes: bool,
+) -> PyResult<Bound<'py, PyAny>> {
     match field {
         BodyField::Text(raw) => Ok(PyString::new(py, raw).into_any()),
+        BodyField::File(file) if read_bytes => Ok(PyBytes::new(py, &file.content).into_any()),
         BodyField::File(file) => Bound::new(
             py,
             PyUploadFile::from_bytes(
@@ -382,11 +387,12 @@ fn form_values<'py>(
     py: Python<'py>,
     values: &[BodyField],
     sequence: bool,
+    read_bytes: bool,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
     if !sequence {
         return values
             .last()
-            .map(|value| form_field_to_py(py, value))
+            .map(|value| form_field_to_py(py, value, read_bytes))
             .transpose();
     }
     if values.is_empty() {
@@ -394,7 +400,7 @@ fn form_values<'py>(
     }
     let items = values
         .iter()
-        .map(|value| form_field_to_py(py, value))
+        .map(|value| form_field_to_py(py, value, read_bytes))
         .collect::<PyResult<SmallVec<[Bound<'py, PyAny>; 4]>>>()?;
     PyList::new(py, items).map(|list| Some(list.into_any()))
 }
@@ -413,7 +419,7 @@ fn form_param_value<'py>(
     {
         return Ok(None);
     }
-    form_values(py, values, param.is_list)
+    form_values(py, values, param.is_list, param.read_bytes)
 }
 
 fn form_dict<'py>(
@@ -424,7 +430,10 @@ fn form_dict<'py>(
 ) -> PyResult<()> {
     for (name, values) in fields.into_iter().flatten() {
         if !skip(name) {
-            dict.set_item(name.as_str(), form_values(py, values, values.len() > 1)?)?;
+            dict.set_item(
+                name.as_str(),
+                form_values(py, values, values.len() > 1, false)?,
+            )?;
         }
     }
     Ok(())
@@ -439,7 +448,7 @@ fn form_model<'py>(
     if let Some(fields) = fields {
         model_dict(py, keys, &dict, |key| {
             match fields.get(key.lookup.as_str()) {
-                Some(values) => form_values(py, values, key.sequence),
+                Some(values) => form_values(py, values, key.sequence, false),
                 None => Ok(None),
             }
         })?;

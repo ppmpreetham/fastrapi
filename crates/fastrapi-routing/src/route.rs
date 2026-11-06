@@ -56,6 +56,7 @@ pub struct ParsedParameter {
     pub model_keys: Option<Arc<[ModelKey]>>,
     pub is_file: bool,
     pub is_form: bool,
+    pub read_bytes: bool,
     pub embed: bool,
     pub fast: Option<FastKind>,
     pub validate: Py<PyAny>,

@@ -95,3 +95,27 @@ def test_api_route_methods_are_sets():
         return 1
 
     assert next(route for route in app.routes if getattr(route, "path", "") == "/y").methods == {"GET"}
+
+
+def build_uploads(lib):
+    from typing import Annotated, Optional
+
+    app = lib.FastAPI()
+
+    @app.post("/bytes")
+    def upload_bytes(data: Annotated[bytes, lib.File()], many: Annotated[Optional[list[bytes]], lib.File()] = None):
+        return {"data": data.decode(), "many": [item.decode() for item in many or []]}
+
+    return app
+
+
+def test_bytes_file_params_match_fastapi():
+    from fastapi.testclient import TestClient
+
+    from conftest import LiveServerTestClient
+
+    files = [("data", ("a.txt", b"hello")), ("many", ("b.txt", b"x")), ("many", ("c.txt", b"y"))]
+    expected = TestClient(build_uploads(fastapi)).post("/bytes", files=files)
+    with LiveServerTestClient(build_uploads(fastrapi)) as client:
+        actual = client.post("/bytes", files=files)
+    assert (actual.status_code, actual.json()) == (expected.status_code, expected.json())
