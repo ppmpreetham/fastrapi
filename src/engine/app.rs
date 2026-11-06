@@ -270,7 +270,10 @@ impl FastrAPI {
             root_path_in_servers,
             responses,
             callbacks,
-            webhooks,
+            webhooks: match webhooks {
+                Some(webhooks) => Some(webhooks),
+                None => Some(Py::new(py, PyAPIRouter::default())?.into_any()),
+            },
             deprecated,
             include_in_schema,
             swagger_ui_parameters,

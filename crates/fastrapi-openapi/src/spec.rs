@@ -109,7 +109,7 @@ pub fn build_openapi_spec(
             app.generate_unique_id_function,
             &mut security_schemes,
         );
-        spec.webhooks = Some(wh_paths);
+        spec.webhooks = (!wh_paths.is_empty()).then_some(wh_paths);
     }
 
     spec.components = (!schemas.is_empty() || !security_schemes.is_empty()).then(|| {

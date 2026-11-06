@@ -62,3 +62,14 @@ def test_mount_name_is_positional(tmp_path):
 
     app = fastrapi.FastAPI()
     app.mount("/static", StaticFiles(directory=str(tmp_path)), "static")
+
+
+def test_webhooks_default_router():
+    assert "webhooks" not in fastrapi.FastAPI().openapi()
+    app = fastrapi.FastAPI()
+
+    @app.webhooks.post("new-subscription")
+    def new_subscription(body: dict):
+        return None
+
+    assert "new-subscription" in app.openapi()["webhooks"]
