@@ -7,6 +7,7 @@ use super::security::PySecurityScopes;
 use crate::request_data::{Errors, request_param_value};
 use crate::route::ParsedParameter;
 use fastrapi_http::request_input::RequestInput;
+use fastrapi_http::responses::PyResponse;
 use fastrapi_pyutil::call::{CallArgs, CallLayout};
 use fastrapi_pyutil::imports::INSPECT;
 use fastrapi_runtime::py_bridge::EventLoop;
@@ -31,6 +32,7 @@ fastrapi_pyutil::cached_py_import!(CONTEXT_MANAGER, "contextlib", "contextmanage
 fastrapi_pyutil::cached_py_import!(ASYNC_CONTEXT_MANAGER, "contextlib", "asynccontextmanager");
 fastrapi_pyutil::cached_py_import!(TO_THREAD, "asyncio", "to_thread");
 fastrapi_pyutil::cached_py_import!(PARTIAL, "functools", "partial");
+fastrapi_pyutil::cached_py_import!(STARLETTE_RESPONSE, "starlette.responses", "Response");
 
 struct ParserKeys<'py> {
     parameters: &'py Bound<'py, PyString>,
@@ -481,8 +483,13 @@ fn is_connection_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bo
 
 pub(crate) fn is_response_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
     let annotation = params::base_annotation(annotation);
-    annotation_display_name(py, &annotation)
-        .is_some_and(|name| name == "Response" || name == "PyResponse")
+    let Ok(class) = annotation.cast::<PyType>() else {
+        return false;
+    };
+    class.is_subclass_of::<PyResponse>().unwrap_or(false)
+        || STARLETTE_RESPONSE
+            .get(py)
+            .is_ok_and(|base| class.is_subclass(base).unwrap_or(false))
 }
 
 fn extract_string_list(value: &Bound<'_, PyAny>) -> Option<Vec<String>> {
@@ -784,10 +791,11 @@ fn build_injection_plan(
             if is_connection_annotation(py, &ann) {
                 return Some(InjectionType::Request);
             }
+            if is_response_annotation(py, &ann) {
+                return Some(InjectionType::Response);
+            }
             annotation_display_name(py, &ann).and_then(|ann_name| {
-                if ann_name == "Response" || ann_name == "PyResponse" {
-                    Some(InjectionType::Response)
-                } else if ann_name.contains("SecurityScopes") {
+                if ann_name.contains("SecurityScopes") {
                     Some(InjectionType::SecurityScopes)
                 } else {
                     None

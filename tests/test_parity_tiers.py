@@ -119,3 +119,27 @@ def test_bytes_file_params_match_fastapi():
     with LiveServerTestClient(build_uploads(fastrapi)) as client:
         actual = client.post("/bytes", files=files)
     assert (actual.status_code, actual.json()) == (expected.status_code, expected.json())
+
+
+def build_sub_response(lib):
+    app = lib.FastAPI()
+
+    @app.get("/sub")
+    def sub(response: lib.responses.JSONResponse):
+        response.headers["x-sub"] = "1"
+        response.status_code = 201
+        return {"type": type(response).__name__}
+
+    return app
+
+
+def test_response_subclass_param_matches_fastapi():
+    from fastapi.testclient import TestClient
+
+    from conftest import LiveServerTestClient
+
+    expected = TestClient(build_sub_response(fastapi)).get("/sub")
+    with LiveServerTestClient(build_sub_response(fastrapi)) as client:
+        actual = client.get("/sub")
+    assert actual.status_code == expected.status_code
+    assert actual.headers["x-sub"] == expected.headers["x-sub"]
