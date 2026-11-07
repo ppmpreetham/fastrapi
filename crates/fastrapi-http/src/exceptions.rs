@@ -74,7 +74,10 @@ fn default_handlers(py: Python<'_>) -> PyResult<[(Bound<'_, PyAny>, Bound<'_, Py
         ),
         (
             websocket_validation_error_type(py)?.clone().into_any(),
-            module.getattr(intern!(py, "websocket_request_validation_exception_handler"))?,
+            module.getattr(intern!(
+                py,
+                "websocket_request_validation_exception_handler"
+            ))?,
         ),
     ])
 }

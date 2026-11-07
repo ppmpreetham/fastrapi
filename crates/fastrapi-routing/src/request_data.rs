@@ -11,7 +11,6 @@ use axum::http::HeaderMap;
 use axum::http::header::CONTENT_TYPE;
 use fastrapi_core::body::{BodyField, BodyPayload, FormText};
 use fastrapi_core::params::ParameterSource;
-use fastrapi_http::background::PyBackgroundTasks;
 use fastrapi_http::exceptions::request_validation_error;
 use fastrapi_http::request::create_py_request;
 use fastrapi_http::request_input::RequestInput;
@@ -341,6 +340,9 @@ pub fn request_param_value<'py>(
     input: &RequestInput<'_>,
     errors: &mut Errors<'py>,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
+    if matches!(param.source, ParameterSource::BackgroundTasks) {
+        return Ok(Some(input.background_tasks(py)?.into_bound(py).into_any()));
+    }
     if let Some(keys) = &param.model_keys {
         return model_param(py, param, keys, input, errors);
     }
@@ -691,7 +693,7 @@ pub fn apply_request_data(
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
     kwargs: &mut CallArgs,
-) -> PyResult<Option<Py<PyBackgroundTasks>>> {
+) -> PyResult<()> {
     if handler.payload.has_multiple_query_params {
         request_input.get_all_query_params();
     }
@@ -702,19 +704,8 @@ pub fn apply_request_data(
     }
 
     let mut errors = Errors::new(py);
-    let mut background: Option<Py<PyBackgroundTasks>> = None;
     for &index in &handler.payload.request_param_indices {
         let param = &handler.payload.parsed_params[index];
-        if matches!(param.source, ParameterSource::BackgroundTasks) {
-            let tasks = match &background {
-                Some(tasks) => tasks.clone_ref(py),
-                None => background
-                    .insert(Py::new(py, PyBackgroundTasks::new())?)
-                    .clone_ref(py),
-            };
-            kwargs.set(param.name_py.bind(py), tasks)?;
-            continue;
-        }
         if let Some(value) = request_param_value(py, param, request_input, &mut errors)? {
             kwargs.set(param.name_py.bind(py), value)?;
         }
@@ -728,6 +719,5 @@ pub fn apply_request_data(
         kwargs,
         &mut errors,
     )?;
-    errors.check(|| received_body(py, handler, payload, request_input.headers))?;
-    Ok(background)
+    errors.check(|| received_body(py, handler, payload, request_input.headers))
 }

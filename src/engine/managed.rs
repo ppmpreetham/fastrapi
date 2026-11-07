@@ -22,7 +22,6 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use smallvec::SmallVec;
 
-use fastrapi_http::background::PyBackgroundTasks;
 use fastrapi_http::response_convert::{convert_response_by_type, is_plain_value};
 use fastrapi_http::responses::PyResponse;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -42,8 +41,7 @@ pub(crate) async fn run_managed_handler(
         event_loop,
     );
     let setup = Python::attach(|py| -> Result<_, Response> {
-        let (mut kwargs, background) =
-            prepare_kwargs_and_payload(py, handler, &input, payload.as_ref())?;
+        let mut kwargs = prepare_kwargs_and_payload(py, handler, &input, payload.as_ref())?;
         let objects = (|| -> PyResult<_> {
             let plan = dependencies::request_plan(
                 py,
@@ -81,11 +79,11 @@ pub(crate) async fn run_managed_handler(
             } else {
                 None
             };
-            Ok((kwargs, background, request, response, plan))
+            Ok((kwargs, request, response, plan))
         })();
         objects.map_err(|err| python_error_to_response_in(py, &err, Some(&input)))
     });
-    let (mut kwargs, mut background, request, metadata, plan) = match setup {
+    let (mut kwargs, request, metadata, plan) = match setup {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -157,7 +155,6 @@ pub(crate) async fn run_managed_handler(
                 converted,
                 None,
                 metadata.as_ref(),
-                background.take(),
             )),
         }
     });
@@ -176,7 +173,6 @@ pub(crate) async fn run_managed_handler(
                     converted,
                     Some(exit),
                     metadata.as_ref(),
-                    background,
                 )
             })
         }
@@ -226,7 +222,6 @@ fn finish_managed_response(
     outcome: ManagedOutcome,
     exit: Option<PyResult<Py<PyAny>>>,
     metadata: Option<&Py<PyAny>>,
-    background: Option<Py<PyBackgroundTasks>>,
 ) -> Response {
     match exit {
         Some(Err(err)) => return python_error_to_response_in(py, &err, Some(input)),
@@ -252,7 +247,7 @@ fn finish_managed_response(
             {
                 return python_error_to_response_in(py, &err, Some(input));
             }
-            spawn_background_tasks(event_loop, background, &response);
+            spawn_background_tasks(event_loop, input, &response);
             response
         }
     }

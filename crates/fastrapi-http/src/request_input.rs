@@ -2,10 +2,12 @@
 //! It gives the path parameters, query parameters, cookies, and headers.
 //! It parses the query parameters and cookies only when the code reads them.
 
+use crate::background::PyBackgroundTasks;
 use axum::http::header::COOKIE;
 use axum::http::{HeaderMap, HeaderName};
 use cookie::Cookie;
 use fastrapi_runtime::py_bridge::EventLoop;
+use pyo3::prelude::*;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::sync::OnceLock;
@@ -23,6 +25,7 @@ pub struct RequestInput<'a> {
     pub headers: &'a HeaderMap,
     pub cookies: OnceLock<SmallVec<[(&'a str, &'a str); 8]>>,
     pub server: Option<EventLoop>,
+    pub background: OnceLock<Py<PyBackgroundTasks>>,
 }
 
 impl<'a> RequestInput<'a> {
@@ -42,7 +45,16 @@ impl<'a> RequestInput<'a> {
             query_params: OnceLock::new(),
             cookies: OnceLock::new(),
             server,
+            background: OnceLock::new(),
         }
+    }
+
+    pub fn background_tasks(&self, py: Python<'_>) -> PyResult<Py<PyBackgroundTasks>> {
+        if let Some(tasks) = self.background.get() {
+            return Ok(tasks.clone_ref(py));
+        }
+        let created = Py::new(py, PyBackgroundTasks::new())?;
+        Ok(self.background.get_or_init(|| created).clone_ref(py))
     }
 
     pub fn get_path_param(&self, key: &str) -> Option<&'a str> {

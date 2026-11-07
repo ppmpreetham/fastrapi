@@ -275,3 +275,30 @@ def test_route_and_add_websocket_route(client, app):
     assert client.get("/routed").text == "routed"
     assert "/plain" not in app.openapi()["paths"]
     assert {route.path for route in app.routes} >= {"/ws", "/ws2"}
+
+
+def test_background_tasks_in_dependencies(client, app):
+    import time
+
+    done = []
+
+    def dependency(tasks: fastrapi.BackgroundTasks):
+        tasks.add_task(done.append, "dependency")
+        return "dep"
+
+    @app.get("/tasks")
+    def endpoint(tasks: fastrapi.BackgroundTasks, value: str = fastrapi.Depends(dependency)):
+        tasks.add_task(done.append, "endpoint")
+        return {"value": value}
+
+    @app.get("/dep-only", dependencies=[fastrapi.Depends(dependency)])
+    def dep_only():
+        return {}
+
+    assert client.get("/tasks").json() == {"value": "dep"}
+    assert client.get("/dep-only").status_code == 200
+    for _ in range(50):
+        if len(done) == 3:
+            break
+        time.sleep(0.02)
+    assert done == ["dependency", "endpoint", "dependency"]

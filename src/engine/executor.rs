@@ -24,7 +24,7 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PySet, PyString};
 use smallvec::SmallVec;
 use std::sync::{Arc, OnceLock};
 
-use fastrapi_http::background::{OwnBackground, PyBackgroundTasks};
+use fastrapi_http::background::OwnBackground;
 use fastrapi_http::request::create_py_request;
 use fastrapi_http::response_convert::convert_response_by_type;
 use fastrapi_pyutil::call::CallArgs;
@@ -98,10 +98,10 @@ pub(crate) fn build_request_input_from_parts<'a>(
 #[inline(always)]
 pub(crate) fn spawn_background_tasks(
     event_loop: EventLoop,
-    bg_tasks: Option<Py<PyBackgroundTasks>>,
+    request_input: &RequestInput<'_>,
     response: &Response,
 ) {
-    if let Some(tasks) = bg_tasks
+    if let Some(tasks) = request_input.background.get().cloned()
         && response.extensions().get::<OwnBackground>().is_none()
     {
         spawn(async move {
@@ -125,9 +125,9 @@ pub(crate) fn prepare_kwargs_and_payload(
     handler: &RouteHandler,
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
-) -> Result<(CallArgs, Option<Py<PyBackgroundTasks>>), Response> {
+) -> Result<CallArgs, Response> {
     let mut kwargs = CallArgs::new();
-    let bg_tasks = fastrapi_routing::request_data::apply_request_data(
+    fastrapi_routing::request_data::apply_request_data(
         py,
         handler,
         request_input,
@@ -136,7 +136,7 @@ pub(crate) fn prepare_kwargs_and_payload(
     )
     .map_err(|err| python_error_to_response_in(py, &err, Some(request_input)))?;
 
-    Ok((kwargs, bg_tasks))
+    Ok(kwargs)
 }
 
 pub(crate) fn request_object(
@@ -376,7 +376,7 @@ pub(crate) fn payload_raw_bytes(payload: Option<&BodyPayload>) -> Option<bytes::
 fn run_sync_gil_section(
     py: Python<'_>,
     state: &GilSection<'_, '_, '_>,
-) -> Result<(Response, Option<Py<PyBackgroundTasks>>), Response> {
+) -> Result<Response, Response> {
     let GilSection {
         handler,
         request_input,
@@ -385,7 +385,7 @@ fn run_sync_gil_section(
         server,
     } = *state;
 
-    let (mut kwargs, bg_tasks) = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
+    let mut kwargs = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
 
     let req_obj = if needs_request_object {
         Some(
@@ -403,7 +403,7 @@ fn run_sync_gil_section(
     match response {
         Ok(response) => {
             execute_teardowns_sync(py, teardowns, None);
-            Ok((response, bg_tasks))
+            Ok(response)
         }
         Err(err) => {
             execute_teardowns_sync(py, teardowns, Some(&err));
@@ -524,8 +524,8 @@ fn run_sync_route<const NEEDS_REQ: bool>(
         server: event_loop,
     };
     match run_sync_gil_section(py, &section) {
-        Ok((response, bg_tasks)) => {
-            spawn_background_tasks(event_loop, bg_tasks, &response);
+        Ok(response) => {
+            spawn_background_tasks(event_loop, &request_input, &response);
             response
         }
         Err(response) => response,
@@ -546,8 +546,7 @@ async fn core_async_no_deps(
         event_loop,
     );
     let future_res = Python::attach(|py| -> Result<_, Response> {
-        let (kwargs, bg_tasks) =
-            prepare_kwargs_and_payload(py, handler, &request_input, payload.as_ref())?;
+        let kwargs = prepare_kwargs_and_payload(py, handler, &request_input, payload.as_ref())?;
 
         let coroutine = kwargs
             .call(
@@ -556,18 +555,17 @@ async fn core_async_no_deps(
             )
             .map_err(|err| python_error_to_response_in(py, &err, Some(&request_input)))?;
 
-        let future = into_asyncio_future(py, event_loop, coroutine)?;
-        Ok((future, bg_tasks))
+        into_asyncio_future(py, event_loop, coroutine)
     });
 
-    let (future_res, bg_tasks) = match future_res {
-        Ok((f, bg)) => (f, bg),
+    let future_res = match future_res {
+        Ok(future) => future,
         Err(resp) => return resp,
     };
 
     match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
-            spawn_background_tasks(event_loop, bg_tasks, &response);
+            spawn_background_tasks(event_loop, &request_input, &response);
             response
         }
         Err(err_resp) => err_resp,
@@ -587,20 +585,18 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
         &handler.payload.path_param_names,
         event_loop,
     );
-    let setup = Python::attach(
-        |py| -> Option<Result<(PyTaskFuture, Option<Py<PyBackgroundTasks>>), Response>> {
-            if overrides_active(py, handler) {
-                return None;
-            }
-            Some(start_async_with_sync_deps::<NEEDS_REQ>(
-                py,
-                event_loop,
-                handler,
-                &request_input,
-                payload.as_ref(),
-            ))
-        },
-    );
+    let setup = Python::attach(|py| -> Option<Result<PyTaskFuture, Response>> {
+        if overrides_active(py, handler) {
+            return None;
+        }
+        Some(start_async_with_sync_deps::<NEEDS_REQ>(
+            py,
+            event_loop,
+            handler,
+            &request_input,
+            payload.as_ref(),
+        ))
+    });
     let Some(setup) = setup else {
         drop(request_input);
         return Box::pin(run_managed_handler(
@@ -614,14 +610,14 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
         .await;
     };
 
-    let (future_res, bg_tasks) = match setup {
-        Ok(pair) => pair,
+    let future_res = match setup {
+        Ok(future) => future,
         Err(resp) => return resp,
     };
 
     match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
-            spawn_background_tasks(event_loop, bg_tasks, &response);
+            spawn_background_tasks(event_loop, &request_input, &response);
             response
         }
         Err(err_resp) => err_resp,
@@ -634,8 +630,8 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
     handler: &RouteHandler,
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
-) -> Result<(PyTaskFuture, Option<Py<PyBackgroundTasks>>), Response> {
-    let (mut kwargs, bg_tasks) = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
+) -> Result<PyTaskFuture, Response> {
+    let mut kwargs = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
 
     let req_obj = if NEEDS_REQ {
         Some(
@@ -655,11 +651,10 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
         )
         .map_err(|err| python_error_to_response_in(py, &err, Some(request_input)))?;
 
-    let future = into_asyncio_future(py, event_loop, coroutine)?;
-    Ok((future, bg_tasks))
+    into_asyncio_future(py, event_loop, coroutine)
 }
 
-type AsyncDepsPrep = (Option<Py<PyAny>>, CallArgs, Option<Py<PyBackgroundTasks>>);
+type AsyncDepsPrep = (Option<Py<PyAny>>, CallArgs);
 
 async fn core_async_async_deps<const NEEDS_REQ: bool>(
     event_loop: EventLoop,
@@ -679,8 +674,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
             return None;
         }
         Some((|| {
-            let (kwargs, bg_tasks) =
-                prepare_kwargs_and_payload(py, handler, &request_input, payload.as_ref())?;
+            let kwargs = prepare_kwargs_and_payload(py, handler, &request_input, payload.as_ref())?;
             let req_obj = if NEEDS_REQ {
                 Some(
                     request_object(py, handler, &kwargs, &request_input, payload.as_ref())
@@ -689,11 +683,11 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
             } else {
                 None
             };
-            Ok((req_obj, kwargs, bg_tasks))
+            Ok((req_obj, kwargs))
         })())
     });
 
-    let (request_object, mut kwargs, bg_tasks) = match prep {
+    let (request_object, mut kwargs) = match prep {
         Some(Ok(res)) => res,
         Some(Err(r)) => return r,
         None => {
@@ -759,7 +753,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
     .await
     {
         Ok(response) => {
-            spawn_background_tasks(event_loop, bg_tasks, &response);
+            spawn_background_tasks(event_loop, &request_input, &response);
             response
         }
         Err(err_resp) => err_resp,

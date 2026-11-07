@@ -5,8 +5,8 @@
 use std::str::FromStr;
 
 use pyo3::exceptions::{PyAssertionError, PyValueError};
-use pyo3::prelude::*;
 use pyo3::intern;
+use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PySet, PyTuple};
 
 use fastrapi_core::method::HttpMethod;

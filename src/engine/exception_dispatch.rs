@@ -11,8 +11,7 @@ use ahash::AHashMap;
 use axum::http::StatusCode;
 use fastrapi_http::exceptions::{
     http_exception_type, http_status_code, is_default_handler, is_http_exception,
-    request_validation_error_type,
-    websocket_validation_error_type,
+    request_validation_error_type, websocket_validation_error_type,
 };
 use fastrapi_http::request::{create_py_request, create_stub_request};
 use fastrapi_http::request_input::RequestInput;
