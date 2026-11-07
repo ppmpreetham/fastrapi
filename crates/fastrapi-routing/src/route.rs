@@ -105,7 +105,7 @@ pub struct PayloadSpec {
     pub body_param_indices: SmallVec<[usize; 4]>,
     pub body_embed: bool,
     pub body_is_form: bool,
-    pub strict_content_type: bool,
+    pub strict_content_type: Option<bool>,
     pub request_param_indices: SmallVec<[usize; 8]>,
     pub needs_body: bool,
     pub override_cache: OverrideCache,

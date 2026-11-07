@@ -492,7 +492,7 @@ fn json_body<'a>(
 ) -> JsonBody<'a> {
     match payload {
         Some(BodyPayload::Json { raw }) if !raw.is_empty() => {
-            if is_json_content_type(headers, handler.payload.strict_content_type) {
+            if is_json_content_type(headers, handler.payload.strict_content_type.unwrap_or(true)) {
                 JsonBody::Json(raw)
             } else {
                 JsonBody::Bytes(raw)

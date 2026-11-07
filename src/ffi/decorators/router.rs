@@ -75,7 +75,7 @@ pub struct PyAPIRouter {
     #[pyo3(get)]
     pub dependency_overrides_provider: Option<Py<PyAny>>,
     #[pyo3(get)]
-    pub strict_content_type: bool,
+    pub strict_content_type: Option<bool>,
     pub mounts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
     pub hosts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
 }
@@ -106,7 +106,7 @@ impl Default for PyAPIRouter {
             redirect_slashes: true,
             default: None,
             dependency_overrides_provider: None,
-            strict_content_type: true,
+            strict_content_type: None,
             mounts: Arc::new(Mutex::new(Vec::new())),
             hosts: Arc::new(Mutex::new(Vec::new())),
         }
@@ -116,7 +116,7 @@ impl Default for PyAPIRouter {
 #[pymethods]
 impl PyAPIRouter {
     #[new]
-    #[pyo3(signature = (*, prefix=String::new(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None, route_class=None, on_startup=None, on_shutdown=None, lifespan=None, routes=None, redirect_slashes=true, default=None, callbacks=None, dependency_overrides_provider=None, strict_content_type=true))]
+    #[pyo3(signature = (*, prefix=String::new(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None, route_class=None, on_startup=None, on_shutdown=None, lifespan=None, routes=None, redirect_slashes=true, default=None, callbacks=None, dependency_overrides_provider=None, strict_content_type=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the signature matches FastAPI's APIRouter"
@@ -140,7 +140,7 @@ impl PyAPIRouter {
         default: Option<Py<PyAny>>,
         callbacks: Option<Py<PyAny>>,
         dependency_overrides_provider: Option<Py<PyAny>>,
-        strict_content_type: bool,
+        strict_content_type: Option<bool>,
     ) -> PyResult<Self> {
         let tag_vec = tags
             .and_then(|obj| obj.try_iter().ok())

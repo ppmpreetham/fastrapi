@@ -132,6 +132,7 @@ impl FastrAPI {
         generate_unique_id_function=None,
         separate_input_output_schemas=true,
         openapi_external_docs=None,
+        strict_content_type=None,
         sync_to_threadpool=true,
         max_body_size=Some(16 * 1024 * 1024),
         max_field_size=Some(1024 * 1024),
@@ -189,6 +190,7 @@ impl FastrAPI {
         generate_unique_id_function: Option<Py<PyAny>>,
         separate_input_output_schemas: bool,
         openapi_external_docs: Option<Py<PyAny>>,
+        strict_content_type: Option<bool>,
         sync_to_threadpool: bool,
         max_body_size: Option<usize>,
         max_field_size: Option<usize>,
@@ -218,6 +220,7 @@ impl FastrAPI {
             py,
             PyAPIRouter {
                 default_response_class: explicit_default_response_class,
+                strict_content_type,
                 ..PyAPIRouter::default()
             },
         )?;

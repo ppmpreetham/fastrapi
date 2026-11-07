@@ -286,10 +286,6 @@ fn func_name(func: &Bound<'_, PyAny>) -> String {
         .unwrap_or_default()
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Route options mirror independent FastAPI route switches"
-)]
 struct RouteOptions {
     name: Option<String>,
     generate_unique_id_function: Option<Py<PyAny>>,
@@ -300,7 +296,7 @@ struct RouteOptions {
     summary: Option<String>,
     description: Option<String>,
     include_in_schema: bool,
-    strict_content_type: bool,
+    strict_content_type: Option<bool>,
     cache_resp: bool,
     rate_limit: Option<NonZeroU32>,
     response_description: Option<String>,
@@ -330,7 +326,7 @@ impl RouteOptions {
         let summary = extract::<String>(kwargs, "summary");
         let description = extract::<String>(kwargs, "description");
         let include_in_schema = extract::<bool>(kwargs, "include_in_schema").unwrap_or(true);
-        let strict_content_type = extract::<bool>(kwargs, "strict_content_type").unwrap_or(true);
+        let strict_content_type = extract::<bool>(kwargs, "strict_content_type");
         let cache_resp = extract::<bool>(kwargs, "cache_resp").unwrap_or(false);
         let rate_limit = extract::<u32>(kwargs, "rate_limit")
             .map(|rps| {

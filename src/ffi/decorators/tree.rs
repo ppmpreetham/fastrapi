@@ -187,6 +187,13 @@ struct Level {
     include_in_schema: bool,
     deprecated: bool,
     response_class: Option<Py<pyo3::PyAny>>,
+    strict_content_type: Option<bool>,
+}
+
+fn with_strict_content_type(handler: &Arc<RouteHandler>, strict: bool) -> Arc<RouteHandler> {
+    let mut updated = (**handler).clone();
+    updated.payload.strict_content_type = Some(strict);
+    Arc::new(updated)
 }
 
 fn with_response_class(
@@ -241,6 +248,7 @@ pub fn flatten_router(
         include_in_schema: true,
         deprecated: false,
         response_class: None,
+        strict_content_type: None,
     });
 
     while let Some(level) = stack.pop() {
@@ -252,6 +260,7 @@ pub fn flatten_router(
         }
 
         let full_prefix = join_path(&level.prefix, &router.prefix);
+        let strict_content_type = router.strict_content_type.or(level.strict_content_type);
 
         let merged_tags = router.tags.iter().fold(level.tags, |mut acc, tag| {
             if !acc.contains(tag) {
@@ -307,6 +316,12 @@ pub fn flatten_router(
             {
                 entry.handler = with_response_class(py, &entry.handler, class);
                 entry.explicit_response_class = true;
+            }
+
+            if entry.handler.payload.strict_content_type.is_none()
+                && let Some(strict) = strict_content_type
+            {
+                entry.handler = with_strict_content_type(&entry.handler, strict);
             }
 
             if !chain_deps.is_empty() {
@@ -384,6 +399,7 @@ pub fn flatten_router(
                     .or(router.default_response_class.as_ref())
                     .or(level.response_class.as_ref())
                     .map(|class| class.clone_ref(py)),
+                strict_content_type,
             });
         }
     }

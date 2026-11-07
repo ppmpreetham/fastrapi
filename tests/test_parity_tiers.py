@@ -167,3 +167,41 @@ def test_default_exception_handlers_are_registered(client, app):
 
     assert client.get("/http").json() == {"detail": "conflict"}
     assert client.get("/typed?value=x").status_code == 422
+
+
+def build_strict(lib):
+    from pydantic import BaseModel
+
+    class Item(BaseModel):
+        name: str
+
+    app = lib.FastAPI(strict_content_type=False)
+    strict_router = lib.APIRouter(strict_content_type=True)
+
+    @app.post("/lenient")
+    def lenient(item: Item):
+        return item
+
+    @strict_router.post("/strict")
+    def strict(item: Item):
+        return item
+
+    def override(item: Item):
+        return item
+
+    strict_router.add_api_route("/override", override, methods=["POST"], strict_content_type=False)
+
+    app.include_router(strict_router)
+    return app
+
+
+@pytest.mark.parametrize("url", ["/lenient", "/strict", "/override"])
+def test_strict_content_type_inheritance_matches_fastapi(url):
+    from fastapi.testclient import TestClient
+
+    from conftest import LiveServerTestClient
+
+    expected = TestClient(build_strict(fastapi)).post(url, content=b'{"name": "a"}')
+    with LiveServerTestClient(build_strict(fastrapi)) as client:
+        actual = client.post(url, content=b'{"name": "a"}')
+    assert (actual.status_code, actual.json()) == (expected.status_code, expected.json())
