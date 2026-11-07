@@ -205,3 +205,27 @@ def test_strict_content_type_inheritance_matches_fastapi(url):
     with LiveServerTestClient(build_strict(fastrapi)) as client:
         actual = client.post(url, content=b'{"name": "a"}')
     assert (actual.status_code, actual.json()) == (expected.status_code, expected.json())
+
+
+def build_file(lib, path):
+    app = lib.FastAPI()
+
+    @app.api_route("/file", methods=["GET", "HEAD"])
+    def file():
+        return lib.responses.FileResponse(path)
+
+    return app
+
+
+def test_file_response_head_matches_fastapi(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from conftest import LiveServerTestClient
+
+    path = tmp_path / "data.txt"
+    path.write_bytes(b"hello world")
+    expected = TestClient(build_file(fastapi, str(path))).head("/file")
+    with LiveServerTestClient(build_file(fastrapi, str(path))) as client:
+        actual = client.head("/file")
+    assert (actual.status_code, actual.content) == (expected.status_code, expected.content)
+    assert actual.headers["content-length"] == expected.headers["content-length"]
