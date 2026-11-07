@@ -14,6 +14,7 @@ const EXCEPTIONS_SOURCE: &str = include_str!("py/exceptions.py");
 const HANDLERS_SOURCE: &str = include_str!("py/exception_handlers.py");
 
 static EXCEPTIONS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+static HANDLERS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 static HTTP_EXCEPTION: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static REQUEST_VALIDATION_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static WEBSOCKET_VALIDATION_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -45,15 +46,50 @@ pub fn exceptions_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
         .map(|module| module.bind(py))
 }
 
-pub fn exception_handlers_module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
-    let module = fastrapi_pyutil::imports::python_source_module(
-        py,
-        HANDLERS_SOURCE,
-        c"fastrapi/exception_handlers.py",
-        c"fastrapi.exception_handlers",
-    )?;
-    fastrapi_pyutil::imports::register_module(py, "fastrapi.exception_handlers", &module)?;
-    Ok(module)
+pub fn exception_handlers_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    HANDLERS
+        .get_or_try_init(py, || {
+            let module = fastrapi_pyutil::imports::python_source_module(
+                py,
+                HANDLERS_SOURCE,
+                c"fastrapi/exception_handlers.py",
+                c"fastrapi.exception_handlers",
+            )?;
+            fastrapi_pyutil::imports::register_module(py, "fastrapi.exception_handlers", &module)?;
+            Ok::<_, PyErr>(module.unbind())
+        })
+        .map(|module| module.bind(py))
+}
+
+fn default_handlers(py: Python<'_>) -> PyResult<[(Bound<'_, PyAny>, Bound<'_, PyAny>); 3]> {
+    let module = exception_handlers_module(py)?;
+    Ok([
+        (
+            STARLETTE_HTTP_EXCEPTION.get(py)?.clone(),
+            module.getattr(intern!(py, "http_exception_handler"))?,
+        ),
+        (
+            request_validation_error_type(py)?.clone().into_any(),
+            module.getattr(intern!(py, "request_validation_exception_handler"))?,
+        ),
+        (
+            websocket_validation_error_type(py)?.clone().into_any(),
+            module.getattr(intern!(py, "websocket_request_validation_exception_handler"))?,
+        ),
+    ])
+}
+
+pub fn register_default_handlers(registry: &Bound<'_, PyDict>) -> PyResult<()> {
+    for (class, handler) in default_handlers(registry.py())? {
+        registry.set_default(class, handler)?;
+    }
+    Ok(())
+}
+
+#[must_use]
+pub fn is_default_handler(handler: &Bound<'_, PyAny>) -> bool {
+    default_handlers(handler.py())
+        .is_ok_and(|defaults| defaults.iter().any(|(_, default)| default.is(handler)))
 }
 
 fn exception_type<'py>(

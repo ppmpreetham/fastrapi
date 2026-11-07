@@ -143,3 +143,27 @@ def test_response_subclass_param_matches_fastapi():
         actual = client.get("/sub")
     assert actual.status_code == expected.status_code
     assert actual.headers["x-sub"] == expected.headers["x-sub"]
+
+
+def test_default_exception_handlers_are_registered(client, app):
+    from fastrapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+    from fastrapi.exceptions import RequestValidationError
+    from starlette.exceptions import HTTPException
+
+    assert app.exception_handlers[HTTPException] is http_exception_handler
+    assert app.exception_handlers[RequestValidationError] is request_validation_exception_handler
+
+    @app.exception_handler(Exception)
+    def generic(request, exc):
+        return fastrapi.responses.JSONResponse({"generic": True}, status_code=500)
+
+    @app.get("/http")
+    def http():
+        raise fastrapi.HTTPException(409, "conflict")
+
+    @app.get("/typed")
+    def typed(value: int):
+        return value
+
+    assert client.get("/http").json() == {"detail": "conflict"}
+    assert client.get("/typed?value=x").status_code == 422

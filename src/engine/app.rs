@@ -254,7 +254,14 @@ impl FastrAPI {
             swagger_ui_init_oauth,
             middleware,
             dependency_overrides: dependency_overrides.or_else(|| Some(PyDict::new(py).into())),
-            exception_handlers: exception_handlers.or_else(|| Some(PyDict::new(py).into())),
+            exception_handlers: Some({
+                let registry = PyDict::new(py);
+                if let Some(handlers) = exception_handlers {
+                    registry.call_method1(pyo3::intern!(py, "update"), (handlers,))?;
+                }
+                fastrapi_http::exceptions::register_default_handlers(&registry)?;
+                registry.into_any().unbind()
+            }),
             on_startup,
             on_shutdown,
             lifespan,

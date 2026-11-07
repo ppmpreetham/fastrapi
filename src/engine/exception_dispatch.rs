@@ -10,7 +10,8 @@ use pyo3::{Py, intern};
 use ahash::AHashMap;
 use axum::http::StatusCode;
 use fastrapi_http::exceptions::{
-    http_exception_type, http_status_code, is_http_exception, request_validation_error_type,
+    http_exception_type, http_status_code, is_default_handler, is_http_exception,
+    request_validation_error_type,
     websocket_validation_error_type,
 };
 use fastrapi_http::request::{create_py_request, create_stub_request};
@@ -177,7 +178,7 @@ fn lookup_handler<'py>(
     mro.try_iter().ok()?.find_map(|entry| {
         let entry = entry.ok()?;
         if let Ok(Some(handler)) = registry.get_item(&entry) {
-            return Some(Some(handler));
+            return Some((!is_default_handler(&handler)).then_some(handler));
         }
         let has_default = STARLETTE_HTTP_EXCEPTION.is(py, &entry)
             || entry.is(validation_error)
