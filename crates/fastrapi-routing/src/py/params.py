@@ -511,3 +511,69 @@ def json_error(raw: bytes) -> tuple[list[dict[str, Any]], Any]:
                 "ctx": {"error": exc.msg},
             }
         ], exc.doc
+
+
+def _signature(call):
+    try:
+        return inspect.signature(call, eval_str=True)
+    except NameError:
+        import sys
+
+        if sys.version_info >= (3, 14):
+            from annotationlib import Format
+
+            return inspect.signature(call, annotation_format=Format.FORWARDREF)
+        return inspect.signature(call)
+
+
+def get_typed_annotation(annotation: Any, globalns: dict[str, Any]) -> Any:
+    if isinstance(annotation, str):
+        from pydantic._internal._typing_extra import try_eval_type
+
+        annotation = try_eval_type(typing.ForwardRef(annotation), globalns, globalns)[0]
+        if annotation is NoneType:
+            return None
+    return annotation
+
+
+def get_typed_signature(call) -> inspect.Signature:
+    signature = _signature(call)
+    globalns = getattr(inspect.unwrap(call), "__globals__", {})
+    return inspect.Signature(
+        [
+            inspect.Parameter(
+                name=param.name,
+                kind=param.kind,
+                default=param.default,
+                annotation=get_typed_annotation(param.annotation, globalns),
+            )
+            for param in signature.parameters.values()
+        ]
+    )
+
+
+class ParamDetails:
+    __slots__ = ("type_annotation", "depends", "field")
+
+    def __init__(self, type_annotation: Any, depends: Any, field: Any) -> None:
+        self.type_annotation = type_annotation
+        self.depends = depends
+        self.field = field
+
+
+def _is_depends(value: Any) -> bool:
+    return hasattr(value, "dependency") and hasattr(value, "use_cache")
+
+
+def analyze_param(*, param_name: str, annotation: Any, value: Any, is_path_param: bool) -> ParamDetails:
+    from fastrapi import UploadFile
+
+    annotated = get_origin(annotation) is Annotated
+    type_annotation = get_args(annotation)[0] if annotated else annotation
+    markers = get_args(annotation)[1:] if annotated else ()
+    depends = value if _is_depends(value) else next((marker for marker in reversed(markers) if _is_depends(marker)), None)
+    if depends is not None:
+        return ParamDetails(type_annotation, depends, None)
+    parameter = inspect.Parameter(param_name, inspect.Parameter.POSITIONAL_OR_KEYWORD, default=value, annotation=annotation)
+    spec = analyze(param_name, parameter, is_path_param, (UploadFile,))
+    return ParamDetails(spec.annotation, None, spec)

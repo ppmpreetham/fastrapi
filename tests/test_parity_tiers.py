@@ -334,3 +334,22 @@ def test_auto_error_false_gives_none(name):
     with LiveServerTestClient(build_optional_security(fastrapi)) as client:
         actual = client.get(f"/{name}")
     assert (actual.status_code, actual.json()) == (expected.status_code, expected.json())
+
+
+def test_dependency_utils_helpers():
+    import inspect
+    from typing import Annotated
+
+    from fastrapi.dependencies.utils import analyze_param, get_typed_signature
+
+    def handler(item_id: "int", q: Annotated[str, fastrapi.Query(max_length=3)] = "x", dep: int = fastrapi.Depends(lambda: 1)):
+        return item_id
+
+    signature = get_typed_signature(handler)
+    assert signature.parameters["item_id"].annotation is int
+    path = analyze_param(param_name="item_id", annotation=int, value=inspect.Signature.empty, is_path_param=True)
+    assert path.depends is None and path.field.source == "path"
+    query = analyze_param(param_name="q", annotation=signature.parameters["q"].annotation, value="x", is_path_param=False)
+    assert query.type_annotation is str and query.field.alias == "q"
+    depends = analyze_param(param_name="dep", annotation=int, value=signature.parameters["dep"].default, is_path_param=False)
+    assert depends.depends is not None and depends.field is None

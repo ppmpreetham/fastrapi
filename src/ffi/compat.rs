@@ -270,6 +270,15 @@ pub(crate) fn register_dependencies(parent: &Bound<'_, PyModule>) -> PyResult<()
         parent.getattr("get_path_param_names")?,
     )?;
     utils.add_function(wrap_pyfunction!(get_flat_dependant, &utils)?)?;
+    let params = fastrapi_routing::params::params_module(py)?;
+    for name in [
+        "analyze_param",
+        "get_typed_signature",
+        "get_typed_annotation",
+        "ParamDetails",
+    ] {
+        utils.add(name, params.getattr(name)?)?;
+    }
     parent.add_submodule(&utils)?;
     fastrapi_pyutil::imports::register_module(py, "fastrapi.dependencies", parent)?;
     fastrapi_pyutil::imports::register_module(py, "fastrapi.dependencies.utils", &utils)?;
