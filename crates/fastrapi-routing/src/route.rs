@@ -22,6 +22,13 @@ pub enum FastKind {
     Bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmptyDefault {
+    List,
+    Dict,
+    Set,
+}
+
 #[derive(Clone, Debug)]
 pub struct ModelKey {
     pub lookup: String,
@@ -59,6 +66,9 @@ pub struct ParsedParameter {
     pub read_bytes: bool,
     pub embed: bool,
     pub fast: Option<FastKind>,
+    pub fast_list: Option<FastKind>,
+    pub fast_pattern: Option<regex::Regex>,
+    pub empty_default: Option<EmptyDefault>,
     pub validate: Py<PyAny>,
     pub validate_json: Option<Py<PyAny>>,
     pub validator_index: Option<usize>,

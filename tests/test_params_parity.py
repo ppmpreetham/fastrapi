@@ -146,6 +146,29 @@ def build(lib):
     def body_model(item: Item):
         return item
 
+    @app.get("/constrained")
+    def constrained(
+        n: Annotated[int, Query(ge=1, le=10)] = 1,
+        f: Annotated[float, Query(gt=0.5, lt=2)] = 1.0,
+        s: Annotated[str, Query(min_length=2, max_length=4, pattern="^a")] = "ab",
+        tags: Annotated[list[int], Query()] = [],
+    ):
+        tags.append(n)
+        return {"n": n, "f": f, "s": s, "tags": tags}
+
+    @app.post("/form-scalars")
+    def form_scalars(count: Annotated[int, Form(ge=0)], flag: Annotated[bool, Form()] = False):
+        return {"count": count, "flag": flag}
+
+    @app.post("/json-scalars")
+    def json_scalars(
+        count: Annotated[int, Body(ge=0)],
+        name: Annotated[str, Body(max_length=3)],
+        ratio: Annotated[float, Body()] = 1.0,
+        flag: Annotated[bool, Body()] = False,
+    ):
+        return {"count": count, "name": name, "ratio": ratio, "flag": flag}
+
     @app.get("/path/{item_id}")
     def path(item_id: Annotated[int, Path(ge=1)]):
         return {"item_id": item_id}
@@ -215,6 +238,17 @@ CASES = [
     ("post", "/body-model", {"json": {"name": 5, "price": "x"}}),
     ("post", "/body-model", {"json": {"price": [1]}}),
     ("post", "/body-model", {"json": [1]}),
+    ("get", "/constrained", {}),
+    ("get", "/constrained", {}),
+    ("get", "/constrained", {"params": {"n": "10", "f": "1.5", "s": "abcd", "tags": ["1", "2"]}}),
+    ("get", "/constrained", {"params": {"n": "0", "f": "0.5", "s": "b", "tags": ["x"]}}),
+    ("get", "/constrained", {"params": {"n": "11", "f": "2", "s": "abcde"}}),
+    ("get", "/constrained", {"params": {"n": " 5", "s": "zz"}}),
+    ("post", "/form-scalars", {"data": {"count": "3", "flag": "on"}}),
+    ("post", "/form-scalars", {"data": {"count": "-1", "flag": "maybe"}}),
+    ("post", "/json-scalars", {"json": {"count": 3, "name": "abc", "ratio": 2.5, "flag": True}}),
+    ("post", "/json-scalars", {"json": {"count": -1, "name": "abcd", "ratio": "x", "flag": 1}}),
+    ("post", "/json-scalars", {"json": {"count": "4", "name": 5, "ratio": 2, "flag": "yes"}}),
     ("get", "/path/0", {}),
     ("get", "/path/x", {}),
     ("get", "/path/4", {}),
@@ -265,3 +299,36 @@ def test_kernel_validates_model_bodies(clients):
     _, actual = clients
     actual.post("/body-model", json={"name": 5, "price": "x"})
     assert fastrapi.kernel_validation_count() >= 1
+
+
+def test_rust_fast_paths_skip_pydantic(monkeypatch):
+    from pydantic import TypeAdapter
+
+    calls = []
+    original = TypeAdapter.validate_python
+
+    def counted(self, *args, **kwargs):
+        calls.append(args[0] if args else None)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(TypeAdapter, "validate_python", counted)
+    app = fastrapi.FastAPI()
+    Query, Form, Body = fastrapi.Query, fastrapi.Form, fastrapi.Body
+
+    @app.get("/q")
+    def query(n: Annotated[int, Query(ge=1)], s: Annotated[str, Query(pattern="^a")], tags: list[int] = Query([]), extra: list[str] = Query([])):
+        return {"n": n, "s": s, "tags": tags, "extra": extra}
+
+    @app.post("/f")
+    def form(count: Annotated[int, Form(ge=0)]):
+        return {"count": count}
+
+    @app.post("/b")
+    def body(count: Annotated[int, Body()], name: Annotated[str, Body()]):
+        return {"count": count}
+
+    with LiveServerTestClient(app) as client:
+        assert client.get("/q", params={"n": "2", "s": "ab", "tags": ["1", "2"]}).status_code == 200
+        assert client.post("/f", data={"count": "1"}).status_code == 200
+        assert client.post("/b", json={"count": 1, "name": "x"}).status_code == 200
+    assert calls == []

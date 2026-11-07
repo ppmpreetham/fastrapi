@@ -294,8 +294,23 @@ def validation_alias(field_info: FieldInfo, name: str) -> str:
     return field_info.alias if field_info.alias is not None else name
 
 
+EMPTY_DEFAULTS = {list: "list", dict: "dict", set: "set"}
+CONSTRAINT_NAMES = {"Gt": "gt", "Ge": "ge", "Lt": "lt", "Le": "le", "MinLen": "min_length", "MaxLen": "max_length"}
+NUMERIC_CONSTRAINTS = {"gt", "ge", "lt", "le"}
+TEXT_CONSTRAINTS = {"min_length", "max_length", "pattern"}
+EXACT_FLOAT = 2**53
+
+
+def empty_default(field_info: FieldInfo) -> str | None:
+    if field_info.is_required() or field_info.default_factory is not None:
+        return None
+    default = field_info.default
+    kind = EMPTY_DEFAULTS.get(type(default))
+    return kind if kind is not None and not default else None
+
+
 def default_maker(field_info: FieldInfo):
-    if field_info.is_required():
+    if field_info.is_required() or empty_default(field_info) is not None:
         return None
     if field_info.default_factory is not None:
         return lambda: deepcopy(field_info.get_default(call_default_factory=True))
@@ -304,13 +319,48 @@ def default_maker(field_info: FieldInfo):
     return partial(deepcopy, field_info.default)
 
 
+def _scalar_kind(annotation: Any) -> str | None:
+    if _is_union(get_origin(annotation)):
+        args = [arg for arg in get_args(annotation) if arg is not NoneType]
+        annotation = args[0] if len(args) == 1 else None
+    return FAST_KINDS.get(annotation) if type(annotation) is type else None
+
+
+def _constraint(item: Any) -> tuple[str, Any] | None:
+    name = CONSTRAINT_NAMES.get(type(item).__name__)
+    if name is not None:
+        return name, getattr(item, name)
+    values = vars(item) if type(item).__name__ == "_PydanticGeneralMetadata" else {}
+    if set(values) == {"pattern"} and isinstance(values["pattern"], str):
+        return "pattern", values["pattern"]
+    return None
+
+
 def fast_kind(field_info: FieldInfo, annotation: Any) -> str | None:
+    kind = _scalar_kind(annotation)
+    if kind is None:
+        return None
+    allowed = NUMERIC_CONSTRAINTS if kind in ("int", "float") else TEXT_CONSTRAINTS if kind == "str" else set()
+    for item in field_info.metadata:
+        constraint = _constraint(item)
+        if constraint is None or constraint[0] not in allowed:
+            return None
+        name, value = constraint
+        if name in NUMERIC_CONSTRAINTS and not (type(value) in (int, float) and abs(value) < EXACT_FLOAT):
+            return None
+    return kind
+
+
+def fast_list_kind(field_info: FieldInfo, annotation: Any) -> str | None:
     if field_info.metadata:
         return None
     if _is_union(get_origin(annotation)):
         args = [arg for arg in get_args(annotation) if arg is not NoneType]
         annotation = args[0] if len(args) == 1 else None
-    return FAST_KINDS.get(annotation) if type(annotation) is type else None
+    if get_origin(annotation) is not list:
+        return None
+    args = get_args(annotation)
+    return _scalar_kind(args[0]) if len(args) == 1 and get_origin(args[0]) is not Annotated else None
 
 
 def constraints(field_info: FieldInfo) -> dict[str, Any]:
@@ -358,6 +408,8 @@ class FieldSpec:
         "constraints",
         "explicit",
         "read_bytes",
+        "fast_list",
+        "empty_default",
     )
 
 
@@ -464,6 +516,8 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
     spec.validate = partial(adapter.validate_python, from_attributes=True)
     spec.validate_json = adapter.validate_json
     spec.fast = None if spec.sequence else fast_kind(field_info, field_info.annotation)
+    spec.fast_list = fast_list_kind(field_info, field_info.annotation) if spec.sequence else None
+    spec.empty_default = empty_default(field_info)
     spec.embed = bool(getattr(field_info, "embed", None))
     spec.is_form = isinstance(field_info, Form)
     spec.is_file = isinstance(field_info, File)

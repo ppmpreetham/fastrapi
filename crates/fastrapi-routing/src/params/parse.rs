@@ -4,7 +4,7 @@
 use super::constraints::extract_constraints;
 use super::module::analyze;
 use super::utils::{annotation_name, base_annotation, is_background_tasks_type, is_inspect_empty};
-use crate::route::{FastKind, ModelKey, ParsedParameter};
+use crate::route::{EmptyDefault, FastKind, ModelKey, ParsedParameter};
 use fastrapi_core::params::{ParameterConstraints, ParameterSource};
 use fastrapi_http::upload_file::PyUploadFile;
 use pyo3::prelude::*;
@@ -19,6 +19,15 @@ fn source_of(name: &str) -> ParameterSource {
         "header" => ParameterSource::Header,
         "cookie" => ParameterSource::Cookie,
         _ => ParameterSource::Body,
+    }
+}
+
+fn empty_default(name: Option<&str>) -> Option<EmptyDefault> {
+    match name? {
+        "list" => Some(EmptyDefault::List),
+        "dict" => Some(EmptyDefault::Dict),
+        "set" => Some(EmptyDefault::Set),
+        _ => None,
     }
 }
 
@@ -84,6 +93,9 @@ fn background_tasks_parameter(py: Python<'_>, param_name: &str) -> ParsedParamet
         read_bytes: false,
         embed: false,
         fast: None,
+        fast_list: None,
+        fast_pattern: None,
+        empty_default: None,
         validate: py.None(),
         validate_json: None,
         validator_index: None,
@@ -119,7 +131,17 @@ pub fn parse_parameter_spec(
             axum::http::HeaderName::from_bytes(external_name.to_ascii_lowercase().as_bytes()).ok()
         })
         .flatten();
-    let fast = spec.getattr(intern!(py, "fast"))?;
+    let constraints = extract_constraints(&spec.getattr(intern!(py, "constraints"))?);
+    let fast_pattern = constraints
+        .pattern
+        .as_deref()
+        .map(regex::Regex::new)
+        .transpose();
+    let fast = fast_kind(
+        spec.getattr(intern!(py, "fast"))?
+            .extract::<Option<&str>>()?,
+    )
+    .filter(|_| fast_pattern.is_ok());
 
     Ok(ParsedParameter {
         name: param_name.to_owned(),
@@ -139,14 +161,23 @@ pub fn parse_parameter_spec(
         description: field_info
             .getattr(intern!(py, "description"))?
             .extract::<Option<String>>()?,
-        constraints: extract_constraints(&spec.getattr(intern!(py, "constraints"))?),
+        constraints,
         is_pydantic_model: spec.getattr(intern!(py, "model"))?.extract()?,
         model_keys: model_keys(&spec)?,
         is_file: spec.getattr(intern!(py, "is_file"))?.extract()?,
         is_form: spec.getattr(intern!(py, "is_form"))?.extract()?,
         read_bytes: spec.getattr(intern!(py, "read_bytes"))?.extract()?,
         embed: spec.getattr(intern!(py, "embed"))?.extract()?,
-        fast: fast_kind(fast.extract::<Option<&str>>()?),
+        fast,
+        fast_list: fast_kind(
+            spec.getattr(intern!(py, "fast_list"))?
+                .extract::<Option<&str>>()?,
+        ),
+        fast_pattern: fast_pattern.ok().flatten(),
+        empty_default: empty_default(
+            spec.getattr(intern!(py, "empty_default"))?
+                .extract::<Option<&str>>()?,
+        ),
         validate: spec.getattr(intern!(py, "validate"))?.unbind(),
         validate_json: optional(&spec, intern!(py, "validate_json"))?.map(Bound::unbind),
         param_object: Some(field_info.unbind()),

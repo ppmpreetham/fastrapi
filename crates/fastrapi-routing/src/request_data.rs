@@ -5,7 +5,7 @@
 use crate::kernel_validation::{KernelOutcome, kernel_error_object, maybe_validate_with_kernel};
 use crate::params::{errors_with_loc, json_error};
 use crate::pydantic::parse_json;
-use crate::route::{FastKind, ModelKey, ParsedParameter, RouteHandler};
+use crate::route::{EmptyDefault, FastKind, ModelKey, ParsedParameter, RouteHandler};
 use ahash::AHashMap;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -24,9 +24,10 @@ use fastrapi_runtime::server_state::current_server;
 use percent_encoding::percent_decode_str;
 use pydantic_core_kernel::ErrorDetail;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyBytes, PyDict, PyFloat, PyList, PyString, PyTuple};
+use pyo3::types::{PyAny, PyBool, PyBytes, PyDict, PyFloat, PyList, PySet, PyString, PyTuple};
 use pyo3::{IntoPyObjectExt, intern};
 use simd_json::prelude::ValueAsObject;
+use simd_json::{OwnedValue as Value, StaticNode};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 
@@ -265,7 +266,113 @@ fn fast_scalar<'py>(py: Python<'py>, kind: FastKind, raw: &str) -> Option<Bound<
     }
 }
 
+const EXACT_FLOAT: u64 = 1 << 53;
+
+fn within_bounds(param: &ParsedParameter, value: f64) -> bool {
+    let bounds = &param.constraints;
+    bounds.gt.is_none_or(|limit| value > limit)
+        && bounds.ge.is_none_or(|limit| value >= limit)
+        && bounds.lt.is_none_or(|limit| value < limit)
+        && bounds.le.is_none_or(|limit| value <= limit)
+}
+
+fn within_text(param: &ParsedParameter, value: &str) -> bool {
+    let bounds = &param.constraints;
+    let length =
+        (bounds.min_length.is_some() || bounds.max_length.is_some()).then(|| value.chars().count());
+    bounds.min_length.is_none_or(|min| length >= Some(min))
+        && bounds.max_length.is_none_or(|max| length <= Some(max))
+        && param
+            .fast_pattern
+            .as_ref()
+            .is_none_or(|pattern| pattern.is_match(value))
+}
+
+fn fast_int<'py>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+    value: i64,
+) -> Option<Bound<'py, PyAny>> {
+    let bounded = param.constraints.gt.is_some()
+        || param.constraints.ge.is_some()
+        || param.constraints.lt.is_some()
+        || param.constraints.le.is_some();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "guarded by the exact float range check"
+    )]
+    let allowed =
+        !bounded || (value.unsigned_abs() < EXACT_FLOAT && within_bounds(param, value as f64));
+    allowed.then(|| value.into_bound_py_any(py).ok()).flatten()
+}
+
+fn fast_float<'py>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+    value: f64,
+) -> Option<Bound<'py, PyAny>> {
+    (value.is_finite() && within_bounds(param, value)).then(|| PyFloat::new(py, value).into_any())
+}
+
+fn fast_text<'py>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+    value: &str,
+) -> Option<Bound<'py, PyAny>> {
+    within_text(param, value).then(|| PyString::new(py, value).into_any())
+}
+
+fn fast_value<'py>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+    raw: &str,
+) -> Option<Bound<'py, PyAny>> {
+    match param.fast? {
+        FastKind::Int => fast_int(py, param, raw.parse().ok()?),
+        FastKind::Float => fast_float(py, param, raw.parse().ok()?),
+        FastKind::Str => fast_text(py, param, raw),
+        FastKind::Bool => fast_scalar(py, FastKind::Bool, raw),
+    }
+}
+
+fn fast_json<'py>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+    value: &Value,
+) -> Option<Bound<'py, PyAny>> {
+    match (param.fast?, value) {
+        (FastKind::Str, Value::String(text)) => fast_text(py, param, text),
+        (FastKind::Int, Value::Static(StaticNode::I64(number))) => fast_int(py, param, *number),
+        (FastKind::Int, Value::Static(StaticNode::U64(number))) => {
+            fast_int(py, param, i64::try_from(*number).ok()?)
+        }
+        (FastKind::Float, Value::Static(StaticNode::F64(number))) => fast_float(py, param, *number),
+        (FastKind::Bool, Value::Static(StaticNode::Bool(flag))) => {
+            Some(PyBool::new(py, *flag).to_owned().into_any())
+        }
+        _ => None,
+    }
+}
+
+fn fast_list<'py>(
+    py: Python<'py>,
+    kind: FastKind,
+    values: &[Cow<'_, str>],
+) -> Option<Bound<'py, PyAny>> {
+    let items = values
+        .iter()
+        .map(|value| fast_scalar(py, kind, value))
+        .collect::<Option<SmallVec<[Bound<'py, PyAny>; 4]>>>()?;
+    PyList::new(py, items).ok().map(Bound::into_any)
+}
+
 fn default_value<'py>(py: Python<'py>, param: &ParsedParameter) -> PyResult<Bound<'py, PyAny>> {
+    match param.empty_default {
+        Some(EmptyDefault::List) => return Ok(PyList::empty(py).into_any()),
+        Some(EmptyDefault::Dict) => return Ok(PyDict::new(py).into_any()),
+        Some(EmptyDefault::Set) => return Ok(PySet::empty(py)?.into_any()),
+        None => {}
+    }
     match (&param.make_default, &param.default_value) {
         (Some(make), _) => make.bind(py).call0(),
         (None, Some(value)) => Ok(value.bind(py).clone()),
@@ -480,14 +587,20 @@ pub fn request_param_value<'py>(
         return model_param(py, param, keys, input, errors);
     }
     let raw = if param.is_list {
-        string_list(
-            py,
-            source_values(&param.source, &param.external_name, input).iter(),
-        )?
+        let values = source_values(&param.source, &param.external_name, input);
+        if !values.is_empty()
+            && let Some(converted) = param
+                .fast_list
+                .and_then(|kind| fast_list(py, kind, &values))
+        {
+            return Ok(Some(converted));
+        }
+        string_list(py, values.iter())?
     } else {
         let value = param_value(param, input);
-        if let (Some(kind), Some(text)) = (param.fast, value.as_deref())
-            && let Some(converted) = fast_scalar(py, kind, text)
+        if let Some(converted) = value
+            .as_deref()
+            .and_then(|text| fast_value(py, param, text))
         {
             return Ok(Some(converted));
         }
@@ -745,14 +858,31 @@ fn apply_json_body<'py>(
     }
     let object = object.flatten();
     for param in params {
-        let raw = object
-            .and_then(|object| object.get(param.external_name.as_str()))
-            .and_then(|value| json_value_to_py(py, value).ok());
+        let found = object.and_then(|object| object.get(param.external_name.as_str()));
+        if let Some(converted) = found.and_then(|value| fast_json(py, param, value)) {
+            kwargs.set(param.name_py.bind(py), converted)?;
+            continue;
+        }
+        let raw = found.and_then(|value| json_value_to_py(py, value).ok());
         if let Some(value) = resolve(py, param, raw, Loc::Field(param), errors)? {
             kwargs.set(param.name_py.bind(py), value)?;
         }
     }
     Ok(())
+}
+
+fn form_fast<'py>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+    fields: Option<&FormFields>,
+) -> Option<Bound<'py, PyAny>> {
+    if param.is_list {
+        return None;
+    }
+    match fields?.get(param.external_name.as_str())?.last()? {
+        BodyField::Text(text) if !text.is_empty() => fast_value(py, param, text),
+        _ => None,
+    }
 }
 
 fn apply_form_body<'py>(
@@ -775,6 +905,10 @@ fn apply_form_body<'py>(
         return Ok(());
     }
     for param in params {
+        if let Some(value) = form_fast(py, param, fields) {
+            kwargs.set(param.name_py.bind(py), value)?;
+            continue;
+        }
         let raw = form_param_value(py, param, fields)?;
         if let Some(value) = resolve(py, param, raw, Loc::Field(param), errors)? {
             kwargs.set(param.name_py.bind(py), value)?;
