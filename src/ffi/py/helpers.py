@@ -190,3 +190,11 @@ async def contextmanager_in_threadpool(cm):
         await anyio.to_thread.run_sync(
             cm.__exit__, None, None, None, limiter=exit_limiter
         )
+
+
+def route_decorator(add_route, path, methods, name, include_in_schema):
+    def decorator(func):
+        add_route(path, func, methods=methods, name=name, include_in_schema=include_in_schema)
+        return func
+
+    return decorator

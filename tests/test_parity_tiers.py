@@ -248,3 +248,30 @@ def test_middleware_keeps_every_set_cookie(client, app):
     response = client.get("/cookies")
     assert response.headers["x-tag"] == "1"
     assert sorted(response.headers.get_list("set-cookie")) == ["a=1; Path=/; SameSite=lax", "b=2; Path=/; SameSite=lax"]
+
+
+def test_route_and_add_websocket_route(client, app):
+    from starlette.responses import PlainTextResponse
+
+    router = fastrapi.APIRouter()
+
+    @app.route("/plain", methods=["GET"])
+    async def plain(request):
+        return PlainTextResponse(request.url.path)
+
+    @router.route("/routed")
+    def routed(request):
+        return PlainTextResponse("routed")
+
+    async def echo(websocket):
+        await websocket.accept()
+        await websocket.close()
+
+    app.add_websocket_route("/ws", echo)
+    router.add_websocket_route("/ws2", echo)
+    app.include_router(router)
+
+    assert client.get("/plain").text == "/plain"
+    assert client.get("/routed").text == "routed"
+    assert "/plain" not in app.openapi()["paths"]
+    assert {route.path for route in app.routes} >= {"/ws", "/ws2"}
