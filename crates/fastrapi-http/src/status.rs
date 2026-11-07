@@ -217,10 +217,19 @@ pub fn create_status_submodule(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     status_module.add("WS_1015_TLS_HANDSHAKE", WS_1015_TLS_HANDSHAKE)?;
 
     for (deprecated, code) in [
-        ("HTTP_413_REQUEST_ENTITY_TOO_LARGE", HTTP_413_CONTENT_TOO_LARGE),
+        (
+            "HTTP_413_REQUEST_ENTITY_TOO_LARGE",
+            HTTP_413_CONTENT_TOO_LARGE,
+        ),
         ("HTTP_414_REQUEST_URI_TOO_LONG", HTTP_414_URI_TOO_LONG),
-        ("HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE", HTTP_416_RANGE_NOT_SATISFIABLE),
-        ("HTTP_422_UNPROCESSABLE_ENTITY", HTTP_422_UNPROCESSABLE_CONTENT),
+        (
+            "HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE",
+            HTTP_416_RANGE_NOT_SATISFIABLE,
+        ),
+        (
+            "HTTP_422_UNPROCESSABLE_ENTITY",
+            HTTP_422_UNPROCESSABLE_CONTENT,
+        ),
     ] {
         status_module.add(deprecated, code)?;
     }

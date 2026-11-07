@@ -488,14 +488,6 @@ def errors_with_loc(exc: ValidationError, loc: tuple) -> list[dict[str, Any]]:
     return [{**error, "loc": loc + error.get("loc", ())} for error in exc.errors(include_url=False)]
 
 
-def missing(loc: tuple) -> dict[str, Any]:
-    error = ValidationError.from_exception_data(
-        "Field required", [{"type": "missing", "loc": loc, "input": {}}]
-    ).errors(include_url=False)[0]
-    error["input"] = None
-    return error
-
-
 def json_error(raw: bytes) -> tuple[list[dict[str, Any]], Any]:
     import json
 

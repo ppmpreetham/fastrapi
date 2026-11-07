@@ -16,6 +16,7 @@ use fastrapi_http::response_type::ResponseType;
 use fastrapi_routing::dependencies::{
     self, TeardownTasks, execute_teardowns_async, execute_teardowns_sync,
 };
+use fastrapi_routing::request_data::Rejection;
 use fastrapi_routing::route::{ExecutionMode, RouteHandler};
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::{blocking, py_bridge};
@@ -134,7 +135,10 @@ pub(crate) fn prepare_kwargs_and_payload(
         payload,
         &mut kwargs,
     )
-    .map_err(|err| python_error_to_response_in(py, &err, Some(request_input)))?;
+    .map_err(|rejection| match rejection {
+        Rejection::Python(err) => python_error_to_response_in(py, &err, Some(request_input)),
+        Rejection::Response(response) => response,
+    })?;
 
     Ok(kwargs)
 }

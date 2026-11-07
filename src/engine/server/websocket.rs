@@ -170,7 +170,7 @@ pub async fn ws_handler(
                 kwargs.set_item(param.name_py.bind(py), value)?;
             }
         }
-        if let Some(errors) = errors.into_list() {
+        if let Some(errors) = errors.into_list()? {
             return Ok(Err(websocket_validation_error(py, errors.into_any())));
         }
 

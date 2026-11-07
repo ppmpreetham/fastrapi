@@ -8,7 +8,6 @@ const PARAMS_SOURCE: &str = include_str!("../py/params.py");
 static PARAMS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 static ANALYZE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static ERRORS_WITH_LOC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-static MISSING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static JSON_ERROR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 pub fn params_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
@@ -42,10 +41,6 @@ pub fn analyze(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
 
 pub fn errors_with_loc(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     helper(py, &ERRORS_WITH_LOC, intern!(py, "errors_with_loc"))
-}
-
-pub fn missing(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
-    helper(py, &MISSING, intern!(py, "missing"))
 }
 
 pub fn json_error(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {

@@ -3,24 +3,28 @@
 //! When a value is not valid, it makes a 422 error response.
 
 use crate::kernel_validation::maybe_validate_with_kernel;
-use crate::params::{errors_with_loc, json_error, missing};
+use crate::params::{errors_with_loc, json_error};
 use crate::pydantic::parse_json;
 use crate::route::{FastKind, ModelKey, ParsedParameter, RouteHandler};
 use ahash::AHashMap;
-use axum::http::HeaderMap;
 use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use fastrapi_core::body::{BodyField, BodyPayload, FormText};
 use fastrapi_core::params::ParameterSource;
-use fastrapi_http::exceptions::request_validation_error;
+use fastrapi_http::exceptions::{
+    is_default_handler, request_validation_error, request_validation_error_type,
+};
 use fastrapi_http::request::create_py_request;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::upload_file::PyUploadFile;
 use fastrapi_pyutil::call::CallArgs;
-use fastrapi_pyutil::json::json_value_to_py;
+use fastrapi_pyutil::json::{json_value_to_py, write_json_string, write_py_json};
+use fastrapi_runtime::server_state::current_server;
 use percent_encoding::percent_decode_str;
-use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyBytes, PyDict, PyFloat, PyList, PyString, PyTuple};
+use pyo3::{IntoPyObjectExt, intern};
 use simd_json::prelude::ValueAsObject;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -29,29 +33,57 @@ type FormFields = AHashMap<FormText, SmallVec<[BodyField; 2]>>;
 
 fastrapi_pyutil::cached_py_import!(VALIDATION_ERROR, "pydantic_core", "ValidationError");
 
+enum ErrorItem<'py> {
+    Missing {
+        source: &'static str,
+        alias: Option<Bound<'py, PyString>>,
+    },
+    Python(Bound<'py, PyAny>),
+}
+
+pub enum Rejection {
+    Python(PyErr),
+    Response(Response),
+}
+
+impl From<PyErr> for Rejection {
+    fn from(err: PyErr) -> Self {
+        Self::Python(err)
+    }
+}
+
 pub struct Errors<'py> {
     py: Python<'py>,
-    list: Option<Bound<'py, PyList>>,
+    items: SmallVec<[ErrorItem<'py>; 2]>,
 }
 
 impl<'py> Errors<'py> {
     #[must_use]
     pub const fn new(py: Python<'py>) -> Self {
-        Self { py, list: None }
-    }
-
-    fn list(&mut self) -> &Bound<'py, PyList> {
-        self.list.get_or_insert_with(|| PyList::empty(self.py))
+        Self {
+            py,
+            items: SmallVec::new_const(),
+        }
     }
 
     fn extend(&mut self, errors: &Bound<'py, PyAny>) -> PyResult<()> {
-        let list = self.list().clone();
-        errors.try_iter()?.try_for_each(|error| list.append(error?))
+        for error in errors.try_iter()? {
+            self.items.push(ErrorItem::Python(error?));
+        }
+        Ok(())
     }
 
-    fn missing(&mut self, loc: Loc<'_>) -> PyResult<()> {
-        let error = missing(self.py)?.call1((loc.tuple(self.py)?,))?;
-        self.list().append(error)
+    fn missing(&mut self, loc: Loc<'_>) {
+        self.items.push(match loc {
+            Loc::Field(param) => ErrorItem::Missing {
+                source: source_name(&param.source),
+                alias: Some(param.alias_py.bind(self.py).clone()),
+            },
+            Loc::Source(source) => ErrorItem::Missing {
+                source: source_name(source),
+                alias: None,
+            },
+        });
     }
 
     fn rejected(&mut self, err: PyErr, loc: Loc<'_>) -> PyResult<()> {
@@ -62,17 +94,113 @@ impl<'py> Errors<'py> {
         self.extend(&errors)
     }
 
+    fn missing_dict(
+        &self,
+        source: &str,
+        alias: Option<&Bound<'py, PyString>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = self.py;
+        let loc = match alias {
+            Some(alias) => PyTuple::new(py, [PyString::new(py, source), alias.clone()])?,
+            None => PyTuple::new(py, [source])?,
+        };
+        let error = PyDict::new(py);
+        error.set_item(intern!(py, "type"), intern!(py, "missing"))?;
+        error.set_item(intern!(py, "loc"), loc)?;
+        error.set_item(intern!(py, "msg"), intern!(py, "Field required"))?;
+        error.set_item(intern!(py, "input"), py.None())?;
+        Ok(error.into_any())
+    }
+
     #[must_use]
-    pub fn into_list(self) -> Option<Bound<'py, PyList>> {
-        self.list
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn into_list(self) -> PyResult<Option<Bound<'py, PyList>>> {
+        if self.items.is_empty() {
+            return Ok(None);
+        }
+        let list = PyList::empty(self.py);
+        for item in &self.items {
+            match item {
+                ErrorItem::Missing { source, alias } => {
+                    list.append(self.missing_dict(source, alias.as_ref())?)?;
+                }
+                ErrorItem::Python(error) => list.append(error)?,
+            }
+        }
+        Ok(Some(list))
     }
 
     pub fn check(self, body: impl FnOnce() -> PyResult<Option<Bound<'py, PyAny>>>) -> PyResult<()> {
-        match self.list {
+        let py = self.py;
+        match self.into_list()? {
             None => Ok(()),
-            Some(list) => Err(request_validation_error(self.py, list.into_any(), body()?)),
+            Some(list) => Err(request_validation_error(py, list.into_any(), body()?)),
         }
     }
+
+    fn json(&self) -> PyResult<Vec<u8>> {
+        let mut out = Vec::with_capacity(128);
+        out.extend_from_slice(b"{\"detail\":[");
+        for (index, item) in self.items.iter().enumerate() {
+            if index > 0 {
+                out.push(b',');
+            }
+            match item {
+                ErrorItem::Missing { source, alias } => {
+                    out.extend_from_slice(b"{\"type\":\"missing\",\"loc\":[");
+                    write_json_string(&mut out, source)?;
+                    if let Some(alias) = alias {
+                        out.push(b',');
+                        write_json_string(&mut out, alias.to_str()?)?;
+                    }
+                    out.extend_from_slice(b"],\"msg\":\"Field required\",\"input\":null}");
+                }
+                ErrorItem::Python(error) => write_py_json(self.py, error, &mut out)?,
+            }
+        }
+        out.extend_from_slice(b"]}");
+        Ok(out)
+    }
+
+    pub fn reject(
+        self,
+        input: &RequestInput<'_>,
+        body: impl FnOnce() -> PyResult<Option<Bound<'py, PyAny>>>,
+    ) -> Rejection {
+        if has_validation_handler(self.py, input) {
+            return Rejection::Python(self.check(body).err().unwrap_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("validation errors disappeared")
+            }));
+        }
+        match self.json() {
+            Ok(body) => Rejection::Response(
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+                    body,
+                )
+                    .into_response(),
+            ),
+            Err(err) => Rejection::Python(err),
+        }
+    }
+}
+
+fn has_validation_handler(py: Python<'_>, input: &RequestInput<'_>) -> bool {
+    let Some(registry) = input
+        .server
+        .or_else(current_server)
+        .and_then(|server| server.server().exception_handlers())
+    else {
+        return false;
+    };
+    request_validation_error_type(py)
+        .ok()
+        .and_then(|class| registry.bind(py).get_item(class).ok().flatten())
+        .is_some_and(|handler| !is_default_handler(&handler))
 }
 
 const fn source_name(source: &ParameterSource) -> &'static str {
@@ -149,7 +277,7 @@ fn resolve<'py>(
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
     let Some(raw) = raw else {
         if param.required {
-            errors.missing(loc)?;
+            errors.missing(loc);
             return Ok(None);
         }
         return default_value(py, param).map(Some);
@@ -594,7 +722,7 @@ fn apply_json_body<'py>(
     let object = parsed.as_ref().map(ValueAsObject::as_object);
     if let Some(None) = object {
         for param in params {
-            errors.missing(Loc::Field(param))?;
+            errors.missing(Loc::Field(param));
         }
         return Ok(());
     }
@@ -693,7 +821,7 @@ pub fn apply_request_data(
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
     kwargs: &mut CallArgs,
-) -> PyResult<()> {
+) -> Result<(), Rejection> {
     if handler.payload.has_multiple_query_params {
         request_input.get_all_query_params();
     }
@@ -719,5 +847,10 @@ pub fn apply_request_data(
         kwargs,
         &mut errors,
     )?;
-    errors.check(|| received_body(py, handler, payload, request_input.headers))
+    if errors.is_empty() {
+        return Ok(());
+    }
+    Err(errors.reject(request_input, || {
+        received_body(py, handler, payload, request_input.headers)
+    }))
 }
