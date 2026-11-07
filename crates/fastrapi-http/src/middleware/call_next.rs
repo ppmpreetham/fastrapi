@@ -17,7 +17,7 @@ use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 use pyo3::{Bound, intern};
 use pyo3_async_runtimes::TaskLocals;
 
@@ -31,12 +31,17 @@ pub struct PyDownstreamResponse {
     #[pyo3(get)]
     pub status_code: u16,
     #[pyo3(get)]
-    pub headers: Py<PyDict>,
+    pub raw_headers: Py<PyList>,
     pub body_bytes: bytes::Bytes,
 }
 
 #[pymethods]
 impl PyDownstreamResponse {
+    #[getter]
+    fn headers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        crate::response_api::headers(py, &self.raw_headers)
+    }
+
     fn __repr__(&self) -> String {
         format!("DownstreamResponse(status_code={})", self.status_code)
     }
@@ -128,18 +133,19 @@ fn parts_to_py<'py>(
     parts: &DownstreamParts,
     body: bytes::Bytes,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let headers_dict = PyDict::new(py);
+    let raw_headers = PyList::empty(py);
     for (name, value) in &parts.headers {
-        if let Ok(value) = value.to_str() {
-            headers_dict.set_item(name.as_str(), value)?;
-        }
+        raw_headers.append((
+            PyBytes::new(py, name.as_str().as_bytes()),
+            PyBytes::new(py, value.as_bytes()),
+        ))?;
     }
 
     Bound::new(
         py,
         PyDownstreamResponse {
             status_code: parts.status,
-            headers: headers_dict.unbind(),
+            raw_headers: raw_headers.unbind(),
             body_bytes: body,
         },
     )
@@ -152,11 +158,9 @@ fn py_to_response(py: Python<'_>, value: &Bound<'_, PyAny>) -> Response {
         let status =
             StatusCode::from_u16(ds.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let mut builder = Response::builder().status(status);
-        if let Ok(dict) = ds.headers.bind(py).cast::<PyDict>() {
-            for (k, v) in dict.iter() {
-                if let (Ok(k), Ok(v)) = (k.extract::<&str>(), v.extract::<&str>()) {
-                    builder = builder.header(k, v);
-                }
+        for item in ds.raw_headers.bind(py).iter() {
+            if let Ok((name, value)) = item.extract::<(&[u8], &[u8])>() {
+                builder = builder.header(name, value);
             }
         }
         return builder

@@ -229,3 +229,22 @@ def test_file_response_head_matches_fastapi(tmp_path):
         actual = client.head("/file")
     assert (actual.status_code, actual.content) == (expected.status_code, expected.content)
     assert actual.headers["content-length"] == expected.headers["content-length"]
+
+
+def test_middleware_keeps_every_set_cookie(client, app):
+    @app.middleware("http")
+    async def tag(request, call_next):
+        response = await call_next(request)
+        response.headers["x-tag"] = "1"
+        return response
+
+    @app.get("/cookies")
+    def cookies():
+        response = fastrapi.responses.JSONResponse({})
+        response.set_cookie("a", "1")
+        response.set_cookie("b", "2")
+        return response
+
+    response = client.get("/cookies")
+    assert response.headers["x-tag"] == "1"
+    assert sorted(response.headers.get_list("set-cookie")) == ["a=1; Path=/; SameSite=lax", "b=2; Path=/; SameSite=lax"]
