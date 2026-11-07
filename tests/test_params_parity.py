@@ -212,6 +212,9 @@ CASES = [
     ("post", "/body-model", {"content": b'{"name": "a"', "headers": {"content-type": "application/json"}}),
     ("post", "/body-model", {"content": b'{"name": "a", "price": 1}'}),
     ("post", "/body-model", {}),
+    ("post", "/body-model", {"json": {"name": 5, "price": "x"}}),
+    ("post", "/body-model", {"json": {"price": [1]}}),
+    ("post", "/body-model", {"json": [1]}),
     ("get", "/path/0", {}),
     ("get", "/path/x", {}),
     ("get", "/path/4", {}),
@@ -256,3 +259,9 @@ def test_signature_errors_raise_at_decoration():
         @app.get("/items/{item_id}")
         def bad(item_id: Annotated[int, fastrapi.Query()]):
             return {}
+
+
+def test_kernel_validates_model_bodies(clients):
+    _, actual = clients
+    actual.post("/body-model", json={"name": 5, "price": "x"})
+    assert fastrapi.kernel_validation_count() >= 1

@@ -17,12 +17,13 @@ use pydantic_core_kernel::{
     ValLineError, ValidationError, ValidationState, Value, build_validator,
 };
 use pyo3::types::{
-    PyBool, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTime, PyTzInfo,
+    PyBool, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTime, PyTuple,
+    PyTzInfo,
 };
 
 use crate::route::PydanticValidator;
-use pydantic_core_kernel::json::parse_json;
-use pydantic_core_kernel::{ExtraBehavior, Int};
+use pydantic_core_kernel::json::{parse_json, serde_to_value};
+use pydantic_core_kernel::{ErrorDetail, ExtraBehavior, Int, LocItem};
 use serde_json::{Map, Number, Value as SerdeJsonValue};
 use std::env::var;
 use std::str::from_utf8;
@@ -66,14 +67,14 @@ impl ParsedJsonValidator {
         })
     }
 
-    fn validate(&self, value: &Value) -> Result<Value, ValidationError> {
-        let mut state = ValidationState::new(InputKind::Json);
+    fn validate(&self, value: &Value, kind: InputKind) -> Result<Value, ValidationError> {
+        let mut state = ValidationState::new(kind);
         self.validator
             .validate(value, &mut state)
-            .map_err(|err| self.to_validation_error(err))
+            .map_err(|err| self.to_validation_error(err, kind))
     }
 
-    fn to_validation_error(&self, err: ValError) -> ValidationError {
+    fn to_validation_error(&self, err: ValError, kind: InputKind) -> ValidationError {
         let line_errors = match err {
             ValError::LineErrors(line_errors) => line_errors,
             ValError::Omit | ValError::UseDefault => vec![ValLineError::new(
@@ -86,7 +87,7 @@ impl ParsedJsonValidator {
                 Value::Null,
             )],
         };
-        ValidationError::new(&self.title, line_errors, InputKind::Json)
+        ValidationError::new(&self.title, line_errors, kind)
     }
 }
 
@@ -109,11 +110,16 @@ pub fn kernel_validation_count() -> usize {
     validation_count()
 }
 
+pub enum KernelOutcome {
+    Valid(Py<PyAny>),
+    Invalid(Vec<ErrorDetail>),
+}
+
 pub fn maybe_validate_with_kernel(
     py: Python<'_>,
     validator: &PydanticValidator,
     raw_payload: &[u8],
-) -> Option<Py<PyAny>> {
+) -> Option<KernelOutcome> {
     let fast = fast_path(py, validator)?;
     from_utf8(raw_payload).ok()?;
     validate_body(py, fast, raw_payload)
@@ -469,16 +475,63 @@ fn schema_has_nested_models(schema: &CoreSchema) -> bool {
     }
     walk(schema, false)
 }
-fn validate_body(py: Python<'_>, fast: &KernelFastPath, raw_payload: &[u8]) -> Option<Py<PyAny>> {
+fn validate_body(
+    py: Python<'_>,
+    fast: &KernelFastPath,
+    raw_payload: &[u8],
+) -> Option<KernelOutcome> {
     let validated = match &fast.schema {
         KernelSchema::Raw(schema) => schema.validate_json(raw_payload),
         KernelSchema::Aliased { validator, core } => {
             let mut parsed = parse_json(raw_payload).ok()?;
             strip_shadowed_name_keys(core, &mut parsed, AliasRules::default());
-            validator.validate(&parsed)
+            validator.validate(&parsed, InputKind::Json)
         }
     };
-    construct_model(py, fast, &validated.ok()?)
+    if let Ok(value) = validated {
+        return construct_model(py, fast, &value).map(KernelOutcome::Valid);
+    }
+    let mut errors = python_mode_error(fast, raw_payload)?.errors_impl(true, true, false, "");
+    for error in &mut errors {
+        error.loc.insert(0, LocItem::S("body".to_owned()));
+    }
+    Some(KernelOutcome::Invalid(errors))
+}
+
+fn python_mode_error(fast: &KernelFastPath, raw_payload: &[u8]) -> Option<ValidationError> {
+    let mut parsed = parse_json(raw_payload).ok()?;
+    match &fast.schema {
+        KernelSchema::Raw(schema) => schema.validate_value(&parsed).err(),
+        KernelSchema::Aliased { validator, core } => {
+            strip_shadowed_name_keys(core, &mut parsed, AliasRules::default());
+            validator.validate(&parsed, InputKind::Python).err()
+        }
+    }
+}
+
+pub fn kernel_error_object<'py>(
+    py: Python<'py>,
+    detail: &ErrorDetail,
+) -> PyResult<Bound<'py, PyAny>> {
+    let error = PyDict::new(py);
+    error.set_item(pyo3::intern!(py, "type"), detail.r#type.as_str())?;
+    let loc = detail.loc.iter().map(|item| match item {
+        LocItem::S(text) => PyString::new(py, text).into_any(),
+        LocItem::I(index) => PyInt::new(py, *index).into_any(),
+    });
+    error.set_item(pyo3::intern!(py, "loc"), PyTuple::new(py, loc)?)?;
+    error.set_item(pyo3::intern!(py, "msg"), detail.msg.as_str())?;
+    if let Some(input) = &detail.input {
+        error.set_item(pyo3::intern!(py, "input"), value_to_py(py, input))?;
+    }
+    if let Some(ctx) = &detail.ctx {
+        let context = PyDict::new(py);
+        for (key, value) in ctx {
+            context.set_item(key, value_to_py(py, &serde_to_value(value)))?;
+        }
+        error.set_item(pyo3::intern!(py, "ctx"), context)?;
+    }
+    Ok(error.into_any())
 }
 
 fn construct_model(py: Python<'_>, fast: &KernelFastPath, value: &Value) -> Option<Py<PyAny>> {

@@ -2,7 +2,7 @@
 //! This module converts raw path, query, header, cookie, form, and body values into Python arguments for the endpoint.
 //! When a value is not valid, it makes a 422 error response.
 
-use crate::kernel_validation::maybe_validate_with_kernel;
+use crate::kernel_validation::{KernelOutcome, kernel_error_object, maybe_validate_with_kernel};
 use crate::params::{errors_with_loc, json_error};
 use crate::pydantic::parse_json;
 use crate::route::{FastKind, ModelKey, ParsedParameter, RouteHandler};
@@ -22,6 +22,7 @@ use fastrapi_pyutil::call::CallArgs;
 use fastrapi_pyutil::json::{json_value_to_py, write_json_string, write_py_json};
 use fastrapi_runtime::server_state::current_server;
 use percent_encoding::percent_decode_str;
+use pydantic_core_kernel::ErrorDetail;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyBytes, PyDict, PyFloat, PyList, PyString, PyTuple};
 use pyo3::{IntoPyObjectExt, intern};
@@ -39,6 +40,7 @@ enum ErrorItem<'py> {
         alias: Option<Bound<'py, PyString>>,
     },
     Python(Bound<'py, PyAny>),
+    Kernel(ErrorDetail),
 }
 
 pub enum Rejection {
@@ -128,6 +130,7 @@ impl<'py> Errors<'py> {
                     list.append(self.missing_dict(source, alias.as_ref())?)?;
                 }
                 ErrorItem::Python(error) => list.append(error)?,
+                ErrorItem::Kernel(detail) => list.append(kernel_error_object(self.py, detail)?)?,
             }
         }
         Ok(Some(list))
@@ -159,6 +162,8 @@ impl<'py> Errors<'py> {
                     out.extend_from_slice(b"],\"msg\":\"Field required\",\"input\":null}");
                 }
                 ErrorItem::Python(error) => write_py_json(self.py, error, &mut out)?,
+                ErrorItem::Kernel(detail) => serde_json::to_writer(&mut out, detail)
+                    .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?,
             }
         }
         out.extend_from_slice(b"]}");
@@ -655,12 +660,21 @@ fn single_json_body<'py>(
     raw: &[u8],
     errors: &mut Errors<'py>,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
-    if let Some(validator) = param
+    let kernel = param
         .validator_index
         .and_then(|index| handler.validation.param_validators.get(index))
-        && let Some(value) = maybe_validate_with_kernel(py, validator, raw)
-    {
-        return Ok(Some(value.into_bound(py)));
+        .and_then(|validator| maybe_validate_with_kernel(py, validator, raw));
+    match kernel {
+        Some(KernelOutcome::Valid(value)) => return Ok(Some(value.into_bound(py))),
+        Some(KernelOutcome::Invalid(details))
+            if details.iter().all(|detail| detail.loc.len() > 1) =>
+        {
+            errors
+                .items
+                .extend(details.into_iter().map(ErrorItem::Kernel));
+            return Ok(None);
+        }
+        _ => {}
     }
     let loc = Loc::Source(&param.source);
     let Some(validate_json) = &param.validate_json else {
@@ -672,15 +686,18 @@ fn single_json_body<'py>(
             errors,
         );
     };
-    match validate_json.bind(py).call1((PyBytes::new(py, raw),)) {
-        Ok(value) => Ok(Some(value)),
-        Err(err) => {
-            if !json_invalid(py, raw, errors)? {
-                errors.rejected(err, loc)?;
-            }
-            Ok(None)
-        }
+    let err = match validate_json.bind(py).call1((PyBytes::new(py, raw),)) {
+        Ok(value) => return Ok(Some(value)),
+        Err(err) => err,
+    };
+    if let Some(parsed) = parse_json(py, raw) {
+        let value = json_value_to_py(py, &parsed)?;
+        return resolve(py, param, Some(value), loc, errors);
     }
+    if !json_invalid(py, raw, errors)? {
+        errors.rejected(err, loc)?;
+    }
+    Ok(None)
 }
 
 fn apply_json_body<'py>(
