@@ -134,7 +134,7 @@ macro_rules! define_api_key_security {
             fn __call__(
                 &self,
                 request: &pyo3::Bound<'_, pyo3::types::PyAny>,
-            ) -> pyo3::PyResult<String> {
+            ) -> pyo3::PyResult<Option<String>> {
                 $crate::security::callable::api_key_call(
                     stringify!($source),
                     &self.name,

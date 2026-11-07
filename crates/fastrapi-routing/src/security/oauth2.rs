@@ -53,7 +53,7 @@ impl OAuth2 {
     }
 
     /// Call self as a function.
-    fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
+    fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
         callable::bearer_token(request, self.auto_error)
     }
 }
@@ -124,7 +124,7 @@ impl OAuth2PasswordBearer {
     }
 
     /// Call self as a function.
-    fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
+    fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
         callable::bearer_token(request, self.auto_error)
     }
 }
@@ -202,7 +202,7 @@ impl OAuth2AuthorizationCodeBearer {
     }
 
     /// Call self as a function.
-    fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
+    fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
         callable::bearer_token(request, self.auto_error)
     }
 }
@@ -271,7 +271,7 @@ impl OpenIdConnect {
     }
 
     /// Call self as a function.
-    fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
+    fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
         callable::bearer_token(request, self.auto_error)
     }
 }

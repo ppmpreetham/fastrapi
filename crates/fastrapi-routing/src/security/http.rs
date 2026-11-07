@@ -76,7 +76,7 @@ impl HTTPBearer {
     fn __call__(
         &self,
         request: &Bound<'_, PyAny>,
-    ) -> PyResult<super::HTTPAuthorizationCredentials> {
+    ) -> PyResult<Option<super::HTTPAuthorizationCredentials>> {
         callable::http_bearer_call(self.auto_error, self.bearer_format.as_deref(), request)
     }
 }
@@ -148,7 +148,10 @@ impl HTTPBasic {
     }
 
     /// Call self as a function.
-    fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<super::HTTPBasicCredentials> {
+    fn __call__(
+        &self,
+        request: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<super::HTTPBasicCredentials>> {
         callable::http_basic_call(self.auto_error, self.realm.as_deref(), request)
     }
 }
@@ -220,7 +223,7 @@ impl HTTPDigest {
     }
 
     /// Call self as a function.
-    fn __call__(&self, request: &Bound<'_, PyAny>) -> Result<String, PyErr> {
+    fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
         let header = request
             .getattr("headers")
             .ok()
@@ -229,9 +232,9 @@ impl HTTPDigest {
             .filter(|value| !value.is_empty());
 
         match header {
-            Some(header) => Ok(header),
+            Some(header) => Ok(Some(header)),
             None if self.auto_error => Err(callable::unauthorized(request.py(), "Digest")),
-            None => Ok(String::new()),
+            None => Ok(None),
         }
     }
 }

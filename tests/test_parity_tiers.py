@@ -302,3 +302,35 @@ def test_background_tasks_in_dependencies(client, app):
             break
         time.sleep(0.02)
     assert done == ["dependency", "endpoint", "dependency"]
+
+
+def build_optional_security(lib):
+    security = lib.security
+    app = lib.FastAPI()
+    schemes = {
+        "bearer": security.HTTPBearer(auto_error=False),
+        "basic": security.HTTPBasic(auto_error=False),
+        "header": security.APIKeyHeader(name="x-key", auto_error=False),
+        "query": security.APIKeyQuery(name="key", auto_error=False),
+        "cookie": security.APIKeyCookie(name="key", auto_error=False),
+        "oauth2": security.OAuth2PasswordBearer(tokenUrl="token", auto_error=False),
+    }
+    for name, scheme in schemes.items():
+
+        def endpoint(credentials=lib.Depends(scheme)):
+            return {"missing": credentials is None}
+
+        app.add_api_route(f"/{name}", endpoint)
+    return app
+
+
+@pytest.mark.parametrize("name", ["bearer", "basic", "header", "query", "cookie", "oauth2"])
+def test_auto_error_false_gives_none(name):
+    from fastapi.testclient import TestClient
+
+    from conftest import LiveServerTestClient
+
+    expected = TestClient(build_optional_security(fastapi)).get(f"/{name}")
+    with LiveServerTestClient(build_optional_security(fastrapi)) as client:
+        actual = client.get(f"/{name}")
+    assert (actual.status_code, actual.json()) == (expected.status_code, expected.json())

@@ -49,18 +49,29 @@ fn auth_header(request: &Bound<'_, PyAny>) -> Option<String> {
         .ok()
 }
 
-pub(crate) fn bearer_token(request: &Bound<'_, PyAny>, auto_error: bool) -> Result<String, PyErr> {
+fn missing<T>(
+    request: &Bound<'_, PyAny>,
+    auto_error: bool,
+    challenge: &str,
+) -> PyResult<Option<T>> {
+    if auto_error {
+        Err(unauthorized(request.py(), challenge))
+    } else {
+        Ok(None)
+    }
+}
+
+pub(crate) fn bearer_token(
+    request: &Bound<'_, PyAny>,
+    auto_error: bool,
+) -> PyResult<Option<String>> {
     let header = auth_header(request).unwrap_or_default();
     let (scheme, credentials) = split_authorization(&header);
 
     if header.is_empty() || !scheme.eq_ignore_ascii_case("bearer") {
-        return if auto_error {
-            Err(unauthorized(request.py(), "Bearer"))
-        } else {
-            Ok(String::new())
-        };
+        return missing(request, auto_error, "Bearer");
     }
-    Ok(credentials.to_owned())
+    Ok(Some(credentials.to_owned()))
 }
 
 pub(crate) fn source_value(request: &Bound<'_, PyAny>, source: &str, name: &str) -> Option<String> {
@@ -89,37 +100,26 @@ pub(crate) fn http_bearer_call(
     auto_error: bool,
     bearer_format: Option<&str>,
     request: &Bound<'_, PyAny>,
-) -> PyResult<HTTPAuthorizationCredentials> {
+) -> PyResult<Option<HTTPAuthorizationCredentials>> {
     _ = bearer_format;
     let header = auth_header(request).unwrap_or_default();
     let (scheme, credentials) = split_authorization(&header);
 
     if header.is_empty() || !scheme.eq_ignore_ascii_case("bearer") || credentials.is_empty() {
-        return if auto_error {
-            Err(unauthorized(request.py(), "Bearer"))
-        } else {
-            Ok(empty_credentials())
-        };
+        return missing(request, auto_error, "Bearer");
     }
 
-    Ok(HTTPAuthorizationCredentials {
+    Ok(Some(HTTPAuthorizationCredentials {
         scheme: scheme.to_owned(),
         credentials: credentials.to_owned(),
-    })
-}
-
-const fn empty_credentials() -> HTTPAuthorizationCredentials {
-    HTTPAuthorizationCredentials {
-        scheme: String::new(),
-        credentials: String::new(),
-    }
+    }))
 }
 
 pub(crate) fn http_basic_call(
     auto_error: bool,
     realm: Option<&str>,
     request: &Bound<'_, PyAny>,
-) -> PyResult<HTTPBasicCredentials> {
+) -> PyResult<Option<HTTPBasicCredentials>> {
     let header = auth_header(request).unwrap_or_default();
     let (scheme, payload) = split_authorization(&header);
 
@@ -134,12 +134,8 @@ pub(crate) fn http_basic_call(
         .flatten();
 
     match credentials {
-        Some((username, password)) => Ok(HTTPBasicCredentials { username, password }),
-        None if auto_error => Err(unauthorized(request.py(), &challenge)),
-        None => Ok(HTTPBasicCredentials {
-            username: String::new(),
-            password: String::new(),
-        }),
+        Some((username, password)) => Ok(Some(HTTPBasicCredentials { username, password })),
+        None => missing(request, auto_error, &challenge),
     }
 }
 
@@ -148,10 +144,9 @@ pub(crate) fn api_key_call(
     name: &str,
     auto_error: bool,
     request: &Bound<'_, PyAny>,
-) -> PyResult<String> {
+) -> PyResult<Option<String>> {
     match source_value(request, source, name).filter(|key| !key.is_empty()) {
-        Some(key) => Ok(key),
-        None if auto_error => Err(unauthorized(request.py(), "APIKey")),
-        None => Ok(String::new()),
+        Some(key) => Ok(Some(key)),
+        None => missing(request, auto_error, "APIKey"),
     }
 }
