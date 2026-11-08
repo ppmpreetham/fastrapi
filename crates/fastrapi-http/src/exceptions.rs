@@ -673,7 +673,7 @@ pub fn validation_error_response(value: &Bound<'_, PyAny>) -> Option<Response> {
 #[derive(Clone)]
 pub struct PyWebSocketException {
     pub code: u16,
-    pub reason: Option<String>,
+    pub reason: String,
 }
 
 /// Common base class for all non-exit exceptions.
@@ -705,21 +705,28 @@ impl PyWebSocketDisconnect {
 impl PyWebSocketException {
     #[new]
     #[pyo3(signature = (code, reason=None))]
-    const fn new(code: u16, reason: Option<String>) -> Self {
-        Self { code, reason }
+    fn new(code: u16, reason: Option<String>) -> Self {
+        Self {
+            code,
+            reason: reason.unwrap_or_default(),
+        }
     }
 
     #[pyo3(signature = (*_args, **_kwargs))]
     const fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
 
     fn __str__(&self) -> String {
-        format!("{}: {}", self.code, self.reason.as_deref().unwrap_or(""))
+        format!("{}: {}", self.code, self.reason)
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "WebSocketException(code={}, reason={:?})",
-            self.code, self.reason
-        )
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let py = slf.py();
+        let this = slf.borrow();
+        Ok(format!(
+            "{}(code={}, reason={})",
+            slf.get_type().name()?,
+            this.code,
+            PyString::new(py, &this.reason).repr()?
+        ))
     }
 }
