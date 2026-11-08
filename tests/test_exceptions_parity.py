@@ -157,3 +157,45 @@ def test_default_handlers_are_async():
     assert no_content.status_code == 204 and no_content.body == b""
     invalid = asyncio.run(request_validation_exception_handler(None, RequestValidationError([{"loc": ("q",)}])))
     assert invalid.status_code == 422 and invalid.body == b'{"detail":[{"loc":["q"]}]}'
+
+
+@pytest.mark.parametrize("args", [(418,), (499,), (404, "gone"), (401, None, {"a": "b"})])
+def test_http_exception_matches_fastapi(args):
+    expected = fastapi.HTTPException(*args)
+    actual = fastrapi.HTTPException(*args)
+    assert (actual.status_code, actual.detail, actual.headers, actual.args) == (
+        expected.status_code,
+        expected.detail,
+        expected.headers,
+        expected.args,
+    )
+    assert (str(actual), repr(actual)) == (str(expected), repr(expected))
+
+
+def test_exception_classes_run_no_python_code():
+    import sys
+
+    from fastrapi.exceptions import RequestValidationError
+
+    frames = []
+
+    def tracer(frame, event, arg):
+        if event == "call":
+            frames.append(frame.f_code.co_name)
+
+    sys.settrace(tracer)
+    try:
+        fastrapi.HTTPException(404, headers={"a": "b"})
+        RequestValidationError([{"loc": ("q",)}], body=b"x")
+    finally:
+        sys.settrace(None)
+    assert frames == []
+
+
+def test_validation_exception_str_matches_fastapi():
+    ctx = {"function": "f", "path": "GET /x", "file": "a.py", "line": 3}
+    for kwargs in ({}, {"endpoint_ctx": {"path": "/x"}}, {"endpoint_ctx": ctx}):
+        expected = fastapi.exceptions.RequestValidationError([{"a": 1}, {"b": 2}], **kwargs)
+        actual = fastrapi.exceptions.RequestValidationError([{"a": 1}, {"b": 2}], **kwargs)
+        assert str(actual) == str(expected)
+        assert actual.endpoint_line == expected.endpoint_line
