@@ -102,9 +102,10 @@ pub(crate) fn spawn_background_tasks(
     request_input: &RequestInput<'_>,
     response: &Response,
 ) {
-    if let Some(tasks) = request_input.background.get().cloned()
+    if let Some(tasks) = request_input.background.get()
         && response.extensions().get::<OwnBackground>().is_none()
     {
+        let tasks = Python::attach(|py| tasks.clone_ref(py));
         spawn(async move {
             let pending = Python::attach(|py| match tasks.try_borrow(py) {
                 Ok(bg) => Some(bg.execute_all(event_loop)),
@@ -270,15 +271,82 @@ pub(crate) fn render_no_request_json_response(
 
 pub(crate) type PyTaskFuture = py_bridge::PyTaskFuture;
 
+pub(crate) enum HandlerRun {
+    Done(Result<Response, Response>),
+    Pending(PyTaskFuture),
+}
+
+enum Step<'py> {
+    Return(Bound<'py, PyAny>),
+    Raise(PyErr),
+    Yield,
+}
+
+fn step_coroutine<'py>(py: Python<'py>, coroutine: &Bound<'py, PyAny>) -> Step<'py> {
+    use pyo3::ffi;
+    unsafe {
+        let ctx = ffi::PyContext_CopyCurrent();
+        if ctx.is_null() {
+            return Step::Raise(PyErr::fetch(py));
+        }
+        let ctx = Bound::from_owned_ptr(py, ctx);
+        if ffi::PyContext_Enter(ctx.as_ptr()) != 0 {
+            return Step::Raise(PyErr::fetch(py));
+        }
+        let mut out: *mut ffi::PyObject = std::ptr::null_mut();
+        let status = ffi::PyIter_Send(coroutine.as_ptr(), ffi::Py_None(), &raw mut out);
+        let step = match status {
+            ffi::PySendResult::PYGEN_RETURN => Step::Return(Bound::from_owned_ptr(py, out)),
+            ffi::PySendResult::PYGEN_ERROR => Step::Raise(PyErr::fetch(py)),
+            ffi::PySendResult::PYGEN_NEXT => {
+                ffi::Py_DECREF(out);
+                Step::Yield
+            }
+        };
+        ffi::PyContext_Exit(ctx.as_ptr());
+        step
+    }
+}
+
+fn start_coroutine(
+    py: Python<'_>,
+    event_loop: EventLoop,
+    handler: &RouteHandler,
+    request_input: Option<&RequestInput<'_>>,
+    coroutine: Bound<'_, PyAny>,
+) -> Result<HandlerRun, Response> {
+    if !handler.execution.inline_async {
+        return into_asyncio_future(py, event_loop, coroutine).map(HandlerRun::Pending);
+    }
+    Ok(HandlerRun::Done(match step_coroutine(py, &coroutine) {
+        Step::Return(result) => Ok(specialized_response_conversion(
+            py,
+            &result,
+            handler,
+            request_input,
+            event_loop,
+        )),
+        Step::Raise(err) => Err(python_error_to_response_in(py, &err, request_input)),
+        Step::Yield => {
+            _ = coroutine.call_method0(pyo3::intern!(py, "close"));
+            let err = pyo3::exceptions::PyRuntimeError::new_err(
+                "inline handler suspended unexpectedly",
+            );
+            Err(python_error_to_response_in(py, &err, request_input))
+        }
+    }))
+}
+
 #[inline(always)]
 async fn await_python_future(
     event_loop: EventLoop,
     handler: &RouteHandler,
     request_input: Option<&RequestInput<'_>>,
-    future_result: Result<PyTaskFuture, Response>,
+    future_result: Result<HandlerRun, Response>,
 ) -> Result<Response, Response> {
     let future = match future_result {
-        Ok(f) => f,
+        Ok(HandlerRun::Pending(f)) => f,
+        Ok(HandlerRun::Done(r)) => return r,
         Err(r) => return Err(r),
     };
 
@@ -364,7 +432,7 @@ async fn core_async_no_args(
             .bind(py)
             .call0()
             .map_err(|err| error_response(py, &err, request_input.as_ref(), event_loop))?;
-        into_asyncio_future(py, event_loop, coroutine)
+        start_coroutine(py, event_loop, handler, request_input.as_ref(), coroutine)
     });
     match await_python_future(event_loop, handler, request_input.as_ref(), future_res).await {
         Ok(res) => res,
@@ -559,7 +627,7 @@ async fn core_async_no_deps(
             )
             .map_err(|err| python_error_to_response_in(py, &err, Some(&request_input)))?;
 
-        into_asyncio_future(py, event_loop, coroutine)
+        start_coroutine(py, event_loop, handler, Some(&request_input), coroutine)
     });
 
     let future_res = match future_res {
@@ -589,7 +657,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
         &handler.payload.path_param_names,
         event_loop,
     );
-    let setup = Python::attach(|py| -> Option<Result<PyTaskFuture, Response>> {
+    let setup = Python::attach(|py| -> Option<Result<HandlerRun, Response>> {
         if overrides_active(py, handler) {
             return None;
         }
@@ -634,7 +702,7 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
     handler: &RouteHandler,
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
-) -> Result<PyTaskFuture, Response> {
+) -> Result<HandlerRun, Response> {
     let mut kwargs = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
 
     let req_obj = if NEEDS_REQ {
@@ -655,7 +723,7 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
         )
         .map_err(|err| python_error_to_response_in(py, &err, Some(request_input)))?;
 
-    into_asyncio_future(py, event_loop, coroutine)
+    start_coroutine(py, event_loop, handler, Some(request_input), coroutine)
 }
 
 type AsyncDepsPrep = (Option<Py<PyAny>>, CallArgs);
@@ -740,7 +808,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
             )
             .map_err(|err| python_error_to_response_in(py, &err, Some(&request_input)))?;
 
-        into_asyncio_future(py, event_loop, coroutine)
+        start_coroutine(py, event_loop, handler, Some(&request_input), coroutine)
     });
 
     let future_res = match setup {

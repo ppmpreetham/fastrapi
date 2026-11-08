@@ -12,13 +12,15 @@ use fastrapi_http::middleware::{MiddlewareContainer, PyMiddleware};
 use fastrapi_http::staticfiles::PyStaticFiles;
 use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
 use fastrapi_pyutil::imports::STARLETTE_STATE;
+use fastrapi_runtime::tokio_runtime::set_threads;
 use parking_lot::Mutex;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyCFunction, PyDict, PyList, PyTuple};
 use pyo3::{Bound, intern};
 use std::env::var_os;
 use std::hash::Hasher;
+use std::num::NonZero;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
@@ -645,12 +647,13 @@ impl FastrAPI {
         clippy::needless_pass_by_value,
         reason = "PyO3 pymethod receiver requires Py<Self>"
     )]
-    #[pyo3(signature = (host=None, port=None, *, reload=false, reload_dirs=None, reload_ignore_dirs=None, reload_ignore_patterns=None, reload_ignore_paths=None, reload_tick=750, reload_ignore_worker_failure=false))]
+    #[pyo3(signature = (host=None, port=None, *, threads=None, reload=false, reload_dirs=None, reload_ignore_dirs=None, reload_ignore_patterns=None, reload_ignore_paths=None, reload_tick=750, reload_ignore_worker_failure=false))]
     fn serve(
         slf: Py<Self>,
         py: Python,
         host: Option<String>,
         port: Option<u16>,
+        threads: Option<usize>,
         reload: bool,
         reload_dirs: Option<Vec<String>>,
         reload_ignore_dirs: Option<Vec<String>>,
@@ -661,6 +664,12 @@ impl FastrAPI {
     ) -> PyResult<()> {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
         println!("running on FastRAPI v{VERSION}");
+
+        if let Some(threads) = threads {
+            let threads = NonZero::new(threads)
+                .ok_or_else(|| PyValueError::new_err("threads must be at least 1"))?;
+            set_threads(threads).map_err(PyRuntimeError::new_err)?;
+        }
 
         if reload && var_os("FASTRAPI_RELOAD_CHILD").is_none() {
             serve_with_reload(

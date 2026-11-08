@@ -30,7 +30,122 @@ pub struct ParsedRouteMetadata {
     pub dependencies: Vec<DependencyNode>,
     pub parsed_params: Vec<ParsedParameter>,
     pub is_async: bool,
+    pub inline_async: bool,
     pub is_fast_path: bool,
+}
+
+const SUSPEND_OPS: &[&str] = &[
+    "GET_AWAITABLE",
+    "SEND",
+    "YIELD_VALUE",
+    "GET_AITER",
+    "GET_ANEXT",
+    "BEFORE_ASYNC_WITH",
+    "END_ASYNC_FOR",
+];
+
+const LOOP_NAMES: &[&str] = &[
+    "asyncio",
+    "anyio",
+    "sniffio",
+    "trio",
+    "get_running_loop",
+    "get_event_loop",
+    "current_task",
+    "all_tasks",
+    "create_task",
+    "ensure_future",
+    "run_coroutine_threadsafe",
+    "call_soon",
+    "call_soon_threadsafe",
+    "call_later",
+    "call_at",
+    "create_future",
+    "run_in_executor",
+    "to_thread",
+    "run_in_threadpool",
+    "TaskGroup",
+    "gather",
+    "wait",
+    "wait_for",
+    "shield",
+    "timeout",
+    "sleep",
+    "Event",
+    "Lock",
+    "Semaphore",
+    "Condition",
+    "Queue",
+    "Future",
+    "Task",
+];
+
+fn code_avoids_loop(
+    py: Python<'_>,
+    code: &Bound<'_, PyAny>,
+    globals: &Bound<'_, PyAny>,
+    depth: u8,
+    check_suspend: bool,
+) -> PyResult<bool> {
+    let names: Vec<String> = code.getattr(intern!(py, "co_names"))?.extract()?;
+    if names.iter().any(|n| LOOP_NAMES.contains(&n.as_str())) {
+        return Ok(false);
+    }
+    if check_suspend {
+        let dis = py.import(intern!(py, "dis"))?;
+        for ins in dis
+            .call_method1(intern!(py, "get_instructions"), (code,))?
+            .try_iter()?
+        {
+            let op: String = ins?.getattr(intern!(py, "opname"))?.extract()?;
+            if SUSPEND_OPS.contains(&op.as_str()) {
+                return Ok(false);
+            }
+        }
+    }
+    let code_type = code.get_type();
+    for constant in code.getattr(intern!(py, "co_consts"))?.try_iter()? {
+        let constant = constant?;
+        if constant.get_type().is(&code_type)
+            && !code_avoids_loop(py, &constant, globals, depth, false)?
+        {
+            return Ok(false);
+        }
+    }
+    if depth == 0 {
+        return Ok(true);
+    }
+    let function_type = py.import(intern!(py, "types"))?.getattr(intern!(py, "FunctionType"))?;
+    for name in &names {
+        let Ok(target) = globals.get_item(name) else {
+            continue;
+        };
+        if target.is_instance(&function_type)? {
+            let helper_code = target.getattr(intern!(py, "__code__"))?;
+            let helper_globals = target.getattr(intern!(py, "__globals__"))?;
+            if !code_avoids_loop(py, &helper_code, &helper_globals, depth - 1, false)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn never_suspends(py: Python<'_>, func: &Bound<'_, PyAny>) -> bool {
+    (|| -> PyResult<bool> {
+        let function_type = py.import(intern!(py, "types"))?.getattr(intern!(py, "FunctionType"))?;
+        if !func.is_instance(&function_type)? {
+            return Ok(false);
+        }
+        let code = func.getattr(intern!(py, "__code__"))?;
+        let flags: u32 = code.getattr(intern!(py, "co_flags"))?.extract()?;
+        if flags & 0x80 == 0 {
+            return Ok(false);
+        }
+        let globals = func.getattr(intern!(py, "__globals__"))?;
+        code_avoids_loop(py, &code, &globals, 2, true)
+    })()
+    .unwrap_or(false)
 }
 
 fn is_request_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
@@ -76,6 +191,7 @@ pub fn parse_route_metadata(
     let serialization_hint = get_serialization_hint(py, func);
 
     let is_async = is_coroutine_callable(py, func);
+    let inline_async = is_async && never_suspends(py, func);
 
     let path_param_names = fastrapi_core::path::extract_path_param_names(path);
     let dependencies = dependencies::parse_dependencies(py, func, &path_param_names)?;
@@ -191,6 +307,7 @@ pub fn parse_route_metadata(
         dependencies,
         parsed_params,
         is_async,
+        inline_async,
         is_fast_path,
     })
 }

@@ -650,6 +650,7 @@ impl PyAPIRouter {
                     func: func.clone().unbind(),
                     call_layout: CallLayout::of(&func).map(Arc::new),
                     is_async: metadata.is_async,
+                    inline_async: metadata.inline_async,
                     is_fast_path: metadata.is_fast_path,
                     execution_mode: ExecutionMode::SyncNoArgs,
                     cache_response: opts.cache_resp,

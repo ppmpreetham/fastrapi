@@ -6,7 +6,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import typing
 import urllib.error
 import urllib.request
 import zipfile
@@ -87,14 +89,20 @@ def extract_wheel(wheel_path: Path, destination: Path) -> None:
         archive.extractall(destination)
 
 
-def wait_for_server(url: str, process: subprocess.Popen[str], timeout_seconds: float) -> None:
+def server_output(log: typing.IO[str]) -> str:
+    log.seek(0)
+    return log.read()
+
+
+def wait_for_server(
+    url: str, process: subprocess.Popen[str], timeout_seconds: float, log: typing.IO[str]
+) -> None:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         if process.poll() is not None:
-            stdout, stderr = process.communicate()
-            raise BenchmarkError(f"Server exited before it was ready.\nstdout:\n{stdout}\nstderr:\n{stderr}")
+            raise BenchmarkError(f"Server exited before it was ready.\noutput:\n{server_output(log)}")
         try:
-            with urllib.request.urlopen(url, timeout=1) as response:
+            with urllib.request.urlopen(url, timeout=5) as response:
                 if response.status in (200, 405):
                     return
         except urllib.error.HTTPError:
@@ -103,8 +111,8 @@ def wait_for_server(url: str, process: subprocess.Popen[str], timeout_seconds: f
             pass
         time.sleep(0.25)
     process.terminate()
-    stdout, stderr = process.communicate()
-    raise BenchmarkError(f"Server did not start in time.\nstdout:\n{stdout}\nstderr:\n{stderr}")
+    process.wait()
+    raise BenchmarkError(f"Server did not start in time.\noutput:\n{server_output(log)}")
 
 
 def run_k6(script_path: Path, base_url: str) -> tuple[float, str]:
@@ -141,27 +149,28 @@ def run_benchmark(
     import_env = {"BENCHMARK_HOST": host, "BENCHMARK_PORT": str(port)}
     if extract_dir is not None:
         code = f"import sys;sys.path.insert(0,{str(extract_dir)!r});" + code
-    process = subprocess.Popen(
-        [sys.executable, "-c", code],
-        cwd=source_root,
-        env={**os.environ, **import_env},
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        base_url = f"http://{host}:{port}"
-        wait_for_server(f"{base_url}/", process, startup_timeout)
-        req_per_sec, raw_output = run_k6(benchmark.stress, base_url)
-        return BenchmarkRun(label, framework, benchmark.name, req_per_sec, raw_output)
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        process.communicate()
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-c", code],
+            cwd=source_root,
+            env={**os.environ, **import_env},
+            text=True,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            base_url = f"http://{host}:{port}"
+            wait_for_server(f"{base_url}/", process, startup_timeout, log)
+            req_per_sec, raw_output = run_k6(benchmark.stress, base_url)
+            return BenchmarkRun(label, framework, benchmark.name, req_per_sec, raw_output)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
 
 
 def print_result(result: BenchmarkRun) -> None:

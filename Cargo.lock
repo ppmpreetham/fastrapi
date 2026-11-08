@@ -643,6 +643,7 @@ version = "0.3.4"
 dependencies = [
  "fastrapi-pyutil",
  "parking_lot",
+ "pyaio",
  "pyo3",
  "pyo3-async-runtimes",
  "tokio",
@@ -1653,6 +1654,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "pyaio"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b87dc4f355641d38d75efe36ccd55178f9a54780a438430bca1e9ccf648e048"
+dependencies = [
+ "pyo3",
+ "tokio",
 ]
 
 [[package]]

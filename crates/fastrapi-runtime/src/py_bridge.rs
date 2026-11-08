@@ -4,37 +4,23 @@
 //! When a `PyTaskFuture` is dropped before it completes, the module cancels the Python task.
 
 use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
 
-use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio as par;
-use tokio::sync::oneshot;
 
 use crate::server_state::ServerContext;
 use crate::tokio_runtime::PYTHON_RUNTIME;
 pub use pyo3_async_runtimes::{TaskLocals, into_future_with_locals};
-
-fastrapi_pyutil::cached_py_import!(ENSURE_FUTURE, "asyncio", "ensure_future");
-fastrapi_pyutil::cached_py_import!(COROUTINE_TYPE, "types", "CoroutineType");
 
 #[derive(Clone, Copy)]
 pub struct EventLoop(&'static ServerContext);
 
 impl EventLoop {
     pub fn leak(py: Python<'_>, event_loop: Py<PyAny>) -> PyResult<Self> {
-        let create_task = event_loop
-            .bind(py)
-            .getattr(intern!(py, "create_task"))?
-            .unbind();
+        let bridge = pyaio_faq::Bridge::for_loop(py, event_loop.bind(py))?;
         Ok(Self(Box::leak(Box::new(ServerContext::new(
-            event_loop,
-            create_task,
+            event_loop, bridge,
         )))))
     }
 
@@ -72,6 +58,7 @@ pub fn request_loop() -> Option<EventLoop> {
 
 pub fn init_with_fastrapi_runtime() {
     _ = par::init_with_runtime(&PYTHON_RUNTIME);
+    _ = pyaio_faq::tokio::init_with_runtime(&PYTHON_RUNTIME);
 }
 
 #[inline]
@@ -105,151 +92,16 @@ where
     par::future_into_py(py, fut)
 }
 
-struct TaskHandle {
-    event_loop: EventLoop,
-    task: Mutex<Option<Py<PyAny>>>,
-    cancelled: AtomicBool,
-    completed: AtomicBool,
-}
-
-#[pyclass]
-struct PyTaskBridge {
-    awaitable: Option<Py<PyAny>>,
-    tx: Option<oneshot::Sender<PyResult<Py<PyAny>>>>,
-    handle: Arc<TaskHandle>,
-}
-
-#[pymethods]
-impl PyTaskBridge {
-    #[pyo3(signature = (task=None))]
-    fn __call__(slf: &Bound<'_, Self>, task: Option<&Bound<'_, PyAny>>) {
-        let py = slf.py();
-        match task {
-            Some(task) => slf.borrow_mut().complete(py, task),
-            None => {
-                if let Err(err) = Self::start(slf)
-                    && let Some(tx) = slf.borrow_mut().tx.take()
-                {
-                    _ = tx.send(Err(err));
-                }
-            }
-        }
-    }
-}
-
-impl PyTaskBridge {
-    fn start(slf: &Bound<'_, Self>) -> PyResult<()> {
-        let py = slf.py();
-        let (awaitable, handle) = {
-            let mut this = slf.borrow_mut();
-            (this.awaitable.take(), this.handle.clone())
-        };
-        let Some(awaitable) = awaitable else {
-            return Ok(());
-        };
-        if handle.cancelled.load(Ordering::Relaxed) {
-            _ = awaitable.bind(py).call_method0(intern!(py, "close"));
-            return Ok(());
-        }
-
-        let awaitable = awaitable.into_bound(py);
-        let task = if awaitable.get_type().is(COROUTINE_TYPE.get(py)?) {
-            handle
-                .event_loop
-                .server()
-                .create_task(py)
-                .call1((awaitable,))?
-        } else {
-            ENSURE_FUTURE.get(py)?.call1((awaitable,))?
-        };
-        if handle.cancelled.load(Ordering::Relaxed) {
-            _ = task.call_method0(intern!(py, "cancel"));
-            return Ok(());
-        }
-        if let Err(err) = task.call_method1(intern!(py, "add_done_callback"), (slf,)) {
-            _ = task.call_method0(intern!(py, "cancel"));
-            return Err(err);
-        }
-        *handle.task.lock() = Some(task.unbind());
-        Ok(())
-    }
-
-    fn complete(&mut self, py: Python<'_>, task: &Bound<'_, PyAny>) {
-        self.handle.completed.store(true, Ordering::Relaxed);
-        *self.handle.task.lock() = None;
-
-        let result = task.call_method0(intern!(py, "result")).map(Bound::unbind);
-        if let Some(tx) = self.tx.take() {
-            _ = tx.send(result);
-        }
-    }
-}
-
-pub struct PyTaskFuture {
-    rx: oneshot::Receiver<PyResult<Py<PyAny>>>,
-    handle: Arc<TaskHandle>,
-}
-
-impl Future for PyTaskFuture {
-    type Output = PyResult<Py<PyAny>>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.rx).poll(cx).map(|result| {
-            result.unwrap_or_else(|_| {
-                Err(PyRuntimeError::new_err(
-                    "python task was dropped before completing",
-                ))
-            })
-        })
-    }
-}
-
-impl Drop for PyTaskFuture {
-    fn drop(&mut self) {
-        if self.handle.completed.load(Ordering::Relaxed) {
-            return;
-        }
-        self.handle.cancelled.store(true, Ordering::Relaxed);
-
-        let Some(task) = self.handle.task.lock().take() else {
-            return;
-        };
-
-        Python::attach(|py| {
-            let Ok(cancel) = task.bind(py).getattr(intern!(py, "cancel")) else {
-                return;
-            };
-            _ = self
-                .handle
-                .event_loop
-                .bind(py)
-                .call_method1(intern!(py, "call_soon_threadsafe"), (cancel,));
-        });
-    }
-}
+pub type PyTaskFuture = pyaio_faq::CallFuture<Py<PyAny>>;
 
 pub fn schedule_task(
-    py: Python<'_>,
+    _py: Python<'_>,
     event_loop: EventLoop,
     awaitable: Bound<'_, PyAny>,
 ) -> PyResult<PyTaskFuture> {
-    let (tx, rx) = oneshot::channel();
-    let handle = Arc::new(TaskHandle {
-        event_loop,
-        task: Mutex::new(None),
-        cancelled: AtomicBool::new(false),
-        completed: AtomicBool::new(false),
-    });
-    let bridge = Bound::new(
-        py,
-        PyTaskBridge {
-            awaitable: Some(awaitable.unbind()),
-            tx: Some(tx),
-            handle: handle.clone(),
-        },
-    )?;
-    event_loop
-        .bind(py)
-        .call_method1(intern!(py, "call_soon_threadsafe"), (bridge,))?;
-    Ok(PyTaskFuture { rx, handle })
+    let awaitable = awaitable.unbind();
+    Ok(event_loop.0.bridge.call(
+        move |py| Ok(awaitable.into_bound(py)),
+        |obj| Ok(obj.unbind()),
+    ))
 }

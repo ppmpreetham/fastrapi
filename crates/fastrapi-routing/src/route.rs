@@ -87,11 +87,16 @@ pub struct PydanticValidator {
     pub validate_json_method: Option<Py<PyAny>>,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Execution plan tracks independent dispatch characteristics"
+)]
 #[derive(Clone)]
 pub struct ExecutionPlan {
     pub func: Py<PyAny>,
     pub call_layout: Option<Arc<CallLayout>>,
     pub is_async: bool,
+    pub inline_async: bool,
     pub is_fast_path: bool,
     pub execution_mode: ExecutionMode,
     pub cache_response: bool,

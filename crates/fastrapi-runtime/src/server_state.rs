@@ -4,13 +4,13 @@
 use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::py_bridge::{EventLoop, request_loop};
 
 pub struct ServerContext {
     pub(crate) event_loop: Py<PyAny>,
-    create_task: Py<PyAny>,
+    pub(crate) bridge: Arc<pyaio_faq::Bridge>,
     app: OnceLock<Py<PyAny>>,
     exception_handlers: OnceLock<Py<PyDict>>,
     status_handlers: OnceLock<bool>,
@@ -18,19 +18,15 @@ pub struct ServerContext {
 }
 
 impl ServerContext {
-    pub(crate) const fn new(event_loop: Py<PyAny>, create_task: Py<PyAny>) -> Self {
+    pub(crate) const fn new(event_loop: Py<PyAny>, bridge: Arc<pyaio_faq::Bridge>) -> Self {
         Self {
             event_loop,
-            create_task,
+            bridge,
             app: OnceLock::new(),
             exception_handlers: OnceLock::new(),
             status_handlers: OnceLock::new(),
             lifespan_state: RwLock::new(None),
         }
-    }
-
-    pub(crate) fn create_task<'py>(&self, py: Python<'py>) -> &Bound<'py, PyAny> {
-        self.create_task.bind(py)
     }
 
     pub fn set_app(&self, app: Py<PyAny>) {
