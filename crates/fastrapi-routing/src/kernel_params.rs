@@ -48,7 +48,7 @@ impl std::fmt::Debug for ParamKernel {
     }
 }
 
-fn plain_json(obj: &Bound<'_, PyAny>) -> Option<Json> {
+pub(crate) fn plain_json(obj: &Bound<'_, PyAny>) -> Option<Json> {
     if obj.is_none() {
         return Some(Json::Null);
     }

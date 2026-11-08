@@ -13,17 +13,18 @@ use pyo3::prelude::*;
 
 use pydantic_core_kernel::validators::{KValidator, Validator};
 use pydantic_core_kernel::{
-    CompiledSchema, CoreSchema, DefinitionsBuilder, ErrorType, InputKind, SchemaResult, ValError,
-    ValLineError, ValidationError, ValidationState, Value, build_validator,
+    CoreSchema, DefinitionsBuilder, ErrorType, InputKind, SchemaResult, ValError, ValLineError,
+    ValidationError, ValidationState, Value, build_validator,
 };
 use pyo3::types::{
     PyBool, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt, PyList, PyString, PyTime,
     PyTuple, PyTzInfo,
 };
 
+use crate::model_plan::ModelPlan;
 use crate::route::PydanticValidator;
 use pydantic_core_kernel::json::{parse_json, serde_to_value};
-use pydantic_core_kernel::{ErrorDetail, ExtraBehavior, Int, LocItem};
+use pydantic_core_kernel::{ErrorDetail, Int, LocItem};
 use serde_json::{Map, Number, Value as SerdeJsonValue};
 use std::env::var;
 use std::str::from_utf8;
@@ -37,17 +38,10 @@ fn enabled() -> bool {
 }
 
 pub struct KernelFastPath {
-    schema: KernelSchema,
-    construct: Py<PyAny>,
-    field_names: Box<[(Box<str>, Py<PyString>)]>,
-}
-
-enum KernelSchema {
-    Raw(CompiledSchema),
-    Aliased {
-        validator: ParsedJsonValidator,
-        core: CoreSchema,
-    },
+    validator: ParsedJsonValidator,
+    core: CoreSchema,
+    aliased: bool,
+    plan: ModelPlan,
 }
 
 struct ParsedJsonValidator {
@@ -129,15 +123,11 @@ fn fast_path<'v>(py: Python<'_>, validator: &'v PydanticValidator) -> Option<&'v
     if let Some(resolved) = validator.kernel.get() {
         return resolved.as_deref();
     }
-    let resolved = resolve_fast_path(py, validator.model_class.bind(py), &validator.name);
+    let resolved = resolve_fast_path(validator.model_class.bind(py), &validator.name);
     validator.kernel.get_or_init(|| resolved).as_deref()
 }
 
-fn resolve_fast_path(
-    py: Python<'_>,
-    model_class: &Bound<'_, PyAny>,
-    name: &str,
-) -> Option<Arc<KernelFastPath>> {
+fn resolve_fast_path(model_class: &Bound<'_, PyAny>, name: &str) -> Option<Arc<KernelFastPath>> {
     if !enabled() {
         return None;
     }
@@ -145,12 +135,34 @@ fn resolve_fast_path(
     if let Some(cached) = cache().lock().get(&key) {
         return cached.clone();
     }
-    let compiled = compile_model(py, model_class, name).map(Arc::new);
+    let compiled = compile_model(model_class, name).map(Arc::new);
     let mut cache = cache().lock();
     if !cache.contains_key(&key) && compiled.is_some() {
         KERNEL_VALIDATIONS.fetch_add(1, Ordering::Relaxed);
     }
     cache.entry(key).or_insert(compiled).clone()
+}
+
+fn definitions_as_map(value: &mut SerdeJsonValue) {
+    match value {
+        SerdeJsonValue::Object(map) => {
+            if map.get("type").and_then(SerdeJsonValue::as_str) == Some("definitions")
+                && let Some(SerdeJsonValue::Array(items)) = map.remove("definitions")
+            {
+                let named = items
+                    .into_iter()
+                    .filter_map(|item| {
+                        let name = item.get("ref")?.as_str()?.to_owned();
+                        Some((name, item))
+                    })
+                    .collect::<Map<_, _>>();
+                map.insert("definitions".to_owned(), SerdeJsonValue::Object(named));
+            }
+            map.values_mut().for_each(definitions_as_map);
+        }
+        SerdeJsonValue::Array(items) => items.iter_mut().for_each(definitions_as_map),
+        _ => {}
+    }
 }
 
 fn py_schema_to_json(obj: &Bound<'_, PyAny>) -> Option<serde_json::Value> {
@@ -207,56 +219,19 @@ fn py_schema_to_json(obj: &Bound<'_, PyAny>) -> Option<serde_json::Value> {
     None
 }
 
-fn compile_model<'py>(
-    _py: Python<'py>,
-    model_class: &Bound<'py, PyAny>,
-    name: &str,
-) -> Option<KernelFastPath> {
+fn compile_model(model_class: &Bound<'_, PyAny>, name: &str) -> Option<KernelFastPath> {
     let core_schema = model_class
         .getattr(pyo3::intern!(model_class.py(), "__pydantic_core_schema__"))
         .ok()?;
-    let json_value = py_schema_to_json(&core_schema)?;
-    let schema: CoreSchema = serde_json::from_value(json_value).ok()?;
-
-    let extra_allowed = match &schema {
-        CoreSchema::Model { config, .. } => {
-            config.as_ref().and_then(|c| c.extra_behavior) == Some(ExtraBehavior::Allow)
-        }
-        _ => false,
-    };
-    if extra_allowed || schema_has_nested_models(&schema) {
-        return None;
-    }
-
-    let schema = if schema_has_aliases(&schema) {
-        KernelSchema::Aliased {
-            validator: ParsedJsonValidator::compile(&schema, name).ok()?,
-            core: schema,
-        }
-    } else {
-        KernelSchema::Raw(CompiledSchema::with_title(&schema, None, name).ok()?)
-    };
-    let py = model_class.py();
-    let construct = model_class
-        .getattr(pyo3::intern!(py, "model_construct"))
-        .ok()?
-        .unbind();
-    let field_names = model_class
-        .getattr(pyo3::intern!(py, "model_fields"))
-        .ok()?
-        .try_iter()
-        .ok()?
-        .filter_map(|name| {
-            let name = name.ok()?.cast_into::<PyString>().ok()?;
-            let text: Box<str> = name.to_str().ok()?.into();
-            let interned = PyString::intern(py, &text).unbind();
-            Some((text, interned))
-        })
-        .collect();
+    let plan = ModelPlan::compile(&core_schema)?;
+    let mut json = py_schema_to_json(&core_schema)?;
+    definitions_as_map(&mut json);
+    let schema: CoreSchema = serde_json::from_value(json).ok()?;
     Some(KernelFastPath {
-        schema,
-        construct,
-        field_names,
+        validator: ParsedJsonValidator::compile(&schema, name).ok()?,
+        aliased: schema_has_aliases(&schema),
+        core: schema,
+        plan,
     })
 }
 
@@ -432,81 +407,36 @@ fn strip_struct_level(
     }
 }
 
-fn schema_has_nested_models(schema: &CoreSchema) -> bool {
-    fn walk(schema: &CoreSchema, inside_struct: bool) -> bool {
-        let is_struct = matches!(
-            schema,
-            CoreSchema::Model { .. } | CoreSchema::TypedDict { .. }
-        );
-        if is_struct && inside_struct {
-            return true;
-        }
-        let inside = inside_struct || is_struct;
-        match schema {
-            CoreSchema::List { items_schema, .. } | CoreSchema::Set { items_schema, .. } => {
-                items_schema.as_ref().is_some_and(|s| walk(s, inside))
-            }
-            CoreSchema::Dict {
-                keys_schema,
-                values_schema,
-                ..
-            } => {
-                keys_schema.as_ref().is_some_and(|s| walk(s, inside))
-                    || values_schema.as_ref().is_some_and(|s| walk(s, inside))
-            }
-            CoreSchema::Nullable { schema, .. }
-            | CoreSchema::Json { schema }
-            | CoreSchema::Model { schema, .. }
-            | CoreSchema::ModelField { schema, .. }
-            | CoreSchema::Definitions { schema, .. } => walk(schema, inside),
-            CoreSchema::WithDefault { schema, .. } | CoreSchema::Default { schema, .. } => {
-                schema.as_ref().is_some_and(|s| walk(s, inside))
-            }
-            CoreSchema::Union { choices, .. } => choices.iter().any(|s| walk(s, inside)),
-            CoreSchema::TaggedUnion { choices, .. } => choices.iter().any(|(_, s)| walk(s, inside)),
-            CoreSchema::JsonOrPython { json, python } => walk(json, inside) || walk(python, inside),
-            CoreSchema::LaxOrStrict {
-                lax_schema,
-                strict_schema,
-            } => walk(lax_schema, inside) || walk(strict_schema, inside),
-            CoreSchema::DefinitionRef { .. } => inside_struct,
-            _ => false,
-        }
-    }
-    walk(schema, false)
-}
 fn validate_body(
     py: Python<'_>,
     fast: &KernelFastPath,
     raw_payload: &[u8],
 ) -> Option<KernelOutcome> {
-    let validated = match &fast.schema {
-        KernelSchema::Raw(schema) => schema.validate_json(raw_payload),
-        KernelSchema::Aliased { validator, core } => {
-            let mut parsed = parse_json(raw_payload).ok()?;
-            strip_shadowed_name_keys(core, &mut parsed, AliasRules::default());
-            validator.validate(&parsed, InputKind::Json)
-        }
-    };
-    if let Ok(value) = validated {
-        return construct_model(py, fast, &value).map(KernelOutcome::Valid);
+    let mut parsed = parse_json(raw_payload).ok()?;
+    if fast.aliased {
+        strip_shadowed_name_keys(&fast.core, &mut parsed, AliasRules::default());
     }
-    let mut errors = python_mode_error(fast, raw_payload)?.errors_impl(true, true, false, "");
+    if let Ok(value) = fast.validator.validate(&parsed, InputKind::Json) {
+        return fast
+            .plan
+            .construct(py, &parsed, &value)
+            .map(|model| KernelOutcome::Valid(model.unbind()));
+    }
+    let mut errors = fast
+        .validator
+        .validate(&parsed, InputKind::Python)
+        .err()?
+        .errors_impl(true, true, false, "");
     for error in &mut errors {
         error.loc.insert(0, LocItem::S("body".to_owned()));
-    }
-    Some(KernelOutcome::Invalid(errors))
-}
-
-fn python_mode_error(fast: &KernelFastPath, raw_payload: &[u8]) -> Option<ValidationError> {
-    let mut parsed = parse_json(raw_payload).ok()?;
-    match &fast.schema {
-        KernelSchema::Raw(schema) => schema.validate_value(&parsed).err(),
-        KernelSchema::Aliased { validator, core } => {
-            strip_shadowed_name_keys(core, &mut parsed, AliasRules::default());
-            validator.validate(&parsed, InputKind::Python).err()
+        if error.r#type == "model_type" {
+            "model_attributes_type".clone_into(&mut error.r#type);
+            "Input should be a valid dictionary or object to extract fields from"
+                .clone_into(&mut error.msg);
+            error.ctx = None;
         }
     }
+    Some(KernelOutcome::Invalid(errors))
 }
 
 pub fn kernel_error_object<'py>(
@@ -532,26 +462,6 @@ pub fn kernel_error_object<'py>(
         error.set_item(pyo3::intern!(py, "ctx"), context)?;
     }
     Ok(error.into_any())
-}
-
-fn construct_model(py: Python<'_>, fast: &KernelFastPath, value: &Value) -> Option<Py<PyAny>> {
-    let Value::Object(entries) = value else {
-        return None;
-    };
-    let kwargs = PyDict::new(py);
-    for (key, field_value) in entries {
-        let py_value = value_to_py(py, field_value)?;
-        let key: &str = key;
-        match fast.field_names.iter().find(|(name, _)| &**name == key) {
-            Some((_, name)) => kwargs.set_item(name.bind(py), py_value).ok()?,
-            None => kwargs.set_item(cached_key(py, key), py_value).ok()?,
-        }
-    }
-    fast.construct
-        .bind(py)
-        .call((), Some(&kwargs))
-        .ok()
-        .map(Bound::unbind)
 }
 
 pub(crate) fn value_to_py(py: Python<'_>, value: &Value) -> Option<Py<PyAny>> {

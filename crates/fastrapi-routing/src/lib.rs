@@ -11,6 +11,7 @@ pub mod annotations;
 pub mod dependencies;
 pub mod kernel_params;
 pub mod kernel_validation;
+pub mod model_plan;
 pub mod params;
 pub mod pydantic;
 pub mod request_data;
