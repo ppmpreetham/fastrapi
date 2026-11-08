@@ -9,10 +9,16 @@ use simd_json::{OwnedValue, StaticNode};
 
 const IGNORED: [&str; 3] = ["metadata", "ref", "serialization"];
 
+fastrapi_pyutil::cached_py_import!(UUID, "uuid", "UUID");
+fastrapi_pyutil::cached_py_import!(SAFE_UNKNOWN, "uuid", "SafeUUID", "unknown");
+fastrapi_pyutil::cached_py_import!(OBJECT_NEW, "builtins", "object", "__new__");
+fastrapi_pyutil::cached_py_import!(OBJECT_SETATTR, "builtins", "object", "__setattr__");
+
 #[derive(Debug)]
 enum Shape {
     Plain,
     Datetime,
+    Uuid(Option<usize>),
     Enum(Box<[(Value, Py<PyAny>)]>),
     List(Box<Self>),
     Set(Box<Self>),
@@ -221,6 +227,7 @@ impl<'py> Converter<'py> {
             }
             "enum" => return (!in_union).then(|| enum_schema(dict)).flatten(),
             "datetime" => (Shape::Datetime, &["strict"]),
+            "uuid" => return (!in_union).then(|| uuid_schema(dict)).flatten(),
             _ => (Shape::Plain, allowed(&kind)?),
         };
         for (key, value) in dict.iter() {
@@ -242,6 +249,47 @@ impl<'py> Converter<'py> {
         }
         Some((Json::Object(out), shape))
     }
+}
+
+fn uuid_schema(dict: &Bound<'_, PyDict>) -> Option<(Json, Shape)> {
+    let mut version = None;
+    for (key, value) in dict.iter() {
+        let key = key.cast_into::<PyString>().ok()?;
+        match key.to_str().ok()? {
+            "type" => {}
+            "version" => version = value.extract::<Option<usize>>().ok()?,
+            "strict" if !value.is_truthy().ok()? => {}
+            name if IGNORED.contains(&name) => {}
+            _ => return None,
+        }
+    }
+    Some((serde_json::json!({ "type": "str" }), Shape::Uuid(version)))
+}
+
+fn uuid_to_py<'py>(
+    py: Python<'py>,
+    text: &str,
+    version: Option<usize>,
+) -> Option<Bound<'py, PyAny>> {
+    let parsed = uuid::Uuid::parse_str(text).ok()?;
+    if version.is_some_and(|version| {
+        parsed.get_version_num() != version || parsed.get_variant() != uuid::Variant::RFC4122
+    }) {
+        return None;
+    }
+    let instance = OBJECT_NEW.get(py).ok()?.call1((UUID.get(py).ok()?,)).ok()?;
+    let setattr = OBJECT_SETATTR.get(py).ok()?;
+    setattr
+        .call1((&instance, intern!(py, "int"), parsed.as_u128()))
+        .ok()?;
+    setattr
+        .call1((
+            &instance,
+            intern!(py, "is_safe"),
+            SAFE_UNKNOWN.get(py).ok()?,
+        ))
+        .ok()?;
+    Some(instance)
 }
 
 fn enum_schema(dict: &Bound<'_, PyDict>) -> Option<(Json, Shape)> {
@@ -389,6 +437,7 @@ impl Shape {
             (Self::Plain | Self::Datetime, _) => {
                 value_to_py(py, value).map(|value| value.into_bound(py))
             }
+            (Self::Uuid(version), Value::Str(text)) => uuid_to_py(py, text, *version),
             (Self::Enum(members), _) => members
                 .iter()
                 .find(|(member, _)| member == value)

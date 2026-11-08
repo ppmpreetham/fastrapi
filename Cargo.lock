@@ -634,6 +634,7 @@ dependencies = [
  "smallvec",
  "smart-default",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -66,6 +66,7 @@ fastwebsockets = { version = "0.10.0", features = ["upgrade", "with_axum", "unst
 bytes = "1.12.1"
 itoa = "1.0.18"
 regex = "1"
+uuid = "1"
 matchit = "0.9.2"
 ahash = "0.8.12"
 percent-encoding = "2.3.2"

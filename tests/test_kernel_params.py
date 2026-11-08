@@ -1,11 +1,12 @@
 import datetime
 import enum
+import uuid
 from typing import Annotated, Literal, Optional, Union
 
 import fastapi
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import Field, StringConstraints
+from pydantic import UUID4, Field, StringConstraints
 
 import fastrapi
 from conftest import LiveServerTestClient
@@ -47,6 +48,20 @@ TYPES = {
     "lower": (Annotated[str, StringConstraints(to_lower=True, min_length=2)], ["AbC", "A"]),
     "strict_int": (Annotated[int, Field(strict=True)], ["1"]),
     "bool_opt": (Optional[bool], ["yes", "off", "maybe"]),
+    "uuid": (
+        uuid.UUID,
+        [
+            "12345678-1234-5678-1234-567812345678",
+            "12345678123456781234567812345678",
+            "{12345678-1234-5678-1234-567812345678}",
+            "urn:uuid:12345678-1234-5678-1234-567812345678",
+            "12345678-1234-5678-1234-56781234567Z",
+            " 12345678-1234-5678-1234-567812345678",
+            "1234",
+        ],
+    ),
+    "uuid4": (UUID4, ["9b2f4c1e-5a8d-4e3b-9f6a-1c2d3e4f5a6b", "12345678-1234-5678-1234-567812345678", "9b2f4c1e-5a8d-4e3b-cf6a-1c2d3e4f5a6b"]),
+    "optional_uuid": (Optional[uuid.UUID], ["12345678-1234-5678-1234-567812345678", "x"]),
 }
 
 LIST_TYPES = {
@@ -54,6 +69,7 @@ LIST_TYPES = {
     "set_int": (set[int], [["1", "2", "1"], ["1", "x"]]),
     "list_date": (list[datetime.date], [["2020-01-02"], ["bad"]]),
     "list_literal": (list[Literal["a", "b"]], [["a", "b"], ["c"]]),
+    "list_uuid": (list[uuid.UUID], [["12345678-1234-5678-1234-567812345678"], ["bad"]]),
 }
 
 
@@ -163,3 +179,16 @@ def test_kernel_params_skip_pydantic(monkeypatch):
             assert client.get(f"/query/{name}", params={"v": inputs[0]}).status_code == 200, name
             assert client.post(f"/body/{name}", json=inputs[0]).status_code == 200, name
     assert calls == []
+
+
+def test_rust_uuid_matches_python_uuid():
+    app = fastrapi.FastAPI()
+
+    @app.get("/u")
+    def read(v: uuid.UUID):
+        expected = uuid.UUID(str(v))
+        return [type(v) is uuid.UUID, v == expected, hash(v) == hash(expected), v.version, v.is_safe.name, str(v)]
+
+    with LiveServerTestClient(app) as client:
+        raw = "9b2f4c1e-5a8d-4e3b-9f6a-1c2d3e4f5a6b"
+        assert client.get("/u", params={"v": raw.upper()}).json() == [True, True, True, 4, "unknown", raw]
