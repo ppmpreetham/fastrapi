@@ -16,6 +16,12 @@ mod imp {
     }
 
     #[inline]
+    #[must_use]
+    pub fn is_held() -> bool {
+        !HELD.get().is_null()
+    }
+
+    #[inline]
     pub fn hold() {
         if !WORKER.get() || !HELD.get().is_null() {
             return;
@@ -46,8 +52,13 @@ mod imp {
 mod imp {
     pub fn mark_worker() {}
     #[inline]
+    #[must_use]
+    pub fn is_held() -> bool {
+        false
+    }
+    #[inline]
     pub fn hold() {}
     pub fn release() {}
 }
 
-pub use imp::{hold, mark_worker, release};
+pub use imp::{hold, is_held, mark_worker, release};

@@ -32,15 +32,23 @@ fn requested_threads() -> Option<usize> {
     })
 }
 
+fn thread_counts() -> (usize, usize) {
+    if let Some(n) = requested_threads() {
+        (n, n)
+    } else {
+        let cpus = available_parallelism().map_or(4, NonZero::get);
+        (cpus, config().sync_threads.max(cpus))
+    }
+}
+
+pub(crate) fn blocking_threads() -> usize {
+    RUNTIME_BUILT.store(true, Ordering::Release);
+    thread_counts().1
+}
+
 pub static PYTHON_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     RUNTIME_BUILT.store(true, Ordering::Release);
-    let (workers, blocking) = match requested_threads() {
-        Some(n) => (n, n),
-        None => {
-            let cpus = available_parallelism().map_or(4, NonZero::get);
-            (cpus, config().sync_threads.max(cpus))
-        }
-    };
+    let (workers, blocking) = thread_counts();
 
     Builder::new_multi_thread()
         .worker_threads(workers)
