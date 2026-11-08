@@ -132,7 +132,7 @@ def test_list_params_match_fastapi(clients, name, raw):
 
 @pytest.mark.parametrize(
     "value",
-    [1, 1.0, 2.5, True, "3", [1], {"a": 1}],
+    [1, 1.0, 2.5, True, None, "3", [1], {"a": 1}],
 )
 def test_embedded_json_values_match_fastapi(clients, value):
     expected_client, actual_client = clients

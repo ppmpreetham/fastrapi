@@ -890,7 +890,9 @@ fn apply_json_body<'py>(
     }
     let object = object.flatten();
     for param in params {
-        let found = object.and_then(|object| object.get(param.external_name.as_str()));
+        let found = object
+            .and_then(|object| object.get(param.external_name.as_str()))
+            .filter(|value| !matches!(value, Value::Static(StaticNode::Null)));
         if let Some(converted) = found.and_then(|value| fast_json(py, param, value)) {
             kwargs.set(param.name_py.bind(py), converted)?;
             continue;
