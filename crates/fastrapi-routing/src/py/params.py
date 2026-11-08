@@ -374,14 +374,12 @@ def constraints(field_info: FieldInfo) -> dict[str, Any]:
 
 
 class ModelKey:
-    __slots__ = ("lookup", "alias", "sequence", "required", "default")
+    __slots__ = ("lookup", "alias", "sequence")
 
     def __init__(self, lookup: str, alias: str, info: FieldInfo) -> None:
         self.lookup = lookup
         self.alias = alias
         self.sequence = is_sequence(info.annotation) and not _is_json(info)
-        self.required = info.is_required()
-        self.default = None if self.required else info.get_default(call_default_factory=True)
 
 
 class FieldSpec:
@@ -398,6 +396,7 @@ class FieldSpec:
         "sequence",
         "model",
         "model_keys",
+        "loc_renames",
         "fast",
         "validate",
         "validate_json",
@@ -513,6 +512,11 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
         if spec.model and (spec.source != "body" or isinstance(field_info, Form))
         else None
     )
+    spec.loc_renames = (
+        {key.alias: key.lookup for key in spec.model_keys if key.alias != key.lookup} or None
+        if spec.model_keys and spec.source == "header" and field_info.annotation.model_config.get("loc_by_alias", True)
+        else None
+    )
     adapter = type_adapter(field_info)
     spec.validate = partial(adapter.validate_python, from_attributes=True)
     spec.validate_json = adapter.validate_json
@@ -540,8 +544,14 @@ def should_embed(specs: list[FieldSpec]) -> bool:
     )
 
 
-def errors_with_loc(exc: ValidationError, loc: tuple) -> list[dict[str, Any]]:
-    return [{**error, "loc": loc + error.get("loc", ())} for error in exc.errors(include_url=False)]
+def errors_with_loc(exc: ValidationError, loc: tuple, renames: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    errors = [{**error, "loc": loc + error.get("loc", ())} for error in exc.errors(include_url=False)]
+    if renames:
+        for error in errors:
+            error_loc = error["loc"]
+            if len(error_loc) > 1 and error_loc[1] in renames:
+                error["loc"] = (error_loc[0], renames[error_loc[1]], *error_loc[2:])
+    return errors
 
 
 def json_error(raw: bytes) -> tuple[list[dict[str, Any]], Any]:

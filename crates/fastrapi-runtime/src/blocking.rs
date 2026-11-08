@@ -1,8 +1,8 @@
 //! Runs blocking Python code on a dedicated thread pool.
-//! Each pool thread keeps one Python thread state while jobs keep coming and releases it only when
-//! the queue is empty, so a busy pool never creates or destroys thread states.
+//! Each pool thread keeps one Python thread state for its life and flushes it before it idles,
+//! so the pool never creates or destroys thread states after warm-up.
 
-use crate::thread_state;
+use crate::{py_bridge, thread_state};
 use parking_lot::{Condvar, Mutex};
 use pyo3::Python;
 use std::any::Any;
@@ -57,6 +57,7 @@ impl Pool {
 
     fn run(&self) {
         thread_state::mark_worker();
+        let mut flushed = true;
         loop {
             let job = {
                 let mut queue = self.queue.lock();
@@ -64,9 +65,10 @@ impl Pool {
                     if let Some(job) = queue.jobs.pop_front() {
                         break job;
                     }
-                    if thread_state::is_held() {
+                    if !flushed {
+                        flushed = true;
                         drop(queue);
-                        thread_state::release();
+                        thread_state::flush();
                         queue = self.queue.lock();
                         continue;
                     }
@@ -76,6 +78,7 @@ impl Pool {
                 }
             };
             thread_state::hold();
+            flushed = false;
             job();
         }
     }
@@ -111,8 +114,14 @@ where
     F: FnOnce(Python<'_>) -> T + Send + 'static,
 {
     let (tx, rx) = oneshot::channel();
+    let context = py_bridge::current_context_cell();
     POOL.submit(Box::new(move || {
-        let result = catch_unwind(AssertUnwindSafe(|| Python::attach(task)));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Python::attach(|py| {
+                let _entered = py_bridge::enter_copy(py, context.as_ref());
+                py_bridge::with_job_context(context, || task(py))
+            })
+        }));
         _ = tx.send(result.map_err(Panicked));
     }));
     rx.await.expect("blocking pool dropped a job")

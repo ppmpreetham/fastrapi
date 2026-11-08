@@ -84,9 +84,11 @@ impl PyScopeDownstream {
         };
 
         let borrowed = handle.borrow();
+        let mut head = borrowed.head.clone();
+        head.extensions.insert(py_bridge::RequestContext::capture(py)?);
         let downstream = PyDownstreamASGI {
             next: borrowed.next.clone(),
-            head: borrowed.head.clone(),
+            head,
             locals: borrowed.locals.clone(),
         };
         let receive = receive.clone().unbind();
@@ -278,6 +280,21 @@ enum ResponseMessage {
 }
 
 pub async fn run_asgi_request(
+    instance: Arc<Py<PyAny>>,
+    req: Request,
+    next: Next,
+    event_loop: EventLoop,
+    max_body_size: usize,
+) -> Response {
+    let context = req.extensions().get::<py_bridge::RequestContext>().cloned();
+    py_bridge::scoped_request_context(
+        context,
+        run_asgi_app(instance, req, next, event_loop, max_body_size),
+    )
+    .await
+}
+
+async fn run_asgi_app(
     instance: Arc<Py<PyAny>>,
     req: Request,
     next: Next,

@@ -115,15 +115,14 @@ pub(crate) async fn run_managed_handler(
         }
         let called = Python::attach(|py| -> PyResult<_> {
             inject_dependencies(py, &mut kwargs, values)?;
-            let result = kwargs.call(
-                handler.execution.func.bind(py),
-                handler.execution.call_layout.as_deref(),
-            )?;
+            let func = handler.execution.func.bind(py);
+            let layout = handler.execution.call_layout.as_deref();
             if handler.execution.is_async {
-                py_bridge::schedule_task(py, event_loop, result).map(Err)
-            } else {
-                Ok(Ok(result.unbind()))
+                let coroutine = kwargs.call(func, layout)?;
+                return py_bridge::schedule_task(py, event_loop, coroutine).map(Err);
             }
+            let _entered = py_bridge::enter_request_copy(py)?;
+            Ok(Ok(kwargs.call(func, layout)?.unbind()))
         })?;
         match called {
             Ok(value) => Ok(value),

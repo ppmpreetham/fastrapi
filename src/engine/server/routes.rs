@@ -621,9 +621,11 @@ fn no_request_method_router(
 
     method_router(method, move |request: Request| async move {
         let event_loop = state.event_loop;
+        let context = request.extensions().get::<py_bridge::RequestContext>().cloned();
         let (request_parts, _) = request.into_parts();
         let response = py_bridge::scoped_request_loop(
             event_loop,
+            context,
             run_py_handler_no_request(
                 event_loop,
                 state.sync_to_threadpool,
@@ -642,15 +644,21 @@ fn sync_no_request_method_router(
     server: EventLoop,
 ) -> MethodRouter {
     method_router(method, move |request: Request| async move {
-        let input = RequestInput::new(
-            request.method(),
-            request.uri(),
-            request.headers(),
-            Some(server),
-        );
-        let response =
-            Python::attach(|py| render_no_request_json_response(py, handler, &input, server));
-        resolve_pending_handler(response).await
+        let context = request.extensions().get::<py_bridge::RequestContext>().cloned();
+        py_bridge::scoped_request_context(context, async move {
+            let input = RequestInput::new(
+                request.method(),
+                request.uri(),
+                request.headers(),
+                Some(server),
+            );
+            let response = Python::attach(|py| {
+                let _entered = py_bridge::enter_request_copy(py);
+                render_no_request_json_response(py, handler, &input, server)
+            });
+            resolve_pending_handler(response).await
+        })
+        .await
     })
 }
 

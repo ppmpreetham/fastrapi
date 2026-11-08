@@ -35,8 +35,6 @@ pub struct ModelKey {
     pub lookup: String,
     pub alias: Py<PyString>,
     pub sequence: bool,
-    pub required: bool,
-    pub default: Py<PyAny>,
 }
 
 #[expect(
@@ -62,6 +60,7 @@ pub struct ParsedParameter {
     pub param_object: Option<Py<PyAny>>,
     pub is_pydantic_model: bool,
     pub model_keys: Option<Arc<[ModelKey]>>,
+    pub loc_renames: Option<Py<PyAny>>,
     pub is_file: bool,
     pub is_form: bool,
     pub read_bytes: bool,

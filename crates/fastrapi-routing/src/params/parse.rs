@@ -61,8 +61,6 @@ fn model_keys(spec: &Bound<'_, PyAny>) -> PyResult<Option<Arc<[ModelKey]>>> {
                 lookup: key.getattr(intern!(py, "lookup"))?.extract()?,
                 alias: PyString::intern(py, key.getattr(intern!(py, "alias"))?.extract()?).unbind(),
                 sequence: key.getattr(intern!(py, "sequence"))?.extract()?,
-                required: key.getattr(intern!(py, "required"))?.extract()?,
-                default: key.getattr(intern!(py, "default"))?.unbind(),
             })
         })
         .collect::<PyResult<Arc<[ModelKey]>>>()
@@ -89,6 +87,7 @@ fn background_tasks_parameter(py: Python<'_>, param_name: &str) -> ParsedParamet
         param_object: None,
         is_pydantic_model: false,
         model_keys: None,
+        loc_renames: None,
         is_file: false,
         is_form: false,
         read_bytes: false,
@@ -177,6 +176,7 @@ pub fn parse_parameter_spec(
         constraints,
         is_pydantic_model: is_model,
         model_keys,
+        loc_renames: optional(&spec, intern!(py, "loc_renames"))?.map(Bound::unbind),
         is_file,
         is_form: spec.getattr(intern!(py, "is_form"))?.extract()?,
         read_bytes: spec.getattr(intern!(py, "read_bytes"))?.extract()?,

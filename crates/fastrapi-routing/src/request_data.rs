@@ -90,10 +90,23 @@ impl<'py> Errors<'py> {
     }
 
     fn rejected(&mut self, err: PyErr, loc: Loc<'_>) -> PyResult<()> {
+        self.rejected_renamed(err, loc, None)
+    }
+
+    fn rejected_renamed(
+        &mut self,
+        err: PyErr,
+        loc: Loc<'_>,
+        renames: Option<&Py<PyAny>>,
+    ) -> PyResult<()> {
         if !VALIDATION_ERROR.is_instance(self.py, err.value(self.py)) {
             return Err(err);
         }
-        let errors = errors_with_loc(self.py)?.call1((err.value(self.py), loc.tuple(self.py)?))?;
+        let errors = errors_with_loc(self.py)?.call1((
+            err.value(self.py),
+            loc.tuple(self.py)?,
+            renames.map(|renames| renames.bind(self.py)),
+        ))?;
         self.extend(&errors)
     }
 
@@ -535,12 +548,8 @@ fn model_dict<'py>(
     value: impl Fn(&ModelKey) -> PyResult<Option<Bound<'py, PyAny>>>,
 ) -> PyResult<()> {
     for key in keys {
-        match value(key)? {
-            Some(found) => dict.set_item(key.alias.bind(py), found)?,
-            None if !key.required && !key.default.is_none(py) => {
-                dict.set_item(key.alias.bind(py), key.default.bind(py))?;
-            }
-            None => {}
+        if let Some(found) = value(key)? {
+            dict.set_item(key.alias.bind(py), found)?;
         }
     }
     Ok(())
@@ -595,13 +604,12 @@ fn model_param<'py>(
         }
         _ => {}
     }
-    resolve(
-        py,
-        param,
-        Some(dict.into_any()),
-        Loc::Source(source),
-        errors,
-    )
+    match param.validate.bind(py).call1((dict,)) {
+        Ok(value) => Ok(Some(value)),
+        Err(err) => errors
+            .rejected_renamed(err, Loc::Source(source), param.loc_renames.as_ref())
+            .map(|()| None),
+    }
 }
 
 pub fn request_param_value<'py>(
@@ -890,9 +898,7 @@ fn apply_json_body<'py>(
     }
     let object = object.flatten();
     for param in params {
-        let found = object
-            .and_then(|object| object.get(param.external_name.as_str()))
-            .filter(|value| !matches!(value, Value::Static(StaticNode::Null)));
+        let found = object.and_then(|object| object.get(param.external_name.as_str()));
         if let Some(converted) = found.and_then(|value| fast_json(py, param, value)) {
             kwargs.set(param.name_py.bind(py), converted)?;
             continue;

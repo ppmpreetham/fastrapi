@@ -97,7 +97,8 @@ pub(crate) async fn dispatch_or_not_found(
         })
         .unwrap_or_default();
 
-    py_bridge::scoped_request_loop(event_loop, async move {
+    let context = req.extensions().get::<py_bridge::RequestContext>().cloned();
+    py_bridge::scoped_request_loop(event_loop, context, async move {
         let (request_parts, body) = req.into_parts();
         if matches!(
             handler.execution.execution_mode,

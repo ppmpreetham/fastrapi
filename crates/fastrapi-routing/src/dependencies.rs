@@ -349,7 +349,10 @@ pub async fn execute_request_dependencies(
                         stack.call_method1(intern!(py, "enter_async_context"), (manager,))?;
                     return pending(py_bridge::schedule_task(py, event_loop, entered)?, None);
                 }
-                let value = stack.call_method1(intern!(py, "enter_context"), (manager,))?;
+                let value = {
+                    let _entered = py_bridge::enter_request_copy(py)?;
+                    stack.call_method1(intern!(py, "enter_context"), (manager,))?
+                };
                 register_result(py, node, value.unbind(), &mut registry, &mut results);
                 return Ok(NodeStep::Done);
             }
@@ -358,10 +361,14 @@ pub async fn execute_request_dependencies(
                 let coroutine = TO_THREAD.get(py)?.call1((call,))?;
                 return pending(py_bridge::schedule_task(py, event_loop, coroutine)?, None);
             }
-            let value = args.call(func, node.call_layout.as_deref())?;
             if node.is_async {
-                return pending(py_bridge::schedule_task(py, event_loop, value)?, None);
+                let coroutine = args.call(func, node.call_layout.as_deref())?;
+                return pending(py_bridge::schedule_task(py, event_loop, coroutine)?, None);
             }
+            let value = {
+                let _entered = py_bridge::enter_request_copy(py)?;
+                args.call(func, node.call_layout.as_deref())?
+            };
             register_result(py, node, value.unbind(), &mut registry, &mut results);
             Ok(NodeStep::Done)
         })?;
@@ -1043,6 +1050,7 @@ fn execute_sync_node(
     request_input: &RequestInput<'_>,
     request: Option<&SharedPyObject>,
 ) -> PyResult<(SharedPyObject, Option<TeardownTask>)> {
+    let _entered = py_bridge::enter_request_copy(py)?;
     if dep.is_generator {
         let generator = call_dependency(py, dep, results_registry, request_input, request)?;
         let value = match generator.call_method0(intern!(py, "__next__")) {
@@ -1089,6 +1097,7 @@ pub fn execute_teardowns_sync(py: Python<'_>, teardowns: TeardownTasks, error: O
         if task.is_async {
             tracing::error!("Async generator dependency found in sync route!");
         } else {
+            let _entered = py_bridge::enter_request_copy(py);
             let result = if let Some(error) = error {
                 let traceback = error
                     .traceback(py)

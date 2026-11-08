@@ -285,27 +285,21 @@ enum Step<'py> {
 
 fn step_coroutine<'py>(py: Python<'py>, coroutine: &Bound<'py, PyAny>) -> Step<'py> {
     use pyo3::ffi;
+    let _entered = match py_bridge::enter_request_copy(py) {
+        Ok(entered) => entered,
+        Err(err) => return Step::Raise(err),
+    };
     unsafe {
-        let ctx = ffi::PyContext_New();
-        if ctx.is_null() {
-            return Step::Raise(PyErr::fetch(py));
-        }
-        let ctx = Bound::from_owned_ptr(py, ctx);
-        if ffi::PyContext_Enter(ctx.as_ptr()) != 0 {
-            return Step::Raise(PyErr::fetch(py));
-        }
         let mut out: *mut ffi::PyObject = std::ptr::null_mut();
         let status = ffi::PyIter_Send(coroutine.as_ptr(), ffi::Py_None(), &raw mut out);
-        let step = match status {
+        match status {
             ffi::PySendResult::PYGEN_RETURN => Step::Return(Bound::from_owned_ptr(py, out)),
             ffi::PySendResult::PYGEN_ERROR => Step::Raise(PyErr::fetch(py)),
             ffi::PySendResult::PYGEN_NEXT => {
                 ffi::Py_DECREF(out);
                 Step::Yield
             }
-        };
-        ffi::PyContext_Exit(ctx.as_ptr());
-        step
+        }
     }
 }
 
@@ -401,7 +395,10 @@ async fn core_sync_no_args(
             .unwrap_or_else(|err| error_response(py, &err, input.as_ref(), event_loop))
     };
     if !sync_to_threadpool {
-        return Python::attach(run);
+        return Python::attach(|py| {
+            let _entered = py_bridge::enter_request_copy(py);
+            run(py)
+        });
     }
 
     blocking::run_python(run)
@@ -517,6 +514,7 @@ async fn core_sync<const NEEDS_REQ: bool>(
 ) -> Response {
     if !sync_to_threadpool {
         let handled = Python::attach(|py| {
+            let _entered = py_bridge::enter_request_copy(py);
             (!overrides_active(py, handler)).then(|| {
                 run_sync_route::<NEEDS_REQ>(
                     py,

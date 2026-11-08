@@ -81,9 +81,13 @@ impl PyCallNext {
         py: Python<'py>,
         _request: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let Some(downstream) = self.downstream.lock().take() else {
+        let Some(mut downstream) = self.downstream.lock().take() else {
             return Err(PyRuntimeError::new_err("call_next was already called"));
         };
+        downstream
+            .request
+            .extensions_mut()
+            .insert(py_bridge::RequestContext::capture(py)?);
         let event_loop = self.event_loop;
         let bridged = async move {
             let Downstream {
@@ -193,7 +197,11 @@ fn drive(
     next: Next,
     event_loop: EventLoop,
 ) -> BoxFuture<'static, Response> {
-    Box::pin(async move {
+    let context = request
+        .extensions()
+        .get::<py_bridge::RequestContext>()
+        .cloned();
+    Box::pin(py_bridge::scoped_request_context(context, async move {
         let Some(mw) = middlewares.get(idx).cloned() else {
             return next.run(request).await;
         };
@@ -245,7 +253,7 @@ fn drive(
                 middleware_error()
             }
         }
-    })
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
