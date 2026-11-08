@@ -3,6 +3,7 @@ use pydantic_core_kernel::json::serde_to_value;
 use pydantic_core_kernel::{CompiledSchema, CoreSchema, Int, Value};
 use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::pyclass::CompareOp;
 use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PySet, PyString, PyTuple};
 use serde_json::{Map, Number, Value as Json};
 use simd_json::{OwnedValue, StaticNode};
@@ -10,6 +11,7 @@ use simd_json::{OwnedValue, StaticNode};
 const IGNORED: [&str; 3] = ["metadata", "ref", "serialization"];
 
 fastrapi_pyutil::cached_py_import!(UUID, "uuid", "UUID");
+fastrapi_pyutil::cached_py_import!(DECIMAL, "decimal", "Decimal");
 fastrapi_pyutil::cached_py_import!(SAFE_UNKNOWN, "uuid", "SafeUUID", "unknown");
 fastrapi_pyutil::cached_py_import!(OBJECT_NEW, "builtins", "object", "__new__");
 fastrapi_pyutil::cached_py_import!(OBJECT_SETATTR, "builtins", "object", "__setattr__");
@@ -19,11 +21,18 @@ enum Shape {
     Plain,
     Datetime,
     Uuid(Option<usize>),
+    Decimal(Box<DecimalRules>),
     Enum(Box<[(Value, Py<PyAny>)]>),
     List(Box<Self>),
     Set(Box<Self>),
     Nullable(Box<Self>),
     Dict(Box<Self>),
+}
+
+#[derive(Debug)]
+struct DecimalRules {
+    allow_inf_nan: bool,
+    bounds: Box<[(CompareOp, Py<PyAny>)]>,
 }
 
 pub struct ParamKernel {
@@ -228,6 +237,7 @@ impl<'py> Converter<'py> {
             "enum" => return (!in_union).then(|| enum_schema(dict)).flatten(),
             "datetime" => (Shape::Datetime, &["strict"]),
             "uuid" => return (!in_union).then(|| uuid_schema(dict)).flatten(),
+            "decimal" => return (!in_union).then(|| decimal_schema(dict)).flatten(),
             _ => (Shape::Plain, allowed(&kind)?),
         };
         for (key, value) in dict.iter() {
@@ -290,6 +300,70 @@ fn uuid_to_py<'py>(
         ))
         .ok()?;
     Some(instance)
+}
+
+fn decimal_schema(dict: &Bound<'_, PyDict>) -> Option<(Json, Shape)> {
+    let mut allow_inf_nan = false;
+    let mut bounds = Vec::new();
+    for (key, value) in dict.iter() {
+        let key = key.cast_into::<PyString>().ok()?;
+        let op = match key.to_str().ok()? {
+            "gt" => CompareOp::Gt,
+            "ge" => CompareOp::Ge,
+            "lt" => CompareOp::Lt,
+            "le" => CompareOp::Le,
+            "allow_inf_nan" => {
+                allow_inf_nan = value.is_truthy().ok()?;
+                continue;
+            }
+            "strict" if !value.is_truthy().ok()? => continue,
+            "max_digits" | "decimal_places" | "multiple_of" if value.is_none() => continue,
+            "type" => continue,
+            name if IGNORED.contains(&name) => continue,
+            _ => return None,
+        };
+        bounds.push((op, value.unbind()));
+    }
+    let schema = serde_json::json!({
+        "type": "union",
+        "choices": [{ "type": "str", "strict": true }, { "type": "int", "strict": true }],
+    });
+    let rules = DecimalRules {
+        allow_inf_nan,
+        bounds: bounds.into_boxed_slice(),
+    };
+    Some((schema, Shape::Decimal(Box::new(rules))))
+}
+
+fn decimal_to_py<'py>(
+    py: Python<'py>,
+    value: &Value,
+    rules: &DecimalRules,
+) -> Option<Bound<'py, PyAny>> {
+    let class = DECIMAL.get(py).ok()?;
+    let decimal = match value {
+        Value::Str(text) => class.call1((text.as_str(),)).ok()?,
+        Value::Int(_) => class.call1((value_to_py(py, value)?,)).ok()?,
+        _ => return None,
+    };
+    let finite = decimal
+        .call_method0(intern!(py, "is_finite"))
+        .ok()?
+        .is_truthy()
+        .ok()?;
+    if !finite && (!rules.allow_inf_nan || !rules.bounds.is_empty()) {
+        return None;
+    }
+    rules
+        .bounds
+        .iter()
+        .all(|(op, bound)| {
+            decimal
+                .rich_compare(bound.bind(py), *op)
+                .and_then(|result| result.is_truthy())
+                .unwrap_or(false)
+        })
+        .then_some(decimal)
 }
 
 fn enum_schema(dict: &Bound<'_, PyDict>) -> Option<(Json, Shape)> {
@@ -438,6 +512,7 @@ impl Shape {
                 value_to_py(py, value).map(|value| value.into_bound(py))
             }
             (Self::Uuid(version), Value::Str(text)) => uuid_to_py(py, text, *version),
+            (Self::Decimal(rules), _) => decimal_to_py(py, value, rules),
             (Self::Enum(members), _) => members
                 .iter()
                 .find(|(member, _)| member == value)

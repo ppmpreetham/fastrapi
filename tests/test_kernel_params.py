@@ -1,4 +1,5 @@
 import datetime
+import decimal
 import enum
 import uuid
 from typing import Annotated, Literal, Optional, Union
@@ -62,6 +63,10 @@ TYPES = {
     ),
     "uuid4": (UUID4, ["9b2f4c1e-5a8d-4e3b-9f6a-1c2d3e4f5a6b", "12345678-1234-5678-1234-567812345678", "9b2f4c1e-5a8d-4e3b-cf6a-1c2d3e4f5a6b"]),
     "optional_uuid": (Optional[uuid.UUID], ["12345678-1234-5678-1234-567812345678", "x"]),
+    "decimal": (decimal.Decimal, ["1.50", " 2 ", "1_000", "1e3", "-0", "NaN", "Infinity", "abc", ""]),
+    "decimal_bounded": (Annotated[decimal.Decimal, Field(gt=0, le=10)], ["5", "0", "10", "10.01", "sNaN"]),
+    "decimal_inf": (Annotated[decimal.Decimal, Field(allow_inf_nan=True)], ["NaN", "-Infinity", "3"]),
+    "decimal_digits": (Annotated[decimal.Decimal, Field(max_digits=3, decimal_places=1)], ["12.3", "1.23"]),
 }
 
 LIST_TYPES = {
@@ -70,6 +75,7 @@ LIST_TYPES = {
     "list_date": (list[datetime.date], [["2020-01-02"], ["bad"]]),
     "list_literal": (list[Literal["a", "b"]], [["a", "b"], ["c"]]),
     "list_uuid": (list[uuid.UUID], [["12345678-1234-5678-1234-567812345678"], ["bad"]]),
+    "list_decimal": (list[decimal.Decimal], [["1.5", "2"], ["x"]]),
 }
 
 
@@ -152,7 +158,7 @@ def test_list_params_match_fastapi(clients, name, raw):
 )
 def test_embedded_json_values_match_fastapi(clients, value):
     expected_client, actual_client = clients
-    for name in ("multiple", "finite", "union", "level", "plain", "literal_int", "bool_opt", "datetime"):
+    for name in ("multiple", "finite", "union", "level", "plain", "literal_int", "bool_opt", "datetime", "decimal", "decimal_bounded"):
         url = f"/embedded/{name}"
         compare(expected_client.post(url, json={"v": value}), actual_client.post(url, json={"v": value}))
 
@@ -170,7 +176,7 @@ def test_kernel_params_skip_pydantic(monkeypatch):
     monkeypatch.setattr(TypeAdapter, "validate_python", counted)
     app = build(fastrapi)
     with LiveServerTestClient(app) as client:
-        valid = {name: inputs[0] for name, (_, inputs) in TYPES.items() if name not in ("strict_int", "literal_int")}
+        valid = {name: inputs[0] for name, (_, inputs) in TYPES.items() if name not in ("strict_int", "literal_int", "decimal_digits")}
         for name, raw in valid.items():
             assert client.get(f"/query/{name}", params={"v": raw}).status_code == 200, name
             assert client.post(f"/embedded/{name}", json={"v": raw}).status_code == 200, name
