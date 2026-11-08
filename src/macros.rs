@@ -7,6 +7,8 @@ macro_rules! generate_http_methods {
     (
         $struct_name:ident,
         $get_router:ident,
+        route_arg: $route_arg:ident,
+        websocket_arg: $websocket_arg:ident,
         get: { $(#[$get_doc:meta])* },
         post: { $(#[$post_doc:meta])* },
         put: { $(#[$put_doc:meta])* },
@@ -56,9 +58,9 @@ macro_rules! generate_http_methods {
             fn trace(&self, py: pyo3::prelude::Python<'_>, path: String, kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
                 self.$get_router(py).create_method_decorator_kw(py, ::fastrapi_core::method::HttpMethod::TRACE, path, kwargs)
             }
-            #[pyo3(signature = (path, endpoint, methods=None, name=None, include_in_schema=true))]
-            fn add_route(&self, py: pyo3::prelude::Python<'_>, path: &str, endpoint: &pyo3::Bound<'_, pyo3::prelude::PyAny>, methods: Option<Vec<String>>, name: Option<String>, include_in_schema: bool) -> pyo3::prelude::PyResult<()> {
-                self.$get_router(py).add_starlette_route(py, path, endpoint, methods, name, include_in_schema)
+            #[pyo3(signature = (path, $route_arg, methods=None, name=None, include_in_schema=true))]
+            fn add_route(&self, py: pyo3::prelude::Python<'_>, path: &str, $route_arg: &pyo3::Bound<'_, pyo3::prelude::PyAny>, methods: Option<Vec<String>>, name: Option<String>, include_in_schema: bool) -> pyo3::prelude::PyResult<()> {
+                self.$get_router(py).add_starlette_route(py, path, $route_arg, methods, name, include_in_schema)
             }
             #[pyo3(signature = (path, methods=None, name=None, include_in_schema=true))]
             fn route<'py>(slf: &pyo3::Bound<'py, Self>, path: String, methods: Option<Vec<String>>, name: Option<String>, include_in_schema: bool) -> pyo3::prelude::PyResult<pyo3::Bound<'py, pyo3::prelude::PyAny>> {
@@ -68,10 +70,10 @@ macro_rules! generate_http_methods {
                     .getattr(pyo3::intern!(slf.py(), "route_decorator"))?
                     .call1((add_route, path, methods, name, include_in_schema))
             }
-            #[pyo3(signature = (path, route, name=None))]
-            fn add_websocket_route(&self, py: pyo3::prelude::Python<'_>, path: String, route: &pyo3::Bound<'_, pyo3::prelude::PyAny>, name: Option<String>) -> pyo3::prelude::PyResult<()> {
+            #[pyo3(signature = (path, $websocket_arg, name=None))]
+            fn add_websocket_route(&self, py: pyo3::prelude::Python<'_>, path: String, $websocket_arg: &pyo3::Bound<'_, pyo3::prelude::PyAny>, name: Option<String>) -> pyo3::prelude::PyResult<()> {
                 use pyo3::prelude::PyAnyMethods;
-                self.$get_router(py).create_ws_decorator(py, path, name, None)?.bind(py).call1((route,))?;
+                self.$get_router(py).create_ws_decorator(py, path, name, None)?.bind(py).call1(($websocket_arg,))?;
                 Ok(())
             }
             #[pyo3(signature = (path, name=None))]

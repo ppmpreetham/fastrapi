@@ -924,6 +924,8 @@ impl FastrAPI {
 crate::generate_http_methods!(
     FastrAPI,
     router_ref,
+    route_arg: route,
+    websocket_arg: route,
     get: {
         /// Add a *path operation* using an HTTP GET operation.
         ///

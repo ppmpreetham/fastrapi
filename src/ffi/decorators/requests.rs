@@ -13,6 +13,8 @@ impl PyAPIRouter {
 crate::generate_http_methods!(
     PyAPIRouter,
     router_ref,
+    route_arg: endpoint,
+    websocket_arg: endpoint,
     get: {
         /// Add a *path operation* using an HTTP GET operation.
         ///
