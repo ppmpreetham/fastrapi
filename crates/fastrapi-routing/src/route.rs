@@ -2,6 +2,7 @@
 //! These types hold the parsed parameters, the validators, the execution plan, and the route entries for HTTP and WebSocket routes.
 
 use crate::dependencies::{DependencyNode, InjectionType, OverrideCache};
+use crate::kernel_params::ParamKernel;
 use crate::kernel_validation::KernelFastPath;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::params::{ParameterConstraints, ParameterSource};
@@ -69,6 +70,7 @@ pub struct ParsedParameter {
     pub fast_list: Option<FastKind>,
     pub fast_pattern: Option<regex::Regex>,
     pub empty_default: Option<EmptyDefault>,
+    pub kernel: Option<Arc<ParamKernel>>,
     pub validate: Py<PyAny>,
     pub validate_json: Option<Py<PyAny>>,
     pub validator_index: Option<usize>,

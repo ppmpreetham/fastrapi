@@ -410,6 +410,7 @@ class FieldSpec:
         "read_bytes",
         "fast_list",
         "empty_default",
+        "core_schema",
     )
 
 
@@ -515,6 +516,7 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
     adapter = type_adapter(field_info)
     spec.validate = partial(adapter.validate_python, from_attributes=True)
     spec.validate_json = adapter.validate_json
+    spec.core_schema = adapter.core_schema
     spec.fast = None if spec.sequence else fast_kind(field_info, field_info.annotation)
     spec.fast_list = fast_list_kind(field_info, field_info.annotation) if spec.sequence else None
     spec.empty_default = empty_default(field_info)

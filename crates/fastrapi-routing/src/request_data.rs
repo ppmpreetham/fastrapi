@@ -327,15 +327,45 @@ fn fast_value<'py>(
     param: &ParsedParameter,
     raw: &str,
 ) -> Option<Bound<'py, PyAny>> {
-    match param.fast? {
-        FastKind::Int => fast_int(py, param, raw.parse().ok()?),
-        FastKind::Float => fast_float(py, param, raw.parse().ok()?),
-        FastKind::Str => fast_text(py, param, raw),
-        FastKind::Bool => fast_scalar(py, FastKind::Bool, raw),
+    let fast = match param.fast {
+        Some(FastKind::Int) => raw
+            .parse()
+            .ok()
+            .and_then(|value| fast_int(py, param, value)),
+        Some(FastKind::Float) => raw
+            .parse()
+            .ok()
+            .and_then(|value| fast_float(py, param, value)),
+        Some(FastKind::Str) => fast_text(py, param, raw),
+        Some(FastKind::Bool) => fast_scalar(py, FastKind::Bool, raw),
+        None => None,
+    };
+    fast.or_else(|| param.kernel.as_ref()?.validate_str(py, raw))
+}
+
+fn fast_values<'py, S: AsRef<str>>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+    values: &[S],
+) -> Option<Bound<'py, PyAny>> {
+    if values.is_empty() {
+        return None;
     }
+    param
+        .fast_list
+        .and_then(|kind| fast_list(py, kind, values))
+        .or_else(|| param.kernel.as_ref()?.validate_strs(py, values))
 }
 
 fn fast_json<'py>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+    value: &Value,
+) -> Option<Bound<'py, PyAny>> {
+    fast_json_scalar(py, param, value).or_else(|| param.kernel.as_ref()?.validate_json(py, value))
+}
+
+fn fast_json_scalar<'py>(
     py: Python<'py>,
     param: &ParsedParameter,
     value: &Value,
@@ -354,14 +384,14 @@ fn fast_json<'py>(
     }
 }
 
-fn fast_list<'py>(
+fn fast_list<'py, S: AsRef<str>>(
     py: Python<'py>,
     kind: FastKind,
-    values: &[Cow<'_, str>],
+    values: &[S],
 ) -> Option<Bound<'py, PyAny>> {
     let items = values
         .iter()
-        .map(|value| fast_scalar(py, kind, value))
+        .map(|value| fast_scalar(py, kind, value.as_ref()))
         .collect::<Option<SmallVec<[Bound<'py, PyAny>; 4]>>>()?;
     PyList::new(py, items).ok().map(Bound::into_any)
 }
@@ -588,11 +618,7 @@ pub fn request_param_value<'py>(
     }
     let raw = if param.is_list {
         let values = source_values(&param.source, &param.external_name, input);
-        if !values.is_empty()
-            && let Some(converted) = param
-                .fast_list
-                .and_then(|kind| fast_list(py, kind, &values))
-        {
+        if let Some(converted) = fast_values(py, param, &values) {
             return Ok(Some(converted));
         }
         string_list(py, values.iter())?
@@ -790,6 +816,12 @@ fn single_json_body<'py>(
         _ => {}
     }
     let loc = Loc::Source(&param.source);
+    if let Some(kernel) = &param.kernel
+        && let Ok(parsed) = pydantic_core_kernel::json::parse_json(raw)
+        && let Some(value) = kernel.validate(py, &parsed)
+    {
+        return Ok(Some(value));
+    }
     let Some(validate_json) = &param.validate_json else {
         return resolve(
             py,
@@ -876,10 +908,18 @@ fn form_fast<'py>(
     param: &ParsedParameter,
     fields: Option<&FormFields>,
 ) -> Option<Bound<'py, PyAny>> {
+    let values = fields?.get(param.external_name.as_str())?;
     if param.is_list {
-        return None;
+        let texts = values
+            .iter()
+            .map(|value| match value {
+                BodyField::Text(text) => Some(text.as_str()),
+                BodyField::File(_) => None,
+            })
+            .collect::<Option<SmallVec<[&str; 4]>>>()?;
+        return fast_values(py, param, &texts);
     }
-    match fields?.get(param.external_name.as_str())?.last()? {
+    match values.last()? {
         BodyField::Text(text) if !text.is_empty() => fast_value(py, param, text),
         _ => None,
     }

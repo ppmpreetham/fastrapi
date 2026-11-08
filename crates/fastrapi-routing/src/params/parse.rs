@@ -4,6 +4,7 @@
 use super::constraints::extract_constraints;
 use super::module::analyze;
 use super::utils::{annotation_name, base_annotation, is_background_tasks_type, is_inspect_empty};
+use crate::kernel_params::ParamKernel;
 use crate::route::{EmptyDefault, FastKind, ModelKey, ParsedParameter};
 use fastrapi_core::params::{ParameterConstraints, ParameterSource};
 use fastrapi_http::upload_file::PyUploadFile;
@@ -96,6 +97,7 @@ fn background_tasks_parameter(py: Python<'_>, param_name: &str) -> ParsedParamet
         fast_list: None,
         fast_pattern: None,
         empty_default: None,
+        kernel: None,
         validate: py.None(),
         validate_json: None,
         validator_index: None,
@@ -142,6 +144,17 @@ pub fn parse_parameter_spec(
             .extract::<Option<&str>>()?,
     )
     .filter(|_| fast_pattern.is_ok());
+    let fast_list = fast_kind(
+        spec.getattr(intern!(py, "fast_list"))?
+            .extract::<Option<&str>>()?,
+    );
+    let model_keys = model_keys(&spec)?;
+    let is_model: bool = spec.getattr(intern!(py, "model"))?.extract()?;
+    let is_file: bool = spec.getattr(intern!(py, "is_file"))?.extract()?;
+    let kernel = (!is_model && !is_file)
+        .then(|| ParamKernel::compile(&spec.getattr(intern!(py, "core_schema")).ok()?))
+        .flatten()
+        .map(Arc::new);
 
     Ok(ParsedParameter {
         name: param_name.to_owned(),
@@ -162,22 +175,20 @@ pub fn parse_parameter_spec(
             .getattr(intern!(py, "description"))?
             .extract::<Option<String>>()?,
         constraints,
-        is_pydantic_model: spec.getattr(intern!(py, "model"))?.extract()?,
-        model_keys: model_keys(&spec)?,
-        is_file: spec.getattr(intern!(py, "is_file"))?.extract()?,
+        is_pydantic_model: is_model,
+        model_keys,
+        is_file,
         is_form: spec.getattr(intern!(py, "is_form"))?.extract()?,
         read_bytes: spec.getattr(intern!(py, "read_bytes"))?.extract()?,
         embed: spec.getattr(intern!(py, "embed"))?.extract()?,
         fast,
-        fast_list: fast_kind(
-            spec.getattr(intern!(py, "fast_list"))?
-                .extract::<Option<&str>>()?,
-        ),
+        fast_list,
         fast_pattern: fast_pattern.ok().flatten(),
         empty_default: empty_default(
             spec.getattr(intern!(py, "empty_default"))?
                 .extract::<Option<&str>>()?,
         ),
+        kernel,
         validate: spec.getattr(intern!(py, "validate"))?.unbind(),
         validate_json: optional(&spec, intern!(py, "validate_json"))?.map(Bound::unbind),
         param_object: Some(field_info.unbind()),

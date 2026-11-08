@@ -9,6 +9,7 @@
 pub mod analysis;
 pub mod annotations;
 pub mod dependencies;
+pub mod kernel_params;
 pub mod kernel_validation;
 pub mod params;
 pub mod pydantic;

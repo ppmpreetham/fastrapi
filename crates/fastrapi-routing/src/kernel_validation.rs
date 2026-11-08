@@ -17,8 +17,8 @@ use pydantic_core_kernel::{
     ValLineError, ValidationError, ValidationState, Value, build_validator,
 };
 use pyo3::types::{
-    PyBool, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTime, PyTuple,
-    PyTzInfo,
+    PyBool, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt, PyList, PyString, PyTime,
+    PyTuple, PyTzInfo,
 };
 
 use crate::route::PydanticValidator;
@@ -554,7 +554,7 @@ fn construct_model(py: Python<'_>, fast: &KernelFastPath, value: &Value) -> Opti
         .map(Bound::unbind)
 }
 
-fn value_to_py(py: Python<'_>, value: &Value) -> Option<Py<PyAny>> {
+pub(crate) fn value_to_py(py: Python<'_>, value: &Value) -> Option<Py<PyAny>> {
     Some(match value {
         Value::Null => py.None(),
         Value::Bool(b) => PyBool::new(py, *b).to_owned().unbind().into_any(),
@@ -620,42 +620,29 @@ fn value_to_py(py: Python<'_>, value: &Value) -> Option<Py<PyAny>> {
                 .into_any()
         }
         Value::Duration(d) => {
-            let total_seconds = i64::from(d.day) * 86_400 + i64::from(d.second);
-            let signed = if d.positive {
-                total_seconds
-            } else {
-                -total_seconds
-            };
-            py.import("datetime")
-                .ok()?
-                .getattr(pyo3::intern!(py, "timedelta"))
-                .ok()?
-                .call1((0i64, signed, i64::from(d.microsecond)))
-                .ok()?
-                .unbind()
+            let sign = if d.positive { 1 } else { -1 };
+            PyDelta::new(
+                py,
+                sign * i32::try_from(d.day).ok()?,
+                sign * i32::try_from(d.second).ok()?,
+                sign * i32::try_from(d.microsecond).ok()?,
+                true,
+            )
+            .ok()?
+            .unbind()
+            .into_any()
         }
     })
 }
 
+fastrapi_pyutil::cached_py_import!(TZ_INFO, "pydantic_core", "TzInfo");
+
 fn py_tz(py: Python<'_>, offset_seconds: i32) -> Option<Bound<'_, PyTzInfo>> {
-    let datetime = py.import("datetime").ok()?;
-    let tz = if offset_seconds == 0 {
-        datetime
-            .getattr(pyo3::intern!(py, "timezone"))
-            .ok()?
-            .getattr(pyo3::intern!(py, "utc"))
-            .ok()?
-    } else {
-        let timedelta = datetime
-            .getattr(pyo3::intern!(py, "timedelta"))
-            .ok()?
-            .call1((offset_seconds,))
-            .ok()?;
-        datetime
-            .getattr(pyo3::intern!(py, "timezone"))
-            .ok()?
-            .call1((timedelta,))
-            .ok()?
-    };
-    tz.cast_into::<PyTzInfo>().ok()
+    TZ_INFO
+        .get(py)
+        .ok()?
+        .call1((offset_seconds,))
+        .ok()?
+        .cast_into::<PyTzInfo>()
+        .ok()
 }
