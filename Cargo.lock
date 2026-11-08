@@ -646,6 +646,7 @@ dependencies = [
  "pyaio",
  "pyo3",
  "pyo3-async-runtimes",
+ "pyo3-build-config",
  "tokio",
 ]
 
@@ -1659,8 +1660,6 @@ dependencies = [
 [[package]]
 name = "pyaio"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b87dc4f355641d38d75efe36ccd55178f9a54780a438430bca1e9ccf648e048"
 dependencies = [
  "pyo3",
  "tokio",

@@ -46,6 +46,8 @@ pub static PYTHON_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
         .worker_threads(workers)
         .max_blocking_threads(blocking)
         .thread_name("python-handler")
+        .on_thread_unpark(crate::thread_state::mark_worker)
+        .on_thread_park(crate::thread_state::release)
         .enable_all()
         .build()
         .expect("Failed to create Python runtime")

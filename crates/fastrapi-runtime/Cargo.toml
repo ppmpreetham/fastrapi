@@ -9,8 +9,11 @@ fastrapi-pyutil.workspace = true
 parking_lot.workspace = true
 pyo3.workspace = true
 pyo3-async-runtimes.workspace = true
-pyaio_faq = { package = "pyaio", version = "0.1.0" }
+pyaio_faq = { package = "pyaio", path = "../../../pyaio" }
 tokio.workspace = true
 
 [lints]
 workspace = true
+
+[build-dependencies]
+pyo3-build-config = "0.29.0"

@@ -30,6 +30,7 @@ use fastrapi_http::request::create_py_request;
 use fastrapi_http::response_convert::convert_response_by_type;
 use fastrapi_pyutil::call::CallArgs;
 use fastrapi_pyutil::json::py_json_response_with_dump_options;
+use fastrapi_runtime::thread_state;
 use fastrapi_runtime::tokio_runtime::spawn;
 
 #[inline(always)]
@@ -285,7 +286,7 @@ enum Step<'py> {
 fn step_coroutine<'py>(py: Python<'py>, coroutine: &Bound<'py, PyAny>) -> Step<'py> {
     use pyo3::ffi;
     unsafe {
-        let ctx = ffi::PyContext_CopyCurrent();
+        let ctx = ffi::PyContext_New();
         if ctx.is_null() {
             return Step::Raise(PyErr::fetch(py));
         }
@@ -834,6 +835,21 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
     response
 }
 
+#[inline]
+fn hold_thread_state(handler: &RouteHandler, sync_to_threadpool: bool) {
+    let offloaded = sync_to_threadpool
+        && matches!(
+            handler.execution.execution_mode,
+            ExecutionMode::SyncNoArgs
+                | ExecutionMode::SyncNoDeps
+                | ExecutionMode::SyncDepsNoReq
+                | ExecutionMode::SyncDepsReq
+        );
+    if !offloaded {
+        thread_state::hold();
+    }
+}
+
 pub async fn run_py_handler(
     event_loop: EventLoop,
     sync_to_threadpool: bool,
@@ -842,6 +858,7 @@ pub async fn run_py_handler(
     param_ranges: SmallVec<[PathParamRange; 4]>,
     payload: Option<BodyPayload>,
 ) -> Response {
+    hold_thread_state(handler, sync_to_threadpool);
     match handler.execution.execution_mode {
         ExecutionMode::Managed => {
             run_managed_handler(
@@ -918,6 +935,7 @@ pub async fn run_py_handler_no_request(
     handler: &'static RouteHandler,
     request_parts: Option<Parts>,
 ) -> Response {
+    hold_thread_state(handler, sync_to_threadpool);
     match handler.execution.execution_mode {
         ExecutionMode::SyncNoArgs => {
             core_sync_no_args(event_loop, handler, request_parts, sync_to_threadpool).await
