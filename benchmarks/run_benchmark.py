@@ -97,9 +97,8 @@ def wait_for_server(url: str, process: subprocess.Popen[str], timeout_seconds: f
             with urllib.request.urlopen(url, timeout=1) as response:
                 if response.status in (200, 405):
                     return
-        except urllib.error.HTTPError as error:
-            if error.code == 405:
-                return
+        except urllib.error.HTTPError:
+            return
         except (urllib.error.URLError, TimeoutError):
             pass
         time.sleep(0.25)
