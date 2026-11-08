@@ -330,19 +330,19 @@ fn generate_operation_id_for_path(
 }
 
 #[pyfunction]
-fn deep_dict_update(main: &Bound<'_, PyDict>, update: &Bound<'_, PyDict>) -> PyResult<()> {
-    for (key, value) in update.iter() {
-        if let Some(existing) = main.get_item(&key)? {
+fn deep_dict_update(main_dict: &Bound<'_, PyDict>, update_dict: &Bound<'_, PyDict>) -> PyResult<()> {
+    for (key, value) in update_dict.iter() {
+        if let Some(existing) = main_dict.get_item(&key)? {
             if let (Ok(left), Ok(right)) = (existing.cast::<PyDict>(), value.cast::<PyDict>()) {
                 deep_dict_update(left, right)?;
                 continue;
             }
             if existing.is_instance_of::<PyList>() && value.is_instance_of::<PyList>() {
-                main.set_item(key, existing.add(value)?)?;
+                main_dict.set_item(key, existing.add(value)?)?;
                 continue;
             }
         }
-        main.set_item(key, value)?;
+        main_dict.set_item(key, value)?;
     }
     Ok(())
 }
