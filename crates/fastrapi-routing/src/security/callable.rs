@@ -74,6 +74,31 @@ pub(crate) fn bearer_token(
     Ok(Some(credentials.to_owned()))
 }
 
+pub(crate) fn raw_authorization(
+    request: &Bound<'_, PyAny>,
+    auto_error: bool,
+) -> PyResult<Option<String>> {
+    match auth_header(request).filter(|header| !header.is_empty()) {
+        Some(header) => Ok(Some(header)),
+        None => missing(request, auto_error, "Bearer"),
+    }
+}
+
+pub(crate) fn http_digest_call(
+    auto_error: bool,
+    request: &Bound<'_, PyAny>,
+) -> PyResult<Option<HTTPAuthorizationCredentials>> {
+    let header = auth_header(request).unwrap_or_default();
+    let (scheme, credentials) = split_authorization(&header);
+    if scheme.is_empty() || credentials.is_empty() || !scheme.eq_ignore_ascii_case("digest") {
+        return missing(request, auto_error, "Digest");
+    }
+    Ok(Some(HTTPAuthorizationCredentials {
+        scheme: scheme.to_owned(),
+        credentials: credentials.to_owned(),
+    }))
+}
+
 pub(crate) fn source_value(request: &Bound<'_, PyAny>, source: &str, name: &str) -> Option<String> {
     let container = match source {
         "query" => request.getattr("query_params"),

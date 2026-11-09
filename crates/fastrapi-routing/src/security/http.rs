@@ -66,7 +66,7 @@ impl HTTPBearer {
     ) -> Self {
         Self {
             bearer_format: bearerFormat.or(bearer_format),
-            scheme_name,
+            scheme_name: scheme_name.or_else(|| Some("HTTPBearer".to_owned())),
             description,
             auto_error,
         }
@@ -133,14 +133,14 @@ pub struct HTTPBasic {
 impl HTTPBasic {
     #[new]
     #[pyo3(signature = (*, scheme_name=None, realm=None, description=None, auto_error=true))]
-    const fn new(
+    fn new(
         scheme_name: Option<String>,
         realm: Option<String>,
         description: Option<String>,
         auto_error: bool,
     ) -> Self {
         Self {
-            scheme_name,
+            scheme_name: scheme_name.or_else(|| Some("HTTPBasic".to_owned())),
             realm,
             description,
             auto_error,
@@ -210,32 +210,24 @@ pub struct HTTPDigest {
 impl HTTPDigest {
     #[new]
     #[pyo3(signature = (*, scheme_name=None, description=None, auto_error=true))]
-    const fn new(
+    fn new(
         scheme_name: Option<String>,
         description: Option<String>,
         auto_error: bool,
     ) -> Self {
         Self {
-            scheme_name,
+            scheme_name: scheme_name.or_else(|| Some("HTTPDigest".to_owned())),
             description,
             auto_error,
         }
     }
 
     /// Call self as a function.
-    fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-        let header = request
-            .getattr("headers")
-            .ok()
-            .and_then(|headers| headers.call_method1("get", ("authorization",)).ok())
-            .and_then(|value| value.extract::<String>().ok())
-            .filter(|value| !value.is_empty());
-
-        match header {
-            Some(header) => Ok(Some(header)),
-            None if self.auto_error => Err(callable::unauthorized(request.py(), "Digest")),
-            None => Ok(None),
-        }
+    fn __call__(
+        &self,
+        request: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<HTTPAuthorizationCredentials>> {
+        callable::http_digest_call(self.auto_error, request)
     }
 }
 

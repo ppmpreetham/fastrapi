@@ -2,12 +2,12 @@
 //! The OpenAPI schema and the route security requirements use this value.
 
 use fastrapi_core::security::SecurityKind;
-use fastrapi_pyutil::json::py_dict_to_json;
+use fastrapi_pyutil::json::{py_any_to_json, py_dict_to_json};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 
 use super::{
-    APIKeyCookie, APIKeyHeader, APIKeyQuery, HTTPBasic, HTTPBearer, HTTPDigest,
+    APIKeyCookie, APIKeyHeader, APIKeyQuery, HTTPBasic, HTTPBearer, HTTPDigest, OAuth2,
     OAuth2AuthorizationCodeBearer, OAuth2PasswordBearer, OpenIdConnect,
 };
 
@@ -101,6 +101,15 @@ pub fn describe_scheme(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<SchemeS
         description: s.description.clone(),
         scopes: None,
         kind: SecurityKind::APIKeyQuery { name: s.name.clone(), auto_error: s.auto_error },
+    });
+    try_scheme!(obj, OAuth2 => s, SchemeSpec {
+        name: s.scheme_name.clone().unwrap_or_else(|| "OAuth2".into()),
+        description: s.description.clone(),
+        scopes: None,
+        kind: SecurityKind::OAuth2 {
+            flows: py_any_to_json(py, s.flows.bind(py)),
+            auto_error: s.auto_error,
+        },
     });
     try_scheme!(obj, APIKeyCookie => s, SchemeSpec {
         name: s.scheme_name.clone().unwrap_or_else(|| "APIKeyCookie".into()),

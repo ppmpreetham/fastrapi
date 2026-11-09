@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SecurityKind {
     OAuth2PasswordBearer {
         token_url: String,
@@ -18,6 +18,10 @@ pub enum SecurityKind {
     },
     OpenIdConnect {
         url: String,
+        auto_error: bool,
+    },
+    OAuth2 {
+        flows: simd_json::OwnedValue,
         auto_error: bool,
     },
     HTTPBearer {

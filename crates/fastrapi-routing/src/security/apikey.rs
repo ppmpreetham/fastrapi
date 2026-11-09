@@ -117,7 +117,7 @@ macro_rules! define_api_key_security {
         impl $struct_name {
             #[new]
             #[pyo3(signature = (*, name, scheme_name=None, description=None, auto_error=true))]
-            const fn new(
+            fn new(
                 name: String,
                 scheme_name: Option<String>,
                 description: Option<String>,
@@ -125,7 +125,7 @@ macro_rules! define_api_key_security {
             ) -> Self {
                 Self {
                     name,
-                    scheme_name,
+                    scheme_name: scheme_name.or_else(|| Some($py_name.to_owned())),
                     description,
                     auto_error,
                 }

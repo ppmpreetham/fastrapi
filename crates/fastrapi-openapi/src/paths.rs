@@ -69,6 +69,7 @@ fn scheme_to_openapi(
             }
             json!({ "type": "oauth2", "flows": { "authorizationCode": code_flow } })
         }
+        SecurityKind::OAuth2 { flows, .. } => json!({ "type": "oauth2", "flows": flows }),
         SecurityKind::OpenIdConnect { url, .. } => json!({
             "type": "openIdConnect",
             "openIdConnectUrl": url

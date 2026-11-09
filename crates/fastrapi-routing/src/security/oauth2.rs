@@ -46,7 +46,7 @@ impl OAuth2 {
     ) -> Self {
         Self {
             flows: flows.unwrap_or_else(|| PyDict::new(py).into()),
-            scheme_name,
+            scheme_name: scheme_name.or_else(|| Some("OAuth2".to_owned())),
             description,
             auto_error,
         }
@@ -54,7 +54,7 @@ impl OAuth2 {
 
     /// Call self as a function.
     fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-        callable::bearer_token(request, self.auto_error)
+        callable::raw_authorization(request, self.auto_error)
     }
 }
 
@@ -116,7 +116,7 @@ impl OAuth2PasswordBearer {
         Ok(Self {
             token_url: required_url(tokenUrl, token_url, "tokenUrl")?,
             refresh_url: refreshUrl.or(refresh_url),
-            scheme_name,
+            scheme_name: scheme_name.or_else(|| Some("OAuth2PasswordBearer".to_owned())),
             scopes,
             description,
             auto_error,
@@ -195,7 +195,7 @@ impl OAuth2AuthorizationCodeBearer {
             token_url: required_url(tokenUrl, token_url, "tokenUrl")?,
             refresh_url: refreshUrl.or(refresh_url),
             scopes,
-            scheme_name,
+            scheme_name: scheme_name.or_else(|| Some("OAuth2AuthorizationCodeBearer".to_owned())),
             description,
             auto_error,
         })
@@ -264,7 +264,7 @@ impl OpenIdConnect {
                 openid_connect_url,
                 "openIdConnectUrl",
             )?,
-            scheme_name,
+            scheme_name: scheme_name.or_else(|| Some("OpenIdConnect".to_owned())),
             description,
             auto_error,
         })
@@ -272,6 +272,6 @@ impl OpenIdConnect {
 
     /// Call self as a function.
     fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-        callable::bearer_token(request, self.auto_error)
+        callable::raw_authorization(request, self.auto_error)
     }
 }

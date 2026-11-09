@@ -174,6 +174,11 @@ impl OAuth2PasswordRequestForm {
         }
     }
 
+    #[getter]
+    fn scopes(&self) -> Vec<&str> {
+        self.scope.split_whitespace().collect()
+    }
+
     fn __call__<'py>(&self, _py: Python<'py>, request: &Bound<'py, PyRequest>) -> PyResult<Self> {
         let form = request.call_method0("form_sync")?;
         let form = &form;
@@ -212,6 +217,11 @@ impl OAuth2PasswordRequestFormStrict {
             client_id,
             client_secret,
         })
+    }
+
+    #[getter]
+    fn scopes(&self) -> Vec<&str> {
+        self.scope.split_whitespace().collect()
     }
 
     fn __call__<'py>(&self, _py: Python<'py>, request: &Bound<'py, PyRequest>) -> PyResult<Self> {
