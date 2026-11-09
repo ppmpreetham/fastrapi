@@ -1,7 +1,6 @@
 //! This module contains the Python response classes, for example `JSONResponse`, `RedirectResponse`, and `FileResponse`.
 //! It also finds the kind of a response object and validates the response model.
 
-use super::response_file::guess_mime;
 use crate::response_api::HeadersArg;
 use axum::http::StatusCode;
 use papaya::HashMap;
@@ -279,10 +278,19 @@ impl PyFileResponse {
             .getattr(pyo3::intern!(py, "fspath"))?
             .call1((path,))?
             .extract::<String>()?;
-        let media_type = Some(
-            media_type
-                .unwrap_or_else(|| guess_mime(filename.as_deref().unwrap_or(&path)).to_owned()),
-        );
+        let media_type = match media_type {
+            Some(media_type) => Some(media_type),
+            None => Some(
+                py.import(pyo3::intern!(py, "mimetypes"))?
+                    .call_method1(
+                        pyo3::intern!(py, "guess_type"),
+                        (filename.as_deref().unwrap_or(&path),),
+                    )?
+                    .get_item(0)?
+                    .extract::<Option<String>>()?
+                    .unwrap_or_else(|| "application/octet-stream".to_owned()),
+            ),
+        };
         let raw_headers = crate::response_api::init_headers(
             py,
             headers.as_ref().map(Bound::as_any),

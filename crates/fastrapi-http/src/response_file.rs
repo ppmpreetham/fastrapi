@@ -197,10 +197,11 @@ pub fn convert_file_response(
     let multi = ranges.len() > 1;
     let boundary = multi.then(|| format!("fastrapi-{length:x}-{status}"));
     let declared = get_str(intern!(py, "media_type"));
-    let media_type = declared
-        .as_deref()
-        .unwrap_or_else(|| guess_mime(&path))
-        .to_owned();
+    let media_type = crate::response_api::content_type(
+        declared.as_deref().unwrap_or_else(|| guess_mime(&path)),
+        "utf-8",
+    )
+    .into_owned();
     let body_length = (!multi).then(|| {
         ranges.first().map_or(0, |range| {
             range.end().saturating_sub(*range.start()).saturating_add(1)
