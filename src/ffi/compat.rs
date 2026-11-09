@@ -193,8 +193,14 @@ const fn default_placeholder(value: Py<PyAny>) -> DefaultPlaceholder {
 }
 
 pub(crate) fn register_default_placeholder(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = module.py();
     module.add_class::<DefaultPlaceholder>()?;
-    module.add_function(wrap_pyfunction!(default_placeholder, module)?)
+    module.add_function(wrap_pyfunction!(default_placeholder, module)?)?;
+    let default_type = py
+        .import("typing")?
+        .getattr("TypeVar")?
+        .call1(("DefaultType",))?;
+    module.add("DefaultType", default_type)
 }
 
 /// Pass items or `DefaultPlaceholder`s by descending priority.
