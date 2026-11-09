@@ -282,11 +282,11 @@ fn body_field_schema(
 ) -> JsonValue {
     let title = schema_title(&param.external_name);
     if param.is_file || marker_class(py, param).as_deref() == Some("File") {
-        let binary = json!({ "type": "string", "format": "binary" });
+        let binary = json!({ "type": "string", "contentMediaType": "application/octet-stream" });
         return if param.is_list {
             json!({ "type": "array", "items": binary, "title": title })
         } else {
-            json!({ "type": "string", "format": "binary", "title": title })
+            json!({ "type": "string", "contentMediaType": "application/octet-stream", "title": title })
         };
     }
     param.annotation.as_ref().map_or_else(
@@ -409,15 +409,7 @@ pub fn build_paths_from_routes(
         let handler = route.handler.clone();
         let tags = &route.tags;
 
-        let description = handler
-            .execution
-            .func
-            .bind(py)
-            .getattr("__doc__")
-            .ok()
-            .and_then(|doc| doc.extract::<String>().ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let description = endpoint_description(py, None, handler.execution.func.bind(py));
 
         let summary = route
             .summary
@@ -485,18 +477,30 @@ pub fn build_paths_from_routes(
         }
 
         let mut seen_params = std::collections::HashSet::new();
-        let all_params: Vec<&ParsedParameter> = handler
+        let mut all_params: Vec<&ParsedParameter> = handler
             .payload
-            .dependencies
+            .parsed_params
             .iter()
-            .flat_map(|node| node.injection_plan.iter())
-            .filter_map(|(_, injection)| match injection {
-                InjectionType::Parameter(param) => Some(param.as_ref()),
-                _ => None,
-            })
-            .chain(handler.payload.parsed_params.iter())
+            .chain(
+                handler
+                    .payload
+                    .dependencies
+                    .iter()
+                    .flat_map(|node| node.injection_plan.iter())
+                    .filter_map(|(_, injection)| match injection {
+                        InjectionType::Parameter(param) => Some(param.as_ref()),
+                        _ => None,
+                    }),
+            )
             .filter(|param| seen_params.insert((param.source.clone(), param.external_name.clone())))
             .collect();
+        all_params.sort_by_key(|param| match param.source {
+            ParameterSource::Path => 0,
+            ParameterSource::Query => 1,
+            ParameterSource::Header => 2,
+            ParameterSource::Cookie => 3,
+            ParameterSource::Body | ParameterSource::BackgroundTasks => 4,
+        });
         let parameters: Vec<Parameter> = all_params
             .iter()
             .filter_map(|param| {
@@ -535,7 +539,12 @@ pub fn build_paths_from_routes(
                     .as_object()
                     .is_some_and(|obj| obj.contains_key("$ref"));
                 if !is_ref && let Some(obj) = schema.as_object_mut() {
-                    if !obj.contains_key("title") {
+                    if let Some(title) = marker
+                        .and_then(|marker| marker.getattr(intern!(py, "title")).ok())
+                        .and_then(|value| value.extract::<String>().ok())
+                    {
+                        obj.insert("title".to_string(), json!(title));
+                    } else if !obj.contains_key("title") {
                         obj.insert(
                             "title".to_string(),
                             json!(schema_title(&param.external_name)),
@@ -549,7 +558,8 @@ pub fn build_paths_from_routes(
                     }
                 }
 
-                let schema = apply_parameter_constraints(schema, &param.constraints);
+                let mut schema =
+                    apply_parameter_constraints(schema, &param.constraints, param.is_list);
 
                 let deprecated = marker
                     .and_then(|marker| marker.getattr(intern!(py, "deprecated")).ok())
@@ -557,6 +567,24 @@ pub fn build_paths_from_routes(
                     .and_then(|value| value.is_truthy().ok())
                     .filter(|truthy| *truthy)
                     .map(|_| true);
+                if !is_ref && let Some(obj) = schema.as_object_mut() {
+                    if let Some(description) = &param.description {
+                        obj.insert("description".to_string(), json!(description));
+                    }
+                    if deprecated.is_some() {
+                        obj.insert("deprecated".to_string(), json!(true));
+                    }
+                    if let Some(extra) = marker
+                        .and_then(|marker| marker.getattr(intern!(py, "json_schema_extra")).ok())
+                        .filter(PyAnyMethods::is_instance_of::<PyDict>)
+                        .map(|extra| py_any_to_json(py, &extra))
+                        && let Some(extra) = extra.as_object()
+                    {
+                        for (key, value) in extra {
+                            obj.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
                 let example = marker
                     .and_then(|marker| marker.getattr(intern!(py, "example")).ok())
                     .filter(|value| !value.is_none())
@@ -799,6 +827,27 @@ pub fn build_paths_from_routes(
 }
 
 #[must_use]
+pub fn endpoint_description(
+    py: Python<'_>,
+    explicit: Option<&str>,
+    endpoint: &Bound<'_, PyAny>,
+) -> Option<String> {
+    let cleaned;
+    let text = if let Some(text) = explicit.filter(|text| !text.is_empty()) {
+        text
+    } else {
+        let doc = endpoint.getattr("__doc__").ok().filter(|doc| !doc.is_none())?;
+        cleaned = py
+            .import("inspect")
+            .and_then(|inspect| inspect.call_method1("cleandoc", (doc,)))
+            .and_then(|text| text.extract::<String>())
+            .ok()?;
+        &cleaned
+    };
+    let text = text.split('\x0c').next().unwrap_or_default().trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 pub fn parse_callbacks_to_json(
     py: Python<'_>,
     callbacks_bound: &Bound<'_, PyAny>,

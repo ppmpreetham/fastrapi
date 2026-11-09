@@ -8,7 +8,7 @@ use fastrapi_core::method::HttpMethod;
 use fastrapi_core::params::ParameterSource;
 use fastrapi_core::path::extract_path_param_names;
 use fastrapi_http::response_type::ResponseFormatter;
-use fastrapi_openapi::paths::parse_callbacks_to_json;
+use fastrapi_openapi::paths::{endpoint_description, parse_callbacks_to_json};
 use fastrapi_pyutil::call::CallLayout;
 use fastrapi_pyutil::json::{SerializationHint, json_to_py_object, py_any_to_json};
 use fastrapi_routing::analysis::{
@@ -796,7 +796,11 @@ impl PyAPIRouter {
                 route_instance,
                 tags: opts.merged_tags.clone(),
                 summary: opts.summary.clone().or(extra_summary),
-                description: opts.description.clone().or(extra_description),
+                description: endpoint_description(
+                    py,
+                    opts.description.as_deref().or(extra_description.as_deref()),
+                    &func,
+                ),
                 response_description: opts.response_description.clone(),
                 operation_id: opts.operation_id.clone().or(extra_operation_id),
                 responses: opts

@@ -1220,7 +1220,7 @@ def test_openapi_documents_dependency_parameters(client, app):
         return {}
 
     params = client.get("/openapi.json").json()["paths"]["/paged"]["get"]["parameters"]
-    assert [(p["in"], p["name"]) for p in params] == [("query", "limit"), ("header", "x-tenant"), ("query", "q")]
+    assert [(p["in"], p["name"]) for p in params] == [("query", "q"), ("query", "limit"), ("header", "x-tenant")]
 
 
 def test_openapi_operation_ids_use_names_and_route_objects(client, app):
@@ -1309,7 +1309,7 @@ def test_openapi_request_bodies_for_forms_files_and_plain_values(client, app):
     assert schemas["Body_login_login_post"]["required"] == ["username", "password"]
     upload_body = paths["/upload"]["post"]["requestBody"]["content"]
     assert list(upload_body) == ["multipart/form-data"]
-    assert schemas["Body_upload_upload_post"]["properties"]["file"] == {"type": "string", "format": "binary", "title": "File"}
+    assert schemas["Body_upload_upload_post"]["properties"]["file"] == {"type": "string", "contentMediaType": "application/octet-stream", "title": "File"}
     assert paths["/count"]["put"]["requestBody"] == {"content": {"application/json": {"schema": {"type": "integer", "title": "Value"}}}, "required": True}
     assert "required" not in paths["/optional"]["post"]["requestBody"]
 

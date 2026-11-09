@@ -332,7 +332,13 @@ pub(crate) fn python_type_to_openapi_type(
 pub(crate) fn apply_parameter_constraints(
     mut schema: JsonValue,
     constraints: &ParameterConstraints,
+    is_list: bool,
 ) -> JsonValue {
+    let (min_key, max_key) = if is_list {
+        ("minItems", "maxItems")
+    } else {
+        ("minLength", "maxLength")
+    };
     if let Some(object) = schema.as_object_mut() {
         if let Some(gt) = constraints.gt {
             object.insert("exclusiveMinimum".to_string(), json!(gt));
@@ -347,10 +353,10 @@ pub(crate) fn apply_parameter_constraints(
             object.insert("maximum".to_string(), json!(le));
         }
         if let Some(min_length) = constraints.min_length {
-            object.insert("minLength".to_string(), json!(min_length));
+            object.insert(min_key.to_string(), json!(min_length));
         }
         if let Some(max_length) = constraints.max_length {
-            object.insert("maxLength".to_string(), json!(max_length));
+            object.insert(max_key.to_string(), json!(max_length));
         }
 
         if let Some(pattern) = &constraints.pattern {
