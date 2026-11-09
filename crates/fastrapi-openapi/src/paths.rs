@@ -554,7 +554,13 @@ pub fn build_paths_from_routes(
                         && let Some(default) = &param.default_value
                         && !default.bind(py).is_none()
                     {
-                        obj.insert("default".to_string(), py_any_to_json(py, default.bind(py)));
+                        let default = py
+                            .import(intern!(py, "pydantic_core"))
+                            .and_then(|core| {
+                                core.call_method1(intern!(py, "to_jsonable_python"), (default,))
+                            })
+                            .unwrap_or_else(|_| default.bind(py).clone());
+                        obj.insert("default".to_string(), py_any_to_json(py, &default));
                     }
                 }
 

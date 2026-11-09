@@ -288,6 +288,7 @@ pub(crate) fn python_type_to_openapi_type(
             "int" => return json!({ "type": "integer" }),
             "float" => return json!({ "type": "number" }),
             "bool" => return json!({ "type": "boolean" }),
+            "Decimal" => return json!({ "anyOf": [{ "type": "number" }, { "type": "string" }] }),
             "list" | "set" | "tuple" => {
                 let items = type_hint
                     .getattr("__args__")
