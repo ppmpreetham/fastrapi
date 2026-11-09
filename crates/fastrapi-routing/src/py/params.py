@@ -2,7 +2,7 @@ import inspect
 import typing
 import warnings
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Generator, Iterable, Iterator, Mapping, Sequence
 from copy import copy, deepcopy
 from dataclasses import is_dataclass
 from enum import Enum
@@ -608,6 +608,67 @@ def get_typed_signature(call) -> inspect.Signature:
             for param in signature.parameters.values()
         ]
     )
+
+
+def get_typed_return_annotation(call) -> Any:
+    annotation = _signature(call).return_annotation
+    if annotation is inspect.Signature.empty:
+        return None
+    return get_typed_annotation(annotation, getattr(inspect.unwrap(call), "__globals__", {}))
+
+
+def get_validation_alias(field) -> str:
+    return getattr(field, "validation_alias", None) or field.alias
+
+
+_STREAM_ORIGINS = {AsyncIterable, AsyncIterator, AsyncGenerator, Iterable, Iterator, Generator}
+
+
+def get_stream_item_type(annotation: Any) -> Any | None:
+    origin = get_origin(annotation)
+    if origin is not None and origin in _STREAM_ORIGINS:
+        return (get_args(annotation) or (Any,))[0]
+    return None
+
+
+multipart_not_installed_error = (
+    'Form data requires "python-multipart" to be installed. \n'
+    'You can install "python-multipart" with: \n\n'
+    "pip install python-multipart\n"
+)
+multipart_incorrect_install_error = (
+    'Form data requires "python-multipart" to be installed. '
+    'It seems you installed "multipart" instead. \n'
+    'You can remove "multipart" with: \n\n'
+    "pip uninstall multipart\n\n"
+    'And then install "python-multipart" with: \n\n'
+    "pip install python-multipart\n"
+)
+
+
+def ensure_multipart_is_installed() -> None:
+    import logging
+
+    logger = logging.getLogger("fastapi")
+    try:
+        from python_multipart import __version__
+
+        assert __version__ > "0.0.12"
+    except (ImportError, AssertionError):
+        try:
+            from multipart import __version__
+
+            assert __version__
+            try:
+                from multipart.multipart import parse_options_header
+
+                assert parse_options_header
+            except ImportError:
+                logger.error(multipart_incorrect_install_error)
+                raise RuntimeError(multipart_incorrect_install_error) from None
+        except ImportError:
+            logger.error(multipart_not_installed_error)
+            raise RuntimeError(multipart_not_installed_error) from None
 
 
 class ParamDetails:

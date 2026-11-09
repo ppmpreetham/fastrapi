@@ -281,6 +281,10 @@ pub(crate) fn register_dependencies(parent: &Bound<'_, PyModule>) -> PyResult<()
         "analyze_param",
         "get_typed_signature",
         "get_typed_annotation",
+        "get_typed_return_annotation",
+        "get_validation_alias",
+        "get_stream_item_type",
+        "ensure_multipart_is_installed",
         "ParamDetails",
     ] {
         utils.add(name, params.getattr(name)?)?;
