@@ -6,6 +6,7 @@ use super::responses::{
     PyFileResponse, PyRedirectResponse, ResponseKind, extract_base_response_data, response_kind,
     response_status,
 };
+use crate::response_api::content_type;
 use crate::background::{OwnBackground, spawn_response_background_value};
 use crate::response_type::{ResponseFormatter, ResponseType};
 use crate::responses::{
@@ -681,7 +682,9 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
                 resp.content.clone_ref(py),
                 StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK),
                 resp.headers.clone(),
-                resp.media_type.clone(),
+                resp.media_type
+                    .as_deref()
+                    .map(|media_type| content_type(media_type, &resp.charset).into_owned()),
                 false,
                 None,
                 "\n".to_owned(),
@@ -692,7 +695,9 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
                 resp.content.clone_ref(py),
                 StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK),
                 resp.headers.clone(),
-                resp.media_type.clone(),
+                resp.media_type
+                    .as_deref()
+                    .map(|media_type| content_type(media_type, &resp.charset).into_owned()),
                 true,
                 sse_options(result).0,
                 sse_options(result).1,
@@ -707,7 +712,10 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
                 content,
                 data.status_code,
                 data.headers,
-                data.media_type,
+                data
+                    .media_type
+                    .as_deref()
+                    .map(|media_type| content_type(media_type, "utf-8").into_owned()),
                 response_kind(result) == ResponseKind::Sse,
                 sse_options(result).0,
                 sse_options(result).1,
@@ -818,8 +826,10 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
         }
     };
     let res = (status_code, Body::from_stream(stream)).into_response();
-    let media_type = media_type.or_else(|| sse.then_some("text/event-stream".to_owned()));
-    apply_response_metadata(py, res, headers.as_ref(), media_type.as_deref())
+    let media_type = media_type
+        .as_deref()
+        .or_else(|| sse.then_some("text/event-stream; charset=utf-8"));
+    apply_response_metadata(py, res, headers.as_ref(), media_type)
 }
 
 #[inline(always)]

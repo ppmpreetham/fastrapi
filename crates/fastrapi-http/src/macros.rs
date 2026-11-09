@@ -106,10 +106,10 @@ macro_rules! response_api_methods {
             fn set_cookie(&self, py: pyo3::Python<'_>, key: String, value: String, max_age: Option<i64>, expires: Option<&pyo3::Bound<'_, pyo3::PyAny>>, path: Option<String>, domain: Option<String>, secure: bool, httponly: bool, samesite: Option<String>, partitioned: bool) -> pyo3::PyResult<()> {
                 $crate::response_api::set_cookie(py, &self.raw_headers, key, value, max_age, expires, path, domain, secure, httponly, samesite, partitioned)
             }
-            #[pyo3(signature = (key, path=Some("/".to_owned()), domain=None, secure=false, httponly=false, samesite=Some("lax".to_owned())))]
-            fn delete_cookie(&self, py: pyo3::Python<'_>, key: String, path: Option<String>, domain: Option<String>, secure: bool, httponly: bool, samesite: Option<String>) -> pyo3::PyResult<()> {
+            #[pyo3(signature = (key, path=Some("/".to_owned()), domain=None, secure=false, httponly=false, samesite=Some("lax".to_owned()), partitioned=false))]
+            fn delete_cookie(&self, py: pyo3::Python<'_>, key: String, path: Option<String>, domain: Option<String>, secure: bool, httponly: bool, samesite: Option<String>, partitioned: bool) -> pyo3::PyResult<()> {
                 let expires = pyo3::types::PyInt::new(py, 0);
-                $crate::response_api::set_cookie(py, &self.raw_headers, key, String::new(), Some(0), Some(expires.as_any()), path, domain, secure, httponly, samesite, false)
+                $crate::response_api::set_cookie(py, &self.raw_headers, key, String::new(), Some(0), Some(expires.as_any()), path, domain, secure, httponly, samesite, partitioned)
             }
         }
     };

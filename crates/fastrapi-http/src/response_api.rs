@@ -2,6 +2,7 @@
 //! The functions render the content, make the header list, and set cookies.
 
 use cookie::time::Duration;
+use std::borrow::Cow;
 use cookie::{Cookie, SameSite};
 use fastrapi_pyutil::imports::SIMPLE_COOKIE;
 use pyo3::exceptions::{PyAssertionError, PyValueError};
@@ -163,15 +164,29 @@ pub fn init_headers(
     if let Some(media_type) = media_type
         && !headers.contains("content-type")?
     {
-        let content_type =
-            if media_type.starts_with("text/") && !media_type.to_lowercase().contains("charset=") {
-                format!("{media_type}; charset={charset}")
-            } else {
-                media_type.to_owned()
-            };
-        headers.set_item("content-type", content_type)?;
+        headers.set_item("content-type", content_type(media_type, charset).as_ref())?;
     }
     Ok(raw)
+}
+
+#[must_use]
+pub fn content_type<'a>(media_type: &'a str, charset: &str) -> Cow<'a, str> {
+    let has_charset = media_type
+        .as_bytes()
+        .windows(8)
+        .any(|window| window.eq_ignore_ascii_case(b"charset="));
+    if !media_type.starts_with("text/") || has_charset {
+        return Cow::Borrowed(media_type);
+    }
+    if charset == "utf-8" {
+        match media_type {
+            "text/plain" => return Cow::Borrowed("text/plain; charset=utf-8"),
+            "text/html" => return Cow::Borrowed("text/html; charset=utf-8"),
+            "text/event-stream" => return Cow::Borrowed("text/event-stream; charset=utf-8"),
+            _ => {}
+        }
+    }
+    Cow::Owned(format!("{media_type}; charset={charset}"))
 }
 
 pub fn set_cookie(
