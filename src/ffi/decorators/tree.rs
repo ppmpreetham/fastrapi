@@ -35,6 +35,7 @@ fn merge_responses(py: Python<'_>, layers: &[Option<&Py<PyAny>>]) -> Option<Py<P
         .iter()
         .flatten()
         .filter_map(|layer| layer.bind(py).cast::<PyDict>().ok().cloned())
+        .filter(|dict| !dict.is_empty())
         .collect();
     match dicts.as_slice() {
         [] => None,

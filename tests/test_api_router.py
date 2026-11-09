@@ -61,8 +61,8 @@ class TestConstruction:
         assert r.tags == []
         assert r.deprecated is None
         assert r.include_in_schema is True
-        assert r.dependencies is None
-        assert r.responses is None
+        assert r.dependencies == []
+        assert r.responses == {}
         assert r.default_response_class is None
         assert r.generate_unique_id_function is None
 

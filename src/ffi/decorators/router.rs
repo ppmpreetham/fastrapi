@@ -54,7 +54,6 @@ pub struct PyAPIRouter {
     pub default_response_class: Option<Py<PyAny>>,
     #[pyo3(get)]
     pub generate_unique_id_function: Option<Py<PyAny>>,
-    #[pyo3(get)]
     pub route_class: Option<Py<PyAny>>,
 
     pub route_entries: Arc<Mutex<Vec<RouteEntry>>>,
@@ -82,11 +81,18 @@ pub struct PyAPIRouter {
 
 impl Default for PyAPIRouter {
     fn default() -> Self {
+        let (dependencies, responses, callbacks) = Python::attach(|py| {
+            (
+                PyList::empty(py).into_any().unbind(),
+                PyDict::new(py).into_any().unbind(),
+                PyList::empty(py).into_any().unbind(),
+            )
+        });
         Self {
             prefix: String::new(),
             tags: Vec::new(),
-            responses: None,
-            dependencies: None,
+            responses: Some(responses),
+            dependencies: Some(dependencies),
             deprecated: None,
             include_in_schema: true,
             default_response_class: None,
@@ -102,7 +108,7 @@ impl Default for PyAPIRouter {
             startup_handlers: Arc::new(Mutex::new(Vec::new())),
             shutdown_handlers: Arc::new(Mutex::new(Vec::new())),
             lifespan: Arc::new(Mutex::new(None)),
-            callbacks: None,
+            callbacks: Some(callbacks),
             redirect_slashes: true,
             default: None,
             dependency_overrides_provider: None,
@@ -151,6 +157,17 @@ impl PyAPIRouter {
             .unwrap_or_default();
 
         super::tree::validate_dependencies(py, dependencies.as_ref())?;
+        let dependencies = match dependencies.filter(|deps| !deps.is_none(py)) {
+            Some(deps) => py.get_type::<PyList>().call1((deps,))?,
+            None => PyList::empty(py).into_any(),
+        };
+        let truthy_or = |value: Option<Py<PyAny>>, empty: Bound<'_, PyAny>| -> Py<PyAny> {
+            value
+                .filter(|value| value.bind(py).is_truthy().unwrap_or(false))
+                .unwrap_or_else(|| empty.unbind())
+        };
+        let responses = truthy_or(responses, PyDict::new(py).into_any());
+        let callbacks = truthy_or(callbacks, PyList::empty(py).into_any());
         if let Some(rc) = &route_class {
             let is_type = Python::attach(|py| rc.bind(py).is_instance_of::<PyType>());
             if !is_type {
@@ -163,8 +180,8 @@ impl PyAPIRouter {
         let router = Self {
             prefix,
             tags: tag_vec,
-            dependencies,
-            responses,
+            dependencies: Some(dependencies.unbind()),
+            responses: Some(responses),
             deprecated,
             include_in_schema,
             default_response_class,
@@ -173,7 +190,7 @@ impl PyAPIRouter {
             startup_handlers: Arc::new(Mutex::new(on_startup.unwrap_or_default())),
             shutdown_handlers: Arc::new(Mutex::new(on_shutdown.unwrap_or_default())),
             lifespan: Arc::new(Mutex::new(lifespan)),
-            callbacks,
+            callbacks: Some(callbacks),
             redirect_slashes,
             default,
             dependency_overrides_provider,
@@ -210,6 +227,14 @@ impl PyAPIRouter {
         self.hosts.lock().push((host, app, name));
         self.touch();
         Ok(())
+    }
+
+    #[getter]
+    fn route_class(&self, py: Python<'_>) -> Py<PyAny> {
+        self.route_class.as_ref().map_or_else(
+            || py.get_type::<crate::ffi::routing::PyAPIRoute>().into_any().unbind(),
+            |class| class.clone_ref(py),
+        )
     }
 
     #[getter]

@@ -313,11 +313,23 @@ pub(crate) fn route_objects<'py>(
         kwargs.set_item("include_in_schema", entry.include_in_schema)?;
         kwargs.set_item("tags", &entry.tags)?;
         kwargs.set_item("summary", &entry.summary)?;
-        kwargs.set_item("description", &entry.description)?;
-        kwargs.set_item("response_description", &entry.response_description)?;
+        kwargs.set_item("description", entry.description.as_deref().unwrap_or_default())?;
+        kwargs.set_item(
+            "response_description",
+            entry
+                .response_description
+                .as_deref()
+                .unwrap_or("Successful Response"),
+        )?;
         kwargs.set_item("operation_id", &entry.operation_id)?;
         kwargs.set_item("deprecated", entry.deprecated)?;
-        kwargs.set_item("responses", entry.responses.as_ref())?;
+        match &entry.responses {
+            Some(responses) => kwargs.set_item("responses", responses)?,
+            None => kwargs.set_item("responses", PyDict::new(py))?,
+        }
+        if entry.callbacks.is_none() {
+            kwargs.set_item("callbacks", PyList::empty(py))?;
+        }
         kwargs.set_item(
             "response_model",
             entry.handler.response.response_model.as_ref(),

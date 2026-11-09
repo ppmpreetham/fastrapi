@@ -61,7 +61,11 @@ pub(crate) fn build_router(
     let base_router = app_config.router.bind(py);
     {
         let mut base_mut = base_router.borrow_mut();
-        if base_mut.dependencies.is_none() {
+        if base_mut
+            .dependencies
+            .as_ref()
+            .is_none_or(|deps| deps.bind(py).len().is_ok_and(|len| len == 0))
+        {
             base_mut.dependencies.clone_from(&app_config.dependencies);
         }
     }
@@ -155,7 +159,11 @@ fn mounted_routes(py: Python<'_>, app: &Bound<'_, FastrAPI>) -> PyResult<FlatRou
     let router = app.router.bind(py);
     {
         let mut router = router.borrow_mut();
-        if router.dependencies.is_none() {
+        if router
+            .dependencies
+            .as_ref()
+            .is_none_or(|deps| deps.bind(py).len().is_ok_and(|len| len == 0))
+        {
             router.dependencies.clone_from(&app.dependencies);
         }
     }
