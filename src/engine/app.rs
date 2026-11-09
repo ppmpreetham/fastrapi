@@ -90,6 +90,45 @@ impl FastrAPI {
     }
 }
 
+#[derive(FromPyObject)]
+enum CheckDir {
+    Flag(bool),
+    Mode(String),
+    #[pyo3(transparent)]
+    Other(Py<PyAny>),
+}
+
+impl CheckDir {
+    fn resolve(self, py: Python<'_>, directory: &str) -> PyResult<bool> {
+        let mode = match self {
+            Self::Flag(flag) => return Ok(flag),
+            Self::Other(value) => return value.bind(py).is_truthy(),
+            Self::Mode(mode) => mode,
+        };
+        if mode != "auto" {
+            return Ok(!mode.is_empty());
+        }
+        if std::env::var_os("FASTAPI_ENV").is_none_or(|env| env != "development") {
+            return Ok(true);
+        }
+        if !Path::new(directory).is_dir() {
+            let realpath: String = py
+                .import(intern!(py, "os.path"))?
+                .call_method1(intern!(py, "realpath"), (directory,))?
+                .extract()?;
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                &std::ffi::CString::new(format!(
+                    "Frontend directory '{directory}' does not exist. Resolved absolute path: '{realpath}'"
+                ))?,
+                2,
+            )?;
+        }
+        Ok(false)
+    }
+}
+
 #[pymethods]
 impl FastrAPI {
     #[new]
@@ -562,22 +601,45 @@ impl FastrAPI {
     /// app = FastAPI()
     /// app.frontend("/", directory="dist")
     /// ```
-    #[pyo3(signature = (path, *, directory, fallback=Some("auto".to_string()), check_dir=true))]
+    #[pyo3(
+        signature = (path, *, directory, fallback=Some("auto".to_string()), check_dir=CheckDir::Mode("auto".to_owned())),
+        text_signature = "(self, path, *, directory, fallback='auto', check_dir='auto')"
+    )]
     fn frontend(
         &mut self,
+        py: Python<'_>,
         mut path: String,
         directory: String,
         fallback: Option<String>,
-        check_dir: bool,
+        check_dir: CheckDir,
     ) -> PyResult<()> {
         if !path.starts_with('/') {
             return Err(PyValueError::new_err("Frontend path must start with '/'"));
         }
 
-        if check_dir && !Path::new(&directory).is_dir() {
-            return Err(PyValueError::new_err(format!(
-                "Directory '{directory}' does not exist"
-            )));
+        let check_dir = check_dir.resolve(py, &directory)?;
+        if check_dir {
+            let realpath = |path: &str| -> PyResult<String> {
+                py.import(intern!(py, "os.path"))?
+                    .call_method1(intern!(py, "realpath"), (path,))?
+                    .extract()
+            };
+            if !Path::new(&directory).is_dir() {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Frontend directory '{directory}' does not exist. Resolved absolute path: '{}'",
+                    realpath(&directory)?
+                )));
+            }
+            if let Some(file) = fallback
+                .as_deref()
+                .filter(|file| matches!(*file, "index.html" | "404.html"))
+                && !Path::new(&directory).join(file).is_file()
+            {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Frontend fallback file '{file}' does not exist in directory '{directory}'. Resolved absolute directory: '{}'",
+                    realpath(&directory)?
+                )));
+            }
         }
 
         if path.len() > 1 && path.ends_with('/') {
