@@ -239,6 +239,7 @@ impl PyUploadFile {
     /// To be awaitable, compatible with async, this is run in threadpool.
     fn write<'py>(&mut self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
         if let Some(file) = &self.file_obj {
+            self.size = self.size.map(|size| size + data.len() as u64);
             let file = file.clone_ref(py);
             return py_bridge::future_into_py(py, async move {
                 Python::attach(|py| {
