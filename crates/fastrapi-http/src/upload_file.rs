@@ -49,11 +49,11 @@ const SPOOL_MAX_MEM: usize = 1024 * 1024;
 /// ```
 #[pyclass(name = "UploadFile", module = "fastrapi.datastructures")]
 pub struct PyUploadFile {
-    #[pyo3(get)]
+    #[pyo3(get, set)]
     pub filename: Option<String>,
     #[pyo3(get)]
     pub content_type: Option<String>,
-    #[pyo3(get)]
+    #[pyo3(get, set)]
     pub size: Option<u64>,
     file_content: Bytes,
     cursor: usize,
@@ -165,6 +165,16 @@ impl PyUploadFile {
         self.file_content = Bytes::new();
         self.file_obj = Some(file.clone_ref(py));
         Ok(file)
+    }
+
+    #[setter]
+    fn set_file(&mut self, file: Py<PyAny>) {
+        self.file_obj = Some(file);
+    }
+
+    #[setter]
+    fn set_headers(&mut self, headers: Py<PyAny>) {
+        self.headers = Some(headers);
     }
 
     #[getter]

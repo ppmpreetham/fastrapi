@@ -27,6 +27,7 @@ fastrapi_pyutil::cached_py_import!(
     "QueryParams"
 );
 fastrapi_pyutil::cached_py_import!(JSON_MODULE, "json");
+fastrapi_pyutil::cached_py_import!(ADDRESS, "starlette.datastructures", "Address");
 
 #[pyclass(
     frozen,
@@ -239,11 +240,10 @@ impl PyHTTPConnection {
         scope.get_item(intern!(py, "client")).map_or_else(
             |_| Ok(py.None()),
             |client| {
-                if let Ok((host, port)) = client.extract::<(String, u16)>() {
-                    let client_info = PyClientInfo { host, port };
-                    return Ok(Bound::new(py, client_info)?.into_any().unbind());
+                if client.is_none() {
+                    return Ok(client.unbind());
                 }
-                Ok(client.into())
+                Ok(ADDRESS.get(py)?.call1(client.cast::<PyTuple>()?)?.unbind())
             },
         )
     }
@@ -522,6 +522,9 @@ pub fn create_py_request(
             .try_for_each(|(k, v)| path_params.set_item(*k, v))?;
     }
     scope.set_item(intern!(py, "path_params"), path_params)?;
+    if let Some(client) = input.client() {
+        scope.set_item(intern!(py, "client"), client)?;
+    }
 
     let bound_req =
         PyRequest::create_bound(py, scope.into_any().unbind(), Some(headers), raw_body)?;
@@ -747,9 +750,9 @@ impl ReadyAwaitable {
     }
 
     fn __next__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Err(pyo3::exceptions::PyStopIteration::new_err((
-            self.value.clone_ref(py),
-        )))
+        Err(pyo3::exceptions::PyStopIteration::new_err((self
+            .value
+            .clone_ref(py),)))
     }
 
     #[pyo3(signature = (_value=None))]
@@ -759,7 +762,13 @@ impl ReadyAwaitable {
 }
 
 fn ready<'py>(py: Python<'py>, value: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    Ok(Bound::new(py, ReadyAwaitable { value: value.unbind() })?.into_any())
+    Ok(Bound::new(
+        py,
+        ReadyAwaitable {
+            value: value.unbind(),
+        },
+    )?
+    .into_any())
 }
 
 #[pymethods]

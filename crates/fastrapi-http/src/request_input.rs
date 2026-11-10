@@ -3,14 +3,19 @@
 //! It parses the query parameters and cookies only when the code reads them.
 
 use crate::background::PyBackgroundTasks;
+use axum::extract::ConnectInfo;
 use axum::http::header::COOKIE;
-use axum::http::{HeaderMap, HeaderName};
+use axum::http::{Extensions, HeaderMap, HeaderName};
 use cookie::Cookie;
 use fastrapi_runtime::py_bridge::EventLoop;
 use pyo3::prelude::*;
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::net::SocketAddr;
 use std::sync::OnceLock;
+
+#[derive(Clone, Debug)]
+pub struct NamedClient(pub Box<str>, pub u16);
 
 pub type PathParams<'a> = OnceLock<SmallVec<[(&'a str, &'a str); 8]>>;
 pub type QueryParams<'a> = OnceLock<SmallVec<[(Cow<'a, str>, Cow<'a, str>); 8]>>;
@@ -23,6 +28,7 @@ pub struct RequestInput<'a> {
     pub path_params: PathParams<'a>,
     pub query_params: QueryParams<'a>,
     pub headers: &'a HeaderMap,
+    pub extensions: &'a Extensions,
     pub cookies: OnceLock<SmallVec<[(&'a str, &'a str); 8]>>,
     pub server: Option<EventLoop>,
     pub background: OnceLock<Py<PyBackgroundTasks>>,
@@ -34,6 +40,7 @@ impl<'a> RequestInput<'a> {
         method: &'a axum::http::Method,
         uri: &'a axum::http::Uri,
         headers: &'a HeaderMap,
+        extensions: &'a Extensions,
         server: Option<EventLoop>,
     ) -> Self {
         Self {
@@ -41,12 +48,23 @@ impl<'a> RequestInput<'a> {
             path: uri.path(),
             query_string: uri.query().unwrap_or(""),
             headers,
+            extensions,
             path_params: OnceLock::new(),
             query_params: OnceLock::new(),
             cookies: OnceLock::new(),
             server,
             background: OnceLock::new(),
         }
+    }
+
+    #[must_use]
+    pub fn client(&self) -> Option<(Cow<'a, str>, u16)> {
+        if let Some(NamedClient(host, port)) = self.extensions.get::<NamedClient>() {
+            return Some((Cow::Borrowed(host), *port));
+        }
+        self.extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| (Cow::Owned(addr.ip().to_string()), addr.port()))
     }
 
     pub fn background_tasks(&self, py: Python<'_>) -> PyResult<Py<PyBackgroundTasks>> {

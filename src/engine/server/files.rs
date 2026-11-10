@@ -4,10 +4,12 @@
 use crate::engine::config::{FrontendMount, StaticMount};
 use axum::Router;
 use axum::body::Body;
+use axum::extract::OriginalUri;
 use axum::extract::Request;
-use axum::http::header::{ACCEPT, CONTENT_TYPE};
-use axum::http::{HeaderValue, Method, StatusCode};
+use axum::http::header::{ACCEPT, CONTENT_TYPE, HOST, LOCATION};
+use axum::http::{HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use fastrapi_http::response_api::content_type;
 use smallvec::SmallVec;
 use std::convert::Infallible;
 use std::path::{Component, Path, PathBuf};
@@ -50,18 +52,68 @@ async fn serve_frontend_file(req: Request, path: PathBuf, status: StatusCode) ->
     Some(response)
 }
 
-fn static_error(response: Response) -> Response {
-    let body: &'static [u8] = match response.status() {
-        StatusCode::NOT_FOUND => br#"{"detail":"Not Found"}"#,
-        StatusCode::METHOD_NOT_ALLOWED => br#"{"detail":"Method Not Allowed"}"#,
-        _ => return response,
-    };
-    (
-        response.status(),
-        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
-        body,
-    )
-        .into_response()
+struct StaticOrigin {
+    uri: Uri,
+    host: Option<HeaderValue>,
+}
+
+impl StaticOrigin {
+    fn of(req: &Request) -> Self {
+        Self {
+            uri: req
+                .extensions()
+                .get::<OriginalUri>()
+                .map_or_else(|| req.uri().clone(), |original| original.0.clone()),
+            host: req.headers().get(HOST).cloned(),
+        }
+    }
+
+    fn finish(&self, mut response: Response) -> Response {
+        let status = response.status();
+        let error: &'static [u8] = match status {
+            StatusCode::NOT_FOUND => br#"{"detail":"Not Found"}"#,
+            StatusCode::METHOD_NOT_ALLOWED => br#"{"detail":"Method Not Allowed"}"#,
+            _ if status.is_redirection() => {
+                if let Ok(location) = HeaderValue::try_from(self.slash_url()) {
+                    response.headers_mut().insert(LOCATION, location);
+                }
+                return response;
+            }
+            _ => {
+                let charset = response
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| {
+                        let full = content_type(value, "utf-8");
+                        (full.as_ref() != value)
+                            .then(|| HeaderValue::try_from(full.as_ref()).ok())
+                            .flatten()
+                    });
+                if let Some(charset) = charset {
+                    response.headers_mut().insert(CONTENT_TYPE, charset);
+                }
+                return response;
+            }
+        };
+        (
+            status,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            error,
+        )
+            .into_response()
+    }
+
+    fn slash_url(&self) -> String {
+        let query = self
+            .uri
+            .query()
+            .map_or_else(String::new, |query| format!("?{query}"));
+        match self.host.as_ref().and_then(|host| host.to_str().ok()) {
+            Some(host) => format!("http://{host}{}/{query}", self.uri.path()),
+            None => format!("{}/{query}", self.uri.path()),
+        }
+    }
 }
 
 pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
@@ -83,6 +135,7 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
         );
         let service = service_fn(move |req: Request| {
             let services = services.clone();
+            let origin = StaticOrigin::of(&req);
             async move {
                 let (parts, _) = req.into_parts();
                 for service in services.iter() {
@@ -93,10 +146,10 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
                         .await
                         .map(IntoResponse::into_response)?;
                     if response.status() != StatusCode::NOT_FOUND {
-                        return Ok::<_, Infallible>(static_error(response));
+                        return Ok::<_, Infallible>(origin.finish(response));
                     }
                 }
-                Ok(static_error(StatusCode::NOT_FOUND.into_response()))
+                Ok(origin.finish(StatusCode::NOT_FOUND.into_response()))
             }
         });
         return app.nest_service(&mount_path, service);
@@ -106,11 +159,12 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
     if mount.follow_symlink {
         let service = service_fn(move |req: Request| {
             let serve_dir = serve_dir.clone();
+            let origin = StaticOrigin::of(&req);
             async move {
                 serve_dir
                     .oneshot(req)
                     .await
-                    .map(|response| static_error(response.into_response()))
+                    .map(|response| origin.finish(response.into_response()))
             }
         });
         return app.nest_service(&mount_path, service);
@@ -125,6 +179,7 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
     let service = service_fn(move |req: Request| {
         let directory = directory.clone();
         let serve_dir = serve_dir.clone();
+        let origin = StaticOrigin::of(&req);
         async move {
             if static_request_hits_symlink(&directory, req.uri().path(), index).await {
                 return Ok::<_, Infallible>(StatusCode::FORBIDDEN.into_response());
@@ -133,7 +188,7 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
             serve_dir
                 .oneshot(req)
                 .await
-                .map(|response| static_error(response.into_response()))
+                .map(|response| origin.finish(response.into_response()))
         }
     });
 

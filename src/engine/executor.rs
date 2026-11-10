@@ -93,7 +93,13 @@ pub(crate) fn build_request_input_from_parts<'a>(
 
     RequestInput {
         path_params,
-        ..RequestInput::new(&parts.method, &parts.uri, &parts.headers, Some(server))
+        ..RequestInput::new(
+            &parts.method,
+            &parts.uri,
+            &parts.headers,
+            &parts.extensions,
+            Some(server),
+        )
     }
 }
 
@@ -324,9 +330,8 @@ fn start_coroutine(
         Step::Raise(err) => Err(python_error_to_response_in(py, &err, request_input)),
         Step::Yield => {
             _ = coroutine.call_method0(pyo3::intern!(py, "close"));
-            let err = pyo3::exceptions::PyRuntimeError::new_err(
-                "inline handler suspended unexpectedly",
-            );
+            let err =
+                pyo3::exceptions::PyRuntimeError::new_err("inline handler suspended unexpectedly");
             Err(python_error_to_response_in(py, &err, request_input))
         }
     }))

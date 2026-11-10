@@ -6,6 +6,8 @@
 use std::fmt::Write as _;
 use std::sync::OnceLock;
 
+fastrapi_pyutil::cached_py_import!(SPLIT_RESULT, "urllib.parse", "SplitResult");
+
 use pyo3::class::basic::CompareOp;
 use pyo3::exceptions::{PyAssertionError, PyKeyError, PyTypeError};
 use pyo3::prelude::*;
@@ -346,6 +348,19 @@ fn encode_pair((key, value): &(String, String)) -> String {
 
 #[pymethods]
 impl PyURL {
+    #[getter(components)]
+    fn split_result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let parts = self.components()?;
+        let text = |value: Option<String>| value.unwrap_or_default();
+        SPLIT_RESULT.get(py)?.call1((
+            text(parts.scheme),
+            text(parts.netloc),
+            parts.path,
+            text(parts.query),
+            text(parts.fragment),
+        ))
+    }
+
     #[new]
     #[pyo3(signature = (url = "", ** components))]
     fn new(_py: Python<'_>, url: &str, components: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
