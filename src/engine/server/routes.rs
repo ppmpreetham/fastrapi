@@ -396,6 +396,7 @@ pub(crate) fn status_handler(
         request.method(),
         request.uri(),
         request.headers(),
+        request.extensions(),
         Some(server),
     );
     dispatch_status_handler(server, status.as_u16(), Some(&input))
@@ -557,11 +558,16 @@ fn merge_declared_middlewares(
         return;
     };
 
+    let registered = container.order.len();
     iter.flatten().for_each(|item| {
         if let Err(err) = apply_declared_middleware(py, &item, container) {
             log_python_error("middleware setup failed", &err);
         }
     });
+    let mut declared = container.order.split_off(registered);
+    declared.reverse();
+    declared.append(&mut container.order);
+    container.order = declared;
 }
 
 pub(crate) fn apply_declared_middleware(
@@ -629,7 +635,10 @@ fn no_request_method_router(
 
     method_router(method, move |request: Request| async move {
         let event_loop = state.event_loop;
-        let context = request.extensions().get::<py_bridge::RequestContext>().cloned();
+        let context = request
+            .extensions()
+            .get::<py_bridge::RequestContext>()
+            .cloned();
         let (request_parts, _) = request.into_parts();
         let response = py_bridge::scoped_request_loop(
             event_loop,
@@ -652,12 +661,16 @@ fn sync_no_request_method_router(
     server: EventLoop,
 ) -> MethodRouter {
     method_router(method, move |request: Request| async move {
-        let context = request.extensions().get::<py_bridge::RequestContext>().cloned();
+        let context = request
+            .extensions()
+            .get::<py_bridge::RequestContext>()
+            .cloned();
         py_bridge::scoped_request_context(context, async move {
             let input = RequestInput::new(
                 request.method(),
                 request.uri(),
                 request.headers(),
+                request.extensions(),
                 Some(server),
             );
             let response = Python::attach(|py| {

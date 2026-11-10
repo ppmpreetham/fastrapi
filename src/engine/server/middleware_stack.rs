@@ -15,8 +15,6 @@ use pyo3::prelude::PyResult;
 use pyo3::types::{PyAnyMethods as _, PyTuple, PyTupleMethods as _};
 use pyo3::{Bound, Py, PyAny, Python};
 use sha2::{Digest, Sha256};
-use tower_http::compression::CompressionLayer;
-use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
@@ -32,8 +30,8 @@ use crate::engine::server::routes::{
 };
 use fastrapi_http::middleware::PyMiddlewareKind;
 use fastrapi_http::middleware::{
-    DeclaredLayer, MiddlewareContainer, PreparedMiddlewares, PyMiddleware, asgi, build_cors_layer,
-    execute_py_middlewares,
+    CorsPolicy, DeclaredLayer, MiddlewareContainer, PreparedMiddlewares, PyMiddleware, asgi,
+    compress, cors, execute_py_middlewares,
 };
 use std::time;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -47,7 +45,7 @@ pub(crate) fn build_stack(
     let max_body_size = app_config.max_body_size.unwrap_or(usize::MAX);
     let threadpool = app_config.sync_to_threadpool;
     let app = if container.order.is_empty() {
-        apply_legacy(app, container, event_loop, threadpool)
+        apply_legacy(app, container)
     } else {
         apply_declared(app, container, event_loop, max_body_size, threadpool)
     };
@@ -76,17 +74,13 @@ fn apply_declared(
                     custom_layer(app, mw.clone(), event_loop, threadpool)
                 }
             }
+            DeclaredLayer::Decorator(mw) => decorator_layer(app, mw, event_loop, threadpool),
         };
     }
-    decorator_layer(app, container, event_loop, threadpool)
+    app
 }
 
-fn apply_legacy(
-    mut app: Router,
-    container: &MiddlewareContainer,
-    event_loop: EventLoop,
-    threadpool: bool,
-) -> Router {
+fn apply_legacy(mut app: Router, container: &MiddlewareContainer) -> Router {
     if container.session.is_some() {
         info!("🔑 Layer: Sessions");
         app = session_layer(app, container);
@@ -95,10 +89,6 @@ fn apply_legacy(
     if let Some(config) = &container.gzip {
         info!("🗜️ Layer: GZip (min: {} bytes)", config.minimum_size);
         app = gzip_layer(app, container);
-    }
-
-    if !container.py_middlewares.is_empty() {
-        app = decorator_layer(app, container, event_loop, threadpool);
     }
 
     if let Some(_config) = &container.https_redirect {
@@ -111,12 +101,9 @@ fn apply_legacy(
         app = trusted_host_layer(app, container);
     }
 
-    if let Some(config) = &container.cors {
+    if container.cors.is_some() {
         info!("Layer: CORS");
-        match build_cors_layer(config) {
-            Ok(layer) => app = app.layer(layer),
-            Err(e) => eprintln!("Error building CORS layer: {e:?}"),
-        }
+        app = cors_layer(app, container);
     }
 
     app
@@ -205,20 +192,20 @@ fn session_layer(app: Router, container: &MiddlewareContainer) -> Router {
 
 fn gzip_layer(app: Router, container: &MiddlewareContainer) -> Router {
     match &container.gzip {
-        Some(config) => app.layer(
-            CompressionLayer::new().compress_when(
-                SizeAbove::new(u16::try_from(config.minimum_size).unwrap_or(u16::MAX))
-                    .and(NotForContentType::SSE),
-            ),
-        ),
+        Some(config) => app.layer(axum_middleware::from_fn_with_state(
+            Arc::new(config.clone()),
+            compress,
+        )),
         None => app,
     }
 }
 
 fn cors_layer(app: Router, container: &MiddlewareContainer) -> Router {
     match &container.cors {
-        Some(config) => match build_cors_layer(config) {
-            Ok(layer) => app.layer(layer),
+        Some(config) => match CorsPolicy::new(config) {
+            Ok(policy) => Router::new()
+                .fallback_service(app)
+                .layer(axum_middleware::from_fn_with_state(Arc::new(policy), cors)),
             Err(e) => {
                 eprintln!("Error building CORS layer: {e:?}");
                 app
@@ -325,27 +312,17 @@ fn https_redirect_layer(app: Router) -> Router {
 
 fn decorator_layer(
     app: Router,
-    container: &MiddlewareContainer,
+    middleware: &Arc<PyMiddleware>,
     event_loop: EventLoop,
     sync_to_threadpool: bool,
 ) -> Router {
-    if container.py_middlewares.is_empty() {
-        return app;
-    }
-
-    info!(
-        "Applying {} custom Python middleware(s)",
-        container.py_middlewares.len()
-    );
-
-    let py_mws = Arc::new(PreparedMiddlewares::new(
-        &container.py_middlewares,
+    let prepared = Arc::new(PreparedMiddlewares::new(
+        std::slice::from_ref(middleware),
         sync_to_threadpool,
     ));
     app.layer(axum_middleware::from_fn(move |req, next| {
-        let py_mws = py_mws.clone();
-        let loop_ = event_loop;
-        async move { execute_py_middlewares(py_mws, req, next, loop_).await }
+        let prepared = prepared.clone();
+        async move { execute_py_middlewares(prepared, req, next, event_loop).await }
     }))
 }
 

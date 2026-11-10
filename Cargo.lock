@@ -566,6 +566,7 @@ dependencies = [
  "cookie",
  "fastrapi-pyutil",
  "fastrapi-runtime",
+ "flate2",
  "form_urlencoded",
  "futures-util",
  "http-range-header",

@@ -64,6 +64,7 @@ parking_lot = "0.12.5"
 fastwebsockets = { version = "0.10.0", features = ["upgrade", "with_axum", "unstable-split"] }
 
 bytes = "1.12.1"
+flate2 = "1.1.10"
 itoa = "1.0.18"
 regex = "1"
 uuid = "1"

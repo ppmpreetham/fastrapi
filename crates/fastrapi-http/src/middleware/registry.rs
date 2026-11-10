@@ -23,6 +23,7 @@ pub enum DeclaredLayer {
     GZip,
     Session,
     Custom(Arc<PyMiddleware>),
+    Decorator(Arc<PyMiddleware>),
 }
 
 #[derive(Clone, Default)]
@@ -32,7 +33,6 @@ pub struct MiddlewareContainer {
     pub https_redirect: Option<HTTPSRedirectMiddleware>,
     pub gzip: Option<GZipMiddleware>,
     pub session: Option<SessionMiddleware>,
-    pub py_middlewares: Vec<Arc<PyMiddleware>>,
     pub order: Vec<DeclaredLayer>,
 }
 
