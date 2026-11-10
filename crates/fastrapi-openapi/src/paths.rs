@@ -14,12 +14,12 @@ use fastrapi_core::params::ParameterSource;
 use fastrapi_core::path::strip_path_convertors;
 use fastrapi_core::security::SecurityKind;
 use fastrapi_http::response_type::ResponseType;
-use fastrapi_pyutil::json::py_any_to_json;
+use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
 use fastrapi_routing::dependencies::InjectionType;
 use fastrapi_routing::route::{ParsedParameter, RouteEntry, RouteHandler};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyString};
 use simd_json::json;
 use simd_json::owned::{Object, Value as JsonValue};
 use simd_json::prelude::{ValueAsMutObject, ValueAsObject, ValueAsScalar};
@@ -290,10 +290,88 @@ fn body_field_schema(
             json!({ "type": "string", "contentMediaType": "application/octet-stream", "title": title })
         };
     }
-    param.annotation.as_ref().map_or_else(
-        || json!({ "title": title.as_str() }),
-        |annotation| registry.field(annotation.bind(py), "validation", Some(title.clone())),
-    )
+    let Some(annotation) = param.annotation.as_ref() else {
+        return json!({ "title": title.as_str() });
+    };
+    let annotation = match marker_attr(py, param, intern!(py, "discriminator"))
+        .or_else(|| annotated_discriminator(py, param))
+    {
+        Some(discriminator) => discriminated(py, annotation.bind(py), &discriminator)
+            .unwrap_or_else(|_| annotation.bind(py).clone()),
+        None => annotation.bind(py).clone(),
+    };
+    registry.field(&annotation, "validation", Some(title))
+}
+
+fn with_schema_extra(py: Python<'_>, mut schema: JsonValue, extra: &Bound<'_, PyAny>) -> JsonValue {
+    if let Ok(extra) = extra.cast::<PyDict>() {
+        if let (Some(object), Some(extra)) = (
+            schema.as_object_mut(),
+            py_any_to_json(py, extra).as_object(),
+        ) {
+            for (key, value) in extra {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+        return schema;
+    }
+    let target = json_to_py_object(py, &schema);
+    if extra.call1((target.bind(py),)).is_err() {
+        return schema;
+    }
+    py_any_to_json(py, target.bind(py))
+}
+
+fn annotated_discriminator<'py>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+) -> Option<Bound<'py, PyAny>> {
+    let annotation = marker_attr(py, param, intern!(py, "annotation"))?;
+    let metadata = py
+        .import(intern!(py, "typing"))
+        .ok()?
+        .call_method1(intern!(py, "get_args"), (annotation,))
+        .ok()?;
+    metadata
+        .try_iter()
+        .ok()?
+        .skip(1)
+        .flatten()
+        .find_map(|item| {
+            item.getattr(intern!(py, "discriminator"))
+                .ok()
+                .filter(|value| !value.is_none())
+        })
+}
+
+fn marker_attr<'py>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+    name: &Bound<'py, PyString>,
+) -> Option<Bound<'py, PyAny>> {
+    param
+        .param_object
+        .as_ref()?
+        .bind(py)
+        .getattr(name)
+        .ok()
+        .filter(|value| !value.is_none())
+}
+
+fn discriminated<'py>(
+    py: Python<'py>,
+    annotation: &Bound<'py, PyAny>,
+    discriminator: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let pydantic = py.import(intern!(py, "pydantic"))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "discriminator"), discriminator)?;
+    let field = pydantic
+        .getattr(intern!(py, "Field"))?
+        .call((), Some(&kwargs))?;
+    py.import(intern!(py, "typing"))?
+        .getattr(intern!(py, "Annotated"))?
+        .get_item((annotation, field))
 }
 
 fn build_request_body(
@@ -373,8 +451,12 @@ fn build_request_body(
         )
     };
 
+    let examples = (!embed)
+        .then(|| marker_attr(py, first, intern!(py, "openapi_examples")))
+        .flatten()
+        .map(|examples| py_any_to_json(py, &examples));
     let mut content = HashMap::new();
-    content.insert(media_type, MediaType { schema });
+    content.insert(media_type, MediaType { schema, examples });
     Some(RequestBody { content, required })
 }
 
@@ -442,7 +524,11 @@ pub fn build_paths_from_routes(
 
         let mut operation = Operation {
             summary,
-            description: route.description.clone().or(description),
+            description: route
+                .description
+                .clone()
+                .filter(|text| !text.is_empty())
+                .or(description),
             operation_id: Some(operation_id.clone()),
             tags: (!tags.is_empty()).then(|| tags.clone()),
             deprecated: route.deprecated,
@@ -500,7 +586,9 @@ pub fn build_paths_from_routes(
             ParameterSource::Query => 1,
             ParameterSource::Header => 2,
             ParameterSource::Cookie => 3,
-            ParameterSource::Body | ParameterSource::BackgroundTasks => 4,
+            ParameterSource::Body
+            | ParameterSource::BackgroundTasks
+            | ParameterSource::SecurityScopes => 4,
         });
         let parameters: Vec<Parameter> = all_params
             .iter()
@@ -510,7 +598,9 @@ pub fn build_paths_from_routes(
                     ParameterSource::Query => "query",
                     ParameterSource::Header => "header",
                     ParameterSource::Cookie => "cookie",
-                    ParameterSource::Body | ParameterSource::BackgroundTasks => return None,
+                    ParameterSource::Body
+                    | ParameterSource::BackgroundTasks
+                    | ParameterSource::SecurityScopes => return None,
                 };
 
                 let marker = param.param_object.as_ref().map(|marker| marker.bind(py));
@@ -581,16 +671,13 @@ pub fn build_paths_from_routes(
                     if deprecated.is_some() {
                         obj.insert("deprecated".to_string(), json!(true));
                     }
-                    if let Some(extra) = marker
+                }
+                if !is_ref
+                    && let Some(extra) = marker
                         .and_then(|marker| marker.getattr(intern!(py, "json_schema_extra")).ok())
-                        .filter(PyAnyMethods::is_instance_of::<PyDict>)
-                        .map(|extra| py_any_to_json(py, &extra))
-                        && let Some(extra) = extra.as_object()
-                    {
-                        for (key, value) in extra {
-                            obj.insert(key.clone(), value.clone());
-                        }
-                    }
+                        .filter(|extra| !extra.is_none())
+                {
+                    schema = with_schema_extra(py, schema, &extra);
                 }
                 let example = marker
                     .and_then(|marker| marker.getattr(intern!(py, "example")).ok())
@@ -682,6 +769,7 @@ pub fn build_paths_from_routes(
                     content.insert(
                         media_type.to_string(),
                         MediaType {
+                            examples: None,
                             schema: response_schema,
                         },
                     );
@@ -733,6 +821,7 @@ pub fn build_paths_from_routes(
                         content.insert(
                             "application/json".to_string(),
                             MediaType {
+                                examples: None,
                                 schema: json!({ "$ref": "#/components/schemas/HTTPValidationError" }),
                             },
                         );
@@ -843,7 +932,10 @@ pub fn endpoint_description(
     let text = if let Some(text) = explicit.filter(|text| !text.is_empty()) {
         text
     } else {
-        let doc = endpoint.getattr("__doc__").ok().filter(|doc| !doc.is_none())?;
+        let doc = endpoint
+            .getattr("__doc__")
+            .ok()
+            .filter(|doc| !doc.is_none())?;
         cleaned = py
             .import("inspect")
             .and_then(|inspect| inspect.call_method1("cleandoc", (doc,)))

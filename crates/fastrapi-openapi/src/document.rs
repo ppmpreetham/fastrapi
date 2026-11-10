@@ -138,6 +138,8 @@ pub struct RequestBody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaType {
     pub schema: JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub examples: Option<JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

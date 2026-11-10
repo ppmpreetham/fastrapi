@@ -8,6 +8,7 @@ use fastrapi_pyutil::json::py_dict_to_json;
 use fastrapi_routing::route::RouteEntry;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use simd_json::StaticNode;
 use simd_json::json;
 use simd_json::owned::Value as JsonValue;
 use simd_json::serde::to_owned_value;
@@ -119,5 +120,18 @@ pub fn build_openapi_spec(
         }
     });
     debug!("Built OpenAPI spec with {} paths", spec.paths.len());
-    to_owned_value(&spec).unwrap_or_else(|_| json!({}))
+    let mut document = to_owned_value(&spec).unwrap_or_else(|_| json!({}));
+    drop_nulls(&mut document);
+    document
+}
+
+fn drop_nulls(value: &mut JsonValue) {
+    match value {
+        JsonValue::Object(object) => {
+            object.retain(|_, item| !matches!(item, JsonValue::Static(StaticNode::Null)));
+            object.values_mut().for_each(drop_nulls);
+        }
+        JsonValue::Array(items) => items.iter_mut().for_each(drop_nulls),
+        _ => {}
+    }
 }
