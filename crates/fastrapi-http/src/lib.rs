@@ -22,6 +22,7 @@ pub mod response_type;
 pub mod responses;
 pub mod sse;
 pub mod staticfiles;
+pub mod stream;
 pub mod status;
 pub mod templating;
 pub mod upload_file;

@@ -493,13 +493,10 @@ fn push_json_dumps(out: &mut String, value: &Bound<'_, PyAny>, encoded: bool) ->
     Ok(())
 }
 
-#[must_use]
-pub fn json_dumps(value: &Bound<'_, PyAny>) -> String {
+pub fn json_dumps(value: &Bound<'_, PyAny>) -> PyResult<String> {
     let mut out = String::new();
-    if push_json_dumps(&mut out, value, false).is_err() {
-        out.clear();
-    }
-    out
+    push_json_dumps(&mut out, value, false)?;
+    Ok(out)
 }
 
 #[must_use]

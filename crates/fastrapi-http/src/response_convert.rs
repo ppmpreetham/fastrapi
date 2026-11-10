@@ -14,6 +14,7 @@ use crate::responses::{
     PyUJSONResponse,
 };
 use crate::sse::PyEventSourceResponse;
+use crate::stream::StreamItems;
 use crate::sse::{event_fields, format_sse_event, json_dumps, sse_options};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
@@ -156,17 +157,16 @@ fn response_helpers(py: Python<'_>) -> PyResult<&Bound<'_, pyo3::types::PyModule
         .map(|module| module.bind(py))
 }
 
-pub fn stream_factory(
-    py: Python<'_>,
-    mode: &str,
-    item_type: Option<&Bound<'_, PyAny>>,
-    response_class: Option<&Bound<'_, PyAny>>,
-    options: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    Ok(response_helpers(py)?
-        .getattr(intern!(py, "stream_factory"))?
-        .call1((mode, item_type, response_class, options))?
-        .unbind())
+pub use crate::stream::stream_factory;
+
+pub(crate) fn validate_stream_item<'py>(
+    py: Python<'py>,
+    adapter: &Bound<'py, PyAny>,
+    item: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    response_helpers(py)?
+        .getattr(intern!(py, "_validate_response"))?
+        .call1((adapter, item))
 }
 
 static SERIALIZE_RESPONSE: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
@@ -634,35 +634,52 @@ pub fn convert_redirect_response(py: Python, result: &Bound<PyAny>) -> Response 
     }
 }
 
+pub(crate) fn sse_event_chunk(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    sep: &str,
+) -> PyResult<bytes::Bytes> {
+    let Some((data, raw_data, event, id, retry, comment)) = event_fields(py, value) else {
+        return Ok(Bytes::new());
+    };
+    let data = match (raw_data, data) {
+        (Some(raw), _) => Some(raw),
+        (None, Some(data)) if data.hasattr(intern!(py, "model_dump_json"))? => {
+            Some(data.call_method0(intern!(py, "model_dump_json"))?.extract::<String>()?)
+        }
+        (None, Some(data)) => Some(json_dumps(&data)?),
+        (None, None) => None,
+    };
+    Ok(format_sse_event(
+        data.as_deref(),
+        event.as_deref(),
+        id.as_deref(),
+        retry,
+        comment.as_deref(),
+        sep,
+    ))
+}
+
 #[inline(always)]
-fn sse_chunk(py: Python<'_>, value: &Bound<'_, PyAny>, sep: &str) -> bytes::Bytes {
-    if let Some((data, raw_data, event, id, retry, comment)) = event_fields(py, value) {
-        let data = raw_data.or_else(|| {
-            let data = data?;
-            if data.hasattr(intern!(py, "model_dump_json")).unwrap_or(false) {
-                return data
-                    .call_method0(intern!(py, "model_dump_json"))
-                    .and_then(|json| json.extract::<String>())
-                    .ok();
-            }
-            Some(json_dumps(&data))
-        });
-        return format_sse_event(
-            data.as_deref(),
-            event.as_deref(),
-            id.as_deref(),
-            retry,
-            comment.as_deref(),
-            sep,
-        );
+fn sse_chunk(py: Python<'_>, value: &Bound<'_, PyAny>, sep: &str) -> PyResult<bytes::Bytes> {
+    if event_fields(py, value).is_some() {
+        return sse_event_chunk(py, value, sep);
     }
-    let data = simd_json::to_string(&fastrapi_pyutil::json::py_any_to_json(py, value)).unwrap_or_default();
-    format_sse_event(Some(&data), None, None, None, None, sep)
+    let mut data = Vec::new();
+    fastrapi_pyutil::json::write_py_json(py, value, &mut data)?;
+    Ok(format_sse_event(
+        Some(&String::from_utf8_lossy(&data)),
+        None,
+        None,
+        None,
+        None,
+        sep,
+    ))
 }
 
 fn stream_chunk(py: Python<'_>, value: &Bound<'_, PyAny>, sse: bool, sep: &str) -> PyResult<Bytes> {
     if sse {
-        return Ok(sse_chunk(py, value, sep));
+        return sse_chunk(py, value, sep);
     }
     if let Ok(bytes) = value.cast::<PyBytes>() {
         return Ok(bytes_body(bytes));
@@ -740,6 +757,10 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
     let ping_chunk =
         sse.then(|| format_sse_event(None, None, None, None, Some("ping"), &sep));
 
+    let (content, items) = match content.bind(py).cast::<StreamItems>() {
+        Ok(items) => (items.get().content.clone_ref(py), Some(items.clone().unbind())),
+        Err(_) => (content, None),
+    };
     let content = {
         let bound = content.bind(py);
         let is_iterator = bound.hasattr(intern!(py, "__anext__")).unwrap_or(false)
@@ -816,7 +837,10 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
                 }
             };
             let chunk = match next {
-                Ok(Some(value)) => Python::attach(|py| stream_chunk(py, value.bind(py), sse, &sep)),
+                Ok(Some(value)) => Python::attach(|py| match &items {
+                    Some(items) => items.get().encode(py, value.bind(py), &sep),
+                    None => stream_chunk(py, value.bind(py), sse, &sep),
+                }),
                 Ok(None) => break,
                 Err(error) => Err(error),
             };
