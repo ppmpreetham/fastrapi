@@ -2,16 +2,15 @@
 //! The functions find the handler for an exception, a validation error or a status code.
 //! They call the handler and convert its result into an HTTP response.
 
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::{Py, intern};
 
 use ahash::AHashMap;
-use axum::http::StatusCode;
 use fastrapi_http::exceptions::{
     http_exception_type, http_status_code, is_default_handler, is_http_exception,
-    request_validation_error_type, websocket_validation_error_type,
+    plain_server_error, request_validation_error_type, websocket_validation_error_type,
 };
 use fastrapi_http::request::{create_py_request, create_stub_request};
 use fastrapi_http::request_input::RequestInput;
@@ -100,25 +99,13 @@ pub(crate) fn dispatch_exception_handler(
     let request = build_request_arg(py, request_input);
     match handler.call1((request, exc_value)) {
         Ok(result) => handler_response(py, server, result)
-            .map(|result| result.into_response(internal_server_error())),
+            .map(|result| result.into_response(plain_server_error())),
         Err(handler_err) => {
             tracing::error!("Exception handler itself failed:");
             handler_err.print(py);
-            Some(internal_server_error())
+            Some(plain_server_error())
         }
     }
-}
-
-pub(crate) fn internal_server_error() -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
-        )],
-        "Internal Server Error",
-    )
-        .into_response()
 }
 
 fn server_of(request_input: Option<&RequestInput<'_>>) -> Option<EventLoop> {
@@ -214,10 +201,10 @@ pub(crate) fn dispatch_status_handler(
         let exc = http_exception_type(py).ok()?.call1((status,)).ok()?;
         match handler.call1((build_request_arg(py, request_input), exc)) {
             Ok(result) => handler_response(py, server, result)
-                .map(|result| result.into_response(internal_server_error())),
+                .map(|result| result.into_response(plain_server_error())),
             Err(err) => {
                 err.print(py);
-                Some(internal_server_error())
+                Some(plain_server_error())
             }
         }
     })

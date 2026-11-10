@@ -5,13 +5,14 @@ use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
 use std::sync::Arc;
 
+use crate::exceptions::{UnhandledError, plain_server_error, server_error_response};
 use crate::request::PyRequest;
 use crate::response_convert::convert_auto_response;
 use axum::body::{Body, to_bytes};
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use fastrapi_runtime::blocking::run_python;
 use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
@@ -96,7 +97,10 @@ impl PyCallNext {
                 request,
                 next,
             } = downstream;
-            let response = drive(middlewares, idx + 1, request, next, event_loop).await;
+            let mut response = drive(middlewares, idx + 1, request, next, event_loop).await;
+            if let Some(UnhandledError(err)) = response.extensions_mut().remove() {
+                return Err(Python::attach(|py| err.clone_ref(py)));
+            }
             let (parts, body) = split_response(response);
             let body_bytes = to_bytes(body, usize::MAX)
                 .await
@@ -106,14 +110,6 @@ impl PyCallNext {
         let locals = TaskLocals::new(event_loop.bind(py).clone());
         py_bridge::future_into_py_with_locals(py, locals, bridged)
     }
-}
-
-fn middleware_error() -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Middleware Execution Error",
-    )
-        .into_response()
 }
 
 struct DownstreamParts {
@@ -169,7 +165,7 @@ fn py_to_response(py: Python<'_>, value: &Bound<'_, PyAny>) -> Response {
         }
         return builder
             .body(Body::from(ds.body_bytes.clone()))
-            .unwrap_or_else(|_| middleware_error());
+            .unwrap_or_else(|_| plain_server_error());
     }
 
     convert_auto_response(py, value)
@@ -244,13 +240,13 @@ fn drive(
                     Ok(value) => py_to_response(py, value.bind(py)),
                     Err(err) => {
                         err.print(py);
-                        middleware_error()
+                        server_error_response(py, &err, Some(event_loop))
                     }
                 })
             }
             _ => {
                 tracing::error!("call_next middleware returned no response");
-                middleware_error()
+                plain_server_error()
             }
         }
     }))
@@ -269,7 +265,7 @@ fn invoke(
 ) -> Result<Outcome, Response> {
     let fail = |err: PyErr| -> Response {
         err.print(py);
-        middleware_error()
+        server_error_response(py, &err, Some(event_loop))
     };
 
     let scope = PyDict::new(py);
@@ -301,7 +297,7 @@ fn invoke(
 
     if result.is_none() {
         tracing::error!("call_next middleware returned None without awaiting call_next");
-        return Err(middleware_error());
+        return Err(plain_server_error());
     }
     if mw.is_async {
         let fut = py_bridge::schedule_task(py, event_loop, result).map_err(fail)?;

@@ -2,14 +2,16 @@
 //! This module also writes Python errors to the log.
 
 use axum::response::Response;
-use fastrapi_http::exceptions::{http_exception_response, validation_error_response};
+use fastrapi_http::exceptions::{
+    http_exception_response, server_error_response, validation_error_response,
+};
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_runtime::py_bridge::EventLoop;
 use pyo3::intern;
 use pyo3::prelude::*;
 use tracing::error;
 
-use crate::engine::exception_dispatch::{dispatch_exception_handler, internal_server_error};
+use crate::engine::exception_dispatch::dispatch_exception_handler;
 
 fastrapi_pyutil::cached_py_import!(TRACEBACK_MODULE, "traceback");
 
@@ -56,7 +58,7 @@ fn python_error_response(
         return response;
     }
     log_python_error(py, err);
-    internal_server_error()
+    server_error_response(py, err, server)
 }
 
 pub(crate) fn log_python_error(py: Python<'_>, err: &PyErr) {

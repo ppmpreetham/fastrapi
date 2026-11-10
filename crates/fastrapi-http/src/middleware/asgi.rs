@@ -2,6 +2,7 @@
 //! It gives `receive` and `send` callables to the middleware and connects them to the axum stack.
 //! It collects the response messages that the middleware sends.
 
+use crate::exceptions::{plain_server_error, server_error_response};
 use axum::body::{Body, to_bytes};
 use axum::extract::Request;
 use axum::http::request::Parts;
@@ -9,9 +10,9 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use bytes::{Bytes, BytesMut};
-use futures_util::StreamExt;
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
+use futures_util::StreamExt;
 use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
@@ -86,7 +87,8 @@ impl PyScopeDownstream {
 
         let borrowed = handle.borrow();
         let mut head = borrowed.head.clone();
-        head.extensions.insert(py_bridge::RequestContext::capture(py)?);
+        head.extensions
+            .insert(py_bridge::RequestContext::capture(py)?);
         let downstream = PyDownstreamASGI {
             next: borrowed.next.clone(),
             head,
@@ -346,17 +348,15 @@ async fn run_asgi_app(
         py_bridge::schedule_task(py, event_loop, coro)
     });
 
-    match outcome {
-        Ok(fut) => {
-            if let Err(err) = fut.await {
-                Python::attach(|py| err.print(py));
-                return middleware_error_response();
-            }
-        }
-        Err(err) => {
-            Python::attach(|py| err.print(py));
-            return middleware_error_response();
-        }
+    let failed = match outcome {
+        Ok(fut) => fut.await.err(),
+        Err(err) => Some(err),
+    };
+    if let Some(err) = failed {
+        return Python::attach(|py| {
+            err.print(py);
+            server_error_response(py, &err, Some(event_loop))
+        });
     }
 
     drop(close_tx);
@@ -431,7 +431,7 @@ fn collect_response(messages: Vec<ResponseMessage>) -> Response {
 
     let Some(status) = status else {
         error!("asgi middleware completed without sending a response");
-        return middleware_error_response();
+        return plain_server_error();
     };
 
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -441,15 +441,7 @@ fn collect_response(messages: Vec<ResponseMessage>) -> Response {
     }
     builder
         .body(Body::from(body.freeze()))
-        .unwrap_or_else(|_| middleware_error_response())
-}
-
-fn middleware_error_response() -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Middleware Execution Error",
-    )
-        .into_response()
+        .unwrap_or_else(|_| plain_server_error())
 }
 
 fn build_scope(py: Python<'_>, parts: &Parts, server: EventLoop) -> PyResult<Py<PyDict>> {

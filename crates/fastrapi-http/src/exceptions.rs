@@ -1,15 +1,19 @@
 //! This module contains the Python exception classes of fastrapi.
 //! The classes are Rust pyclasses, and `HTTPException` subclasses the starlette class with a Rust `__init__`.
 
+use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use fastrapi_pyutil::json::py_json_response_with_status;
+use fastrapi_runtime::py_bridge::EventLoop;
+use fastrapi_runtime::server_state::current_server;
 use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyTypeError, PyUserWarning};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyCFunction, PyDict, PyModule, PyString, PyTuple, PyType};
+use std::sync::Arc;
 
 const HANDLERS_SOURCE: &str = include_str!("py/exception_handlers.py");
 
@@ -729,4 +733,60 @@ impl PyWebSocketException {
             PyString::new(py, &this.reason).repr()?
         ))
     }
+}
+
+#[derive(Clone)]
+pub struct UnhandledError(pub Arc<PyErr>);
+
+#[must_use]
+pub fn plain_server_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )],
+        "Internal Server Error",
+    )
+        .into_response()
+}
+
+#[must_use]
+pub fn server_error_response(py: Python<'_>, err: &PyErr, server: Option<EventLoop>) -> Response {
+    let traceback = is_debug(py, server)
+        .then(|| format_traceback(py, err))
+        .flatten();
+    let mut response = match traceback {
+        Some(traceback) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            )],
+            traceback,
+        )
+            .into_response(),
+        None => plain_server_error(),
+    };
+    response
+        .extensions_mut()
+        .insert(UnhandledError(Arc::new(err.clone_ref(py))));
+    response
+}
+
+fn is_debug(py: Python<'_>, server: Option<EventLoop>) -> bool {
+    server
+        .or_else(current_server)
+        .and_then(|server| server.server().app())
+        .and_then(|app| app.bind(py).getattr(intern!(py, "debug")).ok())
+        .is_some_and(|debug| debug.is_truthy().unwrap_or(false))
+}
+
+fn format_traceback(py: Python<'_>, err: &PyErr) -> Option<String> {
+    let lines = py
+        .import(intern!(py, "traceback"))
+        .ok()?
+        .call_method1(intern!(py, "format_exception"), (err.value(py),))
+        .ok()?;
+    Some(lines.extract::<Vec<String>>().ok()?.concat())
 }
