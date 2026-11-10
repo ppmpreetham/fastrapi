@@ -117,9 +117,11 @@ def stream_factory(mode, item_type, response_class, options):
     def sse_value(item):
         from fastrapi.sse import ServerSentEvent
 
-        if isinstance(item, ServerSentEvent) or adapter is None:
+        if isinstance(item, ServerSentEvent):
             return item
-        return adapter.dump_python(validated(item), mode='json', **options)
+        if adapter is None:
+            return ServerSentEvent(data=item)
+        return ServerSentEvent(raw_data=adapter.dump_json(validated(item), **options).decode('utf-8'))
 
     def factory(gen):
         from fastrapi.responses import StreamingResponse

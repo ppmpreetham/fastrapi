@@ -14,7 +14,7 @@ use crate::responses::{
     PyUJSONResponse,
 };
 use crate::sse::PyEventSourceResponse;
-use crate::sse::{event_fields, format_sse_event, sse_options};
+use crate::sse::{event_fields, format_sse_event, json_dumps, sse_options};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
@@ -637,10 +637,18 @@ pub fn convert_redirect_response(py: Python, result: &Bound<PyAny>) -> Response 
 #[inline(always)]
 fn sse_chunk(py: Python<'_>, value: &Bound<'_, PyAny>, sep: &str) -> bytes::Bytes {
     if let Some((data, raw_data, event, id, retry, comment)) = event_fields(py, value) {
+        let data = raw_data.or_else(|| {
+            let data = data?;
+            if data.hasattr(intern!(py, "model_dump_json")).unwrap_or(false) {
+                return data
+                    .call_method0(intern!(py, "model_dump_json"))
+                    .and_then(|json| json.extract::<String>())
+                    .ok();
+            }
+            Some(json_dumps(&data))
+        });
         return format_sse_event(
-            py,
-            data.as_ref(),
-            raw_data.as_deref(),
+            data.as_deref(),
             event.as_deref(),
             id.as_deref(),
             retry,
@@ -648,7 +656,8 @@ fn sse_chunk(py: Python<'_>, value: &Bound<'_, PyAny>, sep: &str) -> bytes::Byte
             sep,
         );
     }
-    format_sse_event(py, Some(value), None, None, None, None, None, sep)
+    let data = simd_json::to_string(&fastrapi_pyutil::json::py_any_to_json(py, value)).unwrap_or_default();
+    format_sse_event(Some(&data), None, None, None, None, sep)
 }
 
 fn stream_chunk(py: Python<'_>, value: &Bound<'_, PyAny>, sse: bool, sep: &str) -> PyResult<Bytes> {
@@ -729,7 +738,7 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let ping_chunk =
-        sse.then(|| format_sse_event(py, None, None, None, None, None, Some("ping"), &sep));
+        sse.then(|| format_sse_event(None, None, None, None, Some("ping"), &sep));
 
     let content = {
         let bound = content.bind(py);

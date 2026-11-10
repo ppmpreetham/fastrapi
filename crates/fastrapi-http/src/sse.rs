@@ -4,11 +4,12 @@
 
 use crate::response_api::init_headers;
 use bytes::Bytes;
-use fastrapi_pyutil::json::py_any_to_json;
+use std::fmt::Write as _;
+use fastrapi_pyutil::cached_py_import;
 use pyo3::Bound;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PyTuple, PyType};
+use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyType};
 
 /// Streaming response with `text/event-stream` media type.
 ///
@@ -46,7 +47,7 @@ pub struct PyEventSourceResponse {
 #[pymethods]
 impl PyEventSourceResponse {
     #[new]
-    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None, ping=15.0, sep="\r\n".to_string()))]
+    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None, ping=15.0, sep="\n".to_string()))]
     fn new(
         py: Python<'_>,
         content: Py<PyAny>,
@@ -347,19 +348,169 @@ fn single_line_invalid(value: &str) -> bool {
     value.contains('\r') || value.contains('\n')
 }
 
+cached_py_import!(JSONABLE_ENCODER, "fastrapi.encoders", "jsonable_encoder");
+
+fn push_json_float(out: &mut String, value: f64) {
+    if !value.is_finite() {
+        out.push_str("null");
+        return;
+    }
+    if value == 0.0 {
+        out.push_str(if value.is_sign_negative() { "-0.0" } else { "0.0" });
+        return;
+    }
+    let scientific = format!("{value:e}");
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or_default();
+    let mantissa = mantissa.strip_prefix('-').map_or(mantissa, |mantissa| {
+        out.push('-');
+        mantissa
+    });
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    if (-4..16).contains(&exponent) {
+        if let Ok(whole) = usize::try_from(exponent + 1) {
+            if digits.len() <= whole {
+                out.push_str(&digits);
+                out.extend(std::iter::repeat_n('0', whole - digits.len()));
+                out.push_str(".0");
+            } else {
+                out.push_str(&digits[..whole]);
+                out.push('.');
+                out.push_str(&digits[whole..]);
+            }
+        } else {
+            out.push_str("0.");
+            out.extend(std::iter::repeat_n('0', exponent.unsigned_abs() as usize - 1));
+            out.push_str(&digits);
+        }
+        return;
+    }
+    out.push_str(&digits[..1]);
+    if digits.len() > 1 {
+        out.push('.');
+        out.push_str(&digits[1..]);
+    }
+    out.push('e');
+    out.push(if exponent < 0 { '-' } else { '+' });
+    if exponent.unsigned_abs() < 10 {
+        out.push('0');
+    }
+    _ = write!(out, "{}", exponent.unsigned_abs());
+}
+
+fn push_json_string(out: &mut String, text: &str) {
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            ' '..='~' => out.push(ch),
+            _ => {
+                let mut units = [0u16; 2];
+                for unit in ch.encode_utf16(&mut units) {
+                    _ = write!(out, "\\u{unit:04x}");
+                }
+            }
+        }
+    }
+    out.push('"');
+}
+
+fn push_json_key(out: &mut String, key: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Ok(text) = key.cast::<PyString>() {
+        push_json_string(out, &text.to_cow()?);
+    } else if let Ok(flag) = key.cast::<PyBool>() {
+        out.push_str(if flag.is_true() { "\"true\"" } else { "\"false\"" });
+    } else if key.is_none() {
+        out.push_str("\"null\"");
+    } else if let Ok(number) = key.cast::<PyFloat>() {
+        let mut text = String::new();
+        push_json_float(&mut text, number.value());
+        push_json_string(out, &text);
+    } else {
+        push_json_string(out, &key.str()?.to_cow()?);
+    }
+    Ok(())
+}
+
+fn push_json_dumps(out: &mut String, value: &Bound<'_, PyAny>, encoded: bool) -> PyResult<()> {
+    if value.is_none() {
+        out.push_str("null");
+    } else if let Ok(flag) = value.cast_exact::<PyBool>() {
+        out.push_str(if flag.is_true() { "true" } else { "false" });
+    } else if let Some(text) = value
+        .cast_exact::<PyString>()
+        .ok()
+        .or_else(|| encoded.then(|| value.cast::<PyString>().ok()).flatten())
+    {
+        push_json_string(out, &text.to_cow()?);
+    } else if let Some(number) = value
+        .cast_exact::<PyInt>()
+        .ok()
+        .or_else(|| encoded.then(|| value.cast::<PyInt>().ok()).flatten())
+    {
+        match number.extract::<i64>() {
+            Ok(number) => _ = write!(out, "{number}"),
+            Err(_) => out.push_str(&number.str()?.to_cow()?),
+        }
+    } else if let Some(number) = value
+        .cast_exact::<PyFloat>()
+        .ok()
+        .or_else(|| encoded.then(|| value.cast::<PyFloat>().ok()).flatten())
+    {
+        push_json_float(out, number.value());
+    } else if let Ok(dict) = value.cast_exact::<PyDict>() {
+        out.push('{');
+        for (index, (key, item)) in dict.iter().enumerate() {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            push_json_key(out, &key)?;
+            out.push_str(": ");
+            push_json_dumps(out, &item, encoded)?;
+        }
+        out.push('}');
+    } else if value.is_exact_instance_of::<PyList>() || value.is_exact_instance_of::<PyTuple>() {
+        out.push('[');
+        for (index, item) in value.try_iter()?.enumerate() {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            push_json_dumps(out, &item?, encoded)?;
+        }
+        out.push(']');
+    } else if encoded {
+        return Err(PyValueError::new_err("value is not JSON serializable"));
+    } else {
+        let encoded = JSONABLE_ENCODER.get(value.py())?.call1((value,))?;
+        push_json_dumps(out, &encoded, true)?;
+    }
+    Ok(())
+}
+
+#[must_use]
+pub fn json_dumps(value: &Bound<'_, PyAny>) -> String {
+    let mut out = String::new();
+    if push_json_dumps(&mut out, value, false).is_err() {
+        out.clear();
+    }
+    out
+}
+
+#[must_use]
 pub fn format_sse_event(
-    py: Python<'_>,
-    data: Option<&Bound<'_, PyAny>>,
-    raw_data: Option<&str>,
+    data: Option<&str>,
     event: Option<&str>,
     id: Option<&str>,
     retry: Option<i64>,
     comment: Option<&str>,
     sep: &str,
 ) -> bytes::Bytes {
-    let data = raw_data.map(str::to_owned).or_else(|| {
-        data.map(|value| simd_json::to_string(&py_any_to_json(py, value)).unwrap_or_default())
-    });
     let mut output = String::new();
     if let Some(comment) = comment {
         for line in comment
