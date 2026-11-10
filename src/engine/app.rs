@@ -349,6 +349,7 @@ impl FastrAPI {
             middlewares: MiddlewareContainer::default(),
             openapi_cache: Mutex::new(None),
             openapi_schema: Mutex::new(None),
+            asgi: std::sync::OnceLock::new(),
             openapi_version: "3.1.0".to_string(),
             extra: extra.map_or_else(|| PyDict::new(py).unbind(), Bound::unbind),
             router: base_router,
@@ -746,6 +747,15 @@ impl FastrAPI {
         } else {
             serve(py, host, port, &slf)
         }
+    }
+
+    fn _asgi<'py>(
+        slf: &Bound<'py, Self>,
+        scope: &Bound<'py, PyDict>,
+        receive: Bound<'py, PyAny>,
+        send: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        crate::engine::server::asgi_app::call(slf, scope, receive, send)
     }
 
     /// Include an `APIRouter` in the same app.

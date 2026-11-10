@@ -173,6 +173,10 @@ class AsyncExitStackMiddleware:
             await self.app(scope, receive, send)
 
 
+async def asgi_call(self, scope, receive, send):
+    await self._asgi(scope, receive, send)
+
+
 @asynccontextmanager
 async def contextmanager_in_threadpool(cm):
     exit_limiter = anyio.CapacityLimiter(1)

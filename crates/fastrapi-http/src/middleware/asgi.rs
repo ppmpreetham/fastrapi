@@ -9,6 +9,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use bytes::{Bytes, BytesMut};
+use futures_util::StreamExt;
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
 use parking_lot::Mutex;
@@ -117,7 +118,7 @@ async fn run_downstream(
 }
 
 /// Calls the `receive` callable of the middleware and assembles the body again.
-async fn drain_receive(
+pub async fn drain_receive(
     locals: &py_bridge::TaskLocals,
     receive: &Py<PyAny>,
 ) -> PyResult<bytes::Bytes> {
@@ -180,17 +181,13 @@ fn python_bytes(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<bytes::Bytes> 
     Some(fastrapi_pyutil::body::bytes_body(bytes))
 }
 
-/// Sends `http.response.start` and `http.response.body` through the `send` callable of the middleware.
-async fn send_response(
+/// Sends `http.response.start`, then one `http.response.body` message per body frame.
+pub async fn send_response(
     locals: &py_bridge::TaskLocals,
     send: &Py<PyAny>,
     resp: Response,
 ) -> PyResult<()> {
     let (parts, body) = resp.into_parts();
-    let body_bytes = to_bytes(body, usize::MAX)
-        .await
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-
     let start = Python::attach(|py| -> PyResult<Py<PyAny>> {
         let msg = PyDict::new(py);
         msg.set_item(intern!(py, "type"), intern!(py, "http.response.start"))?;
@@ -207,18 +204,28 @@ async fn send_response(
     })?;
     asgi_call(locals, send, start).await?;
 
-    let body_msg = Python::attach(|py| -> PyResult<Py<PyAny>> {
+    let mut frames = body.into_data_stream();
+    while let Some(chunk) = frames.next().await {
+        let chunk = chunk.map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+        if !chunk.is_empty() {
+            asgi_call(locals, send, body_message(&chunk, true)?).await?;
+        }
+    }
+    asgi_call(locals, send, body_message(&[], false)?).await
+}
+
+fn body_message(chunk: &[u8], more_body: bool) -> PyResult<Py<PyAny>> {
+    Python::attach(|py| {
         let msg = PyDict::new(py);
         msg.set_item(intern!(py, "type"), intern!(py, "http.response.body"))?;
-        msg.set_item(intern!(py, "body"), PyBytes::new(py, &body_bytes))?;
-        msg.set_item(intern!(py, "more_body"), false)?;
+        msg.set_item(intern!(py, "body"), PyBytes::new(py, chunk))?;
+        msg.set_item(intern!(py, "more_body"), more_body)?;
         Ok(msg.unbind().into_any())
-    })?;
-    asgi_call(locals, send, body_msg).await
+    })
 }
 
 /// Awaits one `send(message)` call on the Python event loop.
-async fn asgi_call(
+pub async fn asgi_call(
     locals: &py_bridge::TaskLocals,
     target: &Py<PyAny>,
     message: Py<PyAny>,

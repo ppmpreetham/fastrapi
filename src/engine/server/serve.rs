@@ -9,6 +9,7 @@ use super::routes::build_router;
 use fastrapi_core::reload::{ReloadConfig, resolve_reload_dirs, run_reload_supervisor};
 
 use crate::engine::config::FastrAPI;
+use axum::Router;
 use axum::serve::ListenerExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
@@ -103,24 +104,25 @@ fn combined_handlers(
     Ok(Some(combined.into_any().unbind()))
 }
 
-pub fn serve(
-    py: Python<'_>,
-    host: Option<String>,
-    port: Option<u16>,
-    app: &Py<FastrAPI>,
-) -> PyResult<()> {
-    let default_filter = "info";
-    let filter = var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_new(filter).unwrap_or_default())
-        .with_target(false)
-        .try_init()
-        .ok();
+pub(crate) struct LifecycleHooks {
+    pub(crate) lifespan: Option<Py<PyAny>>,
+    pub(crate) on_startup: Option<Py<PyAny>>,
+    pub(crate) on_shutdown: Option<Py<PyAny>>,
+}
 
-    let host: String = host.unwrap_or_else(|| "127.0.0.1".to_string());
-    let port = port.unwrap_or(8000);
+pub(crate) struct PreparedApp {
+    pub(crate) router: Router,
+    pub(crate) event_loop: EventLoop,
+    pub(crate) hooks: LifecycleHooks,
+}
+
+pub(crate) fn prepare_app(py: Python<'_>, app: &Py<FastrAPI>) -> PyResult<PreparedApp> {
     py_bridge::init_with_fastrapi_runtime();
     let event_loop = start_background_asyncio_loop(py)?;
+    build_app(py, app, event_loop).inspect_err(|_| stop_background_asyncio_loop(py, event_loop))
+}
+
+fn build_app(py: Python<'_>, app: &Py<FastrAPI>, event_loop: EventLoop) -> PyResult<PreparedApp> {
     set_server_loop(event_loop);
     event_loop.server().set_app(app.clone_ref(py).into_any());
     let app_bound = app.bind(py);
@@ -140,10 +142,23 @@ pub fn serve(
         app: app.clone_ref(py).into_any(),
     }
     .leak();
+    let hooks = lifecycle_hooks(py, &app_config)?;
+    let router = build_router(
+        py,
+        app_state,
+        app_config.docs_url.as_deref(),
+        app_config.openapi_url.as_deref(),
+        &app_config,
+        custom_openapi,
+    )?;
+    Ok(PreparedApp {
+        router,
+        event_loop,
+        hooks,
+    })
+}
 
-    let docs_url = app_config.docs_url.clone();
-    let openapi_url = app_config.openapi_url.clone();
-    let docs_url_for_log = docs_url.clone();
+fn lifecycle_hooks(py: Python<'_>, app_config: &FastrAPI) -> PyResult<LifecycleHooks> {
     let router_events = app_config.router.bind(py).borrow();
     let on_startup = combined_handlers(
         py,
@@ -162,60 +177,73 @@ pub fn serve(
         .map(|lifespan| lifespan.clone_ref(py));
     drop(router_events);
     let helpers = crate::ffi::compat::py_helpers(py)?;
-    let (on_startup, on_shutdown, lifespan) = match (
-        app_config
-            .lifespan
-            .as_ref()
-            .map(|handler| handler.clone_ref(py)),
-        router_lifespan,
-    ) {
-        (Some(original), Some(nested)) => (
+    let merge = |original: Bound<'_, PyAny>, nested: Py<PyAny>| -> PyResult<Py<PyAny>> {
+        helpers
+            .getattr(pyo3::intern!(py, "merge_lifespan_context"))?
+            .call1((original, nested))
+            .map(Bound::unbind)
+    };
+    let original = app_config
+        .lifespan
+        .as_ref()
+        .map(|handler| handler.clone_ref(py));
+    Ok(match (original, router_lifespan) {
+        (Some(original), Some(nested)) => LifecycleHooks {
+            lifespan: Some(merge(original.into_bound(py), nested)?),
             on_startup,
             on_shutdown,
-            Some(
-                helpers
-                    .getattr(pyo3::intern!(py, "merge_lifespan_context"))?
-                    .call1((original, nested))?
-                    .unbind(),
-            ),
-        ),
+        },
         (None, Some(nested)) => {
             let handlers = helpers
                 .getattr(pyo3::intern!(py, "handlers_lifespan"))?
                 .call1((on_startup, on_shutdown))?;
-            (
-                None,
-                None,
-                Some(
-                    helpers
-                        .getattr(pyo3::intern!(py, "merge_lifespan_context"))?
-                        .call1((handlers, nested))?
-                        .unbind(),
-                ),
-            )
+            LifecycleHooks {
+                lifespan: Some(merge(handlers, nested)?),
+                on_startup: None,
+                on_shutdown: None,
+            }
         }
-        (original, None) => (on_startup, on_shutdown, original),
-    };
-    let app = app.clone_ref(py);
+        (lifespan, None) => LifecycleHooks {
+            lifespan,
+            on_startup,
+            on_shutdown,
+        },
+    })
+}
+
+pub fn serve(
+    py: Python<'_>,
+    host: Option<String>,
+    port: Option<u16>,
+    app: &Py<FastrAPI>,
+) -> PyResult<()> {
+    let default_filter = "info";
+    let filter = var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_new(filter).unwrap_or_default())
+        .with_target(false)
+        .try_init()
+        .ok();
+
+    let host: String = host.unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = port.unwrap_or(8000);
+    let PreparedApp {
+        router,
+        event_loop,
+        hooks:
+            LifecycleHooks {
+                lifespan,
+                on_startup,
+                on_shutdown,
+            },
+    } = prepare_app(py, app)?;
+    let app_config = app.bind(py).borrow();
+    let docs_url_for_log = app_config.docs_url.clone();
     let redoc_url = app_config.redoc_url.clone();
     let scalar_url = app_config.scalar_url.clone();
     let elements_url = app_config.elements_url.clone();
-    let router = build_router(
-        py,
-        app_state,
-        docs_url.as_deref(),
-        openapi_url.as_deref(),
-        &app_config,
-        custom_openapi,
-    );
     drop(app_config);
-    let router = match router {
-        Ok(router) => router,
-        Err(err) => {
-            stop_background_asyncio_loop(py, event_loop);
-            return Err(err);
-        }
-    };
+    let app = app.clone_ref(py);
 
     let server_thread = spawn(move || -> PyResult<()> {
         let entered_lifespan =
