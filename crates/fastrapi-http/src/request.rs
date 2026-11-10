@@ -677,8 +677,7 @@ impl PyRequest {
         conn: &PyHTTPConnection,
     ) -> PyResult<Bound<'py, PyAny>> {
         if let Some(bytes) = self.body_cache.get() {
-            let payload = PyBytes::new(py, bytes).into_any().unbind();
-            return py_bridge::future_into_py(py, async move { Ok(payload) });
+            return ready(py, PyBytes::new(py, bytes).into_any());
         }
 
         let scope_any: &Bound<'py, PyAny> = conn.scope.bind(py).as_any();
@@ -693,8 +692,8 @@ impl PyRequest {
             || method.eq_ignore_ascii_case("PATCH")
             || method.eq_ignore_ascii_case("DELETE");
 
-        if !is_write_method {
-            return Ok(PyBytes::new(py, &[]).into_any());
+        if !is_write_method || conn.receive.bind(py).is_none() {
+            return ready(py, PyBytes::new(py, &[]).into_any());
         }
 
         let content_length = extract_content_length(scope_any);
@@ -730,6 +729,37 @@ impl PyRequest {
             Python::attach(|py| Ok(PyBytes::new(py, &body).into_any().unbind()))
         })
     }
+}
+
+#[pyclass(frozen, name = "_ReadyAwaitable", module = "fastrapi.requests")]
+struct ReadyAwaitable {
+    value: Py<PyAny>,
+}
+
+#[pymethods]
+impl ReadyAwaitable {
+    const fn __await__(slf: Bound<'_, Self>) -> Bound<'_, Self> {
+        slf
+    }
+
+    const fn __iter__(slf: Bound<'_, Self>) -> Bound<'_, Self> {
+        slf
+    }
+
+    fn __next__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Err(pyo3::exceptions::PyStopIteration::new_err((
+            self.value.clone_ref(py),
+        )))
+    }
+
+    #[pyo3(signature = (_value=None))]
+    fn send(&self, py: Python<'_>, _value: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        self.__next__(py)
+    }
+}
+
+fn ready<'py>(py: Python<'py>, value: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    Ok(Bound::new(py, ReadyAwaitable { value: value.unbind() })?.into_any())
 }
 
 #[pymethods]
