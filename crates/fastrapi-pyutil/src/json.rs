@@ -343,6 +343,9 @@ enum ObjKind {
     Path,
     IpAddress,
     Iterable,
+    StrSubclass,
+    IntSubclass,
+    FloatSubclass,
     Object,
     FallbackStr,
 }
@@ -398,6 +401,15 @@ fn probe_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
 
     if is_enum_instance(py, value) {
         return ObjKind::Enum;
+    }
+    if value.is_instance_of::<PyString>() {
+        return ObjKind::StrSubclass;
+    }
+    if value.is_instance_of::<PyInt>() {
+        return ObjKind::IntSubclass;
+    }
+    if value.is_instance_of::<PyFloat>() {
+        return ObjKind::FloatSubclass;
     }
 
     if instance_of(&DECIMAL_TYPE) {
@@ -506,6 +518,11 @@ pub fn classify_py_value<'a, 'py>(
         ObjKind::Path => PyJsonKind::Path,
         ObjKind::IpAddress => PyJsonKind::IpAddress,
         ObjKind::Iterable => PyJsonKind::Iterable,
+        ObjKind::StrSubclass => value.cast::<PyString>().map_or(PyJsonKind::Object, PyJsonKind::Str),
+        ObjKind::IntSubclass => value.cast::<PyInt>().map_or(PyJsonKind::Object, PyJsonKind::Int),
+        ObjKind::FloatSubclass => value
+            .cast::<PyFloat>()
+            .map_or(PyJsonKind::Object, PyJsonKind::Float),
         ObjKind::Object => PyJsonKind::Object,
         ObjKind::FallbackStr => PyJsonKind::FallbackStr,
     }
