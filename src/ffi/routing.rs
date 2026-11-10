@@ -4,7 +4,7 @@
 
 use std::str::FromStr;
 
-use pyo3::exceptions::{PyAssertionError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PySet, PyTuple};
@@ -167,11 +167,6 @@ impl PyAPIRoute {
         include_in_schema: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        if !path.starts_with('/') {
-            return Err(PyAssertionError::new_err(
-                "Routed paths must start with '/'",
-            ));
-        }
         let methods = match methods {
             Some(methods) if !methods.is_none() => {
                 validate_http_methods(methods)?;
@@ -313,7 +308,10 @@ pub(crate) fn route_objects<'py>(
         kwargs.set_item("include_in_schema", entry.include_in_schema)?;
         kwargs.set_item("tags", &entry.tags)?;
         kwargs.set_item("summary", &entry.summary)?;
-        kwargs.set_item("description", entry.description.as_deref().unwrap_or_default())?;
+        kwargs.set_item(
+            "description",
+            entry.description.as_deref().unwrap_or_default(),
+        )?;
         kwargs.set_item(
             "response_description",
             entry

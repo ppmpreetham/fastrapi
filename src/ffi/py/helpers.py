@@ -1,4 +1,5 @@
 import abc
+import dataclasses
 import datetime
 import re
 from collections import defaultdict, deque
@@ -15,12 +16,15 @@ from ipaddress import (
 )
 from pathlib import Path
 from types import GeneratorType
+from typing import Annotated, Any
 from uuid import UUID
 
 import anyio
 import anyio.to_thread
 from pydantic import AnyUrl, NameEmail, SecretBytes, SecretStr
-from pydantic_core import Url
+from pydantic import TypeAdapter, ValidationError
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined, Url
 from starlette.concurrency import run_in_threadpool
 
 
@@ -171,6 +175,101 @@ class AsyncExitStackMiddleware:
         async with AsyncExitStack() as stack:
             scope[self.context_name] = stack
             await self.app(scope, receive, send)
+
+
+@dataclasses.dataclass
+class ModelField:
+    field_info: FieldInfo
+    name: str
+    mode: str = "validation"
+    config: Any = None
+
+    def __post_init__(self):
+        self._type_adapter = TypeAdapter(Annotated[self.field_info.annotation, self.field_info], config=self.config)
+
+    @property
+    def alias(self):
+        return self.field_info.alias if self.field_info.alias is not None else self.name
+
+    @property
+    def validation_alias(self):
+        alias = self.field_info.validation_alias
+        return alias if isinstance(alias, str) and alias else None
+
+    @property
+    def serialization_alias(self):
+        return self.field_info.serialization_alias or None
+
+    @property
+    def default(self):
+        return self.get_default()
+
+    def get_default(self):
+        if self.field_info.is_required():
+            return PydanticUndefined
+        return self.field_info.get_default(call_default_factory=True)
+
+    def validate(self, value, values={}, *, loc=()):
+        try:
+            return self._type_adapter.validate_python(value, from_attributes=True), []
+        except ValidationError as exc:
+            return None, [{**error, "loc": loc + error.get("loc", ())} for error in exc.errors(include_url=False)]
+
+    def serialize(self, value, *, mode="json", **options):
+        return self._type_adapter.dump_python(value, mode=mode, **options)
+
+    def serialize_json(self, value, **options):
+        return self._type_adapter.dump_json(value, **options)
+
+    def __hash__(self):
+        return id(self)
+
+
+def create_model_field(name, type_, default=PydanticUndefined, field_info=None, alias=None, mode="validation"):
+    field_info = field_info or FieldInfo(annotation=type_, default=default, alias=alias)
+    return ModelField(mode=mode, name=name, field_info=field_info)
+
+
+def docs_routes(app):
+    from starlette.routing import Route
+
+    from fastrapi.openapi.docs import get_redoc_html, get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
+    from fastrapi.responses import JSONResponse
+
+    if not app.openapi_url:
+        return []
+
+    def openapi_url(request):
+        return request.scope.get("root_path", "").rstrip("/") + app.openapi_url
+
+    async def openapi(request):
+        return JSONResponse(app.openapi())
+
+    async def swagger_ui_html(request):
+        root = request.scope.get("root_path", "").rstrip("/")
+        redirect = app.swagger_ui_oauth2_redirect_url
+        return get_swagger_ui_html(
+            openapi_url=openapi_url(request),
+            title=f"{app.title} - Swagger UI",
+            oauth2_redirect_url=root + redirect if redirect else None,
+            init_oauth=app.swagger_ui_init_oauth,
+            swagger_ui_parameters=app.swagger_ui_parameters,
+        )
+
+    async def swagger_ui_redirect(request):
+        return get_swagger_ui_oauth2_redirect_html()
+
+    async def redoc_html(request):
+        return get_redoc_html(openapi_url=openapi_url(request), title=f"{app.title} - ReDoc")
+
+    routes = [Route(app.openapi_url, openapi, include_in_schema=False)]
+    if app.docs_url:
+        routes.append(Route(app.docs_url, swagger_ui_html, include_in_schema=False))
+        if app.swagger_ui_oauth2_redirect_url:
+            routes.append(Route(app.swagger_ui_oauth2_redirect_url, swagger_ui_redirect, include_in_schema=False))
+    if app.redoc_url:
+        routes.append(Route(app.redoc_url, redoc_html, include_in_schema=False))
+    return routes
 
 
 async def asgi_call(self, scope, receive, send):

@@ -6,6 +6,8 @@ use fastrapi_routing::route::{RouteEntry, WebSocketEntry};
 use pyo3::exceptions::PyTypeError;
 use pyo3::types::{PyDict, PyList, PyType};
 
+use crate::engine::app::{CheckDir, frontend_mount};
+use crate::engine::config::FrontendMount;
 use parking_lot::Mutex;
 use pyo3::Bound;
 use pyo3::prelude::{Py, PyAny, PyAnyMethods, PyResult, Python, pyclass, pymethods};
@@ -50,7 +52,6 @@ pub struct PyAPIRouter {
     pub deprecated: Option<bool>,
     #[pyo3(get)]
     pub include_in_schema: bool,
-    #[pyo3(get)]
     pub default_response_class: Option<Py<PyAny>>,
     #[pyo3(get)]
     pub generate_unique_id_function: Option<Py<PyAny>>,
@@ -77,6 +78,20 @@ pub struct PyAPIRouter {
     pub strict_content_type: Option<bool>,
     pub mounts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
     pub hosts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
+    pub frontends: Arc<Mutex<Vec<FrontendMount>>>,
+}
+
+impl PyAPIRouter {
+    #[must_use]
+    pub fn with_callbacks(self, callbacks: Option<Py<PyAny>>) -> Self {
+        match callbacks {
+            Some(callbacks) => Self {
+                callbacks: Some(callbacks),
+                ..self
+            },
+            None => self,
+        }
+    }
 }
 
 impl Default for PyAPIRouter {
@@ -115,6 +130,7 @@ impl Default for PyAPIRouter {
             strict_content_type: None,
             mounts: Arc::new(Mutex::new(Vec::new())),
             hosts: Arc::new(Mutex::new(Vec::new())),
+            frontends: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -216,6 +232,25 @@ impl PyAPIRouter {
         Ok(())
     }
 
+    #[pyo3(
+        signature = (path, *, directory, fallback=Some("auto".to_string()), check_dir=CheckDir::Mode("auto".to_owned())),
+        text_signature = "(self, path, *, directory, fallback='auto', check_dir='auto')"
+    )]
+    fn frontend(
+        &self,
+        py: Python<'_>,
+        path: String,
+        directory: String,
+        fallback: Option<String>,
+        check_dir: CheckDir,
+    ) -> PyResult<()> {
+        self.ensure_mutable()?;
+        let mount = frontend_mount(py, path, directory, fallback, check_dir)?;
+        self.frontends.lock().push(mount);
+        self.touch();
+        Ok(())
+    }
+
     #[pyo3(signature = (host, app, name=None))]
     fn host(&self, host: String, app: Py<PyAny>, name: Option<String>) -> PyResult<()> {
         if host.starts_with('/') {
@@ -230,9 +265,29 @@ impl PyAPIRouter {
     }
 
     #[getter]
+    fn default_response_class(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.default_response_class {
+            Some(class) => Ok(class.clone_ref(py)),
+            None => Py::new(
+                py,
+                crate::ffi::compat::DefaultPlaceholder::new(
+                    py.get_type::<fastrapi_http::responses::PyJSONResponse>()
+                        .into_any()
+                        .unbind(),
+                ),
+            )
+            .map(Py::into_any),
+        }
+    }
+
+    #[getter]
     fn route_class(&self, py: Python<'_>) -> Py<PyAny> {
         self.route_class.as_ref().map_or_else(
-            || py.get_type::<crate::ffi::routing::PyAPIRoute>().into_any().unbind(),
+            || {
+                py.get_type::<crate::ffi::routing::PyAPIRoute>()
+                    .into_any()
+                    .unbind()
+            },
             |class| class.clone_ref(py),
         )
     }

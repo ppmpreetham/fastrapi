@@ -171,7 +171,7 @@ pub(crate) struct DefaultPlaceholder {
 #[pymethods]
 impl DefaultPlaceholder {
     #[new]
-    const fn new(value: Py<PyAny>) -> Self {
+    pub(crate) const fn new(value: Py<PyAny>) -> Self {
         Self { value }
     }
 
@@ -340,7 +340,10 @@ fn generate_operation_id_for_path(
 }
 
 #[pyfunction]
-fn deep_dict_update(main_dict: &Bound<'_, PyDict>, update_dict: &Bound<'_, PyDict>) -> PyResult<()> {
+fn deep_dict_update(
+    main_dict: &Bound<'_, PyDict>,
+    update_dict: &Bound<'_, PyDict>,
+) -> PyResult<()> {
     for (key, value) in update_dict.iter() {
         if let Some(existing) = main_dict.get_item(&key)? {
             if let (Ok(left), Ok(right)) = (existing.cast::<PyDict>(), value.cast::<PyDict>()) {
@@ -408,6 +411,9 @@ pub(crate) fn register_compat_modules(parent: &Bound<'_, PyModule>) -> PyResult<
     utils.add_function(wrap_pyfunction!(get_path_param_names, &utils)?)?;
     utils.add_function(wrap_pyfunction!(generate_unique_id, &utils)?)?;
     utils.add_function(wrap_pyfunction!(get_value_or_default, &utils)?)?;
+    for name in ["ModelField", "create_model_field"] {
+        utils.add(name, helpers.getattr(name)?)?;
+    }
     parent.add_submodule(&utils)?;
 
     let params = PyModule::new(py, "param_functions")?;

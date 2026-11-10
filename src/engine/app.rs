@@ -8,7 +8,7 @@ use crate::ffi::decorators;
 use crate::ffi::decorators::{PyAPIRouter, collect_router_routes};
 use ahash::AHasher;
 use fastrapi_core::method::HttpMethod;
-use fastrapi_http::middleware::{MiddlewareContainer, PyMiddleware};
+use fastrapi_http::middleware::{DeclaredLayer, MiddlewareContainer, PyMiddleware};
 use fastrapi_http::staticfiles::PyStaticFiles;
 use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
 use fastrapi_pyutil::imports::STARLETTE_STATE;
@@ -52,6 +52,10 @@ impl FastrAPI {
                 mounts.push((path, app, name));
             }
             hosts.extend(router.hosts.lock().drain(..));
+            for mut frontend in router.frontends.lock().drain(..) {
+                frontend.path = fastrapi_core::path::join_path(&full_prefix, &frontend.path);
+                self.frontend_mounts.push(frontend);
+            }
             for sub in router.sub_routers.lock().iter() {
                 let sub_router = sub.router.bind(py).borrow().clone();
                 stack.push((
@@ -61,7 +65,7 @@ impl FastrAPI {
             }
         }
         for (path, app, name) in mounts {
-            self.mount(py, path, app.bind(py), name)?;
+            self.mount(path, app.bind(py), name)?;
         }
         for (host, app, name) in hosts {
             self.host(py, host, app.bind(py), name.as_deref())?;
@@ -90,8 +94,53 @@ impl FastrAPI {
     }
 }
 
+pub(crate) fn frontend_mount(
+    py: Python<'_>,
+    mut path: String,
+    directory: String,
+    fallback: Option<String>,
+    check_dir: CheckDir,
+) -> PyResult<FrontendMount> {
+    if !path.starts_with('/') {
+        return Err(PyValueError::new_err("Frontend path must start with '/'"));
+    }
+    let check_dir = check_dir.resolve(py, &directory)?;
+    if check_dir {
+        let realpath = |path: &str| -> PyResult<String> {
+            py.import(intern!(py, "os.path"))?
+                .call_method1(intern!(py, "realpath"), (path,))?
+                .extract()
+        };
+        if !Path::new(&directory).is_dir() {
+            return Err(PyRuntimeError::new_err(format!(
+                "Frontend directory '{directory}' does not exist. Resolved absolute path: '{}'",
+                realpath(&directory)?
+            )));
+        }
+        if let Some(file) = fallback
+            .as_deref()
+            .filter(|file| matches!(*file, "index.html" | "404.html"))
+            && !Path::new(&directory).join(file).is_file()
+        {
+            return Err(PyRuntimeError::new_err(format!(
+                "Frontend fallback file '{file}' does not exist in directory '{directory}'. Resolved absolute directory: '{}'",
+                realpath(&directory)?
+            )));
+        }
+    }
+    if path.len() > 1 && path.ends_with('/') {
+        path.truncate(path.trim_end_matches('/').len());
+    }
+    Ok(FrontendMount {
+        path,
+        directory,
+        fallback,
+        check_dir,
+    })
+}
+
 #[derive(FromPyObject)]
-enum CheckDir {
+pub(crate) enum CheckDir {
     Flag(bool),
     Mode(String),
     #[pyo3(transparent)]
@@ -262,9 +311,15 @@ impl FastrAPI {
             PyAPIRouter {
                 default_response_class: explicit_default_response_class,
                 strict_content_type,
+                deprecated,
+                include_in_schema,
                 ..PyAPIRouter::default()
-            },
+            }
+            .with_callbacks(callbacks.as_ref().map(|callbacks| callbacks.clone_ref(py))),
         )?;
+        if let Some(routes) = &routes {
+            crate::ffi::openapi::add_route_objects(py, &base_router.borrow(py), routes.bind(py))?;
+        }
 
         let state = STARLETTE_STATE
             .get(py)
@@ -350,6 +405,7 @@ impl FastrAPI {
             openapi_cache: Mutex::new(None),
             openapi_schema: Mutex::new(None),
             asgi: std::sync::OnceLock::new(),
+            docs_routes: pyo3::sync::PyOnceLock::new(),
             openapi_version: "3.1.0".to_string(),
             extra: extra.map_or_else(|| PyDict::new(py).unbind(), Bound::unbind),
             router: base_router,
@@ -417,7 +473,6 @@ impl FastrAPI {
     #[pyo3(signature = (path, app, name=None))]
     fn mount(
         &mut self,
-        py: Python<'_>,
         path: String,
         app: &Bound<'_, PyAny>,
         name: Option<String>,
@@ -432,8 +487,7 @@ impl FastrAPI {
             path
         };
 
-        if let Ok(sub_app) = app.extract::<PyRef<'_, Self>>() {
-            self.inherit_sub_app_lifespan(py, &sub_app)?;
+        if app.extract::<PyRef<'_, Self>>().is_ok() {
             let owned = app
                 .clone()
                 .into_any()
@@ -542,9 +596,23 @@ impl FastrAPI {
     }
 
     #[getter(routes)]
-    fn get_routes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let (routes, websockets) = self.router.bind(py).borrow().snapshot(py)?;
-        crate::ffi::routing::route_objects(py, &routes, &websockets)
+    fn get_routes<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyList>> {
+        let py = slf.py();
+        let app = slf.borrow();
+        let docs = app.docs_routes.get_or_try_init(py, || {
+            crate::ffi::compat::py_helpers(py)?
+                .getattr(intern!(py, "docs_routes"))?
+                .call1((slf,))?
+                .cast_into::<PyList>()
+                .map(Bound::unbind)
+                .map_err(PyErr::from)
+        })?;
+        let all = PyList::new(py, docs.bind(py))?;
+        let (routes, websockets) = app.router.bind(py).borrow().snapshot(py)?;
+        for route in crate::ffi::routing::route_objects(py, &routes, &websockets)? {
+            all.append(route)?;
+        }
+        Ok(all)
     }
 
     #[pyo3(signature = (name, /, **path_params))]
@@ -609,51 +677,13 @@ impl FastrAPI {
     fn frontend(
         &mut self,
         py: Python<'_>,
-        mut path: String,
+        path: String,
         directory: String,
         fallback: Option<String>,
         check_dir: CheckDir,
     ) -> PyResult<()> {
-        if !path.starts_with('/') {
-            return Err(PyValueError::new_err("Frontend path must start with '/'"));
-        }
-
-        let check_dir = check_dir.resolve(py, &directory)?;
-        if check_dir {
-            let realpath = |path: &str| -> PyResult<String> {
-                py.import(intern!(py, "os.path"))?
-                    .call_method1(intern!(py, "realpath"), (path,))?
-                    .extract()
-            };
-            if !Path::new(&directory).is_dir() {
-                return Err(PyRuntimeError::new_err(format!(
-                    "Frontend directory '{directory}' does not exist. Resolved absolute path: '{}'",
-                    realpath(&directory)?
-                )));
-            }
-            if let Some(file) = fallback
-                .as_deref()
-                .filter(|file| matches!(*file, "index.html" | "404.html"))
-                && !Path::new(&directory).join(file).is_file()
-            {
-                return Err(PyRuntimeError::new_err(format!(
-                    "Frontend fallback file '{file}' does not exist in directory '{directory}'. Resolved absolute directory: '{}'",
-                    realpath(&directory)?
-                )));
-            }
-        }
-
-        if path.len() > 1 && path.ends_with('/') {
-            path.truncate(path.trim_end_matches('/').len());
-        }
-
-        self.frontend_mounts.push(FrontendMount {
-            path,
-            directory,
-            fallback,
-            check_dir,
-        });
-
+        self.frontend_mounts
+            .push(frontend_mount(py, path, directory, fallback, check_dir)?);
         Ok(())
     }
 
@@ -692,8 +722,8 @@ impl FastrAPI {
             let py_middleware = PyMiddleware::new(py, func.clone_ref(py));
             slf.borrow_mut(py)
                 .middlewares
-                .py_middlewares
-                .push(Arc::new(py_middleware));
+                .order
+                .push(DeclaredLayer::Decorator(Arc::new(py_middleware)));
             info!("🔗 Registered {} middleware", middleware_type);
             Ok(func)
         };
@@ -975,22 +1005,6 @@ impl FastrAPI {
                 }
             }
         }
-    }
-
-    fn inherit_sub_app_lifespan(&mut self, py: Python<'_>, sub: &PyRef<'_, Self>) -> PyResult<()> {
-        let extend = |parent: &mut Option<Py<PyAny>>, child: &Option<Py<PyAny>>| -> PyResult<()> {
-            let Some(child_list) = child else {
-                return Ok(());
-            };
-            let list = parent.get_or_insert_with(|| PyList::empty(py).into());
-            list.bind(py)
-                .call_method1("extend", (child_list.bind(py),))?;
-            Ok(())
-        };
-
-        extend(&mut self.on_startup, &sub.on_startup)?;
-        extend(&mut self.on_shutdown, &sub.on_shutdown)?;
-        Ok(())
     }
 }
 crate::generate_http_methods!(
