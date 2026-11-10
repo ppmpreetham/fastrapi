@@ -5,8 +5,8 @@ use crate::engine::config::{FrontendMount, StaticMount};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::header::ACCEPT;
-use axum::http::{Method, StatusCode};
+use axum::http::header::{ACCEPT, CONTENT_TYPE};
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use smallvec::SmallVec;
 use std::convert::Infallible;
@@ -50,6 +50,20 @@ async fn serve_frontend_file(req: Request, path: PathBuf, status: StatusCode) ->
     Some(response)
 }
 
+fn static_error(response: Response) -> Response {
+    let body: &'static [u8] = match response.status() {
+        StatusCode::NOT_FOUND => br#"{"detail":"Not Found"}"#,
+        StatusCode::METHOD_NOT_ALLOWED => br#"{"detail":"Method Not Allowed"}"#,
+        _ => return response,
+    };
+    (
+        response.status(),
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        body,
+    )
+        .into_response()
+}
+
 pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
     let mount_path = if mount.path == "/" {
         "/".to_string()
@@ -79,10 +93,10 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
                         .await
                         .map(IntoResponse::into_response)?;
                     if response.status() != StatusCode::NOT_FOUND {
-                        return Ok::<_, Infallible>(response);
+                        return Ok::<_, Infallible>(static_error(response));
                     }
                 }
-                Ok(StatusCode::NOT_FOUND.into_response())
+                Ok(static_error(StatusCode::NOT_FOUND.into_response()))
             }
         });
         return app.nest_service(&mount_path, service);
@@ -90,7 +104,16 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
 
     let serve_dir = ServeDir::new(&mount.directory).append_index_html_on_directories(mount.html);
     if mount.follow_symlink {
-        return app.nest_service(&mount_path, serve_dir);
+        let service = service_fn(move |req: Request| {
+            let serve_dir = serve_dir.clone();
+            async move {
+                serve_dir
+                    .oneshot(req)
+                    .await
+                    .map(|response| static_error(response.into_response()))
+            }
+        });
+        return app.nest_service(&mount_path, service);
     }
 
     let directory = Arc::new(PathBuf::from(mount.directory));
@@ -110,7 +133,7 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
             serve_dir
                 .oneshot(req)
                 .await
-                .map(IntoResponse::into_response)
+                .map(|response| static_error(response.into_response()))
         }
     });
 
