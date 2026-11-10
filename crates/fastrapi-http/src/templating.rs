@@ -1,7 +1,7 @@
 //! This module contains the `Jinja2Templates` class.
 //! The class renders Jinja2 templates and returns HTML responses.
 
-use pyo3::exceptions::{PyImportError, PyTypeError};
+use pyo3::exceptions::PyImportError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -69,51 +69,29 @@ impl PyJinja2Templates {
     ///
     /// Returns:
     ///     An HTML response with the rendered template content.
-    #[pyo3(signature = (request_or_name, name_or_context=None, context=None, status_code=200, headers=None, media_type=None, background=None))]
+    #[pyo3(signature = (request, name, context=None, status_code=200, headers=None, media_type=None, background=None))]
     #[pyo3(name = "TemplateResponse")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the signature copies Starlette's Jinja2Templates.TemplateResponse"
+    )]
     fn template_response(
         &self,
         py: Python<'_>,
-        request_or_name: Bound<'_, PyAny>,
-        name_or_context: Option<Bound<'_, PyAny>>,
-        context: Option<Bound<'_, PyDict>>,
+        request: Bound<'_, PyAny>,
+        name: Bound<'_, PyAny>,
+        context: Option<Bound<'_, PyAny>>,
         status_code: u16,
-        headers: Option<Bound<'_, PyDict>>,
+        headers: Option<Bound<'_, PyAny>>,
         media_type: Option<String>,
         background: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(pyo3::intern!(py, "status_code"), status_code)?;
-        if let Some(value) = headers {
-            kwargs.set_item(pyo3::intern!(py, "headers"), value)?;
-        }
-        if let Some(value) = media_type {
-            kwargs.set_item(pyo3::intern!(py, "media_type"), value)?;
-        }
-        if let Some(value) = background {
-            kwargs.set_item(pyo3::intern!(py, "background"), value)?;
-        }
-        let (name, context) = if let Ok(name) = request_or_name.extract::<&str>() {
-            (
-                name.to_owned(),
-                name_or_context.and_then(|value| value.cast::<PyDict>().ok().cloned()),
-            )
-        } else {
-            let name = name_or_context
-                .ok_or_else(|| PyTypeError::new_err("missing template name"))?
-                .extract::<String>()?;
-            let context = context.unwrap_or_else(|| PyDict::new(py));
-            context.set_item(pyo3::intern!(py, "request"), request_or_name)?;
-            (name, Some(context))
-        };
-        let context = context.unwrap_or_else(|| PyDict::new(py));
         Ok(self
             .inner
             .bind(py)
-            .call_method(
+            .call_method1(
                 pyo3::intern!(py, "TemplateResponse"),
-                (name, context),
-                Some(&kwargs),
+                (request, name, context, status_code, headers, media_type, background),
             )?
             .unbind())
     }
