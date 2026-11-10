@@ -20,6 +20,85 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio_util::io::ReaderStream;
 
+struct MimeTables {
+    suffixes: std::collections::HashMap<String, String>,
+    encodings: std::collections::HashMap<String, String>,
+    types: std::collections::HashMap<String, String>,
+}
+
+static MIME_TABLES: pyo3::sync::PyOnceLock<MimeTables> = pyo3::sync::PyOnceLock::new();
+
+fn mime_tables(py: Python<'_>) -> PyResult<&MimeTables> {
+    MIME_TABLES.get_or_try_init(py, || {
+        let mimetypes = py.import(intern!(py, "mimetypes"))?;
+        if mimetypes.getattr(intern!(py, "_db"))?.is_none() {
+            mimetypes.call_method0(intern!(py, "init"))?;
+        }
+        let db = mimetypes.getattr(intern!(py, "_db"))?;
+        Ok(MimeTables {
+            suffixes: db.getattr(intern!(py, "suffix_map"))?.extract()?,
+            encodings: db.getattr(intern!(py, "encodings_map"))?.extract()?,
+            types: db.getattr(intern!(py, "types_map"))?.get_item(1)?.extract()?,
+        })
+    })
+}
+
+const fn is_separator(byte: u8) -> bool {
+    byte == b'/' || (cfg!(windows) && byte == b'\\')
+}
+
+fn splitext(path: &str) -> (&str, &str) {
+    let bytes = path.as_bytes();
+    let filename_start = bytes.iter().rposition(|&byte| is_separator(byte)).map_or(0, |index| index + 1);
+    match path[filename_start..].rfind('.') {
+        Some(dot) if path[filename_start..filename_start + dot].bytes().any(|byte| byte != b'.') => {
+            path.split_at(filename_start + dot)
+        }
+        _ => (path, ""),
+    }
+}
+
+fn has_url_scheme(path: &str) -> bool {
+    path.find(':').is_some_and(|colon| {
+        colon > 1
+            && path.as_bytes()[0].is_ascii_alphabetic()
+            && path.as_bytes()[..colon]
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    })
+}
+
+pub(crate) fn guess_media_type(py: Python<'_>, path: &str) -> PyResult<Option<String>> {
+    if has_url_scheme(path) {
+        return py
+            .import(intern!(py, "mimetypes"))?
+            .call_method1(intern!(py, "guess_type"), (path,))?
+            .get_item(0)?
+            .extract();
+    }
+    let tables = mime_tables(py)?;
+    let (base, ext) = splitext(path);
+    if !tables.suffixes.contains_key(&ext.to_lowercase()) {
+        return Ok(lookup(tables, base, ext));
+    }
+    let (mut base, mut ext) = (base.to_owned(), ext.to_owned());
+    while let Some(suffix) = tables.suffixes.get(&ext.to_lowercase()) {
+        let joined = format!("{base}{suffix}");
+        let (next_base, next_ext) = splitext(&joined);
+        (base, ext) = (next_base.to_owned(), next_ext.to_owned());
+    }
+    Ok(lookup(tables, &base, &ext))
+}
+
+fn lookup(tables: &MimeTables, base: &str, ext: &str) -> Option<String> {
+    let ext = if tables.encodings.contains_key(ext) {
+        splitext(base).1
+    } else {
+        ext
+    };
+    tables.types.get(&ext.to_lowercase()).cloned()
+}
+
 pub(crate) fn guess_mime(path: &str) -> &'static str {
     let ext = path.rsplit('.').next().unwrap_or("");
     match ext {

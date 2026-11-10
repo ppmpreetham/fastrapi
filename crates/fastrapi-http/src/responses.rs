@@ -281,13 +281,7 @@ impl PyFileResponse {
         let media_type = match media_type {
             Some(media_type) => Some(media_type),
             None => Some(
-                py.import(pyo3::intern!(py, "mimetypes"))?
-                    .call_method1(
-                        pyo3::intern!(py, "guess_type"),
-                        (filename.as_deref().unwrap_or(&path),),
-                    )?
-                    .get_item(0)?
-                    .extract::<Option<String>>()?
+                crate::response_file::guess_media_type(py, filename.as_deref().unwrap_or(&path))?
                     .unwrap_or_else(|| "application/octet-stream".to_owned()),
             ),
         };
