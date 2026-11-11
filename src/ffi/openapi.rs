@@ -5,7 +5,7 @@
 //! The function sends these routes through the router code of the app.
 //! Thus the output is the same as the served `/openapi.json`, and only one implementation exists.
 
-use crate::ffi::compat::{python_source_module, register_openapi_helpers};
+use crate::ffi::compat::{DefaultPlaceholder, python_source_module, register_openapi_helpers};
 use crate::ffi::decorators::{PyAPIRouter, collect_router_routes};
 use crate::ffi::routing::PyRouteEntry;
 use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
@@ -79,7 +79,7 @@ pub fn get_openapi(
     Ok(json_to_py_object(py, &spec))
 }
 
-const ROUTE_OPTIONS: [&str; 15] = [
+const ROUTE_OPTIONS: [&str; 22] = [
     "response_model",
     "status_code",
     "tags",
@@ -95,6 +95,13 @@ const ROUTE_OPTIONS: [&str; 15] = [
     "name",
     "openapi_extra",
     "generate_unique_id_function",
+    "strict_content_type",
+    "response_model_include",
+    "response_model_exclude",
+    "response_model_by_alias",
+    "response_model_exclude_unset",
+    "response_model_exclude_defaults",
+    "response_model_exclude_none",
 ];
 
 fn router_from_routes<'py>(
@@ -153,6 +160,7 @@ pub(crate) fn add_route_objects(
         for option in ROUTE_OPTIONS {
             if let Ok(value) = route.getattr(option)
                 && !value.is_none()
+                && !value.is_instance_of::<DefaultPlaceholder>()
             {
                 kwargs.set_item(option, value)?;
             }

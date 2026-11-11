@@ -110,3 +110,43 @@ def test_user_middleware_matches_fastapi():
         ]
 
     both(run)
+
+
+def test_api_route_attributes_match_fastapi():
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        a: int
+        b: int | None = None
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/items/{item_id:int}", response_model=Out, response_model_exclude_none=True)
+        def item(item_id: int):
+            return {"a": item_id}
+
+        @app.get("/html", response_class=lib.responses.HTMLResponse, operation_id="html_op")
+        def html():
+            return "<p/>"
+
+        def attrs(route):
+            return (
+                route.unique_id,
+                route.path_format,
+                route.path_regex.pattern,
+                sorted(route.param_convertors),
+                getattr(route.response_class, "value", route.response_class).__name__,
+                route.response_model_include,
+                route.response_model_exclude,
+                route.response_model_by_alias,
+                route.response_model_exclude_unset,
+                route.response_model_exclude_none,
+                route.dependency_overrides_provider is not None,
+            )
+
+        manual = submodule(lib, "routing").APIRoute("/m/{x}", item, methods=["post"])
+        routes = sorted((attrs(r) for r in app.routes if getattr(r, "path", "") in ("/items/{item_id:int}", "/html")))
+        return routes, attrs(manual)
+
+    both(run)

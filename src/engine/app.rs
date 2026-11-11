@@ -637,6 +637,7 @@ impl FastrAPI {
         let all = PyList::new(py, docs.bind(py))?;
         let (routes, websockets) = app.router.bind(py).borrow().snapshot(py)?;
         for route in crate::ffi::routing::route_objects(py, &routes, &websockets)? {
+            route.setattr(intern!(py, "dependency_overrides_provider"), slf)?;
             all.append(route)?;
         }
         Ok(all)

@@ -10,9 +10,18 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PySet, PyTuple};
 
 use fastrapi_core::method::HttpMethod;
-use fastrapi_core::path::{extract_path_param_names, strip_path_convertors};
+use fastrapi_core::path::extract_path_param_names;
 use fastrapi_pyutil::json::json_to_py_object;
 use fastrapi_pyutil::lazy::LazyPyAttr;
+
+fastrapi_pyutil::cached_py_import!(COMPILE_PATH, "starlette.routing", "compile_path");
+fastrapi_pyutil::cached_py_import!(
+    DEFAULT_PLACEHOLDER,
+    "fastrapi.datastructures",
+    "DefaultPlaceholder"
+);
+fastrapi_pyutil::cached_py_import!(GENERATE_UNIQUE_ID, "fastrapi.utils", "generate_unique_id");
+fastrapi_pyutil::cached_py_import!(JSON_RESPONSE, "fastrapi.responses", "JSONResponse");
 use fastrapi_routing::route::{RouteEntry, WebSocketEntry};
 use pyo3::Bound;
 
@@ -167,6 +176,7 @@ impl PyAPIRoute {
         include_in_schema: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
+        let py = slf.py();
         let methods = match methods {
             Some(methods) if !methods.is_none() => {
                 validate_http_methods(methods)?;
@@ -190,7 +200,31 @@ impl PyAPIRoute {
         attrs.set_item("methods", &methods)?;
         attrs.set_item("name", default_name)?;
         attrs.set_item("include_in_schema", include_in_schema)?;
-        attrs.set_item("path_format", strip_path_convertors(path))?;
+        let (path_regex, path_format, param_convertors) = COMPILE_PATH
+            .get(py)?
+            .call1((path,))?
+            .extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
+        attrs.set_item("path_regex", path_regex)?;
+        attrs.set_item("path_format", path_format)?;
+        attrs.set_item("param_convertors", param_convertors)?;
+        let placeholder = DEFAULT_PLACEHOLDER.get(py)?;
+        attrs.set_item(
+            "response_class",
+            placeholder.call1((JSON_RESPONSE.get(py)?,))?,
+        )?;
+        attrs.set_item(
+            "generate_unique_id_function",
+            placeholder.call1((GENERATE_UNIQUE_ID.get(py)?,))?,
+        )?;
+        attrs.set_item("strict_content_type", placeholder.call1((true,))?)?;
+        attrs.set_item("response_model_by_alias", true)?;
+        for key in [
+            "response_model_exclude_unset",
+            "response_model_exclude_defaults",
+            "response_model_exclude_none",
+        ] {
+            attrs.set_item(key, false)?;
+        }
         for key in [
             "summary",
             "operation_id",
@@ -199,8 +233,11 @@ impl PyAPIRoute {
             "status_code",
             "openapi_extra",
             "callbacks",
+            "response_model_include",
+            "response_model_exclude",
+            "dependency_overrides_provider",
         ] {
-            attrs.set_item(key, slf.py().None())?;
+            attrs.set_item(key, py.None())?;
         }
         attrs.set_item("tags", PyList::empty(slf.py()))?;
         attrs.set_item("dependencies", PyList::empty(slf.py()))?;
@@ -228,8 +265,24 @@ impl PyAPIRoute {
         }
         slf.borrow_mut().path = path.to_string();
         let instance_dict = slf.as_any().getattr("__dict__")?;
-        instance_dict.call_method1("update", (attrs,))?;
-        Ok(())
+        instance_dict.call_method1("update", (&attrs,))?;
+        let operation_id = attrs.get_item("operation_id")?.filter(|id| !id.is_none());
+        let unique_id = if let Some(operation_id) = operation_id {
+            operation_id
+        } else {
+            let generate = match attrs
+                .get_item("generate_unique_id_function")?
+                .filter(|function| !function.is_none())
+            {
+                Some(function) if function.is_instance(placeholder)? => {
+                    function.getattr(intern!(py, "value"))?
+                }
+                Some(function) => function,
+                None => GENERATE_UNIQUE_ID.get(py)?.clone(),
+            };
+            generate.call1((slf,))?
+        };
+        slf.setattr(intern!(py, "unique_id"), unique_id)
     }
 
     fn matches<'py>(
@@ -347,6 +400,36 @@ pub(crate) fn route_objects<'py>(
                 .as_ref()
                 .map(|extra| json_to_py_object(py, extra)),
         )?;
+        let response = &entry.handler.response;
+        if entry.explicit_response_class {
+            kwargs.set_item("response_class", response.response_class.as_ref())?;
+        }
+        if let Some(function) = &entry.generate_unique_id_function {
+            kwargs.set_item("generate_unique_id_function", function)?;
+        }
+        if let Some(strict) = entry.handler.payload.strict_content_type {
+            kwargs.set_item("strict_content_type", strict)?;
+        }
+        let options = response
+            .dump_options
+            .as_ref()
+            .map(|options| options.bind(py));
+        let option = |key: &str| -> PyResult<Option<Bound<'py, PyAny>>> {
+            options.map_or(Ok(None), |options| options.get_item(key))
+        };
+        kwargs.set_item("response_model_include", option("include")?)?;
+        kwargs.set_item("response_model_exclude", option("exclude")?)?;
+        for (key, name) in [
+            ("by_alias", "response_model_by_alias"),
+            ("exclude_unset", "response_model_exclude_unset"),
+            ("exclude_defaults", "response_model_exclude_defaults"),
+            ("exclude_none", "response_model_exclude_none"),
+        ] {
+            kwargs.set_item(
+                name,
+                option(key)?.is_some_and(|value| value.is_truthy().unwrap_or(false)),
+            )?;
+        }
         kwargs.set_item(
             "_fastrapi_entry",
             Py::new(
