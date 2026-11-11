@@ -1,11 +1,11 @@
 //! The OAuth2 password form classes `OAuth2PasswordRequestForm` and `OAuth2PasswordRequestFormStrict`.
 //! These dependency classes read the `username`, the `password`, and the scopes from form data.
 
-use fastrapi_http::exceptions::http_exception;
+use fastrapi_http::exceptions::request_validation_error_type;
 use fastrapi_http::request::PyRequest;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{IntoPyDict, PyDict, PyList};
 
 /// This is a dependency class to collect the `username` and `password` as form data
 /// for an OAuth2 password flow.
@@ -140,15 +140,87 @@ pub struct OAuth2PasswordRequestFormStrict {
     pub client_secret: Option<String>,
 }
 
-fn form_value(form: &Bound<'_, PyAny>, key: &str) -> PyResult<Option<String>> {
-    form.call_method1("get", (key,))?.extract()
+struct PasswordForm {
+    grant_type: Option<String>,
+    username: String,
+    password: String,
+    scope: String,
+    client_id: Option<String>,
+    client_secret: Option<String>,
 }
 
-fn required_form_value(form: &Bound<'_, PyAny>, key: &str) -> PyResult<String> {
-    form_value(form, key)?.ok_or_else(|| {
-        Python::attach(|py| {
-            http_exception(py, 422, Some(&format!("missing form field: {key}")), None)
-        })
+fn form_error<'py>(
+    py: Python<'py>,
+    kind: &str,
+    field: &str,
+    msg: &str,
+    input: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let error = PyDict::new(py);
+    error.set_item("type", kind)?;
+    error.set_item("loc", ("body", field))?;
+    error.set_item("msg", msg)?;
+    error.set_item("input", input)?;
+    if input.is_some() {
+        error.set_item("ctx", [("pattern", GRANT_TYPE_PATTERN)].into_py_dict(py)?)?;
+    }
+    Ok(error)
+}
+
+const GRANT_TYPE_PATTERN: &str = "^password$";
+
+fn password_form(request: &Bound<'_, PyRequest>, strict: bool) -> PyResult<PasswordForm> {
+    let py = request.py();
+    let form = request.call_method0("form_sync")?;
+    let field = |key: &str| -> PyResult<Option<String>> {
+        Ok(form
+            .call_method1("get", (key,))?
+            .extract::<Option<String>>()?
+            .filter(|value| !value.is_empty()))
+    };
+    let errors = PyList::empty(py);
+    let grant_type = field("grant_type")?;
+    match grant_type.as_deref() {
+        Some("password") => {}
+        Some(other) => errors.append(form_error(
+            py,
+            "string_pattern_mismatch",
+            "grant_type",
+            "String should match pattern '^password$'",
+            Some(other),
+        )?)?,
+        None if strict => {
+            errors.append(form_error(
+                py,
+                "missing",
+                "grant_type",
+                "Field required",
+                None,
+            )?)?;
+        }
+        None => {}
+    }
+    let required = |key: &str| -> PyResult<String> {
+        let value = field(key)?;
+        if value.is_none() {
+            errors.append(form_error(py, "missing", key, "Field required", None)?)?;
+        }
+        Ok(value.unwrap_or_default())
+    };
+    let username = required("username")?;
+    let password = required("password")?;
+    if !errors.is_empty() {
+        return Err(PyErr::from_value(
+            request_validation_error_type(py)?.call1((errors,))?,
+        ));
+    }
+    Ok(PasswordForm {
+        grant_type,
+        username,
+        password,
+        scope: field("scope")?.unwrap_or_default(),
+        client_id: field("client_id")?,
+        client_secret: field("client_secret")?,
     })
 }
 
@@ -180,15 +252,14 @@ impl OAuth2PasswordRequestForm {
     }
 
     fn __call__<'py>(&self, _py: Python<'py>, request: &Bound<'py, PyRequest>) -> PyResult<Self> {
-        let form = request.call_method0("form_sync")?;
-        let form = &form;
+        let form = password_form(request, false)?;
         Ok(Self {
-            grant_type: form_value(form, "grant_type")?,
-            username: required_form_value(form, "username")?,
-            password: required_form_value(form, "password")?,
-            scope: form_value(form, "scope")?.unwrap_or_default(),
-            client_id: form_value(form, "client_id")?,
-            client_secret: form_value(form, "client_secret")?,
+            grant_type: form.grant_type,
+            username: form.username,
+            password: form.password,
+            scope: form.scope,
+            client_id: form.client_id,
+            client_secret: form.client_secret,
         })
     }
 }
@@ -225,19 +296,14 @@ impl OAuth2PasswordRequestFormStrict {
     }
 
     fn __call__<'py>(&self, _py: Python<'py>, request: &Bound<'py, PyRequest>) -> PyResult<Self> {
-        let form = request.call_method0("form_sync")?;
-        let form = &form;
-        let grant_type = form_value(form, "grant_type")?.unwrap_or_else(|| "password".to_owned());
-        if grant_type != "password" {
-            return Err(PyValueError::new_err("grant_type must be password"));
-        }
+        let form = password_form(request, true)?;
         Ok(Self {
-            grant_type,
-            username: required_form_value(form, "username")?,
-            password: required_form_value(form, "password")?,
-            scope: form_value(form, "scope")?.unwrap_or_default(),
-            client_id: form_value(form, "client_id")?,
-            client_secret: form_value(form, "client_secret")?,
+            grant_type: form.grant_type.unwrap_or_default(),
+            username: form.username,
+            password: form.password,
+            scope: form.scope,
+            client_id: form.client_id,
+            client_secret: form.client_secret,
         })
     }
 }

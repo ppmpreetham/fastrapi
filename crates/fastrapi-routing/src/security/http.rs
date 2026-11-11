@@ -2,7 +2,7 @@
 //! Each security class reads the `Authorization` header and gives the credentials to the endpoint.
 
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyDict, PyType};
 use smart_default::SmartDefault;
 
 use super::callable;
@@ -210,11 +210,7 @@ pub struct HTTPDigest {
 impl HTTPDigest {
     #[new]
     #[pyo3(signature = (*, scheme_name=None, description=None, auto_error=true))]
-    fn new(
-        scheme_name: Option<String>,
-        description: Option<String>,
-        auto_error: bool,
-    ) -> Self {
+    fn new(scheme_name: Option<String>, description: Option<String>, auto_error: bool) -> Self {
         Self {
             scheme_name: scheme_name.or_else(|| Some("HTTPDigest".to_owned())),
             description,
@@ -302,3 +298,78 @@ impl HTTPBasicCredentials {
         Self { username, password }
     }
 }
+
+fn credentials_dump<'py>(
+    py: Python<'py>,
+    fields: [(&str, &str); 2],
+    include: Option<&Bound<'py, PyAny>>,
+    exclude: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dump = PyDict::new(py);
+    for (name, value) in fields {
+        let included = include.map_or(Ok(true), |include| include.contains(name))?;
+        let excluded = exclude.map_or(Ok(false), |exclude| exclude.contains(name))?;
+        if included && !excluded {
+            dump.set_item(name, value)?;
+        }
+    }
+    Ok(dump)
+}
+
+fn credentials_json(fields: [(&str, &str); 2]) -> String {
+    let object: serde_json::Map<String, serde_json::Value> = fields
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.into()))
+        .collect();
+    serde_json::Value::Object(object).to_string()
+}
+
+macro_rules! credentials_model {
+    ($ty:ident, $first:ident, $second:ident) => {
+        impl $ty {
+            const fn fields(&self) -> [(&'static str, &str); 2] {
+                [
+                    (stringify!($first), self.$first.as_str()),
+                    (stringify!($second), self.$second.as_str()),
+                ]
+            }
+        }
+
+        #[pymethods]
+        impl $ty {
+            #[pyo3(signature = (*, include=None, exclude=None, **_options))]
+            fn model_dump<'py>(
+                &self,
+                py: Python<'py>,
+                include: Option<&Bound<'py, PyAny>>,
+                exclude: Option<&Bound<'py, PyAny>>,
+                _options: Option<&Bound<'py, PyDict>>,
+            ) -> PyResult<Bound<'py, PyDict>> {
+                credentials_dump(py, self.fields(), include, exclude)
+            }
+
+            #[pyo3(signature = (**_options))]
+            fn model_dump_json(&self, _options: Option<&Bound<'_, PyDict>>) -> String {
+                credentials_json(self.fields())
+            }
+
+            #[classmethod]
+            fn model_validate<'py>(
+                cls: &Bound<'py, PyType>,
+                value: &Bound<'py, PyAny>,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                if value.is_instance(cls)? {
+                    return Ok(value.clone());
+                }
+                cls.call((), Some(value.cast::<PyDict>()?))
+            }
+
+            fn model_copy(&self) -> Self {
+                self.clone()
+            }
+        }
+    };
+}
+
+credentials_model!(HTTPAuthorizationCredentials, scheme, credentials);
+credentials_model!(HTTPBasicCredentials, username, password);
