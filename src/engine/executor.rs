@@ -26,6 +26,7 @@ use smallvec::SmallVec;
 use std::sync::{Arc, OnceLock};
 
 use fastrapi_http::background::OwnBackground;
+use fastrapi_http::exceptions::plain_server_error;
 use fastrapi_http::request::create_py_request;
 use fastrapi_http::response_convert::convert_response_by_type;
 use fastrapi_pyutil::call::CallArgs;
@@ -185,7 +186,7 @@ fn resolve_sync_deps(
     dep_results.into_iter().try_for_each(|(name, value)| {
         kwargs
             .set(name.bind(py), value.bind(py))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            .map_err(|_| plain_server_error())
     })?;
     Ok(teardowns)
 }
@@ -408,7 +409,7 @@ async fn core_sync_no_args(
 
     blocking::run_python(run)
         .await
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        .unwrap_or_else(|_| plain_server_error())
 }
 
 async fn core_async_no_args(
@@ -574,7 +575,7 @@ async fn core_sync<const NEEDS_REQ: bool>(
             ))
             .await
         }
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => plain_server_error(),
     }
 }
 
@@ -802,7 +803,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
             .try_for_each(|(name, value)| {
                 kwargs
                     .set(name.bind(py), value.bind(py))
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+                    .map_err(|_| plain_server_error())
             })?;
 
         let coroutine = kwargs
@@ -946,6 +947,6 @@ pub async fn run_py_handler_no_request(
         ExecutionMode::AsyncNoArgs => {
             core_async_no_args(event_loop, handler, request_parts, None).await
         }
-        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        _ => plain_server_error(),
     }
 }
