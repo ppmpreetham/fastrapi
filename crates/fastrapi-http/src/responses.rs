@@ -144,7 +144,34 @@ impl PyResponse {
 }
 crate::macros::define_response_class!(PyHTMLResponse, "HTMLResponse", 200);
 crate::macros::define_response_class!(PyJSONResponse, "JSONResponse", 200);
-crate::macros::define_response_class!(
+macro_rules! json_response_subclass {
+    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal) => {
+        $(#[$meta])*
+        #[pyclass(name = $py_name, module = "fastrapi.responses", extends = PyJSONResponse, subclass)]
+        pub struct $struct_name;
+
+        #[pymethods]
+        impl $struct_name {
+            #[new]
+            #[pyo3(signature = (content=None, status_code=200, headers=None, media_type=None, background=None))]
+            fn new(
+                py: Python<'_>,
+                content: Option<Py<PyAny>>,
+                status_code: u16,
+                headers: Option<HeadersArg>,
+                media_type: Option<String>,
+                background: Option<Py<PyAny>>,
+            ) -> PyResult<PyClassInitializer<Self>> {
+                let parts = crate::response_api::response_parts(py, $py_name, content, status_code, headers.map(|headers| headers.0), media_type, background)?;
+                Ok(PyClassInitializer::from(PyResponse::empty(py)?)
+                    .add_subclass(PyJSONResponse::from_response_parts(parts))
+                    .add_subclass(Self))
+            }
+        }
+    };
+}
+
+json_response_subclass!(
     /// JSON response using the orjson library to serialize data to JSON.
     ///
     /// **Deprecated**: `ORJSONResponse` is deprecated. FastAPI now serializes data
@@ -158,8 +185,8 @@ crate::macros::define_response_class!(
     ///
     /// **Note**: `orjson` is not included with FastAPI and must be installed
     /// separately, e.g. `pip install orjson`.
-    PyORJSONResponse, "ORJSONResponse", 200);
-crate::macros::define_response_class!(
+    PyORJSONResponse, "ORJSONResponse");
+json_response_subclass!(
     /// JSON response using the ujson library to serialize data to JSON.
     ///
     /// **Deprecated**: `UJSONResponse` is deprecated. FastAPI now serializes data
@@ -173,7 +200,7 @@ crate::macros::define_response_class!(
     ///
     /// **Note**: `ujson` is not included with FastAPI and must be installed
     /// separately, e.g. `pip install ujson`.
-    PyUJSONResponse, "UJSONResponse", 200);
+    PyUJSONResponse, "UJSONResponse");
 crate::macros::define_response_class!(PyPlainTextResponse, "PlainTextResponse", 200);
 crate::macros::define_response_class!(PyStreamingResponse, "StreamingResponse", 200);
 

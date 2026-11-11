@@ -10,8 +10,7 @@ use crate::response_api::content_type;
 use crate::background::{OwnBackground, spawn_response_background_value};
 use crate::response_type::{ResponseFormatter, ResponseType};
 use crate::responses::{
-    PyHTMLResponse, PyJSONResponse, PyORJSONResponse, PyPlainTextResponse, PyStreamingResponse,
-    PyUJSONResponse,
+    PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyStreamingResponse,
 };
 use crate::sse::PyEventSourceResponse;
 use crate::stream::StreamItems;
@@ -506,24 +505,6 @@ pub fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
         return response;
     }
     if let Ok(resp_bound) = result.cast::<PyJSONResponse>() {
-        let resp = resp_bound.borrow();
-        let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
-        let res = py_json_response_with_status(py, status_code, resp.content.bind(py))
-            .unwrap_or_else(|err| {
-                err.print(py);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            });
-        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_deref())
-    } else if let Ok(resp_bound) = result.cast::<PyORJSONResponse>() {
-        let resp = resp_bound.borrow();
-        let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
-        let res = py_json_response_with_status(py, status_code, resp.content.bind(py))
-            .unwrap_or_else(|err| {
-                err.print(py);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            });
-        apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_deref())
-    } else if let Ok(resp_bound) = result.cast::<PyUJSONResponse>() {
         let resp = resp_bound.borrow();
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
         let res = py_json_response_with_status(py, status_code, resp.content.bind(py))
