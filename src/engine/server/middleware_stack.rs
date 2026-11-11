@@ -30,7 +30,7 @@ use crate::engine::server::routes::{
 };
 use fastrapi_http::middleware::PyMiddlewareKind;
 use fastrapi_http::middleware::{
-    CorsPolicy, DeclaredLayer, MiddlewareContainer, PreparedMiddlewares, PyMiddleware, asgi,
+    DeclaredLayer, MiddlewareContainer, PreparedMiddlewares, PyMiddleware, asgi,
     compress, cors, execute_py_middlewares,
 };
 use std::time;
@@ -202,15 +202,9 @@ fn gzip_layer(app: Router, container: &MiddlewareContainer) -> Router {
 
 fn cors_layer(app: Router, container: &MiddlewareContainer) -> Router {
     match &container.cors {
-        Some(config) => match CorsPolicy::new(config) {
-            Ok(policy) => Router::new()
-                .fallback_service(app)
-                .layer(axum_middleware::from_fn_with_state(Arc::new(policy), cors)),
-            Err(e) => {
-                eprintln!("Error building CORS layer: {e:?}");
-                app
-            }
-        },
+        Some(policy) => Router::new()
+            .fallback_service(app)
+            .layer(axum_middleware::from_fn_with_state(Arc::clone(policy), cors)),
         None => app,
     }
 }

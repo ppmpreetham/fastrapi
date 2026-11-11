@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyTuple};
 
 use super::PyMiddleware;
-use super::cors::{CORSMiddleware, parse_cors_params};
+use super::cors::{CORSMiddleware, CorsPolicy, parse_cors_params};
 use super::gzip::{GZipMiddleware, parse_gzip_params};
 use super::httpsredirect::{HTTPSRedirectMiddleware, parse_https_redirect_params};
 use super::session::{SessionMiddleware, parse_session_params};
@@ -28,7 +28,7 @@ pub enum DeclaredLayer {
 
 #[derive(Clone, Default)]
 pub struct MiddlewareContainer {
-    pub cors: Option<CORSMiddleware>,
+    pub cors: Option<Arc<CorsPolicy>>,
     pub trusted_host: Option<TrustedHostMiddleware>,
     pub https_redirect: Option<HTTPSRedirectMiddleware>,
     pub gzip: Option<GZipMiddleware>,
@@ -98,7 +98,7 @@ impl MiddlewareBuilder for CorsMiddlewareBuilder {
         container: &mut MiddlewareContainer,
     ) -> PyResult<bool> {
         if let Ok(config_bound) = item.cast::<CORSMiddleware>() {
-            container.cors = Some(config_bound.borrow().clone());
+            container.cors = Some(Arc::new(CorsPolicy::new(&config_bound.borrow())?));
             Ok(true)
         } else {
             Ok(false)
@@ -110,7 +110,7 @@ impl MiddlewareBuilder for CorsMiddlewareBuilder {
         kwargs: &Bound<'_, PyDict>,
         container: &mut MiddlewareContainer,
     ) -> PyResult<()> {
-        container.cors = Some(parse_cors_params(kwargs)?);
+        container.cors = Some(Arc::new(CorsPolicy::new(&parse_cors_params(kwargs)?)?));
         Ok(())
     }
 }

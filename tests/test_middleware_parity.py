@@ -214,3 +214,9 @@ def test_routes_argument_matches_fastapi():
         return client(app).get("/r").json(), sorted(getattr(route, "path", "") for route in app.routes)
 
     both(run)
+
+
+def test_invalid_cors_config_raises():
+    app = fastrapi.FastrAPI()
+    with pytest.raises(ValueError):
+        app.add_middleware(fastrapi.middleware.cors.CORSMiddleware, allow_origin_regex="(")
