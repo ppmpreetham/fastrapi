@@ -345,6 +345,8 @@ pub fn serve_with_reload(
         tick_ms: reload_tick.max(50),
         ignore_worker_failure: reload_ignore_worker_failure,
     };
-    py.detach(move || run_reload_supervisor(&executable, &argv, &config))
+    let command: Vec<String> = sys.getattr(intern!(py, "orig_argv"))?.extract()?;
+    let command = command.get(1..).unwrap_or_default().to_vec();
+    py.detach(move || run_reload_supervisor(&executable, &command, &config))
         .map_err(PyRuntimeError::new_err)
 }

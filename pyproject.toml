@@ -48,9 +48,8 @@ documentation = "https://github.com/ppmpreetham/fastrapi#readme"
 repository = "https://github.com/ppmpreetham/fastrapi.git"
 "bug tracker" = "https://github.com/ppmpreetham/fastrapi/issues"
 
-# If you have CLI scripts, add them here
-# [project.scripts]
-# fastrapi-cli = "fastrapi:main_cli"
+[project.scripts]
+fastrapi = "fastrapi.cli:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
