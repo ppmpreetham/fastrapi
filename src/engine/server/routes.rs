@@ -802,7 +802,6 @@ pub(crate) async fn record_prometheus_metrics(req: Request, next: Next) -> Respo
         Method::HEAD => "HEAD",
         _ => "OTHER",
     };
-    let raw_uri = req.uri().clone();
     let start = Instant::now();
     let response = next.run(req).await;
     let status: metrics::SharedString = match response.status().as_u16() {
@@ -830,11 +829,12 @@ pub(crate) async fn record_prometheus_metrics(req: Request, next: Next) -> Respo
         other => SharedString::from(other.to_string()),
     };
 
-    let path: metrics::SharedString = match response.extensions().get::<RoutePattern>() {
-        Some(pattern) => SharedString::from(pattern.0),
-        None if response.status() == StatusCode::NOT_FOUND => SharedString::from("unmatched"),
-        None => SharedString::from(raw_uri.path().to_owned()),
-    };
+    let path = SharedString::from(
+        response
+            .extensions()
+            .get::<RoutePattern>()
+            .map_or("unmatched", |pattern| pattern.0),
+    );
 
     let elapsed = start.elapsed().as_secs_f64();
 
