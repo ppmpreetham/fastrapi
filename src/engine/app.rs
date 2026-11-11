@@ -16,7 +16,7 @@ use fastrapi_runtime::tokio_runtime::set_threads;
 use parking_lot::Mutex;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyCFunction, PyDict, PyList, PyTuple};
+use pyo3::types::{IntoPyDict, PyAny, PyCFunction, PyDict, PyList, PyTuple};
 use pyo3::{Bound, intern};
 use std::env::var_os;
 use std::hash::Hasher;
@@ -24,6 +24,13 @@ use std::num::NonZero;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
+
+fastrapi_pyutil::cached_py_import!(STARLETTE_MIDDLEWARE, "starlette.middleware", "Middleware");
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_BASE_HTTP_MIDDLEWARE,
+    "starlette.middleware.base",
+    "BaseHTTPMiddleware"
+);
 
 fn is_startup_event(event_type: &str) -> PyResult<bool> {
     match event_type {
@@ -351,6 +358,17 @@ impl FastrAPI {
             elements_url,
             swagger_ui_oauth2_redirect_url,
             swagger_ui_init_oauth,
+            user_middleware: match &middleware {
+                Some(middleware) => PyList::new(
+                    py,
+                    middleware
+                        .bind(py)
+                        .try_iter()?
+                        .collect::<PyResult<Vec<_>>>()?,
+                )?
+                .unbind(),
+                None => PyList::empty(py).unbind(),
+            },
             middleware,
             dependency_overrides: dependency_overrides.or_else(|| Some(PyDict::new(py).into())),
             exception_handlers: Some({
@@ -419,14 +437,23 @@ impl FastrAPI {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
+        let py = middleware_class.py();
         let empty_dict;
         let opts = if let Some(dict) = kwargs {
             dict
         } else {
-            empty_dict = PyDict::new(middleware_class.py());
+            empty_dict = PyDict::new(py);
             &empty_dict
         };
-        self.middlewares.register(middleware_class, args, opts)
+        self.middlewares.register(middleware_class, args, opts)?;
+        let positional = PyTuple::new(
+            py,
+            std::iter::once(middleware_class.clone())
+                .chain(args)
+                .collect::<Vec<_>>(),
+        )?;
+        let entry = STARLETTE_MIDDLEWARE.get(py)?.call(positional, Some(opts))?;
+        self.user_middleware.bind(py).insert(0, entry)
     }
 
     #[pyo3(signature = (path))]
@@ -720,8 +747,13 @@ impl FastrAPI {
             let py = args.py();
             let func: Py<PyAny> = args.get_item(0)?.unbind();
             let py_middleware = PyMiddleware::new(py, func.clone_ref(py));
-            slf.borrow_mut(py)
-                .middlewares
+            let entry = STARLETTE_MIDDLEWARE.get(py)?.call(
+                (STARLETTE_BASE_HTTP_MIDDLEWARE.get(py)?,),
+                Some(&[("dispatch", func.bind(py))].into_py_dict(py)?),
+            )?;
+            let mut app = slf.borrow_mut(py);
+            app.user_middleware.bind(py).insert(0, entry)?;
+            app.middlewares
                 .order
                 .push(DeclaredLayer::Decorator(Arc::new(py_middleware)));
             info!("🔗 Registered {} middleware", middleware_type);

@@ -91,3 +91,22 @@ def test_websocket_exception_matches_fastapi():
         )
 
     both(run)
+
+
+def test_user_middleware_matches_fastapi():
+    def run(lib):
+        gzip = submodule(lib, "middleware.gzip").GZipMiddleware
+        cors = submodule(lib, "middleware.cors").CORSMiddleware
+        app = new_app(lib, middleware=[submodule(lib, "middleware").Middleware(gzip, minimum_size=5)])
+        app.add_middleware(cors, allow_origins=["*"])
+
+        @app.middleware("http")
+        async def mw(request, call_next):
+            return await call_next(request)
+
+        return [
+            (entry.cls.__name__, entry.args, entry.kwargs.get("allow_origins"), entry.kwargs.get("minimum_size"))
+            for entry in app.user_middleware
+        ]
+
+    both(run)

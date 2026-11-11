@@ -120,6 +120,8 @@ pub struct FastrAPI {
     pub swagger_ui_init_oauth: Option<Py<PyAny>>,
     #[pyo3(get, set)]
     pub middleware: Option<Py<PyAny>>,
+    #[pyo3(get)]
+    pub user_middleware: Py<PyList>,
     #[pyo3(get, set)]
     pub dependency_overrides: Option<Py<PyAny>>,
     #[pyo3(get, set)]
