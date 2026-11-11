@@ -46,7 +46,9 @@ impl PyDepends {
     fn fields<'py>(&self, py: Python<'py>) -> [Bound<'py, PyAny>; 3] {
         [
             optional(py, self.dependency.as_ref()),
-            pyo3::types::PyBool::new(py, self.use_cache).to_owned().into_any(),
+            pyo3::types::PyBool::new(py, self.use_cache)
+                .to_owned()
+                .into_any(),
             optional(py, self.scope.as_ref()),
         ]
     }
@@ -81,10 +83,12 @@ fn fields_eq<'py>(
         return Ok(py.NotImplemented());
     }
     let equal = fields(slf)?.eq(fields(other)?)?;
-    Ok(pyo3::types::PyBool::new(py, equal == matches!(op, CompareOp::Eq))
-        .to_owned()
-        .into_any()
-        .unbind())
+    Ok(
+        pyo3::types::PyBool::new(py, equal == matches!(op, CompareOp::Eq))
+            .to_owned()
+            .into_any()
+            .unbind(),
+    )
 }
 
 fn depends_tuple<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyTuple>> {
@@ -124,7 +128,11 @@ impl PyDepends {
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
         let name = slf.get_type().qualname()?;
         let values = slf.borrow().fields(slf.py());
-        fields_repr(name.to_str()?, &["dependency", "use_cache", "scope"], &values)
+        fields_repr(
+            name.to_str()?,
+            &["dependency", "use_cache", "scope"],
+            &values,
+        )
     }
 
     fn __richcmp__(
@@ -137,6 +145,18 @@ impl PyDepends {
 
     fn __hash__(slf: &Bound<'_, Self>) -> PyResult<isize> {
         depends_tuple(slf.as_any())?.hash()
+    }
+
+    const fn __copy__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_memo))]
+    const fn __deepcopy__<'py>(
+        slf: PyRef<'py, Self>,
+        _memo: &Bound<'py, PyAny>,
+    ) -> PyRef<'py, Self> {
+        slf
     }
 }
 

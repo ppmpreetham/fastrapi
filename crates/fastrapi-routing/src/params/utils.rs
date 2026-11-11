@@ -2,6 +2,7 @@
 //! The functions find `Annotated` markers, the base type of an annotation, and the element type of a list.
 
 use crate::annotations::strip_optional;
+use fastrapi_core::params::ParameterSource;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyString};
 
@@ -31,9 +32,14 @@ pub fn annotation_name(py: Python<'_>, annotation: &Py<PyAny>) -> Option<String>
         })
 }
 
-#[inline]
-pub fn is_background_tasks_type(name: &str) -> bool {
-    name == "BackgroundTasks" || name.ends_with(".BackgroundTasks")
+#[must_use]
+pub fn injected_source(name: &str) -> Option<ParameterSource> {
+    let base = name.rsplit('.').next().unwrap_or(name);
+    match base {
+        "BackgroundTasks" => Some(ParameterSource::BackgroundTasks),
+        "SecurityScopes" => Some(ParameterSource::SecurityScopes),
+        _ => None,
+    }
 }
 
 #[must_use]

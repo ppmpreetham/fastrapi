@@ -3,7 +3,7 @@
 
 use super::constraints::extract_constraints;
 use super::module::analyze;
-use super::utils::{annotation_name, base_annotation, is_background_tasks_type, is_inspect_empty};
+use super::utils::{annotation_name, base_annotation, injected_source, is_inspect_empty};
 use crate::kernel_params::ParamKernel;
 use crate::route::{EmptyDefault, FastKind, ModelKey, ParsedParameter};
 use fastrapi_core::params::{ParameterConstraints, ParameterSource};
@@ -67,7 +67,11 @@ fn model_keys(spec: &Bound<'_, PyAny>) -> PyResult<Option<Arc<[ModelKey]>>> {
         .map(Some)
 }
 
-fn background_tasks_parameter(py: Python<'_>, param_name: &str) -> ParsedParameter {
+fn injected_parameter(
+    py: Python<'_>,
+    param_name: &str,
+    source: ParameterSource,
+) -> ParsedParameter {
     let name_py = PyString::intern(py, param_name).unbind();
     ParsedParameter {
         name: param_name.to_owned(),
@@ -75,7 +79,7 @@ fn background_tasks_parameter(py: Python<'_>, param_name: &str) -> ParsedParamet
         name_py,
         external_name: param_name.to_owned(),
         header_name: None,
-        source: ParameterSource::BackgroundTasks,
+        source,
         annotation: None,
         default_value: None,
         make_default: None,
@@ -112,11 +116,11 @@ pub fn parse_parameter_spec(
     let raw_annotation = param_obj.getattr(intern!(py, "annotation"))?.into_any();
     let has_annotation = !is_inspect_empty(py, &raw_annotation);
     if has_annotation
-        && annotation_name(py, &base_annotation(&raw_annotation).unbind())
+        && let Some(source) = annotation_name(py, &base_annotation(&raw_annotation).unbind())
             .as_deref()
-            .is_some_and(is_background_tasks_type)
+            .and_then(injected_source)
     {
-        return Ok(background_tasks_parameter(py, param_name));
+        return Ok(injected_parameter(py, param_name, source));
     }
 
     let is_path_param = path_param_names.iter().any(|name| name == param_name);

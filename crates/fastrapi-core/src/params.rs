@@ -11,6 +11,7 @@ pub enum ParameterSource {
     Header,
     Cookie,
     BackgroundTasks,
+    SecurityScopes,
 }
 
 #[derive(Clone, Debug, Default)]

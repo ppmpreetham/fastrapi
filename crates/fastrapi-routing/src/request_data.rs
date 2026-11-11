@@ -6,6 +6,7 @@ use crate::kernel_validation::{KernelOutcome, kernel_error_object, maybe_validat
 use crate::params::{errors_with_loc, json_error};
 use crate::pydantic::parse_json;
 use crate::route::{EmptyDefault, FastKind, ModelKey, ParsedParameter, RouteHandler};
+use crate::security::PySecurityScopes;
 use ahash::AHashMap;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -228,7 +229,9 @@ const fn source_name(source: &ParameterSource) -> &'static str {
         ParameterSource::Query => "query",
         ParameterSource::Header => "header",
         ParameterSource::Cookie => "cookie",
-        ParameterSource::Body | ParameterSource::BackgroundTasks => "body",
+        ParameterSource::Body
+        | ParameterSource::BackgroundTasks
+        | ParameterSource::SecurityScopes => "body",
     }
 }
 
@@ -490,7 +493,9 @@ fn source_value<'a>(
         ParameterSource::Query => input.get_query_param(key).map(Cow::Borrowed),
         ParameterSource::Header => input.get_header(key).map(Cow::Borrowed),
         ParameterSource::Cookie => input.get_cookie(key).map(unquote_cookie),
-        ParameterSource::Body | ParameterSource::BackgroundTasks => None,
+        ParameterSource::Body
+        | ParameterSource::BackgroundTasks
+        | ParameterSource::SecurityScopes => None,
     }
 }
 
@@ -618,8 +623,16 @@ pub fn request_param_value<'py>(
     input: &RequestInput<'_>,
     errors: &mut Errors<'py>,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
-    if matches!(param.source, ParameterSource::BackgroundTasks) {
-        return Ok(Some(input.background_tasks(py)?.into_bound(py).into_any()));
+    match param.source {
+        ParameterSource::BackgroundTasks => {
+            return Ok(Some(input.background_tasks(py)?.into_bound(py).into_any()));
+        }
+        ParameterSource::SecurityScopes => {
+            return Ok(Some(
+                Bound::new(py, PySecurityScopes::new(None))?.into_any(),
+            ));
+        }
+        _ => {}
     }
     if let Some(keys) = &param.model_keys {
         return model_param(py, param, keys, input, errors);

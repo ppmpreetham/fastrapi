@@ -628,6 +628,15 @@ pub fn collect_dependency_callables(
         .unwrap_or_default()
 }
 
+type CacheKey = (u64, Vec<String>);
+
+fn cache_scopes(scopes: &[String]) -> Vec<String> {
+    let mut sorted = scopes.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted
+}
+
 fn extract_and_flatten(
     py: Python,
     inspect: &Bound<'_, PyModule>,
@@ -639,11 +648,12 @@ fn extract_and_flatten(
     scopes: Vec<String>,
     use_cache: bool,
     flat_plan: &mut Vec<DependencyNode>,
-    visited: &mut HashMap<u64, usize>,
+    visited: &mut HashMap<CacheKey, usize>,
 ) -> PyResult<usize> {
     let func_id = func.as_ptr() as u64;
+    let cache_key = (func_id, cache_scopes(&scopes));
 
-    if use_cache && let Some(&idx) = visited.get(&func_id) {
+    if use_cache && let Some(&idx) = visited.get(&cache_key) {
         return Ok(idx);
     }
 
@@ -696,15 +706,15 @@ fn extract_and_flatten(
                 continue;
             };
 
-            let child_scopes = if is_security {
-                marker
+            let mut child_scopes = scopes.clone();
+            if is_security
+                && let Some(own) = marker
                     .getattr(keys.scopes)
                     .ok()
                     .and_then(|value| extract_string_list(&value))
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            {
+                child_scopes.extend(own);
+            }
 
             let child_use_cache = marker
                 .getattr(keys.use_cache)
@@ -759,7 +769,7 @@ fn extract_and_flatten(
     });
 
     if use_cache {
-        visited.insert(func_id, node_index);
+        visited.insert(cache_key, node_index);
     }
 
     Ok(node_index)

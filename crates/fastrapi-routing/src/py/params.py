@@ -183,6 +183,22 @@ class File(Form):
         super().__init__(default, media_type=media_type, **kwargs)
 
 
+def _marker_signature(default: Any = Undefined, after: str = "default_factory", **extra: Any) -> inspect.Signature:
+    params = [param for param in inspect.signature(_init_field).parameters.values() if param.name not in ("self", "annotation")]
+    params[0] = params[0].replace(default=default)
+    index = next(i for i, param in enumerate(params) if param.name == after) + 1
+    added = [inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=value) for name, value in extra.items()]
+    return inspect.Signature(params[:index] + added + params[index:])
+
+
+Query.__signature__ = Cookie.__signature__ = _marker_signature()
+Path.__signature__ = _marker_signature(...)
+Header.__signature__ = _marker_signature(after="serialization_alias", convert_underscores=True)
+Body.__signature__ = _marker_signature(embed=None, media_type="application/json")
+Form.__signature__ = _marker_signature(media_type="application/x-www-form-urlencoded")
+File.__signature__ = _marker_signature(media_type="multipart/form-data")
+
+
 SEQUENCE_TYPES = (list, set, frozenset, tuple, deque, Sequence)
 IMMUTABLE_DEFAULTS = (NoneType, bool, int, float, complex, str, bytes, Enum)
 FAST_KINDS = {str: "str", int: "int", float: "float", bool: "bool"}
