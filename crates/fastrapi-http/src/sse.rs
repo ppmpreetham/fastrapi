@@ -3,6 +3,7 @@
 //! `ServerSentEvent` is one event that the server encodes in the `text/event-stream` format.
 
 use crate::response_api::init_headers;
+use crate::responses::{PyResponse, PyStreamingResponse};
 use bytes::Bytes;
 use std::fmt::Write as _;
 use fastrapi_pyutil::cached_py_import;
@@ -24,30 +25,21 @@ use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTup
 #[pyclass(
     name = "EventSourceResponse",
     module = "fastrapi.responses",
-    extends = crate::responses::PyResponse,
+    extends = PyStreamingResponse,
     subclass,
     get_all,
-    set_all,
-    from_py_object
+    set_all
 )]
-#[derive(Clone)]
 pub struct PyEventSourceResponse {
-    pub content: Py<PyAny>,
-    pub status_code: u16,
-    pub headers: Option<Py<PyDict>>,
-    pub media_type: Option<String>,
-    pub background: Option<Py<PyAny>>,
     pub ping: Option<f64>,
     pub sep: String,
-    pub raw_headers: Py<PyList>,
-    pub body: Py<PyAny>,
-    pub charset: String,
 }
 
 #[pymethods]
 impl PyEventSourceResponse {
     #[new]
-    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None, ping=15.0, sep="\n".to_string()))]
+    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None, ping=15.0, sep="
+".to_string()))]
     fn new(
         py: Python<'_>,
         content: Py<PyAny>,
@@ -73,24 +65,21 @@ impl PyEventSourceResponse {
             Some("text/event-stream"),
             "utf-8",
         )?;
-        Ok(
-            PyClassInitializer::from(crate::responses::PyResponse::empty(py)?).add_subclass(Self {
-                content,
-                status_code,
-                headers,
-                media_type: Some(media_type.unwrap_or_else(|| "text/event-stream".to_owned())),
-                background,
-                ping,
-                sep,
-                raw_headers,
-                body: py.None(),
-                charset: "utf-8".to_owned(),
-            }),
-        )
+        let stream = PyStreamingResponse {
+            content,
+            status_code,
+            headers,
+            media_type: Some(media_type.unwrap_or_else(|| "text/event-stream".to_owned())),
+            background,
+            raw_headers,
+            body: py.None(),
+            charset: "utf-8".to_owned(),
+        };
+        Ok(PyClassInitializer::from(PyResponse::empty(py)?)
+            .add_subclass(stream)
+            .add_subclass(Self { ping, sep }))
     }
 }
-
-crate::macros::response_api_methods!(PyEventSourceResponse, "EventSourceResponse");
 
 /// Represents a single Server-Sent Event.
 ///

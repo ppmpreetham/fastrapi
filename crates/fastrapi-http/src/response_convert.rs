@@ -445,7 +445,6 @@ fn convert_response_value(
                 convert_redirect_response(py, final_result)
             } else if final_result.is_instance_of::<PyStreamingResponse>()
                 || kind == ResponseKind::Streaming
-                || final_result.is_instance_of::<PyEventSourceResponse>()
                 || kind == ResponseKind::Sse
             {
                 convert_streaming_response(py, final_result)
@@ -685,6 +684,9 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
     let (content, status_code, headers, media_type, sse, ping, sep) =
         if let Ok(resp_bound) = result.cast::<PyStreamingResponse>() {
             let resp = resp_bound.borrow();
+            let sse = result.is_instance_of::<PyEventSourceResponse>();
+            let (ping, sep) = if sse { sse_options(result) } else { (None, "
+".to_owned()) };
             (
                 resp.content.clone_ref(py),
                 StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK),
@@ -692,22 +694,9 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
                 resp.media_type
                     .as_deref()
                     .map(|media_type| content_type(media_type, &resp.charset).into_owned()),
-                false,
-                None,
-                "\n".to_owned(),
-            )
-        } else if let Ok(resp_bound) = result.cast::<PyEventSourceResponse>() {
-            let resp = resp_bound.borrow();
-            (
-                resp.content.clone_ref(py),
-                StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK),
-                resp.headers.clone(),
-                resp.media_type
-                    .as_deref()
-                    .map(|media_type| content_type(media_type, &resp.charset).into_owned()),
-                true,
-                sse_options(result).0,
-                sse_options(result).1,
+                sse,
+                ping,
+                sep,
             )
         } else if matches!(
             response_kind(result),
@@ -869,10 +858,9 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
     if result.is_instance_of::<PyRedirectResponse>() || kind == ResponseKind::Redirect {
         return convert_redirect_response(py, result);
     }
-    if result.is_instance_of::<PyStreamingResponse>() || kind == ResponseKind::Streaming {
-        return convert_streaming_response(py, result);
-    }
-    if result.is_instance_of::<PyEventSourceResponse>() || kind == ResponseKind::Sse {
+    if result.is_instance_of::<PyStreamingResponse>()
+        || matches!(kind, ResponseKind::Streaming | ResponseKind::Sse)
+    {
         return convert_streaming_response(py, result);
     }
     if result.is_instance_of::<PyFileResponse>() || kind == ResponseKind::File {

@@ -49,3 +49,18 @@ def test_json_response_subclasses_render():
         (201, {"a": 1}, "1"),
         (200, {"b": 2}, None),
     ]
+
+
+def test_event_source_response_hierarchy_matches_fastapi():
+    def run(lib):
+        r = lib.responses
+        app = new_app(lib)
+
+        @app.get("/sse", response_class=r.EventSourceResponse)
+        def sse():
+            yield {"a": 1}
+
+        x = client(app).get("/sse")
+        return issubclass(r.EventSourceResponse, r.StreamingResponse), x.headers["content-type"], x.text
+
+    both(run)
