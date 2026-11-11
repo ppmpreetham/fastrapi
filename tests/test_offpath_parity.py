@@ -64,3 +64,15 @@ def test_event_source_response_hierarchy_matches_fastapi():
         return issubclass(r.EventSourceResponse, r.StreamingResponse), x.headers["content-type"], x.text
 
     both(run)
+
+
+def test_strict_password_form_hierarchy_matches_fastapi():
+    def run(lib):
+        s = submodule(lib, "security")
+        form = s.OAuth2PasswordRequestFormStrict(grant_type="password", username="u", password="p", scope="a b")
+        return (
+            issubclass(s.OAuth2PasswordRequestFormStrict, s.OAuth2PasswordRequestForm),
+            (form.grant_type, form.username, form.password, form.scopes, form.client_id),
+        )
+
+    both(run)

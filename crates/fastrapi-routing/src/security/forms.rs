@@ -51,6 +51,7 @@ use pyo3::types::{IntoPyDict, PyDict, PyList};
 #[pyclass(
     name = "OAuth2PasswordRequestForm",
     module = "fastrapi.security",
+    subclass,
     get_all,
     skip_from_py_object
 )]
@@ -127,18 +128,10 @@ pub struct OAuth2PasswordRequestForm {
 #[pyclass(
     name = "OAuth2PasswordRequestFormStrict",
     module = "fastrapi.security",
-    get_all,
-    skip_from_py_object
+    extends = OAuth2PasswordRequestForm,
+    subclass
 )]
-#[derive(Clone)]
-pub struct OAuth2PasswordRequestFormStrict {
-    pub grant_type: String,
-    pub username: String,
-    pub password: String,
-    pub scope: String,
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
-}
+pub struct OAuth2PasswordRequestFormStrict;
 
 struct PasswordForm {
     grant_type: Option<String>,
@@ -251,16 +244,21 @@ impl OAuth2PasswordRequestForm {
         self.scope.split_whitespace().collect()
     }
 
-    fn __call__<'py>(&self, _py: Python<'py>, request: &Bound<'py, PyRequest>) -> PyResult<Self> {
-        let form = password_form(request, false)?;
-        Ok(Self {
+    fn __call__(&self, request: &Bound<'_, PyRequest>) -> PyResult<Self> {
+        password_form(request, false).map(Self::from)
+    }
+}
+
+impl From<PasswordForm> for OAuth2PasswordRequestForm {
+    fn from(form: PasswordForm) -> Self {
+        Self {
             grant_type: form.grant_type,
             username: form.username,
             password: form.password,
             scope: form.scope,
             client_id: form.client_id,
             client_secret: form.client_secret,
-        })
+        }
     }
 }
 
@@ -275,35 +273,24 @@ impl OAuth2PasswordRequestFormStrict {
         scope: String,
         client_id: Option<String>,
         client_secret: Option<String>,
-    ) -> PyResult<Self> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         let grant_type = grant_type.unwrap_or_else(|| "password".to_owned());
         if grant_type != "password" {
             return Err(PyValueError::new_err("grant_type must be password"));
         }
-        Ok(Self {
-            grant_type,
-            username: username.unwrap_or_default(),
-            password: password.unwrap_or_default(),
+        Ok(PyClassInitializer::from(OAuth2PasswordRequestForm::new(
+            Some(grant_type),
+            username,
+            password,
             scope,
             client_id,
             client_secret,
-        })
+        ))
+        .add_subclass(Self))
     }
 
-    #[getter]
-    fn scopes(&self) -> Vec<&str> {
-        self.scope.split_whitespace().collect()
-    }
-
-    fn __call__<'py>(&self, _py: Python<'py>, request: &Bound<'py, PyRequest>) -> PyResult<Self> {
-        let form = password_form(request, true)?;
-        Ok(Self {
-            grant_type: form.grant_type.unwrap_or_default(),
-            username: form.username,
-            password: form.password,
-            scope: form.scope,
-            client_id: form.client_id,
-            client_secret: form.client_secret,
-        })
+    fn __call__(&self, request: &Bound<'_, PyRequest>) -> PyResult<Py<Self>> {
+        let form = OAuth2PasswordRequestForm::from(password_form(request, true)?);
+        Py::new(request.py(), PyClassInitializer::from(form).add_subclass(Self))
     }
 }
