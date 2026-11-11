@@ -20,6 +20,7 @@ const HANDLERS_SOURCE: &str = include_str!("py/exception_handlers.py");
 static EXCEPTIONS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 static HANDLERS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 static HTTP_EXCEPTION: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static WEBSOCKET_EXCEPTION: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static REQUEST_VALIDATION_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static WEBSOCKET_VALIDATION_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DEPRECATION_WARNING: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -28,6 +29,11 @@ fastrapi_pyutil::cached_py_import!(
     STARLETTE_HTTP_EXCEPTION,
     "starlette.exceptions",
     "HTTPException"
+);
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_WEBSOCKET_EXCEPTION,
+    "starlette.exceptions",
+    "WebSocketException"
 );
 fastrapi_pyutil::cached_py_import!(METHOD_TYPE, "types", "MethodType");
 fastrapi_pyutil::cached_py_import!(STATUS_PHRASES, "http.client", "responses");
@@ -355,17 +361,34 @@ fn build_http_exception(py: Python<'_>) -> PyResult<Py<PyType>> {
             },
         )?,
     )?;
+    starlette_subclass("HTTPException", STARLETTE_HTTP_EXCEPTION.get(py)?, &namespace)
+}
+
+fn starlette_subclass(
+    name: &str,
+    base: &Bound<'_, PyAny>,
+    namespace: &Bound<'_, PyDict>,
+) -> PyResult<Py<PyType>> {
+    let py = base.py();
     namespace.set_item("__module__", "fastrapi.exceptions")?;
-    namespace.set_item("__qualname__", "HTTPException")?;
+    namespace.set_item("__qualname__", name)?;
     py.get_type::<PyType>()
-        .call1((
-            "HTTPException",
-            (STARLETTE_HTTP_EXCEPTION.get(py)?,),
-            namespace,
-        ))?
+        .call1((name, (base,), namespace))?
         .cast_into::<PyType>()
         .map(Bound::unbind)
         .map_err(PyErr::from)
+}
+
+pub fn websocket_exception_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    WEBSOCKET_EXCEPTION
+        .get_or_try_init(py, || {
+            starlette_subclass(
+                "WebSocketException",
+                STARLETTE_WEBSOCKET_EXCEPTION.get(py)?,
+                &PyDict::new(py),
+            )
+        })
+        .map(|class| class.bind(py))
 }
 
 fn endpoint_context_type(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
@@ -420,7 +443,7 @@ pub fn exceptions_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
                 "ResponseValidationError",
                 py.get_type::<PyResponseValidationError>(),
             )?;
-            module.add("WebSocketException", py.get_type::<PyWebSocketException>())?;
+            module.add("WebSocketException", websocket_exception_type(py)?)?;
             module.add(
                 "WebSocketDisconnect",
                 py.get_type::<PyWebSocketDisconnect>(),
@@ -630,56 +653,6 @@ pub fn validation_error_response(value: &Bound<'_, PyAny>) -> Option<Response> {
     py_json_response_with_status(py, StatusCode::UNPROCESSABLE_ENTITY, content.as_any()).ok()
 }
 
-/// A WebSocket exception you can raise in your own code to show errors to the client.
-///
-/// This is for client errors, invalid authentication, invalid data, etc. Not for server
-/// errors in your code.
-///
-/// Read more about it in the
-/// [FastAPI docs for WebSockets](https://fastapi.tiangolo.com/advanced/websockets/).
-///
-/// ## Example
-///
-/// ```python
-/// from typing import Annotated
-///
-/// from fastrapi import (
-///     Cookie,
-///     FastAPI,
-///     WebSocket,
-///     WebSocketException,
-///     status,
-/// )
-///
-/// app = FastAPI()
-///
-/// @app.websocket("/items/{item_id}/ws")
-/// async def websocket_endpoint(
-///     *,
-///     websocket: WebSocket,
-///     session: Annotated[str | None, Cookie()] = None,
-///     item_id: str,
-/// ):
-///     if session is None:
-///         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
-///     await websocket.accept()
-///     while True:
-///         data = await websocket.receive_text()
-///         await websocket.send_text(f"Session cookie is: {session}")
-///         await websocket.send_text(f"Message text was: {data}, for item ID: {item_id}")
-/// ```
-#[pyclass(
-    extends = PyException,
-    name = "WebSocketException",
-    get_all,
-    from_py_object
-)]
-#[derive(Clone)]
-pub struct PyWebSocketException {
-    pub code: u16,
-    pub reason: String,
-}
-
 /// Common base class for all non-exit exceptions.
 #[pyclass(
     extends = PyException,
@@ -703,36 +676,6 @@ impl PyWebSocketDisconnect {
 
     #[pyo3(signature = (*_args, **_kwargs))]
     const fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
-}
-
-#[pymethods]
-impl PyWebSocketException {
-    #[new]
-    #[pyo3(signature = (code, reason=None))]
-    fn new(code: u16, reason: Option<String>) -> Self {
-        Self {
-            code,
-            reason: reason.unwrap_or_default(),
-        }
-    }
-
-    #[pyo3(signature = (*_args, **_kwargs))]
-    const fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
-
-    fn __str__(&self) -> String {
-        format!("{}: {}", self.code, self.reason)
-    }
-
-    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
-        let py = slf.py();
-        let this = slf.borrow();
-        Ok(format!(
-            "{}(code={}, reason={})",
-            slf.get_type().name()?,
-            this.code,
-            PyString::new(py, &this.reason).repr()?
-        ))
-    }
 }
 
 #[derive(Clone)]

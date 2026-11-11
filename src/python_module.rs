@@ -80,9 +80,6 @@ mod fastrapi {
     use fastrapi_http::websocket::PyWebSocket as WebSocket;
 
     #[pymodule_export]
-    use fastrapi_http::exceptions::PyWebSocketException as WebSocketException;
-
-    #[pymodule_export]
     use fastrapi_http::exceptions::PyWebSocketDisconnect as WebSocketDisconnect;
 
     #[pymodule_export]
@@ -414,7 +411,7 @@ mod fastrapi {
 
     #[pymodule]
     mod websocket {
-        use fastrapi_http::exceptions::{PyWebSocketDisconnect, PyWebSocketException};
+        use fastrapi_http::exceptions::{PyWebSocketDisconnect, websocket_exception_type};
         use pyo3::prelude::*;
 
         #[pymodule_export]
@@ -427,7 +424,7 @@ mod fastrapi {
                 "WebSocketDisconnect",
                 py.get_type::<PyWebSocketDisconnect>(),
             )?;
-            m.add("WebSocketException", py.get_type::<PyWebSocketException>())?;
+            m.add("WebSocketException", websocket_exception_type(py)?)?;
             if let Ok(value) = py
                 .import("starlette.websockets")
                 .and_then(|module| module.getattr("WebSocketState"))
@@ -441,7 +438,7 @@ mod fastrapi {
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
         use crate::ffi::routing;
-        use fastrapi_http::exceptions::{PyWebSocketDisconnect, PyWebSocketException};
+        use fastrapi_http::exceptions::{PyWebSocketDisconnect, websocket_exception_type};
         use fastrapi_http::responses::PyResponse;
         use fastrapi_http::templating::PyJinja2Templates;
         use fastrapi_http::websocket::PyWebSocket;
@@ -494,7 +491,7 @@ mod fastrapi {
             "WebSocketDisconnect",
             py.get_type::<PyWebSocketDisconnect>(),
         )?;
-        websockets.add("WebSocketException", py.get_type::<PyWebSocketException>())?;
+        websockets.add("WebSocketException", websocket_exception_type(py)?)?;
         if let Ok(value) = py
             .import("starlette.websockets")
             .and_then(|module| module.getattr("WebSocketState"))
@@ -544,6 +541,7 @@ mod fastrapi {
         let exceptions = fastrapi_http::exceptions::exceptions_module(py)?;
         m.add("exceptions", exceptions)?;
         m.add("HTTPException", exceptions.getattr("HTTPException")?)?;
+        m.add("WebSocketException", websocket_exception_type(py)?)?;
         create_status_submodule(m)?;
         openapi::register(m)?;
         register_pydantic_integration(m)?;

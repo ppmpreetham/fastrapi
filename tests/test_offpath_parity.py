@@ -76,3 +76,18 @@ def test_strict_password_form_hierarchy_matches_fastapi():
         )
 
     both(run)
+
+
+def test_websocket_exception_matches_fastapi():
+    import starlette.exceptions
+
+    def run(lib):
+        exc = lib.WebSocketException(code=1008, reason="no")
+        return (
+            issubclass(lib.WebSocketException, starlette.exceptions.WebSocketException),
+            lib.WebSocketException is submodule(lib, "exceptions").WebSocketException,
+            str(exc),
+            repr(exc),
+        )
+
+    both(run)

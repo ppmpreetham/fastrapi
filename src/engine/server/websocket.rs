@@ -39,7 +39,7 @@ use axum::http::header::HOST;
 use axum::http::request::Parts;
 use fastrapi_core::path::host_without_port;
 use fastrapi_http::exceptions::{
-    PyWebSocketDisconnect, PyWebSocketException, request_validation_error_type,
+    PyWebSocketDisconnect, request_validation_error_type,
     websocket_validation_error,
 };
 use fastrapi_http::request::PyHTTPConnection;
@@ -291,10 +291,9 @@ fn websocket_error(py: Python<'_>, error: PyErr) -> PyErr {
 }
 
 fn websocket_exception_close(py: Python<'_>, value: &Bound<'_, PyAny>) -> Option<(u16, String)> {
-    let is_websocket_exception = value.is_instance_of::<PyWebSocketException>()
-        || STARLETTE_WEBSOCKET_EXCEPTION
-            .get(py)
-            .is_ok_and(|class| value.is_instance(class).unwrap_or(false));
+    let is_websocket_exception = STARLETTE_WEBSOCKET_EXCEPTION
+        .get(py)
+        .is_ok_and(|class| value.is_instance(class).unwrap_or(false));
     if !is_websocket_exception {
         return None;
     }
