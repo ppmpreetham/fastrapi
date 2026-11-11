@@ -63,7 +63,7 @@ class TestConstruction:
         assert r.include_in_schema is True
         assert r.dependencies == []
         assert r.responses == {}
-        assert r.default_response_class is None
+        assert type(r.default_response_class).__name__ == "DefaultPlaceholder"
         assert r.generate_unique_id_function is None
 
     def test_with_prefix(self):

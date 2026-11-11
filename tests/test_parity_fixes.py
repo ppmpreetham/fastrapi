@@ -1374,7 +1374,7 @@ def test_get_openapi_with_app_routes(client, app):
     assert operation["parameters"][0]["name"] == "verbose"
     assert operation["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/Item"}
     assert "Item" in spec["components"]["schemas"]
-    assert [route.path for route in app.routes] == ["/items"]
+    assert [route.path for route in app.routes] == ["/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc", "/items"]
 
 
 def test_openapi_models_match_fastapi():
