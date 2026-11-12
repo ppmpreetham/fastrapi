@@ -241,3 +241,32 @@ def test_prefixed_empty_and_slash_routes_match_fastapi():
         return [(r.status_code, r.json()) for r in (c.get("/items"), c.get("/items/"))]
 
     both(run)
+
+
+def test_error_after_yield_keeps_response_like_fastapi():
+    def run(lib):
+        app = new_app(lib)
+
+        def dep():
+            yield 1
+            raise RuntimeError("after")
+
+        async def adep():
+            yield 1
+            raise RuntimeError("after")
+
+        @app.get("/s")
+        def s(d=lib.Depends(dep)):
+            return "ok"
+
+        @app.get("/a")
+        async def a(d=lib.Depends(adep)):
+            return "ok"
+
+        responses = [(r.status_code, r.json()) for r in (client(app).get("/s"), client(app).get("/a"))]
+        for path in ("/s", "/a"):
+            with pytest.raises(RuntimeError, match="after"):
+                TestClient(app).get(path)
+        return responses
+
+    both(run)

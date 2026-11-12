@@ -5,12 +5,13 @@ use super::executor::{
     build_request_input_from_parts, prepare_kwargs_and_payload, request_object,
     spawn_background_tasks,
 };
-use super::handler_errors::python_error_to_response_in;
+use super::handler_errors::{log_python_error, python_error_to_response_in};
 use axum::http::request::Parts;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 use fastrapi_core::body::BodyPayload;
 use fastrapi_core::params::PathParamRange;
+use fastrapi_http::exceptions::UnhandledError;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_pyutil::call::CallArgs;
 use fastrapi_routing::dependencies::{self, RequestPlan};
@@ -21,6 +22,7 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use smallvec::SmallVec;
+use std::sync::Arc;
 
 use fastrapi_http::response_convert::{convert_response_by_type, is_plain_value};
 use fastrapi_http::responses::PyResponse;
@@ -223,6 +225,14 @@ fn finish_managed_response(
     metadata: Option<&Py<PyAny>>,
 ) -> Response {
     match exit {
+        Some(Err(err)) if outcome.is_ok() => {
+            log_python_error(py, &err);
+            let mut response = managed_response(py, event_loop, input, outcome, metadata);
+            response
+                .extensions_mut()
+                .insert(UnhandledError(Arc::new(err)));
+            return response;
+        }
         Some(Err(err)) => return python_error_to_response_in(py, &err, Some(input)),
         Some(Ok(suppressed))
             if outcome.is_err() && suppressed.bind(py).is_truthy().unwrap_or(false) =>
@@ -237,6 +247,16 @@ fn finish_managed_response(
         }
         _ => {}
     }
+    managed_response(py, event_loop, input, outcome, metadata)
+}
+
+fn managed_response(
+    py: Python<'_>,
+    event_loop: EventLoop,
+    input: &RequestInput<'_>,
+    outcome: ManagedOutcome,
+    metadata: Option<&Py<PyAny>>,
+) -> Response {
     match outcome {
         Err(err) => python_error_to_response_in(py, &err, Some(input)),
         Ok((mut response, explicit)) => {
