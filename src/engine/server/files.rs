@@ -2,14 +2,17 @@
 //! This module serves files from a directory and gives the fallback file for frontend navigation requests.
 
 use crate::engine::config::{FrontendMount, StaticMount};
+use crate::engine::exception_dispatch::{dispatch_http_error, resolve_pending_handler};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::OriginalUri;
 use axum::extract::Request;
 use axum::http::header::{ACCEPT, CONTENT_TYPE, HOST, LOCATION};
-use axum::http::{HeaderValue, Method, StatusCode, Uri};
+use axum::http::{Extensions, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::response_api::content_type;
+use fastrapi_runtime::py_bridge::EventLoop;
 use smallvec::SmallVec;
 use std::convert::Infallible;
 use std::path::{Component, Path, PathBuf};
@@ -52,23 +55,57 @@ async fn serve_frontend_file(req: Request, path: PathBuf, status: StatusCode) ->
     Some(response)
 }
 
+struct HandledRequest {
+    method: Method,
+    headers: HeaderMap,
+    server: EventLoop,
+}
+
 struct StaticOrigin {
     uri: Uri,
     host: Option<HeaderValue>,
+    handled: Option<HandledRequest>,
 }
 
 impl StaticOrigin {
-    fn of(req: &Request) -> Self {
+    fn of(req: &Request, handlers: Option<EventLoop>) -> Self {
         Self {
             uri: req
                 .extensions()
                 .get::<OriginalUri>()
                 .map_or_else(|| req.uri().clone(), |original| original.0.clone()),
             host: req.headers().get(HOST).cloned(),
+            handled: handlers.map(|server| HandledRequest {
+                method: req.method().clone(),
+                headers: req.headers().clone(),
+                server,
+            }),
         }
     }
 
-    fn finish(&self, mut response: Response) -> Response {
+    async fn finish(&self, response: Response) -> Response {
+        let status = response.status();
+        if matches!(
+            status,
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        ) && let Some(handled) = &self.handled
+        {
+            let extensions = Extensions::new();
+            let input = RequestInput::new(
+                &handled.method,
+                &self.uri,
+                &handled.headers,
+                &extensions,
+                Some(handled.server),
+            );
+            if let Some(response) = dispatch_http_error(handled.server, status.as_u16(), &input) {
+                return resolve_pending_handler(response).await;
+            }
+        }
+        self.finish_plain(response)
+    }
+
+    fn finish_plain(&self, mut response: Response) -> Response {
         let status = response.status();
         let error: &'static [u8] = match status {
             StatusCode::NOT_FOUND => br#"{"detail":"Not Found"}"#,
@@ -116,7 +153,11 @@ impl StaticOrigin {
     }
 }
 
-pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
+pub(crate) fn add_static_mount(
+    app: Router,
+    mount: StaticMount,
+    handlers: Option<EventLoop>,
+) -> Router {
     let mount_path = if mount.path == "/" {
         "/".to_string()
     } else {
@@ -135,7 +176,7 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
         );
         let service = service_fn(move |req: Request| {
             let services = services.clone();
-            let origin = StaticOrigin::of(&req);
+            let origin = StaticOrigin::of(&req, handlers);
             async move {
                 let (parts, _) = req.into_parts();
                 for service in services.iter() {
@@ -146,10 +187,10 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
                         .await
                         .map(IntoResponse::into_response)?;
                     if response.status() != StatusCode::NOT_FOUND {
-                        return Ok::<_, Infallible>(origin.finish(response));
+                        return Ok::<_, Infallible>(origin.finish(response).await);
                     }
                 }
-                Ok(origin.finish(StatusCode::NOT_FOUND.into_response()))
+                Ok(origin.finish(StatusCode::NOT_FOUND.into_response()).await)
             }
         });
         return app.nest_service(&mount_path, service);
@@ -159,12 +200,10 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
     if mount.follow_symlink {
         let service = service_fn(move |req: Request| {
             let serve_dir = serve_dir.clone();
-            let origin = StaticOrigin::of(&req);
+            let origin = StaticOrigin::of(&req, handlers);
             async move {
-                serve_dir
-                    .oneshot(req)
-                    .await
-                    .map(|response| origin.finish(response.into_response()))
+                let response = serve_dir.oneshot(req).await?.into_response();
+                Ok::<_, Infallible>(origin.finish(response).await)
             }
         });
         return app.nest_service(&mount_path, service);
@@ -179,16 +218,13 @@ pub(crate) fn add_static_mount(app: Router, mount: StaticMount) -> Router {
     let service = service_fn(move |req: Request| {
         let directory = directory.clone();
         let serve_dir = serve_dir.clone();
-        let origin = StaticOrigin::of(&req);
+        let origin = StaticOrigin::of(&req, handlers);
         async move {
             if static_request_hits_symlink(&directory, req.uri().path(), index).await {
                 return Ok::<_, Infallible>(StatusCode::FORBIDDEN.into_response());
             }
-
-            serve_dir
-                .oneshot(req)
-                .await
-                .map(|response| origin.finish(response.into_response()))
+            let response = serve_dir.oneshot(req).await?.into_response();
+            Ok(origin.finish(response).await)
         }
     });
 

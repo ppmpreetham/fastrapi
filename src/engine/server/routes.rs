@@ -27,7 +27,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::engine::exception_dispatch::{dispatch_status_handler, resolve_pending_handler};
+use crate::engine::exception_dispatch::{
+    dispatch_status_handler, has_custom_handlers, resolve_pending_handler,
+};
 use crate::engine::executor::{
     render_no_request_json_response, render_no_request_response, run_py_handler_no_request,
 };
@@ -286,12 +288,13 @@ fn register_routes(
         };
     }
 
+    let handlers = has_custom_handlers(py, app_state.event_loop).then_some(app_state.event_loop);
     app = app_config
         .static_mounts
         .iter()
         .cloned()
         .fold(app, |current_app, mount| {
-            add_static_mount(current_app, mount)
+            add_static_mount(current_app, mount, handlers)
         });
 
     app = app.method_not_allowed_fallback(move |req: Request| async move {

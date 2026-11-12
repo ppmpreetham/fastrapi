@@ -108,6 +108,39 @@ pub(crate) fn dispatch_exception_handler(
     }
 }
 
+pub(crate) fn has_custom_handlers(py: Python<'_>, server: EventLoop) -> bool {
+    server
+        .server()
+        .exception_handlers()
+        .is_some_and(|registry| {
+            registry
+                .bind(py)
+                .values()
+                .iter()
+                .any(|handler| !is_default_handler(&handler))
+        })
+}
+
+pub(crate) fn dispatch_http_error(
+    server: EventLoop,
+    status: u16,
+    request_input: &RequestInput<'_>,
+) -> Option<Response> {
+    Python::attach(|py| {
+        let exc = STARLETTE_HTTP_EXCEPTION
+            .get(py)
+            .ok()?
+            .call1((status,))
+            .ok()?;
+        dispatch_exception_handler(
+            py,
+            &PyErr::from_value(exc),
+            Some(request_input),
+            Some(server),
+        )
+    })
+}
+
 fn server_of(request_input: Option<&RequestInput<'_>>) -> Option<EventLoop> {
     request_input
         .and_then(|input| input.server)

@@ -270,3 +270,26 @@ def test_error_after_yield_keeps_response_like_fastapi():
         return responses
 
     both(run)
+
+
+def test_static_errors_use_handlers_like_fastapi(tmp_path):
+    import starlette.exceptions
+
+    (tmp_path / "a.txt").write_text("a")
+
+    def run(lib):
+        app = new_app(lib)
+        app.mount("/st", submodule(lib, "staticfiles").StaticFiles(directory=str(tmp_path)))
+
+        @app.exception_handler(404)
+        def not_found(request, exc):
+            return lib.responses.JSONResponse({"custom": exc.status_code, "path": request.url.path}, status_code=404)
+
+        @app.exception_handler(starlette.exceptions.HTTPException)
+        def http_error(request, exc):
+            return lib.responses.JSONResponse({"http": exc.status_code}, status_code=exc.status_code)
+
+        c = client(app)
+        return [(r.status_code, r.json()) for r in (c.get("/st/missing.txt"), c.post("/st/a.txt"))]
+
+    both(run)
