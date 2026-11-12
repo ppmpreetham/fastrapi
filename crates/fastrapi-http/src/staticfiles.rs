@@ -2,10 +2,10 @@
 //! The class sends files from a directory or from Python packages.
 //! Some methods send the call to the starlette `StaticFiles` class.
 
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyAssertionError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[pyclass(frozen, name = "StaticFiles", get_all, from_py_object, eq)]
 #[derive(Clone, PartialEq, Eq)]
@@ -57,18 +57,30 @@ impl PyStaticFiles {
         kwargs.set_item(pyo3::intern!(py, "html"), self.html)?;
         kwargs.set_item(pyo3::intern!(py, "check_dir"), self.check_dir)?;
         kwargs.set_item(pyo3::intern!(py, "follow_symlink"), self.follow_symlink)?;
-        cls.call((), Some(&kwargs))
+        let delegate = cls.call((), Some(&kwargs))?;
+        delegate.setattr(pyo3::intern!(py, "all_directories"), &self.directories)?;
+        Ok(delegate)
+    }
+
+    fn __call__<'py>(
+        &self,
+        py: Python<'py>,
+        scope: &Bound<'py, PyAny>,
+        receive: &Bound<'py, PyAny>,
+        send: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.delegate(py)?.call1((scope, receive, send))
     }
 
     /// Given `directory` and `packages` arguments, return a list of all the
     /// directories that should be used for serving static files from.
-    fn get_directories(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(self
-            .directories
-            .clone()
-            .into_pyobject(py)?
-            .into_any()
-            .unbind())
+    #[pyo3(signature = (directory=None, packages=None))]
+    fn get_directories(
+        &self,
+        directory: Option<String>,
+        packages: Option<Py<PyAny>>,
+    ) -> PyResult<Vec<String>> {
+        resolve_directories(directory, packages)
     }
 
     /// Given the ASGI scope, return the `path` string to serve up,
@@ -155,31 +167,34 @@ fn resolve_directories(
     Python::attach(|py| {
         for item in packages.bind(py).try_iter()? {
             let item = item?;
-            let (package, subdirectory) = if let Ok(name) = item.extract::<String>() {
-                (name, None)
-            } else {
-                let pair = item.cast::<PyTuple>()?;
-                (
+            let (package, statics_dir) = match item.cast::<PyTuple>() {
+                Ok(pair) => (
                     pair.get_item(0)?.extract::<String>()?,
-                    Some(pair.get_item(1)?.extract::<String>()?),
-                )
+                    pair.get_item(1)?.extract::<String>()?,
+                ),
+                Err(_) => (item.extract::<String>()?, "statics".to_owned()),
             };
-            let spec = py
+            let origin = py
                 .import("importlib.util")?
-                .call_method1(pyo3::intern!(py, "find_spec"), (&package,))?;
-            let locations = spec.getattr(pyo3::intern!(py, "submodule_search_locations"))?;
-            if locations.is_none() {
-                return Err(PyRuntimeError::new_err(format!(
-                    "Package '{package}' has no filesystem location"
+                .call_method1(pyo3::intern!(py, "find_spec"), (&package,))?
+                .getattr(pyo3::intern!(py, "origin"))
+                .ok()
+                .filter(|origin| !origin.is_none())
+                .ok_or_else(|| {
+                    PyAssertionError::new_err(format!("Package '{package}' could not be found."))
+                })?;
+            let os_path = py.import("os.path")?;
+            let joined =
+                os_path.call_method1(pyo3::intern!(py, "join"), (origin, "..", &statics_dir))?;
+            let package_directory: String = os_path
+                .call_method1(pyo3::intern!(py, "normpath"), (joined,))?
+                .extract()?;
+            if !Path::new(&package_directory).is_dir() {
+                return Err(PyAssertionError::new_err(format!(
+                    "Directory ''{statics_dir}'' in package '{package}' could not be found."
                 )));
             }
-            for location in locations.try_iter()? {
-                let mut path = PathBuf::from(location?.extract::<String>()?);
-                if let Some(subdirectory) = &subdirectory {
-                    path.push(subdirectory);
-                }
-                directories.push(path.to_string_lossy().into_owned());
-            }
+            directories.push(package_directory);
         }
         Ok(directories)
     })

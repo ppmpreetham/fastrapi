@@ -150,3 +150,28 @@ def test_api_route_attributes_match_fastapi():
         return routes, attrs(manual)
 
     both(run)
+
+
+def test_static_files_methods_match_fastapi(tmp_path):
+    import asyncio
+
+    import httpx
+
+    (tmp_path / "a.txt").write_text("hello")
+
+    def run(lib):
+        files = submodule(lib, "staticfiles").StaticFiles(directory=str(tmp_path))
+
+        async def call():
+            transport = httpx.ASGITransport(app=files)
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                r = await c.get("/a.txt")
+                return r.status_code, r.text
+
+        return (
+            files.get_directories(),
+            files.get_directories(str(tmp_path)) == [str(tmp_path)],
+            asyncio.run(call()),
+        )
+
+    both(run)
