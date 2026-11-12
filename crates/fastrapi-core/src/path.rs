@@ -33,6 +33,9 @@ pub fn join_path(a: &str, b: &str) -> String {
     if a.is_empty() {
         return b.to_owned();
     }
+    if b.is_empty() {
+        return a.to_owned();
+    }
     let a_ends = a.ends_with('/');
     let b_starts = b.starts_with('/');
 

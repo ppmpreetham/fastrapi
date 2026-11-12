@@ -221,3 +221,23 @@ def test_non_ascii_paths_match_fastapi():
         return [(r.status_code, r.json()) for r in (c.get("/ünï"), c.get("/%C3%BCn%C3%AF"), c.get("/café/x"))]
 
     both(run)
+
+
+def test_prefixed_empty_and_slash_routes_match_fastapi():
+    def run(lib):
+        app = new_app(lib)
+        router = lib.APIRouter(prefix="/items")
+
+        @router.get("")
+        def empty():
+            return "empty"
+
+        @router.get("/")
+        def slash():
+            return "slash"
+
+        app.include_router(router)
+        c = client(app)
+        return [(r.status_code, r.json()) for r in (c.get("/items"), c.get("/items/"))]
+
+    both(run)
