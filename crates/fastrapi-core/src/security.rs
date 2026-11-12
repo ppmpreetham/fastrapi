@@ -46,6 +46,9 @@ pub enum SecurityKind {
         name: String,
         auto_error: bool,
     },
+    Model {
+        scheme: simd_json::OwnedValue,
+    },
 }
 
 #[derive(Clone, Debug)]

@@ -331,3 +331,51 @@ def test_dependency_cache_is_shared_like_fastapi():
         return results
 
     both(run)
+
+
+def test_security_classes_match_fastapi():
+    def run(lib):
+        s = submodule(lib, "security")
+        base = submodule(lib, "security.api_key")
+
+        class Forbidden(s.HTTPBearer):
+            def make_not_authenticated_error(self):
+                return lib.HTTPException(status_code=403, detail="nope")
+
+        class Token(base.APIKeyBase):
+            def __init__(self):
+                super().__init__(location="header", name="x-token", description="t", scheme_name=None, auto_error=True)
+
+            async def __call__(self, request: lib.Request):
+                return self.check_api_key(request.headers.get("x-token"))
+
+        bearer = Forbidden()
+        token = Token()
+        app = new_app(lib)
+
+        @app.get("/bearer")
+        def protected(credentials=lib.Depends(bearer)):
+            return credentials.credentials
+
+        @app.get("/token")
+        def tokened(value=lib.Depends(token)):
+            return value
+
+        c = client(app)
+        basic = s.HTTPBasic(realm="r")
+        password = s.OAuth2PasswordBearer(tokenUrl="t", scopes={"a": "A"})
+        key = s.APIKeyQuery(name="k")
+        return (
+            [(r.status_code, r.json()) for r in (c.get("/bearer"), c.get("/token"), c.get("/token", headers={"x-token": "v"}))],
+            bearer.scheme_name,
+            token.scheme_name,
+            basic.make_authenticate_headers(),
+            (basic.make_not_authenticated_error().status_code, basic.make_not_authenticated_error().headers),
+            key.check_api_key("v"),
+            key.make_not_authenticated_error().headers,
+            password.make_not_authenticated_error().headers,
+            [m.model.model_dump(mode="json", by_alias=True, exclude_none=True) for m in (basic, password, key, s.HTTPBearer(bearerFormat="JWT"))],
+            sorted(app.openapi()["components"]["securitySchemes"]),
+        )
+
+    both(run)

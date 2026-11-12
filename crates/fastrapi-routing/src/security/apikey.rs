@@ -97,13 +97,14 @@ macro_rules! define_api_key_security {
     ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, $source:ident) => {
         $(#[$meta])*
         #[pyo3::prelude::pyclass(
-                                                                    frozen,
-                                                                    name = $py_name,
-                                                                    module = "fastrapi.security",
-                                                                    get_all,
-                                                                    from_py_object,
-                                                                    eq
-                                                                )]
+            frozen,
+            subclass,
+            name = $py_name,
+            module = "fastrapi.security",
+            get_all,
+            from_py_object,
+            eq
+        )]
         #[derive(smart_default::SmartDefault, Clone, Debug, PartialEq, Eq)]
         pub struct $struct_name {
             pub name: String,
@@ -116,30 +117,60 @@ macro_rules! define_api_key_security {
         #[pyo3::prelude::pymethods]
         impl $struct_name {
             #[new]
+            #[classmethod]
             #[pyo3(signature = (*, name, scheme_name=None, description=None, auto_error=true))]
             fn new(
+                cls: &pyo3::Bound<'_, pyo3::types::PyType>,
                 name: String,
                 scheme_name: Option<String>,
                 description: Option<String>,
                 auto_error: bool,
-            ) -> Self {
-                Self {
+            ) -> pyo3::PyResult<Self> {
+                Ok(Self {
                     name,
-                    scheme_name: scheme_name.or_else(|| Some($py_name.to_owned())),
+                    scheme_name: Some($crate::security::callable::scheme_name(cls, scheme_name)?),
                     description,
                     auto_error,
-                }
+                })
             }
 
             fn __call__(
-                &self,
+                slf: &pyo3::Bound<'_, Self>,
                 request: &pyo3::Bound<'_, pyo3::types::PyAny>,
             ) -> pyo3::PyResult<Option<String>> {
-                $crate::security::callable::api_key_call(
+                let this = slf.get();
+                let key = $crate::security::callable::source_value(
+                    request,
+                    stringify!($source),
+                    &this.name,
+                );
+                $crate::security::callable::check_api_key(slf.as_any(), this.auto_error, key)
+            }
+
+            fn check_api_key(
+                slf: &pyo3::Bound<'_, Self>,
+                api_key: Option<String>,
+            ) -> pyo3::PyResult<Option<String>> {
+                $crate::security::callable::check_api_key(slf.as_any(), slf.get().auto_error, api_key)
+            }
+
+            fn make_not_authenticated_error<'py>(
+                &self,
+                py: pyo3::Python<'py>,
+            ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+                $crate::security::callable::challenge_error(py, "APIKey")
+            }
+
+            #[getter]
+            fn model<'py>(
+                &self,
+                py: pyo3::Python<'py>,
+            ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+                $crate::security::scheme::api_key_model(
+                    py,
                     stringify!($source),
                     &self.name,
-                    self.auto_error,
-                    request,
+                    self.description.as_deref(),
                 )
             }
         }

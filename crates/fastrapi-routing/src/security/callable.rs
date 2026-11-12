@@ -5,31 +5,37 @@
 use base64::Engine as _;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{PyAny, PyDict, PyType};
 
 use crate::security::{HTTPAuthorizationCredentials, HTTPBasicCredentials};
 use base64::engine::general_purpose::STANDARD;
-use fastrapi_http::exceptions::http_exception;
+use fastrapi_http::exceptions::http_exception_type;
 
-/// Makes an `HTTPException` error with a status code, a detail, and an optional challenge.
-/// RFC 9110 requires a `WWW-Authenticate` header in a 401 response.
-fn http_exc(py: Python<'_>, status: u16, detail: &str, challenge: Option<&str>) -> PyErr {
-    let headers = match challenge {
-        Some(value) => {
-            let headers = PyDict::new(py);
-            if let Err(err) = headers.set_item(intern!(py, "WWW-Authenticate"), value) {
-                return err;
-            }
-            Some(headers)
-        }
-        None => None,
-    };
-    http_exception(py, status, Some(detail), headers)
+pub(crate) fn scheme_name(cls: &Bound<'_, PyType>, given: Option<String>) -> PyResult<String> {
+    match given.filter(|name| !name.is_empty()) {
+        Some(name) => Ok(name),
+        None => Ok(cls.name()?.to_string()),
+    }
 }
 
-/// Makes a 401 error with the challenge for the expected scheme.
-pub(crate) fn unauthorized(py: Python<'_>, challenge: &str) -> PyErr {
-    http_exc(py, 401, "Not authenticated", Some(challenge))
+pub(crate) fn authenticate_headers<'py>(
+    py: Python<'py>,
+    challenge: &str,
+) -> PyResult<Bound<'py, PyDict>> {
+    let headers = PyDict::new(py);
+    headers.set_item(intern!(py, "WWW-Authenticate"), challenge)?;
+    Ok(headers)
+}
+
+pub(crate) fn not_authenticated(headers: Bound<'_, PyAny>) -> PyResult<Bound<'_, PyAny>> {
+    http_exception_type(headers.py())?.call1((401, "Not authenticated", headers))
+}
+
+pub(crate) fn challenge_error<'py>(
+    py: Python<'py>,
+    challenge: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    not_authenticated(authenticate_headers(py, challenge)?.into_any())
 }
 
 fn split_authorization(header: &str) -> (&str, &str) {
@@ -49,49 +55,48 @@ fn auth_header(request: &Bound<'_, PyAny>) -> Option<String> {
         .ok()
 }
 
-fn missing<T>(
-    request: &Bound<'_, PyAny>,
-    auto_error: bool,
-    challenge: &str,
-) -> PyResult<Option<T>> {
-    if auto_error {
-        Err(unauthorized(request.py(), challenge))
-    } else {
-        Ok(None)
+fn missing<T>(scheme: &Bound<'_, PyAny>, auto_error: bool) -> PyResult<Option<T>> {
+    if !auto_error {
+        return Ok(None);
     }
+    let error = scheme.call_method0(intern!(scheme.py(), "make_not_authenticated_error"))?;
+    Err(PyErr::from_value(error))
 }
 
 pub(crate) fn bearer_token(
-    request: &Bound<'_, PyAny>,
+    scheme_object: &Bound<'_, PyAny>,
     auto_error: bool,
+    request: &Bound<'_, PyAny>,
 ) -> PyResult<Option<String>> {
     let header = auth_header(request).unwrap_or_default();
     let (scheme, credentials) = split_authorization(&header);
 
     if header.is_empty() || !scheme.eq_ignore_ascii_case("bearer") {
-        return missing(request, auto_error, "Bearer");
+        return missing(scheme_object, auto_error);
     }
     Ok(Some(credentials.to_owned()))
 }
 
 pub(crate) fn raw_authorization(
-    request: &Bound<'_, PyAny>,
+    scheme: &Bound<'_, PyAny>,
     auto_error: bool,
+    request: &Bound<'_, PyAny>,
 ) -> PyResult<Option<String>> {
     match auth_header(request).filter(|header| !header.is_empty()) {
         Some(header) => Ok(Some(header)),
-        None => missing(request, auto_error, "Bearer"),
+        None => missing(scheme, auto_error),
     }
 }
 
 pub(crate) fn http_digest_call(
+    scheme_object: &Bound<'_, PyAny>,
     auto_error: bool,
     request: &Bound<'_, PyAny>,
 ) -> PyResult<Option<HTTPAuthorizationCredentials>> {
     let header = auth_header(request).unwrap_or_default();
     let (scheme, credentials) = split_authorization(&header);
     if scheme.is_empty() || credentials.is_empty() || !scheme.eq_ignore_ascii_case("digest") {
-        return missing(request, auto_error, "Digest");
+        return missing(scheme_object, auto_error);
     }
     Ok(Some(HTTPAuthorizationCredentials {
         scheme: scheme.to_owned(),
@@ -122,16 +127,15 @@ fn decode_basic(payload: &str) -> Option<(String, String)> {
 }
 
 pub(crate) fn http_bearer_call(
+    scheme_object: &Bound<'_, PyAny>,
     auto_error: bool,
-    bearer_format: Option<&str>,
     request: &Bound<'_, PyAny>,
 ) -> PyResult<Option<HTTPAuthorizationCredentials>> {
-    _ = bearer_format;
     let header = auth_header(request).unwrap_or_default();
     let (scheme, credentials) = split_authorization(&header);
 
     if header.is_empty() || !scheme.eq_ignore_ascii_case("bearer") || credentials.is_empty() {
-        return missing(request, auto_error, "Bearer");
+        return missing(scheme_object, auto_error);
     }
 
     Ok(Some(HTTPAuthorizationCredentials {
@@ -141,17 +145,12 @@ pub(crate) fn http_bearer_call(
 }
 
 pub(crate) fn http_basic_call(
+    scheme_object: &Bound<'_, PyAny>,
     auto_error: bool,
-    realm: Option<&str>,
     request: &Bound<'_, PyAny>,
 ) -> PyResult<Option<HTTPBasicCredentials>> {
     let header = auth_header(request).unwrap_or_default();
     let (scheme, payload) = split_authorization(&header);
-
-    let challenge = match realm {
-        Some(realm) => format!("Basic realm=\"{realm}\""),
-        None => "Basic".to_owned(),
-    };
 
     let credentials = scheme
         .eq_ignore_ascii_case("basic")
@@ -160,18 +159,17 @@ pub(crate) fn http_basic_call(
 
     match credentials {
         Some((username, password)) => Ok(Some(HTTPBasicCredentials { username, password })),
-        None => missing(request, auto_error, &challenge),
+        None => missing(scheme_object, auto_error),
     }
 }
 
-pub(crate) fn api_key_call(
-    source: &'static str,
-    name: &str,
+pub(crate) fn check_api_key(
+    scheme: &Bound<'_, PyAny>,
     auto_error: bool,
-    request: &Bound<'_, PyAny>,
+    api_key: Option<String>,
 ) -> PyResult<Option<String>> {
-    match source_value(request, source, name).filter(|key| !key.is_empty()) {
+    match api_key.filter(|key| !key.is_empty()) {
         Some(key) => Ok(Some(key)),
-        None => missing(request, auto_error, "APIKey"),
+        None => missing(scheme, auto_error),
     }
 }

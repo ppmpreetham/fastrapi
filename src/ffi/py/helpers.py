@@ -158,12 +158,54 @@ class SecurityBase(abc.ABC):
     pass
 
 
+def _not_authenticated(headers):
+    from fastrapi.exceptions import HTTPException
+
+    return HTTPException(status_code=401, detail="Not authenticated", headers=headers)
+
+
 class APIKeyBase(SecurityBase):
-    pass
+    def __init__(self, location, name, description, scheme_name, auto_error):
+        from fastrapi.openapi.models import APIKey
+
+        self.auto_error = auto_error
+        self.model = APIKey(**{"in": location}, name=name, description=description)
+        self.scheme_name = scheme_name or self.__class__.__name__
+
+    def make_not_authenticated_error(self):
+        return _not_authenticated({"WWW-Authenticate": "APIKey"})
+
+    def check_api_key(self, api_key):
+        if not api_key:
+            if self.auto_error:
+                raise self.make_not_authenticated_error()
+            return None
+        return api_key
 
 
 class HTTPBase(SecurityBase):
-    pass
+    def __init__(self, *, scheme, scheme_name=None, description=None, auto_error=True):
+        from fastrapi.openapi.models import HTTPBase as HTTPBaseModel
+
+        self.model = HTTPBaseModel(scheme=scheme, description=description)
+        self.scheme_name = scheme_name or self.__class__.__name__
+        self.auto_error = auto_error
+
+    def make_authenticate_headers(self):
+        return {"WWW-Authenticate": self.model.scheme.title()}
+
+    def make_not_authenticated_error(self):
+        return _not_authenticated(self.make_authenticate_headers())
+
+    async def __call__(self, request):
+        from fastrapi.security import HTTPAuthorizationCredentials
+
+        scheme, _, credentials = (request.headers.get("Authorization") or "").partition(" ")
+        if not (scheme and credentials.strip()):
+            if self.auto_error:
+                raise self.make_not_authenticated_error()
+            return None
+        return HTTPAuthorizationCredentials(scheme=scheme, credentials=credentials.strip())
 
 
 class AsyncExitStackMiddleware:

@@ -14,6 +14,7 @@ use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::{blocking, py_bridge};
 
 use crate::security::{OAuth2PasswordRequestForm, describe_scheme};
+use fastrapi_core::security::SecurityKind;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyStopIteration};
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -545,7 +546,9 @@ fn adapt_security_schemes(py: Python<'_>, nodes: &mut [DependencyNode]) {
         if is_form_type && let Ok(instance) = node.func.bind(py).call0() {
             node.func = instance.unbind();
         }
-        if describe_scheme(py, node.func.bind(py)).is_some() || is_form || is_form_type {
+        let native_scheme = describe_scheme(py, node.func.bind(py))
+            .is_some_and(|spec| !matches!(spec.kind, SecurityKind::Model { .. }));
+        if native_scheme || is_form || is_form_type {
             node.injection_plan = vec![(
                 PyString::intern(py, "request").unbind(),
                 InjectionType::Request,

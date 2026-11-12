@@ -4,10 +4,10 @@
 
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{PyAny, PyDict, PyType};
 use smart_default::SmartDefault;
 
-use super::callable;
+use super::{callable, scheme};
 
 /// This is the base class for OAuth2 authentication, an instance of it would be used
 /// as a dependency. All other OAuth2 classes inherit from it and customize it for
@@ -20,6 +20,7 @@ use super::callable;
 /// [FastAPI docs for Security](https://fastapi.tiangolo.com/tutorial/security/).
 #[pyclass(
     frozen,
+    subclass,
     name = "OAuth2",
     module = "fastrapi.security",
     get_all,
@@ -36,25 +37,31 @@ pub struct OAuth2 {
 #[pymethods]
 impl OAuth2 {
     #[new]
+    #[classmethod]
     #[pyo3(signature = (flows=None, scheme_name=None, description=None, auto_error=true))]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, PyType>,
         flows: Option<Py<PyAny>>,
         scheme_name: Option<String>,
         description: Option<String>,
         auto_error: bool,
-    ) -> Self {
-        Self {
-            flows: flows.unwrap_or_else(|| PyDict::new(py).into()),
-            scheme_name: scheme_name.or_else(|| Some("OAuth2".to_owned())),
+    ) -> PyResult<Self> {
+        Ok(Self {
+            flows: flows.unwrap_or_else(|| PyDict::new(cls.py()).into()),
+            scheme_name: Some(callable::scheme_name(cls, scheme_name)?),
             description,
             auto_error,
-        }
+        })
     }
 
     /// Call self as a function.
-    fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-        callable::raw_authorization(request, self.auto_error)
+    fn __call__(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+        callable::raw_authorization(slf.as_any(), slf.get().auto_error, request)
+    }
+
+    #[getter]
+    fn model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        scheme::oauth2_model(self.flows.bind(py), self.description.as_deref())
     }
 }
 
@@ -65,6 +72,7 @@ impl OAuth2 {
 /// [FastAPI docs for Simple OAuth2 with Password and Bearer](https://fastapi.tiangolo.com/tutorial/security/simple-oauth2/).
 #[pyclass(
     frozen,
+    subclass,
     name = "OAuth2PasswordBearer",
     module = "fastrapi.security",
     get_all,
@@ -84,6 +92,7 @@ pub struct OAuth2PasswordBearer {
 #[pymethods]
 impl OAuth2PasswordBearer {
     #[new]
+    #[classmethod]
     #[pyo3(signature = (
         tokenUrl=None,
         scheme_name=None,
@@ -104,6 +113,7 @@ impl OAuth2PasswordBearer {
         reason = "the signature copies FastAPI and keeps the snake_case names"
     )]
     fn new(
+        cls: &Bound<'_, PyType>,
         tokenUrl: Option<String>,
         scheme_name: Option<String>,
         scopes: Option<Py<PyDict>>,
@@ -116,7 +126,7 @@ impl OAuth2PasswordBearer {
         Ok(Self {
             token_url: required_url(tokenUrl, token_url, "tokenUrl")?,
             refresh_url: refreshUrl.or(refresh_url),
-            scheme_name: scheme_name.or_else(|| Some("OAuth2PasswordBearer".to_owned())),
+            scheme_name: Some(callable::scheme_name(cls, scheme_name)?),
             scopes,
             description,
             auto_error,
@@ -124,8 +134,22 @@ impl OAuth2PasswordBearer {
     }
 
     /// Call self as a function.
-    fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-        callable::bearer_token(request, self.auto_error)
+    fn __call__(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+        callable::bearer_token(slf.as_any(), slf.get().auto_error, request)
+    }
+
+    #[getter]
+    fn model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let flows = scheme::oauth2_flow(
+            py,
+            "password",
+            &[
+                ("tokenUrl", Some(&self.token_url)),
+                ("refreshUrl", self.refresh_url.as_deref()),
+            ],
+            self.scopes.as_ref(),
+        )?;
+        scheme::oauth2_model(&flows, self.description.as_deref())
     }
 }
 
@@ -133,6 +157,7 @@ impl OAuth2PasswordBearer {
 /// flow. An instance of it would be used as a dependency.
 #[pyclass(
     frozen,
+    subclass,
     name = "OAuth2AuthorizationCodeBearer",
     module = "fastrapi.security",
     get_all,
@@ -153,6 +178,7 @@ pub struct OAuth2AuthorizationCodeBearer {
 #[pymethods]
 impl OAuth2AuthorizationCodeBearer {
     #[new]
+    #[classmethod]
     #[pyo3(signature = (
         authorizationUrl=None,
         tokenUrl=None,
@@ -175,6 +201,7 @@ impl OAuth2AuthorizationCodeBearer {
         reason = "the signature copies FastAPI and keeps the snake_case names"
     )]
     fn new(
+        cls: &Bound<'_, PyType>,
         authorizationUrl: Option<String>,
         tokenUrl: Option<String>,
         refreshUrl: Option<String>,
@@ -195,15 +222,30 @@ impl OAuth2AuthorizationCodeBearer {
             token_url: required_url(tokenUrl, token_url, "tokenUrl")?,
             refresh_url: refreshUrl.or(refresh_url),
             scopes,
-            scheme_name: scheme_name.or_else(|| Some("OAuth2AuthorizationCodeBearer".to_owned())),
+            scheme_name: Some(callable::scheme_name(cls, scheme_name)?),
             description,
             auto_error,
         })
     }
 
     /// Call self as a function.
-    fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-        callable::bearer_token(request, self.auto_error)
+    fn __call__(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+        callable::bearer_token(slf.as_any(), slf.get().auto_error, request)
+    }
+
+    #[getter]
+    fn model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let flows = scheme::oauth2_flow(
+            py,
+            "authorizationCode",
+            &[
+                ("authorizationUrl", Some(&self.authorization_url)),
+                ("tokenUrl", Some(&self.token_url)),
+                ("refreshUrl", self.refresh_url.as_deref()),
+            ],
+            self.scopes.as_ref(),
+        )?;
+        scheme::oauth2_model(&flows, self.description.as_deref())
     }
 }
 
@@ -222,6 +264,7 @@ fn required_url(camel: Option<String>, snake: Option<String>, name: &str) -> PyR
 /// code.
 #[pyclass(
     frozen,
+    subclass,
     name = "OpenIdConnect",
     module = "fastrapi.security",
     get_all,
@@ -239,6 +282,7 @@ pub struct OpenIdConnect {
 #[pymethods]
 impl OpenIdConnect {
     #[new]
+    #[classmethod]
     #[pyo3(signature = (
         openIdConnectUrl=None,
         scheme_name=None,
@@ -252,6 +296,7 @@ impl OpenIdConnect {
         reason = "FastAPI names this argument openIdConnectUrl"
     )]
     fn new(
+        cls: &Bound<'_, PyType>,
         openIdConnectUrl: Option<String>,
         scheme_name: Option<String>,
         description: Option<String>,
@@ -264,14 +309,37 @@ impl OpenIdConnect {
                 openid_connect_url,
                 "openIdConnectUrl",
             )?,
-            scheme_name: scheme_name.or_else(|| Some("OpenIdConnect".to_owned())),
+            scheme_name: Some(callable::scheme_name(cls, scheme_name)?),
             description,
             auto_error,
         })
     }
 
     /// Call self as a function.
-    fn __call__(&self, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-        callable::raw_authorization(request, self.auto_error)
+    fn __call__(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+        callable::raw_authorization(slf.as_any(), slf.get().auto_error, request)
+    }
+
+    #[getter]
+    fn model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        scheme::openid_model(py, &self.openid_connect_url, self.description.as_deref())
     }
 }
+
+macro_rules! bearer_challenge {
+    ($($ty:ty),+) => {$(
+        #[pymethods]
+        impl $ty {
+            fn make_not_authenticated_error<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+                callable::challenge_error(py, "Bearer")
+            }
+        }
+    )+};
+}
+
+bearer_challenge!(
+    OAuth2,
+    OAuth2PasswordBearer,
+    OAuth2AuthorizationCodeBearer,
+    OpenIdConnect
+);

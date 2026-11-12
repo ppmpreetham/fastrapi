@@ -1,11 +1,13 @@
 //! The HTTP security classes `HTTPBearer`, `HTTPBasic`, and `HTTPDigest`, and their credential classes.
 //! Each security class reads the `Authorization` header and gives the credentials to the endpoint.
 
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyType};
 use smart_default::SmartDefault;
+use std::borrow::Cow;
 
-use super::callable;
+use super::{callable, scheme};
 
 /// HTTP Bearer token authentication.
 ///
@@ -37,6 +39,7 @@ use super::callable;
 /// ```
 #[pyclass(
     frozen,
+    subclass,
     name = "HTTPBearer",
     module = "fastrapi.security",
     get_all,
@@ -55,29 +58,46 @@ pub struct HTTPBearer {
 #[pymethods]
 impl HTTPBearer {
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*, bearerFormat=None, scheme_name=None, description=None, auto_error=true, bearer_format=None))]
     #[expect(non_snake_case, reason = "FastAPI names this argument bearerFormat")]
     fn new(
+        cls: &Bound<'_, PyType>,
         bearerFormat: Option<String>,
         scheme_name: Option<String>,
         description: Option<String>,
         auto_error: bool,
         bearer_format: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        Ok(Self {
             bearer_format: bearerFormat.or(bearer_format),
-            scheme_name: scheme_name.or_else(|| Some("HTTPBearer".to_owned())),
+            scheme_name: Some(callable::scheme_name(cls, scheme_name)?),
             description,
             auto_error,
-        }
+        })
     }
 
     /// Call self as a function.
     fn __call__(
-        &self,
+        slf: &Bound<'_, Self>,
         request: &Bound<'_, PyAny>,
     ) -> PyResult<Option<super::HTTPAuthorizationCredentials>> {
-        callable::http_bearer_call(self.auto_error, self.bearer_format.as_deref(), request)
+        callable::http_bearer_call(slf.as_any(), slf.get().auto_error, request)
+    }
+
+    #[getter]
+    fn model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        scheme::bearer_model(
+            py,
+            self.bearer_format.as_deref(),
+            self.description.as_deref(),
+        )
+    }
+}
+
+impl HTTPBearer {
+    const fn challenge(&self) -> Cow<'static, str> {
+        Cow::Borrowed("Bearer")
     }
 }
 
@@ -114,6 +134,7 @@ impl HTTPBearer {
 /// ```
 #[pyclass(
     frozen,
+    subclass,
     name = "HTTPBasic",
     module = "fastrapi.security",
     get_all,
@@ -132,27 +153,43 @@ pub struct HTTPBasic {
 #[pymethods]
 impl HTTPBasic {
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*, scheme_name=None, realm=None, description=None, auto_error=true))]
     fn new(
+        cls: &Bound<'_, PyType>,
         scheme_name: Option<String>,
         realm: Option<String>,
         description: Option<String>,
         auto_error: bool,
-    ) -> Self {
-        Self {
-            scheme_name: scheme_name.or_else(|| Some("HTTPBasic".to_owned())),
+    ) -> PyResult<Self> {
+        Ok(Self {
+            scheme_name: Some(callable::scheme_name(cls, scheme_name)?),
             realm,
             description,
             auto_error,
-        }
+        })
     }
 
     /// Call self as a function.
     fn __call__(
-        &self,
+        slf: &Bound<'_, Self>,
         request: &Bound<'_, PyAny>,
     ) -> PyResult<Option<super::HTTPBasicCredentials>> {
-        callable::http_basic_call(self.auto_error, self.realm.as_deref(), request)
+        callable::http_basic_call(slf.as_any(), slf.get().auto_error, request)
+    }
+
+    #[getter]
+    fn model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        scheme::http_model(py, "basic", self.description.as_deref())
+    }
+}
+
+impl HTTPBasic {
+    fn challenge(&self) -> Cow<'static, str> {
+        match &self.realm {
+            Some(realm) if !realm.is_empty() => Cow::Owned(format!("Basic realm=\"{realm}\"")),
+            _ => Cow::Borrowed("Basic"),
+        }
     }
 }
 
@@ -192,6 +229,7 @@ impl HTTPBasic {
 /// ```
 #[pyclass(
     frozen,
+    subclass,
     name = "HTTPDigest",
     module = "fastrapi.security",
     get_all,
@@ -209,23 +247,57 @@ pub struct HTTPDigest {
 #[pymethods]
 impl HTTPDigest {
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*, scheme_name=None, description=None, auto_error=true))]
-    fn new(scheme_name: Option<String>, description: Option<String>, auto_error: bool) -> Self {
-        Self {
-            scheme_name: scheme_name.or_else(|| Some("HTTPDigest".to_owned())),
+    fn new(
+        cls: &Bound<'_, PyType>,
+        scheme_name: Option<String>,
+        description: Option<String>,
+        auto_error: bool,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            scheme_name: Some(callable::scheme_name(cls, scheme_name)?),
             description,
             auto_error,
-        }
+        })
     }
 
     /// Call self as a function.
     fn __call__(
-        &self,
+        slf: &Bound<'_, Self>,
         request: &Bound<'_, PyAny>,
     ) -> PyResult<Option<HTTPAuthorizationCredentials>> {
-        callable::http_digest_call(self.auto_error, request)
+        callable::http_digest_call(slf.as_any(), slf.get().auto_error, request)
+    }
+
+    #[getter]
+    fn model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        scheme::http_model(py, "digest", self.description.as_deref())
     }
 }
+
+impl HTTPDigest {
+    const fn challenge(&self) -> Cow<'static, str> {
+        Cow::Borrowed("Digest")
+    }
+}
+
+macro_rules! http_challenge {
+    ($($ty:ty),+) => {$(
+        #[pymethods]
+        impl $ty {
+            fn make_authenticate_headers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+                callable::authenticate_headers(py, &self.challenge())
+            }
+
+            fn make_not_authenticated_error<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+                callable::not_authenticated(slf.call_method0(intern!(slf.py(), "make_authenticate_headers"))?)
+            }
+        }
+    )+};
+}
+
+http_challenge!(HTTPBearer, HTTPBasic, HTTPDigest);
 
 /// The HTTP authorization credentials in the result of using `HTTPBearer` or
 /// `HTTPDigest` in a dependency.

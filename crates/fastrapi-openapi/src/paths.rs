@@ -95,6 +95,7 @@ fn scheme_to_openapi(
         SecurityKind::APIKeyCookie { name, .. } => {
             json!({ "type": "apiKey", "in": "cookie", "name": name })
         }
+        SecurityKind::Model { scheme } => scheme.clone(),
     };
 
     if let (Some(obj), Some(desc)) = (base.as_object_mut(), description) {
