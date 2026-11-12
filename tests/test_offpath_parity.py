@@ -203,3 +203,21 @@ def test_mount_names_match_fastapi(tmp_path):
         return [(str(u), u.protocol, u.host) for u in urls]
 
     both(run)
+
+
+def test_non_ascii_paths_match_fastapi():
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/ünï")
+        def unicode():
+            return {"ok": 1}
+
+        @app.get("/café/{item}")
+        def cafe(item: str):
+            return {"item": item}
+
+        c = client(app)
+        return [(r.status_code, r.json()) for r in (c.get("/ünï"), c.get("/%C3%BCn%C3%AF"), c.get("/café/x"))]
+
+    both(run)

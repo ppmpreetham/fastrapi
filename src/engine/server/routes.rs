@@ -20,6 +20,7 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{MethodFilter, MethodRouter, any, get, on};
 use bytes::Bytes;
+use percent_encoding::{CONTROLS, utf8_percent_encode};
 use pyo3::prelude::*;
 use simd_json::OwnedValue as JsonValue;
 use std::net::SocketAddr;
@@ -111,6 +112,21 @@ pub(crate) fn build_router(
             ws
         }));
     }
+    let encoded_routes: Vec<RouteEntry> = routes
+        .iter()
+        .filter_map(|route| {
+            encoded_path(&route.path).map(|path| RouteEntry {
+                path,
+                ..route.clone()
+            })
+        })
+        .collect();
+    routes.extend(encoded_routes);
+    let encoded_ws: Vec<WebSocketEntry> = ws_routes
+        .iter()
+        .filter_map(|ws| encoded_path(&ws.path).map(|path| WebSocketEntry { path, ..ws.clone() }))
+        .collect();
+    ws_routes.extend(encoded_ws);
     if let Some(overrides) = &app_config.dependency_overrides {
         for route in &mut routes {
             if !route.handler.payload.dependencies.is_empty() {
@@ -789,6 +805,10 @@ where
         app = app.route(path, method_router);
     }
     app
+}
+
+fn encoded_path(path: &str) -> Option<String> {
+    (!path.is_ascii()).then(|| utf8_percent_encode(path, CONTROLS).to_string())
 }
 
 pub(crate) async fn record_prometheus_metrics(req: Request, next: Next) -> Response {
