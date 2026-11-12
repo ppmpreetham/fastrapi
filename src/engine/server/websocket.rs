@@ -39,8 +39,7 @@ use axum::http::header::HOST;
 use axum::http::request::Parts;
 use fastrapi_core::path::host_without_port;
 use fastrapi_http::exceptions::{
-    PyWebSocketDisconnect, request_validation_error_type,
-    websocket_validation_error,
+    PyWebSocketDisconnect, request_validation_error_type, websocket_validation_error,
 };
 use fastrapi_http::request::PyHTTPConnection;
 use fastrapi_http::request_input::RequestInput;
@@ -229,10 +228,11 @@ pub async fn ws_handler(
             execute_teardowns_async(route.event_loop, teardowns).await;
             response
         }
-        WSDecision::Accept => {
-            let Ok((response, fut)) = ws.upgrade() else {
+        WSDecision::Accept(headers) => {
+            let Ok((mut response, fut)) = ws.upgrade() else {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             };
+            response.headers_mut().extend(headers);
             let connection_route = route.clone();
             spawn(async move {
                 if let Err(error) = handle_connection(
@@ -387,7 +387,7 @@ async fn rejected(
     match decision_rx.try_recv() {
         Ok(WSDecision::Reject(_)) => StatusCode::FORBIDDEN.into_response(),
         Ok(WSDecision::Deny(response)) => response,
-        Ok(WSDecision::Accept) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(WSDecision::Accept(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Err(_) => match outcome {
             HandlerOutcome::Close(..) => StatusCode::FORBIDDEN.into_response(),
             _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

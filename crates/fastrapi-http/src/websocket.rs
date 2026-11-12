@@ -4,6 +4,8 @@
 use crate::request::PyHTTPConnection;
 use crate::response_convert::convert_auto_response;
 use axum::body::Body;
+use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::Response;
 use bytes::{BufMut, Bytes, BytesMut};
 use fastrapi_runtime::py_bridge;
@@ -32,12 +34,29 @@ fn disconnected() -> PyErr {
 }
 
 pub enum WSDecision {
-    Accept,
+    Accept(HeaderMap),
     Reject(u16),
     Deny(Response),
 }
 
-type DenialParts = (u16, Vec<(Vec<u8>, Vec<u8>)>, Vec<u8>);
+type RawHeaders = Vec<(Vec<u8>, Vec<u8>)>;
+type DenialParts = (u16, RawHeaders, Vec<u8>);
+
+fn accept_headers(subprotocol: Option<&str>, headers: Option<RawHeaders>) -> PyResult<HeaderMap> {
+    let invalid = |err: &dyn std::fmt::Display| PyValueError::new_err(err.to_string());
+    let mut accepted = HeaderMap::new();
+    if let Some(subprotocol) = subprotocol {
+        let value = HeaderValue::from_str(subprotocol).map_err(|err| invalid(&err))?;
+        accepted.insert(SEC_WEBSOCKET_PROTOCOL, value);
+    }
+    for (name, value) in headers.into_iter().flatten() {
+        accepted.append(
+            HeaderName::from_bytes(&name).map_err(|err| invalid(&err))?,
+            HeaderValue::from_bytes(&value).map_err(|err| invalid(&err))?,
+        );
+    }
+    Ok(accepted)
+}
 
 fn denial_response((status, headers, body): DenialParts) -> PyResult<Response> {
     let mut builder = Response::builder().status(status);
@@ -148,7 +167,14 @@ impl PyWebSocket {
 
 #[pymethods]
 impl PyWebSocket {
-    fn accept<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (subprotocol=None, headers=None))]
+    fn accept<'py>(
+        &self,
+        py: Python<'py>,
+        subprotocol: Option<&str>,
+        headers: Option<RawHeaders>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let accepted = accept_headers(subprotocol, headers)?;
         let decision = self.decision.clone();
         let state = self.handshake_state.clone();
         py_bridge::future_into_py(py, async move {
@@ -157,7 +183,7 @@ impl PyWebSocket {
                 .is_ok()
                 && let Some(sender) = decision.lock().take()
             {
-                let _ = sender.send(WSDecision::Accept);
+                let _ = sender.send(WSDecision::Accept(accepted));
             }
             Ok(())
         })
@@ -278,7 +304,13 @@ impl PyWebSocket {
             Ok(message.get_item(key)?.filter(|value| !value.is_none()))
         };
         match kind.as_str() {
-            "websocket.accept" => self.accept(py),
+            "websocket.accept" => {
+                let subprotocol = field("subprotocol")?
+                    .map(|value| value.extract::<String>())
+                    .transpose()?;
+                let headers = field("headers")?.map(|value| value.extract()).transpose()?;
+                self.accept(py, subprotocol.as_deref(), headers)
+            }
             "websocket.send" => {
                 if let Some(text) = field("text")? {
                     self.send_text(py, text.extract()?)
@@ -293,7 +325,7 @@ impl PyWebSocket {
             "websocket.http.response.start" => {
                 let status = field("status")?.map_or(Ok(200), |status| status.extract())?;
                 let headers = field("headers")?
-                    .map(|headers| headers.extract::<Vec<(Vec<u8>, Vec<u8>)>>())
+                    .map(|headers| headers.extract::<RawHeaders>())
                     .transpose()?
                     .unwrap_or_default();
                 *self.denial.lock() = Some((status, headers, Vec::new()));

@@ -379,3 +379,43 @@ def test_security_classes_match_fastapi():
         )
 
     both(run)
+
+
+def test_websocket_accept_options_match_fastapi():
+    import base64
+    import os
+    import socket
+
+    from test_websocket_smoke import _free_port, _serve
+
+    def handler(lib):
+        async def ws(websocket: lib.WebSocket):
+            await websocket.accept(subprotocol="chat", headers=[(b"x-extra", b"1")])
+            await websocket.close()
+
+        return ws
+
+    expected_app = fastapi.FastAPI()
+    expected_app.websocket("/ws")(handler(fastapi))
+    with TestClient(expected_app).websocket_connect("/ws", subprotocols=["chat"]) as websocket:
+        expected = (websocket.accepted_subprotocol, dict(websocket.extra_headers).get(b"x-extra"))
+
+    app = fastrapi.FastrAPI()
+    app.websocket("/ws")(handler(fastrapi))
+    port = _free_port()
+    _serve(app, port)
+    key = base64.b64encode(os.urandom(16)).decode()
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(
+            (
+                "GET /ws HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{port}\r\n"
+                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+                "Sec-WebSocket-Protocol: chat\r\n\r\n"
+            ).encode()
+        )
+        head = sock.recv(4096).split(b"\r\n\r\n")[0].decode().lower().split("\r\n")
+    headers = dict(line.split(": ", 1) for line in head[1:])
+    assert head[0].startswith("http/1.1 101")
+    assert (headers.get("sec-websocket-protocol"), headers.get("x-extra", "").encode()) == expected
