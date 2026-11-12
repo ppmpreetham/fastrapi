@@ -13,9 +13,7 @@ use fastrapi_pyutil::imports::INSPECT;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::{blocking, py_bridge};
 
-use crate::security::{
-    OAuth2PasswordRequestForm, describe_scheme,
-};
+use crate::security::{OAuth2PasswordRequestForm, describe_scheme};
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyStopIteration};
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -80,7 +78,7 @@ pub struct DependencyNode {
     pub is_async_generator: bool,
     /// The position of this node in the flattened plan.
     pub index: usize,
-    pub param_name: Option<Py<PyString>>,
+    pub bindings: SmallVec<[Py<PyString>; 1]>,
     pub scopes: Arc<[String]>,
     pub use_cache: bool,
     pub is_top_level: bool,
@@ -163,7 +161,7 @@ fn visit(
         let root = output.len();
         replacement_root.index = root;
         replacement_root.func_id = original.func_id;
-        replacement_root.param_name.clone_from(&original.param_name);
+        replacement_root.bindings.clone_from(&original.bindings);
         replacement_root.is_top_level = original.is_top_level;
         replacement_root.use_cache = original.use_cache;
         output.push(replacement_root);
@@ -589,15 +587,39 @@ pub fn parse_external_dependencies(
     Ok(flat_plan)
 }
 
-pub fn shift_dependency_indices(nodes: &mut [DependencyNode], offset: usize) {
-    for node in nodes.iter_mut() {
-        node.index += offset;
+#[must_use]
+pub fn merge_dependencies(
+    mut merged: Vec<DependencyNode>,
+    nodes: Vec<DependencyNode>,
+) -> Vec<DependencyNode> {
+    let mut positions: SmallVec<[usize; 8]> = SmallVec::with_capacity(nodes.len());
+    for mut node in nodes {
         for (_, injection) in &mut node.injection_plan {
             if let InjectionType::Dependency(target) = injection {
-                *target += offset;
+                *target = positions[*target];
             }
         }
+        let cached = node
+            .use_cache
+            .then(|| merged.iter().position(|other| shares_cache(other, &node)))
+            .flatten();
+        let position = if let Some(position) = cached {
+            let target = &mut merged[position];
+            target.is_top_level |= node.is_top_level;
+            target.bindings.extend(node.bindings);
+            position
+        } else {
+            node.index = merged.len();
+            merged.push(node);
+            merged.len() - 1
+        };
+        positions.push(position);
     }
+    merged
+}
+
+fn shares_cache(a: &DependencyNode, b: &DependencyNode) -> bool {
+    a.use_cache && a.func_id == b.func_id && cache_scopes(&a.scopes) == cache_scopes(&b.scopes)
 }
 
 #[must_use]
@@ -647,6 +669,12 @@ fn extract_and_flatten(
     let cache_key = (func_id, cache_scopes(&scopes));
 
     if use_cache && let Some(&idx) = visited.get(&cache_key) {
+        if is_top_level {
+            let node = &mut flat_plan[idx];
+            node.is_top_level = true;
+            node.bindings
+                .extend(parent_param_name.map(|name| PyString::intern(py, name).unbind()));
+        }
         return Ok(idx);
     }
 
@@ -751,7 +779,11 @@ fn extract_and_flatten(
         is_generator,
         is_async_generator,
         index: node_index,
-        param_name: parent_param_name.map(|name| PyString::intern(py, name).unbind()),
+        bindings: parent_param_name
+            .filter(|_| is_top_level)
+            .map(|name| PyString::intern(py, name).unbind())
+            .into_iter()
+            .collect(),
         scopes: scopes.into(),
         use_cache,
         is_top_level,
@@ -897,13 +929,8 @@ pub fn execute_dependencies_sync(
             teardown_tasks.push(teardown);
         }
 
-        results_registry[dep.index] = Some(result.clone_ref(py));
-
-        if dep.is_top_level
-            && let Some(name) = &dep.param_name
-        {
-            final_results.push((name.clone_ref(py), result));
-        }
+        bind_result(py, dep, &result, &mut final_results);
+        results_registry[dep.index] = Some(result);
     }
 
     Ok((final_results, teardown_tasks))
@@ -1037,12 +1064,22 @@ fn register_result(
     results_registry: &mut [Option<SharedPyObject>],
     final_results: &mut ResolvedDependencies,
 ) {
-    results_registry[dep.index] = Some(result.clone());
-    if dep.is_top_level
-        && let Some(name) = &dep.param_name
-    {
-        final_results.push((name.clone_ref(py), result));
-    }
+    bind_result(py, dep, &result, final_results);
+    results_registry[dep.index] = Some(result);
+}
+
+#[inline]
+fn bind_result(
+    py: Python<'_>,
+    dep: &DependencyNode,
+    result: &SharedPyObject,
+    final_results: &mut ResolvedDependencies,
+) {
+    final_results.extend(
+        dep.bindings
+            .iter()
+            .map(|name| (name.clone_ref(py), result.clone_ref(py))),
+    );
 }
 
 #[inline]

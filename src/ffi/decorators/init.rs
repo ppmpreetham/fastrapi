@@ -16,8 +16,8 @@ use fastrapi_routing::analysis::{
     parse_websocket_signature,
 };
 use fastrapi_routing::dependencies::{
-    DependencyNode, OverrideCache, collect_dependency_callables, parse_dependencies,
-    parse_external_dependencies, shift_dependency_indices,
+    DependencyNode, OverrideCache, collect_dependency_callables, merge_dependencies,
+    parse_dependencies, parse_external_dependencies,
 };
 use fastrapi_routing::route::{
     ExecutionMode, ExecutionPlan, PayloadSpec, RouteEntry, RouteHandler, ValidationRules,
@@ -587,10 +587,8 @@ impl PyAPIRouter {
             if let Some(dependencies) = &opts.dependencies {
                 let path_param_names = extract_path_param_names(&path_for_closure);
                 let callables = collect_dependency_callables(py, Some(dependencies));
-                let mut external = parse_external_dependencies(py, &callables, &path_param_names)?;
-                shift_dependency_indices(&mut metadata.dependencies, external.len());
-                external.append(&mut metadata.dependencies);
-                metadata.dependencies = external;
+                let external = parse_external_dependencies(py, &callables, &path_param_names)?;
+                metadata.dependencies = merge_dependencies(external, metadata.dependencies);
             }
             let analysis = RouteAnalysis::new(&metadata);
 
@@ -847,10 +845,8 @@ impl PyAPIRouter {
             let mut nodes = parse_dependencies(py, func.bind(py), &path_param_names)?;
             if let Some(dependencies) = &dependencies {
                 let callables = collect_dependency_callables(py, Some(dependencies));
-                let mut external = parse_external_dependencies(py, &callables, &path_param_names)?;
-                shift_dependency_indices(&mut nodes, external.len());
-                external.append(&mut nodes);
-                nodes = external;
+                let external = parse_external_dependencies(py, &callables, &path_param_names)?;
+                nodes = merge_dependencies(external, nodes);
             }
             let deps: SmallVec<[DependencyNode; 4]> = nodes.into();
             let signature = parse_websocket_signature(py, func.bind(py), &path, &deps)?;

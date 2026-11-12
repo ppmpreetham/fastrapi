@@ -198,7 +198,7 @@ pub fn parse_route_metadata(
 
     let dep_param_names: HashSet<String> = dependencies
         .iter()
-        .filter_map(|d| d.param_name.as_ref().map(|n| n.bind(py).to_string()))
+        .flat_map(|d| d.bindings.iter().map(|n| n.bind(py).to_string()))
         .collect();
 
     let mut param_validators = Vec::new();
@@ -330,7 +330,7 @@ pub fn parse_websocket_signature(
     let path_param_names = fastrapi_core::path::extract_path_param_names(path);
     let dep_param_names: HashSet<String> = dependencies
         .iter()
-        .filter_map(|d| d.param_name.as_ref().map(|n| n.bind(py).to_string()))
+        .flat_map(|d| d.bindings.iter().map(|n| n.bind(py).to_string()))
         .collect();
     let signature = INSPECT.get(py)?.call_method1("signature", (func,))?;
     let mut parameters = Vec::new();

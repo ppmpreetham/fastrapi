@@ -7,8 +7,7 @@ use fastrapi_openapi::document::deep_merge_json;
 use fastrapi_openapi::paths::parse_callbacks_to_json;
 use fastrapi_routing::analysis::get_response_type_from_class;
 use fastrapi_routing::dependencies::{
-    DependencyNode, collect_dependency_callables, parse_external_dependencies,
-    shift_dependency_indices,
+    DependencyNode, collect_dependency_callables, merge_dependencies, parse_external_dependencies,
 };
 use fastrapi_routing::route::{RouteEntry, RouteHandler, WebSocketEntry};
 use pyo3::Py;
@@ -344,7 +343,7 @@ pub fn flatten_router(
         ws_routes.extend(ws_entries.into_iter().map(|mut ws| {
             ws.path = join_path(&full_prefix, &ws.path);
             if !ws_chain.is_empty() {
-                ws.deps = prepend_nodes(ws.deps.to_vec(), ws_chain).into();
+                ws.deps = merge_dependencies(ws_chain.to_vec(), ws.deps.into_vec()).into();
             }
             ws
         }));
@@ -408,20 +407,6 @@ pub fn flatten_router(
     Ok((routes, ws_routes))
 }
 
-fn prepend_nodes(
-    mut base: Vec<DependencyNode>,
-    externals: &[DependencyNode],
-) -> Vec<DependencyNode> {
-    let offset = externals.len();
-    if offset == 0 {
-        return base;
-    }
-    shift_dependency_indices(&mut base, offset);
-    let mut merged = externals.to_vec();
-    merged.append(&mut base);
-    merged
-}
-
 fn chain_nodes<'c>(
     py: Python<'_>,
     chain: &[Py<pyo3::PyAny>],
@@ -457,7 +442,8 @@ fn prepend_chain_dependencies(
     }
 
     let mut merged = <RouteHandler>::clone(handler);
-    merged.payload.dependencies = prepend_nodes(merged.payload.dependencies, externals);
+    merged.payload.dependencies =
+        merge_dependencies(externals.to_vec(), merged.payload.dependencies);
 
     merged.payload.needs_kwargs = true;
     merged.payload.refresh_dependency_flags();

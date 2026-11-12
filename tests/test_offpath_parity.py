@@ -293,3 +293,41 @@ def test_static_errors_use_handlers_like_fastapi(tmp_path):
         return [(r.status_code, r.json()) for r in (c.get("/st/missing.txt"), c.post("/st/a.txt"))]
 
     both(run)
+
+
+def test_dependency_cache_is_shared_like_fastapi():
+    def run(lib):
+        calls = []
+
+        def get_db():
+            calls.append("db")
+            return 1
+
+        async def get_async():
+            calls.append("async")
+            return 2
+
+        def sub(db=lib.Depends(get_db)):
+            calls.append("sub")
+            return db
+
+        app = new_app(lib, dependencies=[lib.Depends(get_db)])
+        router = lib.APIRouter(dependencies=[lib.Depends(get_async)])
+
+        @router.get("/mixed", dependencies=[lib.Depends(sub)])
+        def mixed(s=lib.Depends(sub), db=lib.Depends(get_db), a=lib.Depends(get_async)):
+            return [s, db, a]
+
+        @app.get("/twice")
+        async def twice(a=lib.Depends(get_db), b=lib.Depends(get_db)):
+            return [a, b]
+
+        app.include_router(router)
+        c = client(app)
+        results = []
+        for path in ("/mixed", "/twice"):
+            calls.clear()
+            results.append((c.get(path).json(), sorted(calls)))
+        return results
+
+    both(run)
