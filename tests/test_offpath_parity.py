@@ -175,3 +175,31 @@ def test_static_files_methods_match_fastapi(tmp_path):
         )
 
     both(run)
+
+
+def test_mount_names_match_fastapi(tmp_path):
+    def run(lib):
+        sub = new_app(lib)
+
+        @sub.get("/items/{item_id}")
+        def item(item_id: int):
+            return {}
+
+        hosted = new_app(lib)
+
+        @hosted.get("/h")
+        def h():
+            return {}
+
+        app = new_app(lib)
+        app.mount("/static", submodule(lib, "staticfiles").StaticFiles(directory=str(tmp_path)), name="static")
+        app.mount("/sub", sub, name="api")
+        app.host("api.example.com", hosted, name="hosted")
+        urls = [
+            app.url_path_for("static", path="/css/a.css"),
+            app.url_path_for("api:item", item_id=3),
+            app.url_path_for("hosted:h"),
+        ]
+        return [(str(u), u.protocol, u.host) for u in urls]
+
+    both(run)

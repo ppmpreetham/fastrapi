@@ -26,6 +26,33 @@ use std::sync::Arc;
 use tracing::info;
 
 fastrapi_pyutil::cached_py_import!(STARLETTE_MIDDLEWARE, "starlette.middleware", "Middleware");
+fastrapi_pyutil::cached_py_import!(URL_PATH, "starlette.datastructures", "URLPath");
+
+fn child_name<'a>(mount_name: Option<&str>, name: &'a str) -> Option<&'a str> {
+    match mount_name {
+        None => Some(name),
+        Some(mount_name) => name
+            .strip_prefix(mount_name)
+            .and_then(|rest| rest.strip_prefix(':')),
+    }
+}
+
+fn mounted_file(
+    mount_name: Option<&str>,
+    name: &str,
+    path_params: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<String>> {
+    let Some(params) = path_params.filter(|params| params.len() == 1) else {
+        return Ok(None);
+    };
+    if mount_name != Some(name) {
+        return Ok(None);
+    }
+    params
+        .get_item("path")?
+        .map(|path| Ok(path.str()?.to_str()?.trim_start_matches('/').to_owned()))
+        .transpose()
+}
 fastrapi_pyutil::cached_py_import!(
     STARLETTE_BASE_HTTP_MIDDLEWARE,
     "starlette.middleware.base",
@@ -75,9 +102,56 @@ impl FastrAPI {
             self.mount(path, app.bind(py), name)?;
         }
         for (host, app, name) in hosts {
-            self.host(py, host, app.bind(py), name.as_deref())?;
+            self.host(py, host, app.bind(py), name)?;
         }
         Ok(())
+    }
+
+    fn mounted_url_path<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+        path_params: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let url_path = URL_PATH.get(py)?;
+        let prefixes = self
+            .static_mounts
+            .iter()
+            .map(|mount| (mount.path.as_str(), mount.name.as_deref()))
+            .chain(
+                self.app_mounts
+                    .iter()
+                    .map(|mount| (mount.path.as_str(), mount.name.as_deref())),
+            );
+        for (prefix, mount_name) in prefixes {
+            if let Some(file) = mounted_file(mount_name, name, path_params)? {
+                let path = format!("{}/{file}", prefix.trim_end_matches('/'));
+                return url_path.call1((path,)).map(Some);
+            }
+        }
+        let protocol = intern!(py, "protocol");
+        for mount in &self.app_mounts {
+            let Some(child) = child_name(mount.name.as_deref(), name) else {
+                continue;
+            };
+            if let Ok(found) = mount.app.borrow(py).url_path_for(py, child, path_params) {
+                let found = found.into_bound(py);
+                let path = format!("{}{}", mount.path.trim_end_matches('/'), found.str()?);
+                return url_path.call1((path, found.getattr(protocol)?)).map(Some);
+            }
+        }
+        for mount in &self.host_mounts {
+            let Some(child) = child_name(mount.name.as_deref(), name) else {
+                continue;
+            };
+            if let Ok(found) = mount.app.borrow(py).url_path_for(py, child, path_params) {
+                let found = found.into_bound(py);
+                return url_path
+                    .call1((found.str()?, found.getattr(protocol)?, &mount.host))
+                    .map(Some);
+            }
+        }
+        Ok(None)
     }
 
     fn push_event_handler(
@@ -524,6 +598,7 @@ impl FastrAPI {
             self.app_mounts.push(SubAppMount {
                 path: normalized_path,
                 app: owned,
+                name,
             });
             return Ok(());
         }
@@ -575,9 +650,7 @@ impl FastrAPI {
         _py: Python<'_>,
         host: String,
         app: &Bound<'_, PyAny>,
-        #[expect(unused_variables, reason = "part of the starlette `host` signature")] name: Option<
-            &str,
-        >,
+        name: Option<String>,
     ) -> PyResult<()> {
         if host.starts_with('/') {
             return Err(PyValueError::new_err("Host must not start with '/'"));
@@ -588,7 +661,11 @@ impl FastrAPI {
             .cast_into::<Self>()
             .map_err(PyErr::from)?
             .unbind();
-        self.host_mounts.push(HostMount { host, app: owned });
+        self.host_mounts.push(HostMount {
+            host,
+            app: owned,
+            name,
+        });
         Ok(())
     }
 
@@ -650,10 +727,18 @@ impl FastrAPI {
         name: &str,
         path_params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        self.router
+        let routed = self
+            .router
             .bind(py)
             .borrow()
-            .url_path_for_name(py, name, path_params)
+            .url_path_for_name(py, name, path_params);
+        match routed {
+            Err(err) => self
+                .mounted_url_path(py, name, path_params)?
+                .map(Bound::unbind)
+                .ok_or(err),
+            found => found,
+        }
     }
 
     #[pyo3(signature = (path, methods=None, **kwargs))]

@@ -13,12 +13,14 @@ use fastrapi_http::middleware::MiddlewareContainer;
 pub struct SubAppMount {
     pub path: String,
     pub app: Py<FastrAPI>,
+    pub name: Option<String>,
 }
 
 /// A `FastrAPI` app that serves the requests for one host name, as `starlette.routing.Host` does.
 pub struct HostMount {
     pub host: String,
     pub app: Py<FastrAPI>,
+    pub name: Option<String>,
 }
 
 #[pyclass(frozen, new = "from_fields", get_all, from_py_object, eq)]
