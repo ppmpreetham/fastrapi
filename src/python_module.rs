@@ -382,6 +382,12 @@ mod fastrapi {
         }
 
         #[pymodule]
+        mod sessions {
+            #[pymodule_export]
+            use fastrapi_http::middleware::{PySession as Session, SessionMiddleware};
+        }
+
+        #[pymodule]
         mod trustedhost {
             #[pymodule_export]
             use fastrapi_http::middleware::TrustedHostMiddleware;

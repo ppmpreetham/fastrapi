@@ -14,14 +14,10 @@ use axum::response::{IntoResponse, Response};
 use pyo3::prelude::PyResult;
 use pyo3::types::{PyAnyMethods as _, PyTuple, PyTupleMethods as _};
 use pyo3::{Bound, Py, PyAny, Python};
-use sha2::{Digest, Sha256};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
-use tower_sessions::cookie::time::Duration;
-use tower_sessions::cookie::{Key, SameSite};
-use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 use tracing::{error, info};
 
 use crate::engine::config::FastrAPI;
@@ -30,8 +26,8 @@ use crate::engine::server::routes::{
 };
 use fastrapi_http::middleware::PyMiddlewareKind;
 use fastrapi_http::middleware::{
-    DeclaredLayer, MiddlewareContainer, PreparedMiddlewares, PyMiddleware, asgi,
-    compress, cors, execute_py_middlewares,
+    DeclaredLayer, MiddlewareContainer, PreparedMiddlewares, PyMiddleware, SessionPolicy, asgi,
+    compress, cors, execute_py_middlewares, session,
 };
 use std::time;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -153,41 +149,14 @@ fn apply_config_layers(mut app: Router, app_config: &FastrAPI) -> Router {
     app
 }
 
-fn session_key(secret: &str) -> Key {
-    Key::derive_from(&Sha256::digest(secret.as_bytes()))
-}
-
-fn same_site(value: &str) -> SameSite {
-    match value {
-        "strict" => SameSite::Strict,
-        "none" => SameSite::None,
-        _ => SameSite::Lax,
-    }
-}
-
 fn session_layer(app: Router, container: &MiddlewareContainer) -> Router {
-    let Some(config) = &container.session else {
-        return app;
-    };
-
-    let layer = SessionManagerLayer::new(MemoryStore::default())
-        .with_signed(session_key(&config.secret_key))
-        .with_name(config.session_cookie.clone())
-        .with_path(config.path.clone())
-        .with_secure(config.https_only)
-        .with_http_only(true)
-        .with_same_site(same_site(&config.same_site));
-
-    let layer = match &config.domain {
-        Some(domain) => layer.with_domain(domain.clone()),
-        None => layer,
-    };
-    let layer = match config.max_age {
-        Some(max_age) => layer.with_expiry(Expiry::OnInactivity(Duration::seconds(max_age))),
-        None => layer,
-    };
-
-    app.layer(layer)
+    match &container.session {
+        Some(config) => app.layer(axum_middleware::from_fn_with_state(
+            Arc::new(SessionPolicy::new(config)),
+            session,
+        )),
+        None => app,
+    }
 }
 
 fn gzip_layer(app: Router, container: &MiddlewareContainer) -> Router {

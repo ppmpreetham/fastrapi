@@ -3,6 +3,7 @@
 
 use crate::exceptions::http_exception;
 use crate::form;
+use crate::middleware::SessionHandle;
 use crate::request_input::RequestInput;
 use crate::url::PyURL;
 use axum::http::HeaderMap;
@@ -250,15 +251,19 @@ impl PyHTTPConnection {
 
     #[getter]
     pub fn session(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.scope
+        let session = self
+            .scope
             .bind(py)
             .get_item(intern!(py, "session"))
-            .map(Into::into)
             .map_err(|_| {
                 PyAssertionError::new_err(
                     "SessionMiddleware must be installed to access request.session",
                 )
-            })
+            })?;
+        if session.hasattr(intern!(py, "mark_accessed"))? {
+            session.call_method0(intern!(py, "mark_accessed"))?;
+        }
+        Ok(session.unbind())
     }
 
     #[getter]
@@ -524,6 +529,9 @@ pub fn create_py_request(
     scope.set_item(intern!(py, "path_params"), path_params)?;
     if let Some(client) = input.client() {
         scope.set_item(intern!(py, "client"), client)?;
+    }
+    if let Some(SessionHandle(slot)) = input.extensions.get::<SessionHandle>() {
+        scope.set_item(intern!(py, "session"), slot.session(py)?)?;
     }
 
     let bound_req =

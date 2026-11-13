@@ -544,3 +544,63 @@ def test_form_data_hierarchy_matches_fastapi():
         return client(app).post("/f", data={"a": ["1", "2"], "b": "3"}).json()
 
     both(run)
+
+
+def session_app(lib):
+    from starlette.middleware.sessions import SessionMiddleware
+
+    app = new_app(lib)
+    app.add_middleware(SessionMiddleware, secret_key="secret", max_age=60)
+
+    @app.get("/count")
+    def count(request: lib.Request):
+        request.session["n"] = request.session.get("n", 0) + 1
+        return dict(request.session)
+
+    @app.get("/read")
+    def read(request: lib.Request):
+        return dict(request.session)
+
+    @app.get("/clear")
+    def clear(request: lib.Request):
+        request.session.clear()
+        return {}
+
+    @app.get("/none")
+    def untouched():
+        return {}
+
+    return app
+
+
+def test_sessions_match_fastapi():
+    def run(lib):
+        c = client(session_app(lib))
+        first = c.get("/count")
+        second = c.get("/count")
+        untouched = c.get("/none")
+        read = c.get("/read")
+        cleared = c.get("/clear")
+        cookie = first.headers["set-cookie"]
+        return (
+            first.json(),
+            second.json(),
+            read.json(),
+            read.headers.get("vary"),
+            "set-cookie" in untouched.headers,
+            cookie.split("=", 1)[0],
+            cookie.split(";", 1)[1],
+            cleared.headers.get("set-cookie"),
+            c.get("/read", cookies={"session": "tampered"}).json(),
+        )
+
+    both(run)
+
+
+def test_session_cookies_interoperate_with_fastapi():
+    ours, theirs = client(session_app(fastrapi)), client(session_app(fastapi))
+    ours.get("/count")
+    theirs.cookies = ours.cookies
+    assert theirs.get("/count").json() == {"n": 2}
+    ours.cookies = theirs.cookies
+    assert ours.get("/count").json() == {"n": 3}

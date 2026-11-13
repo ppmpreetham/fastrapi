@@ -50,10 +50,10 @@ tower-http = { version = "0.6.8", features = [
   "timeout",
   "request-id",
 ] }
-tower-sessions = { version = "0.15.0", features = ["signed"] } # for sessions
 tower = "0.5.3"
 cookie = { version = "0.18.1", features = ["private", "signed", "key-expansion"] }
-sha2 = "0.10"
+hmac = "0.12.1"
+sha1 = "0.10.6"
 form_urlencoded = "1.2.2"
 http-range-header = "0.4.2"
 httpdate = "1.0"
@@ -156,10 +156,8 @@ futures-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 tower-http.workspace = true
-tower-sessions.workspace = true
 tower.workspace = true
 cookie.workspace = true
-sha2.workspace = true
 form_urlencoded.workspace = true
 parking_lot.workspace = true
 fastwebsockets.workspace = true

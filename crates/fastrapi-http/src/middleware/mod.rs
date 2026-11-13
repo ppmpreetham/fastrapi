@@ -28,7 +28,9 @@ pub use httpsredirect::{HTTPSRedirectMiddleware, parse_https_redirect_params};
 pub use registry::{
     DeclaredLayer, MIDDLEWARE_REGISTRY, MiddlewareBuilder, MiddlewareContainer, MiddlewareRegistry,
 };
-pub use session::{SessionMiddleware, parse_session_params};
+pub use session::{
+    PySession, SessionHandle, SessionMiddleware, SessionPolicy, parse_session_params, session,
+};
 pub use trustedhost::{TrustedHostMiddleware, parse_trusted_host_params};
 mod python;
 
