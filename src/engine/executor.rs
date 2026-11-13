@@ -25,14 +25,13 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PySet, PyString};
 use smallvec::SmallVec;
 use std::sync::{Arc, OnceLock};
 
-use fastrapi_http::background::OwnBackground;
+use fastrapi_http::background::{BackgroundJob, OwnBackground, run_after_body};
 use fastrapi_http::exceptions::plain_server_error;
 use fastrapi_http::request::create_py_request;
 use fastrapi_http::response_convert::convert_response_by_type;
 use fastrapi_pyutil::call::CallArgs;
 use fastrapi_pyutil::json::py_json_response_with_dump_options;
 use fastrapi_runtime::thread_state;
-use fastrapi_runtime::tokio_runtime::spawn;
 
 #[inline(always)]
 fn specialized_response_conversion(
@@ -105,27 +104,17 @@ pub(crate) fn build_request_input_from_parts<'a>(
 }
 
 #[inline(always)]
-pub(crate) fn spawn_background_tasks(
+pub(crate) fn with_background_tasks(
     event_loop: EventLoop,
     request_input: &RequestInput<'_>,
-    response: &Response,
-) {
-    if let Some(tasks) = request_input.background.get()
-        && response.extensions().get::<OwnBackground>().is_none()
-    {
-        let tasks = Python::attach(|py| tasks.clone_ref(py));
-        spawn(async move {
-            let pending = Python::attach(|py| match tasks.try_borrow(py) {
-                Ok(bg) => Some(bg.execute_all(event_loop)),
-                Err(e) => {
-                    tracing::error!("Failed to borrow BackgroundTasks: {}", e);
-                    None
-                }
-            });
-            if let Some(pending) = pending {
-                pending.run().await;
-            }
-        });
+    response: Response,
+) -> Response {
+    match request_input.background.get() {
+        Some(tasks) if response.extensions().get::<OwnBackground>().is_none() => {
+            let tasks = Python::attach(|py| tasks.clone_ref(py));
+            run_after_body(response, BackgroundJob::Tasks(tasks), event_loop)
+        }
+        _ => response,
     }
 }
 
@@ -601,10 +590,7 @@ fn run_sync_route<const NEEDS_REQ: bool>(
         server: event_loop,
     };
     match run_sync_gil_section(py, &section) {
-        Ok(response) => {
-            spawn_background_tasks(event_loop, &request_input, &response);
-            response
-        }
+        Ok(response) => with_background_tasks(event_loop, &request_input, response),
         Err(response) => response,
     }
 }
@@ -641,10 +627,7 @@ async fn core_async_no_deps(
     };
 
     match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
-        Ok(response) => {
-            spawn_background_tasks(event_loop, &request_input, &response);
-            response
-        }
+        Ok(response) => with_background_tasks(event_loop, &request_input, response),
         Err(err_resp) => err_resp,
     }
 }
@@ -693,10 +676,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
     };
 
     match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
-        Ok(response) => {
-            spawn_background_tasks(event_loop, &request_input, &response);
-            response
-        }
+        Ok(response) => with_background_tasks(event_loop, &request_input, response),
         Err(err_resp) => err_resp,
     }
 }
@@ -829,10 +809,7 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
     )
     .await
     {
-        Ok(response) => {
-            spawn_background_tasks(event_loop, &request_input, &response);
-            response
-        }
+        Ok(response) => with_background_tasks(event_loop, &request_input, response),
         Err(err_resp) => err_resp,
     };
     execute_teardowns_async(event_loop, teardowns).await;

@@ -7,7 +7,9 @@ use super::responses::{
     response_status,
 };
 use crate::response_api::content_type;
-use crate::background::{OwnBackground, spawn_response_background_value};
+use crate::background::{
+    BackgroundJob, OwnBackground, run_after_body, spawn_response_background_value,
+};
 use crate::response_type::{ResponseFormatter, ResponseType};
 use crate::responses::{
     PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyStreamingResponse,
@@ -26,7 +28,7 @@ use fastrapi_pyutil::json::{
 };
 use fastrapi_runtime::blocking::run_python;
 use fastrapi_runtime::py_bridge;
-use fastrapi_runtime::server_state::server_loop;
+use fastrapi_runtime::server_state::{current_server, server_loop};
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyStopIteration};
 use pyo3::prelude::*;
 use pyo3::types::{
@@ -275,8 +277,14 @@ pub fn convert_response_by_type(
         .filter(|background| !background.is_none());
     let mut response = convert_response_object(py, result, kind, request_headers);
     if let Some(background) = background {
-        if !matches!(kind, ResponseKind::Streaming | ResponseKind::Sse) {
-            spawn_response_background_value(background.unbind());
+        if !matches!(kind, ResponseKind::Streaming | ResponseKind::Sse)
+            && let Some(event_loop) = current_server()
+        {
+            response = run_after_body(
+                response,
+                BackgroundJob::Value(background.unbind()),
+                event_loop,
+            );
         }
         response.extensions_mut().insert(OwnBackground);
     }

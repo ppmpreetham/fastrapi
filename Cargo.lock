@@ -567,6 +567,7 @@ dependencies = [
  "form_urlencoded",
  "futures-util",
  "hmac",
+ "http-body",
  "http-range-header",
  "httpdate",
  "multer",

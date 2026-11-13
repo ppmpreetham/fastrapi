@@ -973,3 +973,38 @@ def test_scope_server_is_the_listening_socket():
     _serve(app, port)
     response = httpx.get(f"http://127.0.0.1:{port}/server", headers={"host": "example.com"})
     assert response.json() == {"server": ["127.0.0.1", port], "client": "127.0.0.1"}
+
+
+def test_background_tasks_run_after_response_like_fastapi():
+    import time
+
+    def run(lib):
+        events = []
+
+        def slow(label):
+            time.sleep(0.05)
+            events.append(label)
+
+        app = new_app(lib)
+
+        @app.get("/tasks")
+        def tasks(background: lib.BackgroundTasks):
+            background.add_task(slow, "tasks")
+            events.append("endpoint")
+            return "ok"
+
+        @app.get("/response")
+        def response():
+            tasks = lib.BackgroundTasks()
+            tasks.add_task(slow, "response")
+            return lib.responses.PlainTextResponse("ok", background=tasks)
+
+        c = client(app)
+        results = []
+        for path in ("/tasks", "/response"):
+            events.clear()
+            r = c.get(path)
+            results.append((r.text, list(events)))
+        return results
+
+    both(run)

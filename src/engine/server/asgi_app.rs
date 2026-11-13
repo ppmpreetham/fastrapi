@@ -3,6 +3,7 @@ use super::serve::{PreparedApp, prepare_app};
 use crate::engine::config::FastrAPI;
 use axum::body::Body;
 use axum::http::{HeaderName, HeaderValue, Request, Version};
+use fastrapi_http::background::DeferredBackground;
 use fastrapi_http::exceptions::UnhandledError;
 use fastrapi_http::middleware::asgi::{asgi_call, drain_receive, send_response};
 use fastrapi_http::request_input::{AsgiMount, NamedClient};
@@ -152,7 +153,14 @@ async fn http(
         Err(never) => match never {},
     };
     let unhandled = response.extensions_mut().remove::<UnhandledError>();
+    let background = response
+        .extensions()
+        .get::<DeferredBackground>()
+        .and_then(DeferredBackground::take);
     send_response(&locals, &send, response).await?;
+    if let Some((job, event_loop)) = background {
+        job.run(event_loop).await;
+    }
     unhandled.map_or(Ok(()), |UnhandledError(err)| {
         Err(Python::attach(|py| err.clone_ref(py)))
     })

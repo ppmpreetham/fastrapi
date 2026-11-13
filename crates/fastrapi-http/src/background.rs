@@ -1,16 +1,22 @@
 //! This module contains the `BackgroundTasks` Python class.
 //! The class keeps a list of functions and runs them after the server sends the response.
 
+use axum::body::Body;
+use axum::response::Response;
+use bytes::Bytes;
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::server_state::current_server;
 use fastrapi_runtime::tokio_runtime::spawn;
+use http_body::{Body as HttpBody, Frame, SizeHint};
 use parking_lot::Mutex;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyTuple};
 use std::mem::take;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tracing::error;
 
 /// A collection of background tasks that will be called after a response has been
@@ -232,19 +238,103 @@ pub fn spawn_response_background(py: Python<'_>, result: &Bound<'_, PyAny>) {
 }
 
 pub fn spawn_response_background_value(background: Py<PyAny>) {
-    let Some(event_loop) = current_server() else {
-        return;
-    };
-    spawn(async move {
-        let pending = Python::attach(|py| {
-            background.bind(py).cast::<PyBackgroundTasks>().map_or_else(
+    if let Some(event_loop) = current_server() {
+        spawn(BackgroundJob::Value(background).run(event_loop));
+    }
+}
+
+pub enum BackgroundJob {
+    Tasks(Py<PyBackgroundTasks>),
+    Value(Py<PyAny>),
+}
+
+impl BackgroundJob {
+    pub async fn run(self, event_loop: EventLoop) {
+        let pending = Python::attach(|py| match self {
+            Self::Tasks(tasks) => match tasks.try_borrow(py) {
+                Ok(tasks) => tasks.execute_all(event_loop),
+                Err(err) => {
+                    error!("Failed to borrow BackgroundTasks: {}", err);
+                    PendingTasks {
+                        event_loop,
+                        tasks: Vec::new(),
+                    }
+                }
+            },
+            Self::Value(background) => background.bind(py).cast::<PyBackgroundTasks>().map_or_else(
                 |_| PendingTasks {
                     event_loop,
                     tasks: vec![(background.clone_ref(py), Vec::new(), None)],
                 },
                 |tasks| tasks.borrow().execute_all(event_loop),
-            )
+            ),
         });
         pending.run().await;
-    });
+    }
+}
+
+type JobSlot = Arc<Mutex<Option<(BackgroundJob, EventLoop)>>>;
+
+#[derive(Clone)]
+pub struct DeferredBackground(JobSlot);
+
+impl DeferredBackground {
+    #[must_use]
+    pub fn take(&self) -> Option<(BackgroundJob, EventLoop)> {
+        self.0.lock().take()
+    }
+}
+
+struct RunAfterBody {
+    body: Body,
+    job: JobSlot,
+}
+
+impl RunAfterBody {
+    fn finish(&self) {
+        if let Some((job, event_loop)) = self.job.lock().take() {
+            spawn(job.run(event_loop));
+        }
+    }
+}
+
+impl Drop for RunAfterBody {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+impl HttpBody for RunAfterBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        let polled = Pin::new(&mut this.body).poll_frame(cx);
+        if matches!(polled, Poll::Ready(None)) {
+            this.finish();
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
+}
+
+#[must_use]
+pub fn run_after_body(response: Response, job: BackgroundJob, event_loop: EventLoop) -> Response {
+    let slot: JobSlot = Arc::new(Mutex::new(Some((job, event_loop))));
+    let (mut parts, body) = response.into_parts();
+    parts
+        .extensions
+        .insert(DeferredBackground(Arc::clone(&slot)));
+    Response::from_parts(parts, Body::new(RunAfterBody { body, job: slot }))
 }

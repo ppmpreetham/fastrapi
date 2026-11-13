@@ -3,7 +3,7 @@
 
 use super::executor::{
     build_request_input_from_parts, prepare_kwargs_and_payload, request_object,
-    spawn_background_tasks,
+    with_background_tasks,
 };
 use super::handler_errors::{log_python_error, python_error_to_response_in};
 use axum::http::request::Parts;
@@ -266,8 +266,7 @@ fn managed_response(
             {
                 return python_error_to_response_in(py, &err, Some(input));
             }
-            spawn_background_tasks(event_loop, input, &response);
-            response
+            with_background_tasks(event_loop, input, response)
         }
     }
 }
