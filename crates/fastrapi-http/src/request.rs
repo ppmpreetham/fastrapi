@@ -622,12 +622,7 @@ pub fn create_py_request(
     scope.set_item(intern!(py, "query_string"), input.query_string)?;
     scope.set_item(
         intern!(py, "headers"),
-        Bound::new(
-            py,
-            PyScopeHeaders {
-                headers: headers.clone(),
-            },
-        )?,
+        Bound::new(py, PyScopeHeaders::new(Arc::clone(&headers)))?,
     )?;
     if let Some(server) = input.server.or_else(current_server) {
         let server = server.server();
@@ -669,6 +664,11 @@ pub struct PyScopeHeaders {
 }
 
 impl PyScopeHeaders {
+    #[must_use]
+    pub const fn new(headers: Arc<HeaderMap>) -> Self {
+        Self { headers }
+    }
+
     fn pair<'py>(
         py: Python<'py>,
         name: &axum::http::HeaderName,

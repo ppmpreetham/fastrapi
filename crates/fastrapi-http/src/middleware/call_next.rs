@@ -6,7 +6,7 @@ use fastrapi_runtime::py_bridge::EventLoop;
 use std::sync::Arc;
 
 use crate::exceptions::{UnhandledError, plain_server_error, server_error_response};
-use crate::request::PyRequest;
+use crate::request::{PyRequest, PyScopeHeaders};
 use crate::response_convert::convert_auto_response;
 use axum::body::{Body, to_bytes};
 use axum::extract::Request;
@@ -276,6 +276,8 @@ fn invoke(
         intern!(py, "query_string"),
         PyBytes::new(py, query.as_bytes()),
     );
+    let scope_headers = Bound::new(py, PyScopeHeaders::new(Arc::clone(&headers))).map_err(fail)?;
+    _ = scope.set_item(intern!(py, "headers"), scope_headers);
 
     let req_obj = PyRequest::create_bound(py, scope.into_any().unbind(), Some(headers), None)
         .map_err(fail)?

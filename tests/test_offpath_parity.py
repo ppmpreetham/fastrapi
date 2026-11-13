@@ -766,3 +766,26 @@ def test_server_sent_event_model_matches_fastapi():
         )
 
     both(run)
+
+
+def test_middleware_request_url_matches_fastapi():
+    def run(lib):
+        app = new_app(lib)
+        seen = {}
+
+        @app.middleware("http")
+        async def record(request, call_next):
+            seen["url"] = str(request.url)
+            seen["base"] = str(request.base_url)
+            seen["host"] = request.headers.get("host")
+            seen["path"] = request.url.path
+            return await call_next(request)
+
+        @app.get("/items/{x}")
+        def items(x: str):
+            return x
+
+        client(app).get("/items/a%20b?q=1")
+        return seen
+
+    both(run)
