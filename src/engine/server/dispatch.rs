@@ -1,6 +1,7 @@
 //! The dispatch of HTTP requests to the route handlers.
 //! The dispatch finds the route, applies the rate limit and returns a 404 response if no route matches.
 
+use super::custom_route::{BypassCustomHandler, run_custom_handler};
 use super::payload::extract_payload;
 use super::serve::AppState;
 use fastrapi_core::rate_limit::is_rate_limited;
@@ -96,6 +97,13 @@ pub(crate) async fn dispatch_or_not_found(
                 .collect()
         })
         .unwrap_or_default();
+
+    if let Some(custom) = handler.execution.custom_handler.get()
+        && req.extensions().get::<BypassCustomHandler>().is_none()
+    {
+        let response = run_custom_handler(custom, handler, state, req, param_ranges).await;
+        return Ok(tag(resolve_pending_handler(response).await));
+    }
 
     let context = req.extensions().get::<py_bridge::RequestContext>().cloned();
     py_bridge::scoped_request_loop(event_loop, context, async move {

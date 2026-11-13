@@ -100,6 +100,7 @@ pub struct ExecutionPlan {
     pub execution_mode: ExecutionMode,
     pub cache_response: bool,
     pub rate_limit_per_second: Option<NonZeroU32>,
+    pub custom_handler: OnceLock<Py<PyAny>>,
 }
 
 #[expect(

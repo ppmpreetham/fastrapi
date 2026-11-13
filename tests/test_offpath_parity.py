@@ -903,3 +903,56 @@ def test_request_receive_matches_fastapi():
         return client(app).post("/copy", content=b"abc").json()
 
     both(run)
+
+
+def test_custom_route_class_matches_fastapi():
+    def run(lib):
+        routing = submodule(lib, "routing")
+
+        class TimedRoute(routing.APIRoute):
+            def get_route_handler(self):
+                original = super().get_route_handler()
+
+                async def handler(request: lib.Request):
+                    response = await original(request)
+                    response.headers["x-route"] = "timed"
+                    return response
+
+                return handler
+
+        class UpperRequest(lib.Request):
+            async def body(self):
+                return (await super().body()).upper()
+
+        class UpperRoute(routing.APIRoute):
+            def get_route_handler(self):
+                original = super().get_route_handler()
+
+                async def handler(request: lib.Request):
+                    return await original(UpperRequest(request.scope, request.receive))
+
+                return handler
+
+        app = new_app(lib)
+        timed = lib.APIRouter(route_class=TimedRoute)
+        upper = lib.APIRouter(route_class=UpperRoute)
+
+        @timed.get("/items/{item_id}")
+        def item(item_id: int, q: str = "x"):
+            return {"item_id": item_id, "q": q}
+
+        @upper.post("/echo")
+        async def echo(request: lib.Request):
+            return {"body": (await request.body()).decode()}
+
+        @app.get("/plain")
+        def plain():
+            return "plain"
+
+        app.include_router(timed)
+        app.include_router(upper)
+        c = client(app)
+        responses = [c.get("/items/3?q=y"), c.post("/echo", content=b"abc"), c.get("/plain")]
+        return [(r.status_code, r.json(), r.headers.get("x-route")) for r in responses]
+
+    both(run)

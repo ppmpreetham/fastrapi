@@ -2,6 +2,7 @@
 //! It registers the route handlers, the documentation endpoints and the cached responses.
 //! It also contains the 404 and 405 responses.
 
+use super::custom_route::install_custom_handlers;
 use super::dispatch::dispatch_or_not_found;
 use super::files::{add_static_mount, serve_frontend_mounts};
 use super::lifecycle::log_python_error;
@@ -151,6 +152,7 @@ pub(crate) fn build_router(
     }
     let frozen_router: &'static FrozenRouter<RouteHandler> =
         Box::leak(Box::new(frozen_router_builder.build()));
+    install_custom_handlers(py, routes, frozen_router, app_state)?;
 
     let app = Router::new();
     let app = register_routes(
@@ -210,6 +212,7 @@ fn register_routes(
     app = group_and_register_routes(app, routes, &head_dispatch, |route| {
         if route.host.is_none()
             && route.handler.execution.rate_limit_per_second.is_none()
+            && route.handler.execution.custom_handler.get().is_none()
             && route.handler.execution.cache_response
             && !route.path.contains('{')
             && matches!(
@@ -230,6 +233,7 @@ fn register_routes(
     app = group_and_register_routes(app, routes, &head_dispatch, |route| {
         if route.host.is_none()
             && route.handler.execution.rate_limit_per_second.is_none()
+            && route.handler.execution.custom_handler.get().is_none()
             && !route.handler.execution.cache_response
             && !route.path.contains('{')
             && matches!(

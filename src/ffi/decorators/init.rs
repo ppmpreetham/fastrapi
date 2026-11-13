@@ -32,8 +32,8 @@ use pyo3::types::{PyCFunction, PyDict, PyTuple};
 use smallvec::SmallVec;
 use std::num::NonZeroU32;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
 
 #[inline]
 fn extract<'py, T>(kwargs: Option<&Bound<'py, PyDict>>, key: &str) -> Option<T>
@@ -658,6 +658,7 @@ impl PyAPIRouter {
                     execution_mode: ExecutionMode::SyncNoArgs,
                     cache_response: opts.cache_resp,
                     rate_limit_per_second: opts.rate_limit,
+                    custom_handler: OnceLock::new(),
                 },
                 payload: PayloadSpec {
                     dependency_needs_request: false,

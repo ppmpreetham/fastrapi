@@ -313,7 +313,8 @@ impl PyAPIRoute {
 
     fn get_route_handler(slf: &Bound<'_, Self>, py: Python<'_>) -> Py<PyAny> {
         slf.as_any()
-            .getattr("endpoint")
+            .getattr("_fastrapi_original")
+            .or_else(|_| slf.as_any().getattr("endpoint"))
             .map_or_else(|_| py.None(), Bound::unbind)
     }
 
