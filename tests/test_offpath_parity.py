@@ -449,3 +449,22 @@ def test_middleware_classes_as_asgi_apps_match_fastapi():
         return [asyncio.run(call(app)) for app in apps], [app.app is inner for app in apps]
 
     both(run)
+
+
+def test_background_tasks_call_matches_fastapi():
+    import asyncio
+
+    def run(lib):
+        calls = []
+
+        async def later(value):
+            calls.append(("async", value))
+
+        tasks = lib.BackgroundTasks()
+        tasks.add_task(calls.append, "sync")
+        tasks.add_task(later, 1)
+        tasks.add_task(calls.append, "last")
+        asyncio.run(tasks())
+        return calls, len(tasks.tasks)
+
+    both(run)

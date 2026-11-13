@@ -83,20 +83,8 @@ impl PyBackgroundTasks {
         let task_class = py
             .import(intern!(py, "starlette.background"))?
             .getattr(intern!(py, "BackgroundTask"))?;
-        let snapshot: Vec<Task> = self
-            .tasks
-            .lock()
-            .iter()
-            .map(|(func, args, kwargs)| {
-                (
-                    func.clone_ref(py),
-                    args.iter().map(|arg| arg.clone_ref(py)).collect(),
-                    kwargs.as_ref().map(|kwargs| kwargs.clone_ref(py)),
-                )
-            })
-            .collect();
         let tasks = PyList::empty(py);
-        for (func, args, kwargs) in &snapshot {
+        for (func, args, kwargs) in &self.snapshot(py) {
             let mut call_args = vec![func.clone_ref(py)];
             call_args.extend(args.iter().map(|arg| arg.clone_ref(py)));
             tasks.append(task_class.call(
@@ -115,6 +103,26 @@ impl PyBackgroundTasks {
     fn add_task(&self, func: Py<PyAny>, args: Vec<Py<PyAny>>, kwargs: Option<&Bound<'_, PyDict>>) {
         let mut tasks = self.tasks.lock();
         tasks.push((func, args, kwargs.map(|kw| kw.clone().unbind())));
+    }
+
+    async fn __call__(&self) -> PyResult<()> {
+        let (tasks, locals) = Python::attach(|py| {
+            py_bridge::get_current_locals(py).map(|locals| (self.snapshot(py), locals))
+        })?;
+        for (func, args, kwargs) in tasks {
+            let pending = Python::attach(|py| -> PyResult<_> {
+                let kwargs = kwargs.as_ref().map(|kwargs| kwargs.bind(py));
+                let result = func.bind(py).call(PyTuple::new(py, args)?, kwargs)?;
+                if result.hasattr(intern!(py, "__await__"))? {
+                    return py_bridge::into_future_with_locals(&locals, result).map(Some);
+                }
+                Ok(None)
+            })?;
+            if let Some(pending) = pending {
+                pending.await?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -180,6 +188,20 @@ impl PendingTasks {
 }
 
 impl PyBackgroundTasks {
+    fn snapshot(&self, py: Python<'_>) -> Vec<Task> {
+        self.tasks
+            .lock()
+            .iter()
+            .map(|(func, args, kwargs)| {
+                (
+                    func.clone_ref(py),
+                    args.iter().map(|arg| arg.clone_ref(py)).collect(),
+                    kwargs.as_ref().map(|kwargs| kwargs.clone_ref(py)),
+                )
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self {
