@@ -2,9 +2,9 @@
 //! It gives `receive` and `send` callables to the middleware and connects them to the axum stack.
 //! It collects the response messages that the middleware sends.
 
-use crate::exceptions::{plain_server_error, server_error_response};
+use crate::exceptions::{http_exception_response, plain_server_error, server_error_response};
 use axum::body::{Body, to_bytes};
-use axum::extract::Request;
+use axum::extract::{OriginalUri, Request};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
@@ -18,8 +18,10 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyList};
+use std::pin::pin;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Sender, channel};
+use tokio::sync::watch;
 use tracing::error;
 
 const DOWNSTREAM_KEY: &str = "_fastrapi_downstream";
@@ -52,6 +54,7 @@ pub struct PyScopeDownstream;
 )]
 pub struct PyAsgiReceive {
     body: Arc<Mutex<Option<bytes::Bytes>>>,
+    finished: watch::Receiver<bool>,
 }
 
 #[pyclass(
@@ -62,6 +65,7 @@ pub struct PyAsgiReceive {
 )]
 pub struct PyAsgiSend {
     tx: Sender<Py<PyAny>>,
+    finished: watch::Sender<bool>,
 }
 
 #[pymethods]
@@ -244,8 +248,12 @@ pub async fn asgi_call(
 impl PyAsgiReceive {
     fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let body = self.body.clone();
+        let mut finished = self.finished.clone();
         py_bridge::future_into_py(py, async move {
             let body = body.lock().take();
+            if body.is_none() {
+                _ = finished.wait_for(|finished| *finished).await;
+            }
             Python::attach(|py| {
                 let msg = PyDict::new(py);
                 match body {
@@ -272,11 +280,20 @@ impl PyAsgiSend {
         message: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.tx.clone();
+        let completes = matches!(
+            parse_response_message(py, message),
+            ResponseMessage::Body(_, false)
+        );
+        let finished = self.finished.clone();
         let message = message.clone().unbind();
         py_bridge::future_into_py(py, async move {
             tx.send(message)
                 .await
-                .map_err(|_| PyRuntimeError::new_err("asgi send channel closed"))
+                .map_err(|_| PyRuntimeError::new_err("asgi send channel closed"))?;
+            if completes {
+                finished.send_replace(true);
+            }
+            Ok(())
         })
     }
 }
@@ -284,7 +301,7 @@ impl PyAsgiSend {
 /// A parsed `http.response.*` message that the middleware sent.
 enum ResponseMessage {
     Start(u16, Vec<(bytes::Bytes, bytes::Bytes)>),
-    Body(bytes::Bytes),
+    Body(bytes::Bytes, bool),
     Other,
 }
 
@@ -314,10 +331,7 @@ async fn run_asgi_app(
     let Ok(body_bytes) = to_bytes(body, max_body_size).await else {
         return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response();
     };
-    let (send_tx, mut send_rx) = channel::<Py<PyAny>>(16);
-    let close_tx = send_tx.clone();
-
-    let outcome = Python::attach(|py| -> PyResult<_> {
+    let scope = Python::attach(|py| -> PyResult<_> {
         let locals = py_bridge::TaskLocals::new(event_loop.bind(py).clone());
         let scope = build_scope(py, &parts, event_loop)?;
         let handle = Py::new(
@@ -327,20 +341,80 @@ async fn run_asgi_app(
                 head: parts,
                 locals,
             },
-        )?
-        .into_any();
+        )?;
         scope
             .bind(py)
-            .set_item(intern!(py, DOWNSTREAM_KEY), &handle)?;
+            .set_item(intern!(py, DOWNSTREAM_KEY), handle)?;
+        Ok(scope)
+    });
+    drive_asgi(&instance, scope, body_bytes, event_loop)
+        .await
+        .unwrap_or_else(|err| server_error(&err, event_loop))
+}
 
+pub async fn mounted_asgi(
+    app: Arc<Py<PyAny>>,
+    prefix: Arc<str>,
+    req: Request,
+    event_loop: EventLoop,
+    max_body_size: usize,
+) -> Response {
+    let (mut parts, body) = req.into_parts();
+    if let Some(OriginalUri(uri)) = parts.extensions.get::<OriginalUri>().cloned() {
+        parts.uri = uri;
+    }
+    let Ok(body_bytes) = to_bytes(body, max_body_size).await else {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response();
+    };
+    let scope = Python::attach(|py| -> PyResult<_> {
+        let scope = build_scope(py, &parts, event_loop)?;
+        scope
+            .bind(py)
+            .set_item(intern!(py, "root_path"), &*prefix)?;
+        Ok(scope)
+    });
+    drive_asgi(&app, scope, body_bytes, event_loop)
+        .await
+        .unwrap_or_else(|err| {
+            Python::attach(|py| http_exception_response(err.value(py)))
+                .unwrap_or_else(|| server_error(&err, event_loop))
+        })
+}
+
+fn server_error(err: &PyErr, event_loop: EventLoop) -> Response {
+    Python::attach(|py| {
+        err.print(py);
+        server_error_response(py, err, Some(event_loop))
+    })
+}
+
+async fn drive_asgi(
+    instance: &Py<PyAny>,
+    scope: PyResult<Py<PyDict>>,
+    body_bytes: Bytes,
+    event_loop: EventLoop,
+) -> PyResult<Response> {
+    let (send_tx, mut send_rx) = channel::<Py<PyAny>>(16);
+    let (finished_tx, finished_rx) = watch::channel(false);
+
+    let outcome = Python::attach(|py| -> PyResult<_> {
+        let scope = scope?;
         let receive = Py::new(
             py,
             PyAsgiReceive {
                 body: Arc::new(Mutex::new(Some(body_bytes))),
+                finished: finished_rx,
             },
         )?
         .into_any();
-        let send = Py::new(py, PyAsgiSend { tx: send_tx })?.into_any();
+        let send = Py::new(
+            py,
+            PyAsgiSend {
+                tx: send_tx,
+                finished: finished_tx,
+            },
+        )?
+        .into_any();
 
         let coro = instance
             .bind(py)
@@ -348,25 +422,27 @@ async fn run_asgi_app(
         py_bridge::schedule_task(py, event_loop, coro)
     });
 
+    let parse = |msg: Py<PyAny>| Python::attach(|py| parse_response_message(py, msg.bind(py)));
+    let mut messages = Vec::new();
     let failed = match outcome {
-        Ok(fut) => fut.await.err(),
+        Ok(fut) => {
+            let mut fut = pin!(fut);
+            loop {
+                tokio::select! {
+                    Some(msg) = send_rx.recv() => messages.push(parse(msg)),
+                    result = &mut fut => break result.err(),
+                }
+            }
+        }
         Err(err) => Some(err),
     };
     if let Some(err) = failed {
-        return Python::attach(|py| {
-            err.print(py);
-            server_error_response(py, &err, Some(event_loop))
-        });
+        return Err(err);
     }
-
-    drop(close_tx);
-    let mut messages = Vec::new();
-    while let Some(msg) = send_rx.recv().await {
-        messages.push(Python::attach(|py| {
-            parse_response_message(py, msg.bind(py))
-        }));
+    while let Ok(msg) = send_rx.try_recv() {
+        messages.push(parse(msg));
     }
-    collect_response(messages)
+    Ok(collect_response(messages))
 }
 
 fn parse_response_message(py: Python<'_>, msg: &Bound<'_, PyAny>) -> ResponseMessage {
@@ -398,7 +474,10 @@ fn parse_response_message(py: Python<'_>, msg: &Bound<'_, PyAny>) -> ResponseMes
                 .ok()
                 .and_then(|raw| python_bytes(py, &raw))
                 .unwrap_or_default();
-            ResponseMessage::Body(body)
+            let more_body = msg
+                .get_item(intern!(py, "more_body"))
+                .is_ok_and(|more| more.is_truthy().unwrap_or(false));
+            ResponseMessage::Body(body, more_body)
         }
         _ => ResponseMessage::Other,
     }
@@ -424,7 +503,7 @@ fn collect_response(messages: Vec<ResponseMessage>) -> Response {
                     }
                 }
             }
-            ResponseMessage::Body(chunk) => body.extend(chunk),
+            ResponseMessage::Body(chunk, _) => body.extend(chunk),
             ResponseMessage::Other => {}
         }
     }

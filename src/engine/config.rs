@@ -4,6 +4,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use smart_default::SmartDefault;
+use std::sync::Arc;
 
 use crate::ffi::decorators::PyAPIRouter;
 use fastrapi_http::middleware::MiddlewareContainer;
@@ -13,6 +14,12 @@ use fastrapi_http::middleware::MiddlewareContainer;
 pub struct SubAppMount {
     pub path: String,
     pub app: Py<FastrAPI>,
+    pub name: Option<String>,
+}
+
+pub struct AsgiMount {
+    pub path: String,
+    pub app: Arc<Py<PyAny>>,
     pub name: Option<String>,
 }
 
@@ -194,6 +201,7 @@ pub struct FastrAPI {
     pub(crate) static_mounts: Vec<StaticMount>,
     pub(crate) frontend_mounts: Vec<FrontendMount>,
     pub(crate) app_mounts: Vec<SubAppMount>,
+    pub(crate) asgi_mounts: Vec<AsgiMount>,
     pub(crate) host_mounts: Vec<HostMount>,
     pub(crate) prometheus_config: Option<PrometheusConfig>,
     pub(crate) middlewares: MiddlewareContainer,

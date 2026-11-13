@@ -41,6 +41,7 @@ use crate::ffi::docs;
 use fastrapi_core::method::{HttpMethod, allow_header};
 use fastrapi_core::path::{host_without_port, join_path, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, FrozenRouterBuilder, RoutePattern};
+use fastrapi_http::middleware::asgi::mounted_asgi;
 use fastrapi_http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer};
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::response_type::ResponseType;
@@ -295,6 +296,27 @@ fn register_routes(
         .cloned()
         .fold(app, |current_app, mount| {
             add_static_mount(current_app, mount, handlers)
+        });
+    let max_body_size = app_state.max_body_size.unwrap_or(usize::MAX);
+    app = app_config
+        .asgi_mounts
+        .iter()
+        .fold(app, |current_app, mount| {
+            let mounted = Arc::clone(&mount.app);
+            let prefix: Arc<str> = mount.path.as_str().into();
+            current_app.nest_service(
+                &mount.path,
+                tower::service_fn(move |req: Request| {
+                    let response = mounted_asgi(
+                        Arc::clone(&mounted),
+                        Arc::clone(&prefix),
+                        req,
+                        app_state.event_loop,
+                        max_body_size,
+                    );
+                    async move { Ok::<_, std::convert::Infallible>(response.await) }
+                }),
+            )
         });
 
     app = app.method_not_allowed_fallback(move |req: Request| async move {

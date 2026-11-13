@@ -2,7 +2,7 @@
 //! These methods add routes, mounts, middleware, exception handlers and routers to the app.
 //! They also start the server and build the OpenAPI schema.
 
-use super::config::{FastrAPI, FrontendMount, HostMount, StaticMount, SubAppMount};
+use super::config::{AsgiMount, FastrAPI, FrontendMount, HostMount, StaticMount, SubAppMount};
 use super::server::serve::{serve, serve_with_reload};
 use crate::ffi::decorators;
 use crate::ffi::decorators::{PyAPIRouter, collect_router_routes};
@@ -14,7 +14,7 @@ use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
 use fastrapi_pyutil::imports::STARLETTE_STATE;
 use fastrapi_runtime::tokio_runtime::set_threads;
 use parking_lot::Mutex;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyAny, PyCFunction, PyDict, PyList, PyTuple};
 use pyo3::{Bound, intern};
@@ -120,6 +120,11 @@ impl FastrAPI {
             .map(|mount| (mount.path.as_str(), mount.name.as_deref()))
             .chain(
                 self.app_mounts
+                    .iter()
+                    .map(|mount| (mount.path.as_str(), mount.name.as_deref())),
+            )
+            .chain(
+                self.asgi_mounts
                     .iter()
                     .map(|mount| (mount.path.as_str(), mount.name.as_deref())),
             );
@@ -491,6 +496,7 @@ impl FastrAPI {
             static_mounts: Vec::new(),
             frontend_mounts: Vec::new(),
             app_mounts: Vec::new(),
+            asgi_mounts: Vec::new(),
             host_mounts: Vec::new(),
             prometheus_config: None,
             middlewares: MiddlewareContainer::default(),
@@ -603,13 +609,25 @@ impl FastrAPI {
             return Ok(());
         }
 
-        let static_files = app.extract::<PyRef<'_, PyStaticFiles>>()?;
-        self.static_mounts.push(StaticMount {
+        if let Ok(static_files) = app.extract::<PyRef<'_, PyStaticFiles>>() {
+            self.static_mounts.push(StaticMount {
+                path: normalized_path,
+                directory: static_files.directory.clone(),
+                directories: static_files.directories.clone(),
+                html: static_files.html,
+                follow_symlink: static_files.follow_symlink,
+                name,
+            });
+            return Ok(());
+        }
+        if !app.is_callable() {
+            return Err(PyTypeError::new_err(
+                "mounted app must be an ASGI application",
+            ));
+        }
+        self.asgi_mounts.push(AsgiMount {
             path: normalized_path,
-            directory: static_files.directory.clone(),
-            directories: static_files.directories.clone(),
-            html: static_files.html,
-            follow_symlink: static_files.follow_symlink,
+            app: Arc::new(app.clone().unbind()),
             name,
         });
         Ok(())

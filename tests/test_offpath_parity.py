@@ -789,3 +789,39 @@ def test_middleware_request_url_matches_fastapi():
         return seen
 
     both(run)
+
+
+def test_mount_any_asgi_app_matches_fastapi(tmp_path):
+    import json
+
+    import starlette.applications
+    import starlette.responses
+    import starlette.routing
+    import starlette.staticfiles
+
+    (tmp_path / "a.txt").write_text("static")
+
+    async def raw(scope, receive, send):
+        body = json.dumps({"path": scope["path"], "root_path": scope["root_path"]}).encode()
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def hello(request):
+        return starlette.responses.PlainTextResponse(f"hello {request.url.path}")
+
+    def run(lib):
+        sub = starlette.applications.Starlette(routes=[starlette.routing.Route("/hi", hello)])
+        app = new_app(lib)
+        app.mount("/raw", raw, name="raw")
+        app.mount("/star", sub)
+        app.mount("/files", starlette.staticfiles.StaticFiles(directory=str(tmp_path)))
+
+        @app.get("/own")
+        def own():
+            return "own"
+
+        c = client(app)
+        responses = [c.get(path) for path in ("/raw/x/y", "/star/hi", "/files/a.txt", "/own", "/files/missing")]
+        return [(r.status_code, r.text) for r in responses], str(app.url_path_for("raw", path="/z"))
+
+    both(run)
