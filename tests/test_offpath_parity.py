@@ -743,3 +743,26 @@ def test_request_scope_matches_fastapi():
         return client(app).get("/s/a%20b?q=1", cookies={"c": "1"}).json()
 
     both(run)
+
+
+def test_server_sent_event_model_matches_fastapi():
+    def run(lib):
+        event_cls = submodule(lib, "sse").ServerSentEvent
+        event = event_cls(data={"a": 1}, event="x")
+        validated = event_cls.model_validate({"data": 1, "id": "i"})
+        return (
+            list(event_cls.model_fields),
+            event_cls.model_json_schema(),
+            event.model_dump(),
+            event.model_dump(exclude_none=True),
+            event.model_dump(exclude_unset=True),
+            event.model_dump(include={"event"}),
+            event.model_dump_json(),
+            sorted(event.model_fields_set),
+            repr(validated),
+            str(validated),
+            event.model_copy(update={"id": "2"}).model_dump(exclude_none=True),
+            event == event_cls(data={"a": 1}, event="x"),
+        )
+
+    both(run)

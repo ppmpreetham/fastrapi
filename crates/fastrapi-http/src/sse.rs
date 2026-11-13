@@ -10,7 +10,10 @@ use fastrapi_pyutil::cached_py_import;
 use pyo3::Bound;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyType};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{
+    IntoPyDict, PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PySet, PyString, PyTuple, PyType,
+};
 
 /// Streaming response with `text/event-stream` media type.
 ///
@@ -95,20 +98,57 @@ impl PyEventSourceResponse {
 ///
 /// For example, `data="hello"` produces `data: "hello"` on the wire (with
 /// quotes).
-#[pyclass(
-    name = "ServerSentEvent",
-    module = "fastrapi.sse",
-    get_all,
-    skip_from_py_object
-)]
+#[pyclass(name = "ServerSentEvent", module = "fastrapi.sse", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyServerSentEvent {
+    #[pyo3(get)]
     pub data: Py<PyAny>,
+    #[pyo3(get)]
     pub raw_data: Option<String>,
+    #[pyo3(get)]
     pub event: Option<String>,
+    #[pyo3(get)]
     pub id: Option<String>,
+    #[pyo3(get)]
     pub retry: Option<i64>,
+    #[pyo3(get)]
     pub comment: Option<String>,
+    fields_set: u8,
+}
+
+const EVENT_FIELDS: [&str; 6] = ["data", "raw_data", "event", "id", "retry", "comment"];
+
+static EVENT_MODEL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+fn event_model(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    EVENT_MODEL
+        .get_or_try_init(py, || {
+            let typing = py.import("typing")?;
+            let optional = typing.getattr("Optional")?;
+            let text = optional.get_item(py.get_type::<PyString>())?;
+            let retry = typing.getattr("Annotated")?.get_item((
+                optional.get_item(py.get_type::<PyInt>())?,
+                py.import("pydantic")?
+                    .getattr("Field")?
+                    .call((), Some(&[("ge", 0)].into_py_dict(py)?))?,
+            ))?;
+            let fields = PyDict::new(py);
+            fields.set_item(
+                "__doc__",
+                py.get_type::<PyServerSentEvent>().getattr("__doc__")?,
+            )?;
+            fields.set_item("data", (typing.getattr("Any")?, py.None()))?;
+            for name in ["raw_data", "event", "id"] {
+                fields.set_item(name, (&text, py.None()))?;
+            }
+            fields.set_item("retry", (retry, py.None()))?;
+            fields.set_item("comment", (&text, py.None()))?;
+            py.import("pydantic")?
+                .getattr("create_model")?
+                .call(("ServerSentEvent",), Some(&fields))
+                .map(Bound::unbind)
+        })
+        .map(|model| model.bind(py))
 }
 
 pub const KEEPALIVE_COMMENT: &[u8] = b": ping\n\n";
@@ -116,7 +156,11 @@ pub const KEEPALIVE_COMMENT: &[u8] = b": ping\n\n";
 #[pymethods]
 impl PyServerSentEvent {
     #[new]
-    #[pyo3(signature = (*, data=None, raw_data=None, event=None, id=None, retry=None, comment=None))]
+    #[pyo3(signature = (*, data=None, raw_data=None, event=None, id=None, retry=None, comment=None, **_given))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the signature copies the FastAPI ServerSentEvent model"
+    )]
     fn new(
         py: Python<'_>,
         data: Option<Py<PyAny>>,
@@ -125,6 +169,7 @@ impl PyServerSentEvent {
         id: Option<String>,
         retry: Option<i64>,
         comment: Option<String>,
+        _given: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         if data.is_some() && raw_data.is_some() {
             return Err(PyValueError::new_err(
@@ -142,6 +187,17 @@ impl PyServerSentEvent {
         if retry.is_some_and(|value| value < 0) {
             return Err(PyValueError::new_err("retry must be non-negative"));
         }
+        let fields_set = [
+            data.is_some(),
+            raw_data.is_some(),
+            event.is_some(),
+            id.is_some(),
+            retry.is_some(),
+            comment.is_some(),
+        ]
+        .iter()
+        .enumerate()
+        .fold(0, |mask, (bit, set)| mask | (u8::from(*set) << bit));
         Ok(Self {
             data: data.unwrap_or_else(|| py.None()),
             raw_data,
@@ -149,152 +205,152 @@ impl PyServerSentEvent {
             id,
             retry,
             comment,
+            fields_set,
         })
     }
 
-    #[pyo3(signature = (*_args, **kwargs))]
-    fn model_dump(
-        &self,
-        py: Python<'_>,
-        _args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Py<PyDict>> {
-        let result = PyDict::new(py);
-        let exclude_none = kwargs
-            .and_then(|value| {
-                value
-                    .get_item(pyo3::intern!(py, "exclude_none"))
-                    .ok()
-                    .flatten()
-            })
-            .and_then(|value| value.extract::<bool>().ok())
-            .unwrap_or(false);
-        if !self.data.bind(py).is_none() || !exclude_none {
-            result.set_item(pyo3::intern!(py, "data"), self.data.bind(py))?;
-        }
-        if !exclude_none || self.raw_data.is_some() {
-            result.set_item(pyo3::intern!(py, "raw_data"), self.raw_data.as_deref())?;
-        }
-        if !exclude_none || self.event.is_some() {
-            result.set_item(pyo3::intern!(py, "event"), self.event.as_deref())?;
-        }
-        if !exclude_none || self.id.is_some() {
-            result.set_item(pyo3::intern!(py, "id"), self.id.as_deref())?;
-        }
-        if !exclude_none || self.retry.is_some() {
-            result.set_item(pyo3::intern!(py, "retry"), self.retry)?;
-        }
-        if !exclude_none || self.comment.is_some() {
-            result.set_item(pyo3::intern!(py, "comment"), self.comment.as_deref())?;
-        }
-        if let Some(kwargs) = kwargs {
-            if let Some(include) = kwargs.get_item(pyo3::intern!(py, "include"))?
-                && let Ok(include) = include.extract::<Vec<String>>()
-            {
-                for key in ["data", "raw_data", "event", "id", "retry", "comment"] {
-                    if !include.iter().any(|item| item == key) {
-                        result.del_item(key)?;
-                    }
-                }
-            }
-            if let Some(exclude) = kwargs.get_item(pyo3::intern!(py, "exclude"))?
-                && let Ok(exclude) = exclude.extract::<Vec<String>>()
-            {
-                for key in exclude {
-                    result.del_item(key)?;
-                }
-            }
-        }
-        Ok(result.unbind())
+    #[classattr]
+    fn model_fields(py: Python<'_>) -> PyResult<Py<PyAny>> {
+        event_model(py)?.getattr("model_fields").map(Bound::unbind)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
-    fn model_dump_json(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<String> {
-        let dumped = self.model_dump(py, args, kwargs)?;
-        py.import("json")?
-            .getattr(pyo3::intern!(py, "dumps"))?
-            .call1((dumped.bind(py),))?
-            .extract()
+    #[getter]
+    fn model_fields_set<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PySet>> {
+        PySet::new(
+            py,
+            EVENT_FIELDS
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| self.fields_set & (1 << bit) != 0)
+                .map(|(_, name)| *name),
+        )
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
-    fn dict(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Py<PyDict>> {
-        self.model_dump(py, args, kwargs)
+    #[classmethod]
+    #[pyo3(signature = (**kwargs))]
+    fn model_json_schema<'py>(
+        cls: &Bound<'py, PyType>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        event_model(cls.py())?.call_method("model_json_schema", (), kwargs)
     }
 
-    #[pyo3(signature = (*args, **kwargs))]
-    fn json(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<String> {
-        self.model_dump_json(py, args, kwargs)
-    }
-
-    #[pyo3(signature = (*args, **kwargs))]
-    fn copy(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Py<PyAny>> {
-        self.model_copy(py, args, kwargs)
-    }
-
-    #[pyo3(signature = (*args, **kwargs))]
-    fn model_copy(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Py<PyAny>> {
-        let deep = kwargs
-            .and_then(|value| value.get_item(pyo3::intern!(py, "deep")).ok().flatten())
-            .and_then(|value| value.extract::<bool>().ok())
-            .unwrap_or(false);
-        let data = self.model_dump(py, args, None)?;
-        if let Some(kwargs) = kwargs
-            && let Some(update) = kwargs.get_item(pyo3::intern!(py, "update"))?
-            && !update.is_none()
-        {
-            data.bind(py).update(update.cast()?)?;
+    #[classmethod]
+    #[pyo3(signature = (value, **_options))]
+    fn model_validate<'py>(
+        cls: &Bound<'py, PyType>,
+        value: &Bound<'py, PyAny>,
+        _options: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if value.is_instance(cls)? {
+            return Ok(value.clone());
         }
-        if deep {
-            let copied = py
-                .import("copy")?
-                .call_method1(pyo3::intern!(py, "deepcopy"), (data.bind(py),))?;
-            return py
-                .get_type::<Self>()
-                .call((), Some(copied.cast::<PyDict>()?))
-                .map(Bound::unbind);
+        cls.call((), Some(value.cast::<PyDict>()?))
+    }
+
+    #[pyo3(signature = (**kwargs))]
+    fn model_dump<'py>(
+        &self,
+        py: Python<'py>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.as_model(py)?.call_method("model_dump", (), kwargs)
+    }
+
+    #[pyo3(signature = (**kwargs))]
+    fn model_dump_json<'py>(
+        &self,
+        py: Python<'py>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.as_model(py)?
+            .call_method("model_dump_json", (), kwargs)
+    }
+
+    #[pyo3(signature = (*, update=None, deep=false))]
+    fn model_copy<'py>(
+        &self,
+        py: Python<'py>,
+        update: Option<&Bound<'py, PyDict>>,
+        deep: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let fields = self.fields(py)?;
+        if let Some(update) = update {
+            fields.update(update.as_mapping())?;
         }
-        py.get_type::<Self>()
-            .call((), Some(data.bind(py)))
-            .map(Bound::unbind)
+        let fields = if deep {
+            py.import("copy")?
+                .call_method1("deepcopy", (fields,))?
+                .cast_into::<PyDict>()?
+        } else {
+            fields
+        };
+        py.get_type::<Self>().call((), Some(&fields))
+    }
+
+    #[pyo3(signature = (*, update=None, deep=false))]
+    fn copy<'py>(
+        &self,
+        py: Python<'py>,
+        update: Option<&Bound<'py, PyDict>>,
+        deep: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.model_copy(py, update, deep)
+    }
+
+    #[pyo3(signature = (**kwargs))]
+    fn dict<'py>(
+        &self,
+        py: Python<'py>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.as_model(py)?.call_method("dict", (), kwargs)
+    }
+
+    #[pyo3(signature = (**kwargs))]
+    fn json<'py>(
+        &self,
+        py: Python<'py>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.as_model(py)?.call_method("json", (), kwargs)
     }
 
     #[pyo3(signature = (_context))]
     const fn model_post_init(&self, _context: &Bound<'_, PyAny>) {}
 
-    #[classmethod]
-    fn model_validate(cls: &Bound<'_, PyType>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(event) = value.cast::<Self>() {
-            return Ok(event.clone().unbind().into_any());
+    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        match other.cast::<Self>() {
+            Ok(other) => self.fields(py)?.eq(other.borrow().fields(py)?),
+            Err(_) => Ok(false),
         }
-        let dict = value.cast::<PyDict>()?;
-        let kwargs = dict.copy()?.into_any().cast_into::<PyDict>()?;
-        cls.call((), Some(&kwargs)).map(Bound::unbind)
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(self.as_model(py)?.repr()?.to_string())
+    }
+
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(self.as_model(py)?.str()?.to_string())
+    }
+}
+
+impl PyServerSentEvent {
+    fn fields<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let fields = PyDict::new(py);
+        fields.set_item("data", self.data.bind(py))?;
+        fields.set_item("raw_data", self.raw_data.as_deref())?;
+        fields.set_item("event", self.event.as_deref())?;
+        fields.set_item("id", self.id.as_deref())?;
+        fields.set_item("retry", self.retry)?;
+        fields.set_item("comment", self.comment.as_deref())?;
+        Ok(fields)
+    }
+
+    fn as_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let fields = self.fields(py)?;
+        fields.set_item("_fields_set", self.model_fields_set(py)?)?;
+        event_model(py)?.call_method("model_construct", (), Some(&fields))
     }
 }
 
