@@ -470,6 +470,11 @@ mod fastrapi {
                     "WebSocket",
                     py.get_type::<PyWebSocket>(),
                 ),
+                (
+                    "starlette.datastructures",
+                    "FormData",
+                    py.get_type::<fastrapi_http::form_data::PyFormData>(),
+                ),
             ],
         )?;
         m.add(

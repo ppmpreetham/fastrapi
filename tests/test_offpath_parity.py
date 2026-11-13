@@ -520,3 +520,27 @@ def test_request_hierarchy_matches_fastapi():
         return client(app).get("/r").json(), issubclass(lib.WebSocket, starlette.websockets.WebSocket)
 
     both(run)
+
+
+def test_form_data_hierarchy_matches_fastapi():
+    import collections.abc
+
+    import starlette.datastructures as datastructures
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.post("/f")
+        async def f(request: lib.Request):
+            form = await request.form()
+            return [
+                isinstance(form, datastructures.ImmutableMultiDict),
+                isinstance(form, datastructures.FormData),
+                isinstance(form, collections.abc.Mapping),
+                form.getlist("a"),
+                list(form.multi_items()),
+            ]
+
+        return client(app).post("/f", data={"a": ["1", "2"], "b": "3"}).json()
+
+    both(run)
