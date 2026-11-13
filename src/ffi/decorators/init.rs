@@ -304,6 +304,7 @@ struct RouteOptions {
     responses: Option<Py<PyAny>>,
     openapi_extra: Option<simd_json::OwnedValue>,
     callbacks: Option<simd_json::OwnedValue>,
+    callback_routes: Option<Py<PyAny>>,
     bypass_serialization: bool,
     merged_tags: Vec<String>,
     resolved_deprecated: Option<bool>,
@@ -360,8 +361,11 @@ impl RouteOptions {
 
         let openapi_extra = extract_bound(kwargs, "openapi_extra").map(|d| py_any_to_json(py, &d));
 
-        let callbacks = extract_bound(kwargs, "callbacks")
-            .and_then(|x| parse_callbacks_to_json(py, &x, super::router::collect_router_routes));
+        let callback_routes = extract_bound(kwargs, "callbacks").filter(|routes| !routes.is_none());
+        let callbacks = callback_routes
+            .as_ref()
+            .and_then(|x| parse_callbacks_to_json(py, x, super::router::collect_router_routes));
+        let callback_routes = callback_routes.map(Bound::unbind);
 
         let mut merged_tags = parent_tags.to_vec();
         if let Some(kw) = kwargs
@@ -397,6 +401,7 @@ impl RouteOptions {
             responses,
             openapi_extra,
             callbacks,
+            callback_routes,
             bypass_serialization,
             merged_tags,
             resolved_deprecated,
@@ -807,6 +812,10 @@ impl PyAPIRouter {
                     .map(|responses| responses.clone_ref(py)),
                 openapi_extra: opts.openapi_extra.clone().or(extra_openapi),
                 callbacks: opts.callbacks.clone(),
+                callback_routes: opts
+                    .callback_routes
+                    .as_ref()
+                    .map(|routes| routes.clone_ref(py)),
                 deprecated: opts.resolved_deprecated,
                 include_in_schema: extra_include.unwrap_or(opts.include_in_schema)
                     && router_include_in_schema,

@@ -604,3 +604,33 @@ def test_session_cookies_interoperate_with_fastapi():
     assert theirs.get("/count").json() == {"n": 2}
     ours.cookies = theirs.cookies
     assert ours.get("/count").json() == {"n": 3}
+
+
+def test_route_callbacks_match_fastapi():
+    def run(lib):
+        callbacks = lib.APIRouter()
+
+        @callbacks.post("{$callback_url}/events")
+        def event():
+            pass
+
+        router = lib.APIRouter(callbacks=callbacks.routes)
+        app = new_app(lib)
+
+        @app.post("/direct", callbacks=callbacks.routes)
+        def direct():
+            pass
+
+        @app.get("/plain")
+        def plain():
+            pass
+
+        @router.post("/inherited")
+        def inherited():
+            pass
+
+        app.include_router(router)
+        found = {r.path: [c.path for c in r.callbacks] for r in app.routes if getattr(r, "path", "") in ("/direct", "/plain")}
+        return found, [c.path for c in router.routes[0].callbacks]
+
+    both(run)

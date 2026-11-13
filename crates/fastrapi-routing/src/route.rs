@@ -182,6 +182,7 @@ pub struct RouteEntry {
     pub openapi_extra: Option<simd_json::OwnedValue>,
     pub responses: Option<Py<PyAny>>,
     pub callbacks: Option<simd_json::OwnedValue>,
+    pub callback_routes: Option<Py<PyAny>>,
     pub deprecated: Option<bool>,
     pub include_in_schema: bool,
     pub security: Vec<RouteSecurityRequirement>,

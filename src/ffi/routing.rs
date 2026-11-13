@@ -378,9 +378,11 @@ pub(crate) fn route_objects<'py>(
             Some(responses) => kwargs.set_item("responses", responses)?,
             None => kwargs.set_item("responses", PyDict::new(py))?,
         }
-        if entry.callbacks.is_none() {
-            kwargs.set_item("callbacks", PyList::empty(py))?;
-        }
+        let callbacks = match &entry.callback_routes {
+            Some(routes) => py.get_type::<PyList>().call1((routes,))?,
+            None => PyList::empty(py).into_any(),
+        };
+        kwargs.set_item("callbacks", callbacks)?;
         kwargs.set_item(
             "response_model",
             entry.handler.response.response_model.as_ref(),
