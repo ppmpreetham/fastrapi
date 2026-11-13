@@ -454,7 +454,10 @@ fn build_scope(py: Python<'_>, parts: &Parts, server: EventLoop) -> PyResult<Py<
     scope.set_item(intern!(py, "http_version"), intern!(py, "1.1"))?;
     scope.set_item(intern!(py, "method"), parts.method.as_str())?;
     scope.set_item(intern!(py, "scheme"), intern!(py, "http"))?;
-    scope.set_item(intern!(py, "path"), parts.uri.path())?;
+    scope.set_item(
+        intern!(py, "path"),
+        crate::request::decode_path(parts.uri.path()),
+    )?;
     scope.set_item(
         intern!(py, "raw_path"),
         PyBytes::new(py, parts.uri.path().as_bytes()),

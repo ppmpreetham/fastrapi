@@ -719,3 +719,27 @@ def test_websocket_json_modes_match_fastapi():
         frames += [_recv_frame(sock), _recv_frame(sock)]
     assert [opcode for opcode, _ in frames] == [0x2, 0x1, 0x1]
     assert [frames[0][1], frames[1][1].decode(), frames[2][1].decode()] == expected
+
+
+def test_request_scope_matches_fastapi():
+    keys = ("type", "method", "path", "raw_path", "query_string", "root_path", "scheme", "http_version", "client", "path_params")
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/s/{x}")
+        def s(x: str, request: lib.Request):
+            request.headers, request.cookies, request.query_params
+            scope = request.scope
+            scope["headers"].append((b"x-added", b"1"))
+            return {
+                "scope": {key: repr(scope.get(key)) for key in keys},
+                "server": tuple(scope["server"]),
+                "private": sorted(key for key in scope if key.startswith("_")),
+                "headers": isinstance(scope["headers"], list),
+                "url": [str(request.url), request.url.path, request.path_params, x],
+            }
+
+        return client(app).get("/s/a%20b?q=1", cookies={"c": "1"}).json()
+
+    both(run)

@@ -24,6 +24,7 @@ httpdate.workspace = true
 multer.workspace = true
 papaya.workspace = true
 parking_lot.workspace = true
+percent-encoding.workspace = true
 pyo3.workspace = true
 pyo3-async-runtimes.workspace = true
 regex.workspace = true

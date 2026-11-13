@@ -118,10 +118,10 @@ pub async fn ws_handler(
         }
     };
     let py_ws_obj = match Python::attach(|py| {
-        let connection = PyHTTPConnection {
-            scope: build_scope(py, &parts, &request_input, route.app.bind(py)).into_any(),
-            receive: py.None(),
-        };
+        let connection = PyHTTPConnection::from_scope(
+            build_scope(py, &parts, &request_input, route.app.bind(py)).into_any(),
+            py.None(),
+        );
         Py::new(
             py,
             PyClassInitializer::from(connection).add_subclass(PyWebSocket {
