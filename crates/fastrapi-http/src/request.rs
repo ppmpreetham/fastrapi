@@ -900,6 +900,31 @@ impl ReadyAwaitable {
     }
 }
 
+#[pyclass(frozen, name = "_BodyReceive", module = "fastrapi.requests")]
+struct BodyReceive {
+    body: Arc<OnceCell<Bytes>>,
+    delivered: std::sync::atomic::AtomicBool,
+}
+
+#[pymethods]
+impl BodyReceive {
+    fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let message = PyDict::new(py);
+        if self
+            .delivered
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            message.set_item(intern!(py, "type"), intern!(py, "http.disconnect"))?;
+        } else {
+            let body = self.body.get().map_or(&b""[..], |body| body);
+            message.set_item(intern!(py, "type"), intern!(py, "http.request"))?;
+            message.set_item(intern!(py, "body"), PyBytes::new(py, body))?;
+            message.set_item(intern!(py, "more_body"), false)?;
+        }
+        ready(py, message.into_any())
+    }
+}
+
 fn ready<'py>(py: Python<'py>, value: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     Ok(Bound::new(
         py,
@@ -912,6 +937,24 @@ fn ready<'py>(py: Python<'py>, value: Bound<'py, PyAny>) -> PyResult<Bound<'py, 
 
 #[pymethods]
 impl PyRequest {
+    #[getter]
+    fn receive(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let receive = slf.as_super().borrow().receive.clone_ref(py);
+        if !receive.is_none(py) {
+            return Ok(receive);
+        }
+        let body = Arc::clone(&slf.borrow().body_cache);
+        Py::new(
+            py,
+            BodyReceive {
+                body,
+                delivered: std::sync::atomic::AtomicBool::new(false),
+            },
+        )
+        .map(Py::into_any)
+    }
+
     #[new]
     #[pyo3(signature = (scope, receive=None, send=None))]
     fn new(

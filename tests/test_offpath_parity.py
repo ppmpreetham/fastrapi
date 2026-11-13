@@ -888,3 +888,18 @@ def test_router_is_an_asgi_app():
             return [(r.status_code, r.json()) for r in [await c.get(p) for p in ("/r/items/3", "/r/missing", "/docs")]]
 
     assert asyncio.run(call()) == [(200, {"item_id": 3}), (404, {"detail": "Not Found"}), (404, {"detail": "Not Found"})]
+
+
+
+def test_request_receive_matches_fastapi():
+    def run(lib):
+        app = new_app(lib)
+
+        @app.post("/copy")
+        async def copy(request: lib.Request):
+            clone = lib.Request(request.scope, request.receive)
+            return {"clone": (await clone.body()).decode(), "callable": callable(request.receive)}
+
+        return client(app).post("/copy", content=b"abc").json()
+
+    both(run)
