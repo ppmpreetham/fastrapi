@@ -17,6 +17,14 @@ use std::sync::OnceLock;
 #[derive(Clone, Debug)]
 pub struct NamedClient(pub Box<str>, pub u16);
 
+#[derive(Clone)]
+pub struct AsgiMount {
+    pub root_path: Box<str>,
+    pub path: Box<str>,
+    pub app_root_path: Option<Py<PyAny>>,
+    pub router: Option<Py<PyAny>>,
+}
+
 pub type PathParams<'a> = OnceLock<SmallVec<[(&'a str, &'a str); 8]>>;
 pub type QueryParams<'a> = OnceLock<SmallVec<[(Cow<'a, str>, Cow<'a, str>); 8]>>;
 

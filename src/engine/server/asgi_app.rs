@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::{HeaderName, HeaderValue, Request, Version};
 use fastrapi_http::exceptions::UnhandledError;
 use fastrapi_http::middleware::asgi::{asgi_call, drain_receive, send_response};
-use fastrapi_http::request_input::NamedClient;
+use fastrapi_http::request_input::{AsgiMount, NamedClient};
 use fastrapi_runtime::blocking::run_python;
 use fastrapi_runtime::py_bridge::{self, TaskLocals};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -117,6 +117,14 @@ fn http_request<'py>(scope: &Bound<'py, PyDict>) -> PyResult<Request<Body>> {
         item(intern!(py, "client"))?.and_then(|client| client.extract::<(String, u16)>().ok())
     {
         builder = builder.extension(NamedClient(host.into_boxed_str(), port));
+    }
+    if !root_path.is_empty() {
+        builder = builder.extension(AsgiMount {
+            root_path: root_path.into_boxed_str(),
+            path: String::from_utf8_lossy(&path).into(),
+            app_root_path: item(intern!(py, "app_root_path"))?.map(Bound::unbind),
+            router: item(intern!(py, "router"))?.map(Bound::unbind),
+        });
     }
     builder
         .body(Body::empty())

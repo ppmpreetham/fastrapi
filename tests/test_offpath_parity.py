@@ -825,3 +825,26 @@ def test_mount_any_asgi_app_matches_fastapi(tmp_path):
         return [(r.status_code, r.text) for r in responses], str(app.url_path_for("raw", path="/z"))
 
     both(run)
+
+
+def test_mounted_inside_asgi_app_matches_fastapi():
+    def run(lib):
+        inner = new_app(lib)
+
+        @inner.get("/x/{v}")
+        def x(v: str, request: lib.Request):
+            scope = request.scope
+            return [
+                str(request.url),
+                request.url.path,
+                scope["root_path"],
+                scope["path"],
+                str(request.base_url),
+                str(request.url_for("x", v="q")),
+            ]
+
+        outer = fastapi.FastAPI()
+        outer.mount("/sub", inner)
+        return client(outer).get("/sub/x/a").json()
+
+    both(run)

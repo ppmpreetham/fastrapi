@@ -292,6 +292,7 @@ impl PyAPIRoute {
         route_matches(slf.as_any(), scope)
     }
 
+    #[pyo3(signature = (name, /, **path_params))]
     fn url_path_for<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
@@ -522,6 +523,7 @@ impl PyAPIWebSocketRoute {
         delegate.call_method1("matches", (scope,))
     }
 
+    #[pyo3(signature = (name, /, **params))]
     fn url_path_for<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,

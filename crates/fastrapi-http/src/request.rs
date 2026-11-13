@@ -4,7 +4,7 @@
 use crate::exceptions::http_exception;
 use crate::form;
 use crate::middleware::SessionHandle;
-use crate::request_input::RequestInput;
+use crate::request_input::{AsgiMount, RequestInput};
 use crate::url::PyURL;
 use axum::http::HeaderMap;
 use axum::http::header::COOKIE;
@@ -248,7 +248,8 @@ impl PyHTTPConnection {
             _ = base_scope.set_item(intern!(py, "path"), "/");
             _ = base_scope.set_item(intern!(py, "query_string"), PyBytes::new(py, b""));
             let root_path = scope
-                .get_item(intern!(py, "root_path"))
+                .get_item(intern!(py, "app_root_path"))
+                .or_else(|_| scope.get_item(intern!(py, "root_path")))
                 .unwrap_or_else(|_| pyo3::intern!(py, "").clone().into_any());
             _ = base_scope.set_item(intern!(py, "root_path"), root_path);
             let url = PyURL::from_scope(&base_scope)?;
@@ -611,14 +612,25 @@ pub fn create_py_request(
     let scope = PyDict::new(py);
     scope.set_item(intern!(py, "type"), intern!(py, "http"))?;
     scope.set_item(intern!(py, "method"), input.method)?;
-    let path = decode_path(input.path);
+    let mount = input.extensions.get::<AsgiMount>();
+    let raw_path = mount.map_or(input.path, |mount| &mount.path);
+    let path = decode_path(raw_path);
     if let Cow::Owned(_) = path {
         scope.set_item(
             intern!(py, "raw_path"),
-            PyBytes::new(py, input.path.as_bytes()),
+            PyBytes::new(py, raw_path.as_bytes()),
         )?;
     }
     scope.set_item(intern!(py, "path"), path)?;
+    if let Some(mount) = mount {
+        scope.set_item(intern!(py, "root_path"), &*mount.root_path)?;
+        if let Some(app_root_path) = &mount.app_root_path {
+            scope.set_item(intern!(py, "app_root_path"), app_root_path)?;
+        }
+        if let Some(router) = &mount.router {
+            scope.set_item(intern!(py, "router"), router)?;
+        }
+    }
     scope.set_item(intern!(py, "query_string"), input.query_string)?;
     scope.set_item(
         intern!(py, "headers"),
