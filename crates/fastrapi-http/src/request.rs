@@ -866,7 +866,19 @@ impl PyRequest {
         })
     }
 
-    fn form<'py>(self_: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (*, max_files=1000.0, max_fields=1000.0, max_part_size=1024 * 1024))]
+    fn form<'py>(
+        self_: &Bound<'py, Self>,
+        py: Python<'py>,
+        max_files: f64,
+        max_fields: f64,
+        max_part_size: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let limits = form::FormLimits {
+            files: max_files,
+            fields: max_fields,
+            part_size: max_part_size,
+        };
         let conn: &Bound<'py, PyHTTPConnection> = self_.as_super();
         let conn_borrow = conn.borrow();
         let req_borrow = self_.borrow();
@@ -876,7 +888,7 @@ impl PyRequest {
         let body_fut = py_bridge::into_future_with_locals(&locals, body_awaitable)?;
         let body_cell = req_borrow.body_cache.clone();
 
-        py_bridge::future_into_py_with_locals(py, locals, async move {
+        let parsed = py_bridge::future_into_py_with_locals(py, locals, async move {
             let body_bytes: Py<PyAny> = body_fut.await?;
 
             let raw: Bytes = body_cell.get().cloned().unwrap_or_else(|| {
@@ -889,14 +901,15 @@ impl PyRequest {
                 })
             });
 
-            let entries = match form::parse_form(&content_type, raw).await {
+            let entries = match form::parse_form(&content_type, raw, limits).await {
                 Ok(entries) => entries,
                 Err(message) => {
                     return Python::attach(|py| Err(http_exception(py, 400, Some(&message), None)));
                 }
             };
             Python::attach(|py| form::to_form_data(py, entries))
-        })
+        })?;
+        Bound::new(py, form::PyFormCall::new(parsed)).map(Bound::into_any)
     }
 
     fn form_sync<'py>(self_: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -904,14 +917,11 @@ impl PyRequest {
         let request = self_.borrow();
         let raw = request.body_cache.get().cloned().unwrap_or_default();
         let content_type = form::content_type_of(py, conn.borrow().scope.bind(py));
-        if content_type.starts_with("multipart/form-data") {
-            let parsed = form::parse_form(&content_type, raw)
-                .now_or_never()
-                .ok_or_else(|| PyRuntimeError::new_err("the form parser did not finish"))?
-                .map_err(|message| http_exception(py, 400, Some(&message), None))?;
-            return form::to_form_data(py, parsed).map(|value| value.bind(py).clone());
-        }
-        Ok(form::parse_urlencoded_form_data(py, &raw)?.into_bound(py))
+        let parsed = form::parse_form(&content_type, raw, form::FormLimits::default())
+            .now_or_never()
+            .ok_or_else(|| PyRuntimeError::new_err("the form parser did not finish"))?
+            .map_err(|message| http_exception(py, 400, Some(&message), None))?;
+        form::to_form_data(py, parsed).map(|value| value.bind(py).clone())
     }
 
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {

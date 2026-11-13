@@ -81,6 +81,16 @@ fn expected(expected: &str, got: &str) -> PyErr {
     PyTypeError::new_err(format!("Expected {expected}, got {got}"))
 }
 
+fn binary_mode(mode: &str) -> PyResult<bool> {
+    match mode {
+        "text" => Ok(false),
+        "binary" => Ok(true),
+        _ => Err(PyRuntimeError::new_err(
+            "The \"mode\" argument should be \"text\" or \"binary\".",
+        )),
+    }
+}
+
 fn parse_json_bytes(bytes: Bytes) -> PyResult<Py<PyAny>> {
     let mut json_buf = Vec::from(bytes);
     let value = simd_json::to_owned_value(&mut json_buf)
@@ -209,20 +219,26 @@ impl PyWebSocket {
         })
     }
 
+    #[pyo3(signature = (data, mode="text"))]
     fn send_json<'py>(
         &self,
         py: Python<'py>,
         data: &Bound<'_, PyAny>,
+        mode: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let binary = binary_mode(mode)?;
         let mut buf = BytesMut::new();
         let mut writer = (&mut buf).writer();
         write_py_json(py, data, &mut writer)?;
         let payload = buf.freeze();
+        let message = if binary {
+            WSMessage::Binary(payload)
+        } else {
+            WSMessage::Text(payload)
+        };
         let tx = self.tx.clone();
         py_bridge::future_into_py(py, async move {
-            tx.send(WSMessage::Text(payload))
-                .await
-                .map_err(|_| closed())?;
+            tx.send(message).await.map_err(|_| closed())?;
             Ok(())
         })
     }
@@ -250,11 +266,15 @@ impl PyWebSocket {
         })
     }
 
-    fn receive_json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (mode="text"))]
+    fn receive_json<'py>(&self, py: Python<'py>, mode: &str) -> PyResult<Bound<'py, PyAny>> {
+        let binary = binary_mode(mode)?;
         let rx = self.rx.clone();
         py_bridge::future_into_py(py, async move {
             match next_message(rx).await? {
-                WSMessage::Text(bytes) => parse_json_bytes(bytes),
+                WSMessage::Text(bytes) if !binary => parse_json_bytes(bytes),
+                WSMessage::Binary(bytes) if binary => parse_json_bytes(bytes),
+                WSMessage::Text(_) => Err(expected("binary", "text")),
                 WSMessage::Binary(_) => Err(expected("text", "binary")),
                 WSMessage::Close(code, reason) => Err(disconnected_with_code(code, reason)),
             }

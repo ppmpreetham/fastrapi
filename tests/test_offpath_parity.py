@@ -634,3 +634,88 @@ def test_route_callbacks_match_fastapi():
         return found, [c.path for c in router.routes[0].callbacks]
 
     both(run)
+
+
+def test_form_options_match_fastapi():
+    def run(lib):
+        app = new_app(lib)
+
+        @app.post("/limited")
+        async def limited(request: lib.Request):
+            form = await request.form(max_fields=1, max_files=1, max_part_size=4)
+            return sorted(form.keys())
+
+        @app.post("/managed")
+        async def managed(request: lib.Request):
+            async with request.form() as form:
+                return {"a": form["a"]}
+
+        c = client(app)
+        cases = [
+            c.post("/limited", data={"a": "1"}),
+            c.post("/limited", data={"a": "1", "b": "2"}),
+            c.post("/limited", data={"a": "12345"}),
+            c.post("/limited", files=[("f", ("a.txt", b"x")), ("g", ("b.txt", b"y"))]),
+            c.post("/limited", data={"a": "1"}, files=[("f", ("a.txt", b"x"))]),
+            c.post("/limited", data={"a": "123456"}, files=[("f", ("a.txt", b"x"))]),
+            c.post("/managed", data={"a": "1"}),
+        ]
+        return [(r.status_code, r.json()) for r in cases]
+
+    both(run)
+
+
+
+
+def json_mode_handler(lib):
+    async def ws(websocket: lib.WebSocket):
+        await websocket.accept()
+        data = await websocket.receive_json(mode="binary")
+        await websocket.send_json(data, mode="binary")
+        data = await websocket.receive_json()
+        await websocket.send_json(data)
+        try:
+            await websocket.send_json(data, mode="bad")
+        except RuntimeError as error:
+            await websocket.send_text(str(error))
+        await websocket.close()
+
+    return ws
+
+
+def test_websocket_json_modes_match_fastapi():
+    import base64
+    import os
+    import socket
+    import struct
+
+    from test_websocket_smoke import _free_port, _recv_frame, _send_text, _serve
+
+    expected_app = fastapi.FastAPI()
+    expected_app.websocket("/ws")(json_mode_handler(fastapi))
+    with TestClient(expected_app).websocket_connect("/ws") as websocket:
+        websocket.send_bytes(b'{"a":1}')
+        binary = websocket.receive_bytes()
+        websocket.send_text('{"b":2}')
+        expected = [binary, websocket.receive_text(), websocket.receive_text()]
+
+    app = fastrapi.FastrAPI()
+    app.websocket("/ws")(json_mode_handler(fastrapi))
+    port = _free_port()
+    _serve(app, port)
+    key = base64.b64encode(os.urandom(16)).decode()
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(
+            (
+                f"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\n"
+                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            ).encode()
+        )
+        assert b" 101 " in sock.recv(4096)
+        payload, mask = b'{"a":1}', os.urandom(4)
+        sock.sendall(bytes([0x82, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+        frames = [_recv_frame(sock)]
+        _send_text(sock, '{"b":2}')
+        frames += [_recv_frame(sock), _recv_frame(sock)]
+    assert [opcode for opcode, _ in frames] == [0x2, 0x1, 0x1]
+    assert [frames[0][1], frames[1][1].decode(), frames[2][1].decode()] == expected
