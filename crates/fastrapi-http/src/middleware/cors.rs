@@ -1,7 +1,7 @@
 //! This module contains the `CORSMiddleware` class.
 //! It reads the CORS configuration from Python keyword arguments and answers CORS requests like Starlette.
 
-use super::add_vary;
+use super::{AsgiApp, add_vary, asgi_middleware};
 use axum::extract::{Request, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
@@ -41,6 +41,7 @@ fn default_methods() -> Vec<String> {
 #[pyclass(frozen, name = "CORSMiddleware", get_all, from_py_object, eq)]
 #[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct CORSMiddleware {
+    pub app: AsgiApp,
     pub allow_origins: Vec<String>,
     #[default(_code = "default_methods()")]
     pub allow_methods: Vec<String>,
@@ -58,7 +59,7 @@ impl CORSMiddleware {
     #[new]
     #[pyo3(
         signature = (
-            _app=None,
+            app=None,
             allow_origins=Vec::new(),
             allow_methods=default_methods(),
             allow_headers=Vec::new(),
@@ -71,8 +72,8 @@ impl CORSMiddleware {
         text_signature = "(app=None, allow_origins=(), allow_methods=('GET',), allow_headers=(), allow_credentials=False, allow_origin_regex=None, allow_private_network=False, expose_headers=(), max_age=600)"
     )]
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    const fn new(
-        _app: Option<&Bound<'_, PyAny>>,
+    fn new(
+        app: Option<&Bound<'_, PyAny>>,
         allow_origins: Vec<String>,
         allow_methods: Vec<String>,
         allow_headers: Vec<String>,
@@ -83,6 +84,7 @@ impl CORSMiddleware {
         max_age: u64,
     ) -> Self {
         Self {
+            app: AsgiApp::new(app),
             allow_origins,
             allow_methods,
             allow_headers,
@@ -94,6 +96,22 @@ impl CORSMiddleware {
         }
     }
 }
+
+asgi_middleware!(
+    CORSMiddleware,
+    "starlette.middleware.cors",
+    "CORSMiddleware",
+    [
+        "allow_origins",
+        "allow_methods",
+        "allow_headers",
+        "allow_credentials",
+        "allow_origin_regex",
+        "allow_private_network",
+        "expose_headers",
+        "max_age"
+    ]
+);
 
 pub fn parse_cors_params(kwargs: &Bound<'_, PyDict>) -> PyResult<CORSMiddleware> {
     kwargs

@@ -419,3 +419,33 @@ def test_websocket_accept_options_match_fastapi():
     headers = dict(line.split(": ", 1) for line in head[1:])
     assert head[0].startswith("http/1.1 101")
     assert (headers.get("sec-websocket-protocol"), headers.get("x-extra", "").encode()) == expected
+
+
+def test_middleware_classes_as_asgi_apps_match_fastapi():
+    import asyncio
+
+    import httpx
+
+    async def inner(scope, receive, send):
+        body = b"x" * 600
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/plain")]})
+        await send({"type": "http.response.body", "body": body})
+
+    def run(lib):
+        m = lambda name: submodule(lib, f"middleware.{name}")
+        apps = [
+            m("cors").CORSMiddleware(inner, allow_origins=["https://a.com"]),
+            m("gzip").GZipMiddleware(inner, minimum_size=10),
+            m("trustedhost").TrustedHostMiddleware(inner, allowed_hosts=["t"]),
+            m("httpsredirect").HTTPSRedirectMiddleware(inner),
+        ]
+
+        async def call(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                r = await c.get("/p", headers={"origin": "https://a.com", "accept-encoding": "gzip"})
+                return r.status_code, r.headers.get("access-control-allow-origin"), r.headers.get("content-encoding"), r.headers.get("location")
+
+        return [asyncio.run(call(app)) for app in apps], [app.app is inner for app in apps]
+
+    both(run)

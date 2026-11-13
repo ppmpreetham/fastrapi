@@ -1,7 +1,7 @@
 //! This module contains the `GZipMiddleware` class.
 //! It reads the gzip compression configuration from Python keyword arguments and compresses responses like Starlette.
 
-use super::add_vary;
+use super::{AsgiApp, add_vary, asgi_middleware};
 use crate::exceptions::plain_server_error;
 use axum::BoxError;
 use axum::body::{Body, Bytes, HttpBody as _, to_bytes};
@@ -43,6 +43,7 @@ fn default_excluded() -> Vec<String> {
 #[pyclass(frozen, name = "GZipMiddleware", get_all, from_py_object, eq)]
 #[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct GZipMiddleware {
+    pub app: AsgiApp,
     #[default(500)]
     pub minimum_size: usize,
     #[default(9)]
@@ -57,17 +58,18 @@ pub struct GZipMiddleware {
 impl GZipMiddleware {
     #[new]
     #[pyo3(
-        signature = (_app=None, minimum_size=500, compresslevel=9, thread_minimum_size=131_072, *, exclude_content_types=default_excluded()),
+        signature = (app=None, minimum_size=500, compresslevel=9, thread_minimum_size=131_072, *, exclude_content_types=default_excluded()),
         text_signature = "(app=None, minimum_size=500, compresslevel=9, thread_minimum_size=131072, *, exclude_content_types=...)"
     )]
     fn new(
-        _app: Option<&Bound<'_, PyAny>>,
+        app: Option<&Bound<'_, PyAny>>,
         minimum_size: usize,
         compresslevel: u32,
         thread_minimum_size: usize,
         exclude_content_types: Vec<String>,
     ) -> Self {
         Self {
+            app: AsgiApp::new(app),
             minimum_size,
             compresslevel,
             thread_minimum_size,
@@ -78,6 +80,18 @@ impl GZipMiddleware {
         }
     }
 }
+
+asgi_middleware!(
+    GZipMiddleware,
+    "starlette.middleware.gzip",
+    "GZipMiddleware",
+    [
+        "minimum_size",
+        "compresslevel",
+        "thread_minimum_size",
+        "exclude_content_types"
+    ]
+);
 
 impl GZipMiddleware {
     fn excludes(&self, headers: &HeaderMap) -> bool {
