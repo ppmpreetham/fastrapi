@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod config;
+pub(crate) mod deferred;
 pub mod exception_dispatch;
 pub mod executor;
 pub mod handler_errors;

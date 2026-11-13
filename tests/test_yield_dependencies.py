@@ -43,6 +43,12 @@ def _get(app: FastrAPI, path: str) -> httpx.Response:
     return httpx.get(f"http://127.0.0.1:{port}{path}", timeout=5.0)
 
 
+def _wait_for(events, item):
+    deadline = time.time() + 2
+    while item not in events and time.time() < deadline:
+        time.sleep(0.01)
+
+
 def test_sync_yield_dependency():
     app = FastrAPI()
     events = []
@@ -60,6 +66,7 @@ def test_sync_yield_dependency():
     response = _get(app, "/sync-yield")
     assert response.status_code == 200
     assert response.json() == {"msg": "sync_db_session"}
+    _wait_for(events, "sync db closed")
     assert events == [
         "sync db open",
         "sync route executing with sync_db_session",
@@ -86,6 +93,7 @@ def test_async_yield_dependency():
     response = _get(app, "/async-yield")
     assert response.status_code == 200
     assert response.json() == {"msg": "async_db_session"}
+    _wait_for(events, "async db closed")
     assert events == [
         "async db open",
         "async route executing with async_db_session",

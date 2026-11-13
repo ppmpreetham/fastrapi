@@ -41,6 +41,35 @@ struct ParserKeys<'py> {
     annotation: &'py Bound<'py, PyString>,
     scopes: &'py Bound<'py, PyString>,
     use_cache: &'py Bound<'py, PyString>,
+    scope: &'py Bound<'py, PyString>,
+}
+
+#[derive(Clone, Copy)]
+struct MarkerOptions {
+    use_cache: bool,
+    function_scope: bool,
+}
+
+impl MarkerOptions {
+    const ROOT: Self = Self {
+        use_cache: true,
+        function_scope: false,
+    };
+
+    fn of(marker: &Bound<'_, PyAny>, keys: &ParserKeys<'_>) -> Self {
+        Self {
+            use_cache: marker
+                .getattr(keys.use_cache)
+                .ok()
+                .and_then(|value| value.is_truthy().ok())
+                .unwrap_or(true),
+            function_scope: marker
+                .getattr(keys.scope)
+                .ok()
+                .and_then(|value| value.extract::<String>().ok())
+                .is_some_and(|scope| scope == "function"),
+        }
+    }
 }
 
 impl<'py> ParserKeys<'py> {
@@ -53,6 +82,7 @@ impl<'py> ParserKeys<'py> {
             annotation: intern!(py, "annotation"),
             scopes: intern!(py, "scopes"),
             use_cache: intern!(py, "use_cache"),
+            scope: intern!(py, "scope"),
         }
     }
 }
@@ -82,6 +112,7 @@ pub struct DependencyNode {
     pub bindings: SmallVec<[Py<PyString>; 1]>,
     pub scopes: Arc<[String]>,
     pub use_cache: bool,
+    pub function_scope: bool,
     pub is_top_level: bool,
     pub injection_plan: Vec<(Py<PyString>, InjectionType)>,
     pub needs_request_object: bool,
@@ -116,6 +147,12 @@ impl DependencyNode {
 pub struct TeardownTask {
     pub generator: Py<PyAny>,
     pub is_async: bool,
+    pub function_scope: bool,
+}
+
+#[must_use]
+pub fn split_function_scope(teardowns: TeardownTasks) -> (TeardownTasks, TeardownTasks) {
+    teardowns.into_iter().partition(|task| task.function_scope)
 }
 
 pub type TeardownTasks = SmallVec<[TeardownTask; 4]>;
@@ -292,6 +329,22 @@ enum NodeStep {
     },
 }
 
+#[derive(Default)]
+pub struct ExitStacks {
+    pub request: Option<Py<PyAny>>,
+    pub function: Option<Py<PyAny>>,
+}
+
+impl ExitStacks {
+    const fn slot(&mut self, node: &DependencyNode) -> &mut Option<Py<PyAny>> {
+        if node.function_scope {
+            &mut self.function
+        } else {
+            &mut self.request
+        }
+    }
+}
+
 fn exit_stack<'a, 'py>(
     py: Python<'py>,
     slot: &'a mut Option<Py<PyAny>>,
@@ -309,7 +362,7 @@ pub async fn execute_request_dependencies(
     input: &RequestInput<'_>,
     request: Option<&Py<PyAny>>,
     response: Option<&Py<PyAny>>,
-    stack: &mut Option<Py<PyAny>>,
+    stacks: &mut ExitStacks,
     sync_to_threadpool: bool,
 ) -> PyResult<ResolvedDependencies> {
     let mut registry: ResultRegistry = smallvec::smallvec![None; plan.len()];
@@ -342,7 +395,7 @@ pub async fn execute_request_dependencies(
                         Some(exit.unbind()),
                     );
                 }
-                let stack = exit_stack(py, stack)?;
+                let stack = exit_stack(py, stacks.slot(node))?;
                 if node.is_async_generator {
                     let entered =
                         stack.call_method1(intern!(py, "enter_async_context"), (manager,))?;
@@ -375,7 +428,8 @@ pub async fn execute_request_dependencies(
             let value = future.await?;
             Python::attach(|py| -> PyResult<()> {
                 if let Some(exit) = exit {
-                    exit_stack(py, stack)?.call_method1(intern!(py, "push_async_exit"), (exit,))?;
+                    exit_stack(py, stacks.slot(node))?
+                        .call_method1(intern!(py, "push_async_exit"), (exit,))?;
                 }
                 register_result(py, node, value, &mut registry, &mut results);
                 Ok(())
@@ -524,7 +578,7 @@ pub fn parse_dependencies(
         true,
         None,
         Vec::new(),
-        true,
+        MarkerOptions::ROOT,
         &mut flat_plan,
         &mut visited,
     )?;
@@ -580,7 +634,7 @@ pub fn parse_external_dependencies(
             true,
             None,
             Vec::new(),
-            true,
+            MarkerOptions::ROOT,
             &mut flat_plan,
             &mut visited,
         )?;
@@ -664,10 +718,11 @@ fn extract_and_flatten(
     is_top_level: bool,
     parent_param_name: Option<&str>,
     scopes: Vec<String>,
-    use_cache: bool,
+    options: MarkerOptions,
     flat_plan: &mut Vec<DependencyNode>,
     visited: &mut HashMap<CacheKey, usize>,
 ) -> PyResult<usize> {
+    let use_cache = options.use_cache;
     let func_id = func.as_ptr() as u64;
     let cache_key = (func_id, cache_scopes(&scopes));
 
@@ -740,12 +795,6 @@ fn extract_and_flatten(
                 child_scopes.extend(own);
             }
 
-            let child_use_cache = marker
-                .getattr(keys.use_cache)
-                .ok()
-                .and_then(|value| value.is_truthy().ok())
-                .unwrap_or(true);
-
             let target_index = extract_and_flatten(
                 py,
                 inspect,
@@ -755,7 +804,7 @@ fn extract_and_flatten(
                 is_top_level && parent_param_name.is_none(),
                 Some(param_name_str),
                 child_scopes,
-                child_use_cache,
+                MarkerOptions::of(&marker, keys),
                 flat_plan,
                 visited,
             )?;
@@ -789,6 +838,7 @@ fn extract_and_flatten(
             .collect(),
         scopes: scopes.into(),
         use_cache,
+        function_scope: options.function_scope,
         is_top_level,
         injection_plan,
         needs_request_object,
@@ -1034,6 +1084,7 @@ async fn execute_dependencies_inner(
                 teardown_tasks.push(TeardownTask {
                     generator: generator.clone_ref(py),
                     is_async: true,
+                    function_scope: dep.function_scope,
                 });
                 register_result(py, dep, value, &mut results_registry, &mut final_results);
                 Ok(())
@@ -1109,6 +1160,7 @@ fn execute_sync_node(
         let teardown = TeardownTask {
             generator: generator.unbind(),
             is_async: false,
+            function_scope: dep.function_scope,
         };
         Ok((value, Some(teardown)))
     } else {

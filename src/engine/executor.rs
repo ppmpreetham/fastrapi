@@ -14,7 +14,7 @@ use fastrapi_core::params::PathParamRange;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_routing::dependencies::{
-    self, TeardownTasks, execute_teardowns_async, execute_teardowns_sync,
+    self, TeardownTasks, execute_teardowns_async, execute_teardowns_sync, split_function_scope,
 };
 use fastrapi_routing::request_data::Rejection;
 use fastrapi_routing::route::{ExecutionMode, RouteHandler};
@@ -25,7 +25,7 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PySet, PyString};
 use smallvec::SmallVec;
 use std::sync::{Arc, OnceLock};
 
-use fastrapi_http::background::{BackgroundJob, OwnBackground, run_after_body};
+use super::deferred::{Cleanup, finish_request};
 use fastrapi_http::exceptions::plain_server_error;
 use fastrapi_http::request::create_py_request;
 use fastrapi_http::response_convert::convert_response_by_type;
@@ -100,21 +100,6 @@ pub(crate) fn build_request_input_from_parts<'a>(
             &parts.extensions,
             Some(server),
         )
-    }
-}
-
-#[inline(always)]
-pub(crate) fn with_background_tasks(
-    event_loop: EventLoop,
-    request_input: &RequestInput<'_>,
-    response: Response,
-) -> Response {
-    match request_input.background.get() {
-        Some(tasks) if response.extensions().get::<OwnBackground>().is_none() => {
-            let tasks = Python::attach(|py| tasks.clone_ref(py));
-            run_after_body(response, BackgroundJob::Tasks(tasks), event_loop)
-        }
-        _ => response,
     }
 }
 
@@ -441,7 +426,7 @@ pub(crate) fn payload_raw_bytes(payload: Option<&BodyPayload>) -> Option<bytes::
 fn run_sync_gil_section(
     py: Python<'_>,
     state: &GilSection<'_, '_, '_>,
-) -> Result<Response, Response> {
+) -> Result<(Response, TeardownTasks), Response> {
     let GilSection {
         handler,
         request_input,
@@ -467,8 +452,9 @@ fn run_sync_gil_section(
         call_handler_and_convert(py, handler, Some(&kwargs), Some(request_input), server);
     match response {
         Ok(response) => {
-            execute_teardowns_sync(py, teardowns, None);
-            Ok(response)
+            let (function, request) = split_function_scope(teardowns);
+            execute_teardowns_sync(py, function, None);
+            Ok((response, request))
         }
         Err(err) => {
             execute_teardowns_sync(py, teardowns, Some(&err));
@@ -590,7 +576,10 @@ fn run_sync_route<const NEEDS_REQ: bool>(
         server: event_loop,
     };
     match run_sync_gil_section(py, &section) {
-        Ok(response) => with_background_tasks(event_loop, &request_input, response),
+        Ok((response, teardowns)) => {
+            let cleanup = (!teardowns.is_empty()).then(|| Cleanup::Sync(teardowns));
+            finish_request(event_loop, &request_input, response, cleanup)
+        }
         Err(response) => response,
     }
 }
@@ -627,7 +616,7 @@ async fn core_async_no_deps(
     };
 
     match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
-        Ok(response) => with_background_tasks(event_loop, &request_input, response),
+        Ok(response) => finish_request(event_loop, &request_input, response, None),
         Err(err_resp) => err_resp,
     }
 }
@@ -676,7 +665,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
     };
 
     match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
-        Ok(response) => with_background_tasks(event_loop, &request_input, response),
+        Ok(response) => finish_request(event_loop, &request_input, response, None),
         Err(err_resp) => err_resp,
     }
 }
@@ -801,19 +790,18 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
         Err(resp) => return resp,
     };
 
-    let response = match await_python_future(
-        event_loop,
-        handler,
-        Some(&request_input),
-        Ok(future_res),
-    )
-    .await
-    {
-        Ok(response) => with_background_tasks(event_loop, &request_input, response),
-        Err(err_resp) => err_resp,
-    };
-    execute_teardowns_async(event_loop, teardowns).await;
-    response
+    match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
+        Ok(response) => {
+            let (function, request) = split_function_scope(teardowns);
+            execute_teardowns_async(event_loop, function).await;
+            let cleanup = (!request.is_empty()).then(|| Cleanup::Async(request, event_loop));
+            finish_request(event_loop, &request_input, response, cleanup)
+        }
+        Err(err_resp) => {
+            execute_teardowns_async(event_loop, teardowns).await;
+            err_resp
+        }
+    }
 }
 
 #[inline]

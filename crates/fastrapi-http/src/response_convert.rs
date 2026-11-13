@@ -8,7 +8,7 @@ use super::responses::{
 };
 use crate::response_api::content_type;
 use crate::background::{
-    BackgroundJob, OwnBackground, run_after_body, spawn_response_background_value,
+    BackgroundJob, BackgroundRun, OwnBackground, run_after_body, spawn_response_background_value,
 };
 use crate::response_type::{ResponseFormatter, ResponseType};
 use crate::responses::{
@@ -282,8 +282,7 @@ pub fn convert_response_by_type(
         {
             response = run_after_body(
                 response,
-                BackgroundJob::Value(background.unbind()),
-                event_loop,
+                BackgroundRun(BackgroundJob::Value(background.unbind()), event_loop),
             );
         }
         response.extensions_mut().insert(OwnBackground);

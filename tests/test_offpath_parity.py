@@ -1008,3 +1008,56 @@ def test_background_tasks_run_after_response_like_fastapi():
         return results
 
     both(run)
+
+
+def test_yield_cleanup_timing_matches_fastapi():
+    def run(lib):
+        events = []
+
+        def session():
+            state = {"open": True}
+            yield state
+            state["open"] = False
+            events.append("request cleanup")
+
+        def function_session():
+            state = {"open": True}
+            yield state
+            state["open"] = False
+            events.append("function cleanup")
+
+        async def async_session():
+            state = {"open": True}
+            yield state
+            state["open"] = False
+            events.append("async cleanup")
+
+        app = new_app(lib)
+
+        @app.get("/stream")
+        def stream(db=lib.Depends(session), fn=lib.Depends(function_session, scope="function")):
+            def chunks():
+                yield f"{db['open']} {fn['open']}"
+
+            return lib.responses.StreamingResponse(chunks())
+
+        @app.get("/async")
+        async def async_stream(db=lib.Depends(async_session)):
+            async def chunks():
+                yield str(db["open"])
+
+            return lib.responses.StreamingResponse(chunks())
+
+        @app.get("/background")
+        def background(tasks: lib.BackgroundTasks, db=lib.Depends(session)):
+            tasks.add_task(events.append, "background")
+            return "ok"
+
+        c = client(app)
+        results = []
+        for path in ("/stream", "/async", "/background"):
+            events.clear()
+            results.append((c.get(path).text, list(events)))
+        return results
+
+    both(run)

@@ -273,38 +273,60 @@ impl BackgroundJob {
     }
 }
 
-type JobSlot = Arc<Mutex<Option<(BackgroundJob, EventLoop)>>>;
+pub trait AfterResponse: Send + 'static {
+    fn run(self) -> impl Future<Output = PyResult<()>> + Send;
+}
 
-#[derive(Clone)]
-pub struct DeferredBackground(JobSlot);
+pub struct BackgroundRun(pub BackgroundJob, pub EventLoop);
 
-impl DeferredBackground {
+impl AfterResponse for BackgroundRun {
+    async fn run(self) -> PyResult<()> {
+        self.0.run(self.1).await;
+        Ok(())
+    }
+}
+
+type JobSlot<J> = Arc<Mutex<Option<J>>>;
+
+pub struct DeferredWork<J>(JobSlot<J>);
+
+impl<J> Clone for DeferredWork<J> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<J> DeferredWork<J> {
     #[must_use]
-    pub fn take(&self) -> Option<(BackgroundJob, EventLoop)> {
+    pub fn take(&self) -> Option<J> {
         self.0.lock().take()
     }
 }
 
-struct RunAfterBody {
+struct RunAfterBody<J: AfterResponse> {
     body: Body,
-    job: JobSlot,
+    job: JobSlot<J>,
 }
 
-impl RunAfterBody {
+impl<J: AfterResponse> RunAfterBody<J> {
     fn finish(&self) {
-        if let Some((job, event_loop)) = self.job.lock().take() {
-            spawn(job.run(event_loop));
+        if let Some(job) = self.job.lock().take() {
+            spawn(async move {
+                if let Err(err) = job.run().await {
+                    Python::attach(|py| err.print(py));
+                }
+            });
         }
     }
 }
 
-impl Drop for RunAfterBody {
+impl<J: AfterResponse> Drop for RunAfterBody<J> {
     fn drop(&mut self) {
         self.finish();
     }
 }
 
-impl HttpBody for RunAfterBody {
+impl<J: AfterResponse> HttpBody for RunAfterBody<J> {
     type Data = Bytes;
     type Error = axum::Error;
 
@@ -330,11 +352,9 @@ impl HttpBody for RunAfterBody {
 }
 
 #[must_use]
-pub fn run_after_body(response: Response, job: BackgroundJob, event_loop: EventLoop) -> Response {
-    let slot: JobSlot = Arc::new(Mutex::new(Some((job, event_loop))));
+pub fn run_after_body<J: AfterResponse>(response: Response, job: J) -> Response {
+    let slot: JobSlot<J> = Arc::new(Mutex::new(Some(job)));
     let (mut parts, body) = response.into_parts();
-    parts
-        .extensions
-        .insert(DeferredBackground(Arc::clone(&slot)));
+    parts.extensions.insert(DeferredWork(Arc::clone(&slot)));
     Response::from_parts(parts, Body::new(RunAfterBody { body, job: slot }))
 }

@@ -1,20 +1,17 @@
 //! The executor for route handlers that need a managed Python context.
 //! It injects the dependencies, applies the response metadata and closes the dependency exit stacks.
 
-use super::executor::{
-    build_request_input_from_parts, prepare_kwargs_and_payload, request_object,
-    with_background_tasks,
-};
-use super::handler_errors::{log_python_error, python_error_to_response_in};
+use super::deferred::{Cleanup, finish_request, with_cleanup};
+use super::executor::{build_request_input_from_parts, prepare_kwargs_and_payload, request_object};
+use super::handler_errors::python_error_to_response_in;
 use axum::http::request::Parts;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 use fastrapi_core::body::BodyPayload;
 use fastrapi_core::params::PathParamRange;
-use fastrapi_http::exceptions::UnhandledError;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_pyutil::call::CallArgs;
-use fastrapi_routing::dependencies::{self, RequestPlan};
+use fastrapi_routing::dependencies::{self, ExitStacks, RequestPlan};
 use fastrapi_routing::route::RouteHandler;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::{blocking, py_bridge};
@@ -22,7 +19,6 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use smallvec::SmallVec;
-use std::sync::Arc;
 
 use fastrapi_http::response_convert::{convert_response_by_type, is_plain_value};
 use fastrapi_http::responses::PyResponse;
@@ -90,7 +86,7 @@ pub(crate) async fn run_managed_handler(
         Err(response) => return response,
     };
 
-    let mut stack: Option<Py<PyAny>> = None;
+    let mut stacks = ExitStacks::default();
     let outcome = async {
         let values = dependencies::execute_request_dependencies(
             event_loop,
@@ -98,7 +94,7 @@ pub(crate) async fn run_managed_handler(
             &input,
             request.as_ref(),
             metadata.as_ref(),
-            &mut stack,
+            &mut stacks,
             sync_to_threadpool,
         )
         .await?;
@@ -132,6 +128,22 @@ pub(crate) async fn run_managed_handler(
         }
     }
     .await;
+    let outcome = match stacks.function.take() {
+        Some(function) => {
+            let exit = Python::attach(|py| {
+                schedule_stack_exit(py, event_loop, &function, outcome.as_ref().err())
+            });
+            match exit {
+                Ok(exit) => match exit.await {
+                    Ok(_) => outcome,
+                    Err(err) => Err(err),
+                },
+                Err(err) => Err(err),
+            }
+        }
+        None => outcome,
+    };
+    let stack = stacks.request;
 
     let converted = Python::attach(|py| {
         let converted = outcome.and_then(|value| {
@@ -145,8 +157,16 @@ pub(crate) async fn run_managed_handler(
             Ok((response, explicit))
         });
         match stack {
+            Some(stack) if converted.is_ok() => Ok(managed_response(
+                py,
+                event_loop,
+                &input,
+                converted,
+                metadata.as_ref(),
+                Some(Cleanup::Stack(stack, event_loop)),
+            )),
             Some(stack) => {
-                let exit = schedule_stack_exit(py, event_loop, &stack, &converted);
+                let exit = schedule_stack_exit(py, event_loop, &stack, converted.as_ref().err());
                 Err((converted, exit))
             }
             None => Ok(finish_managed_response(
@@ -196,7 +216,7 @@ fn schedule_stack_exit(
     py: Python<'_>,
     event_loop: EventLoop,
     stack: &Py<PyAny>,
-    outcome: &ManagedOutcome,
+    error: Option<&PyErr>,
 ) -> PyResult<py_bridge::PyTaskFuture> {
     let exc_info = |err: &PyErr| {
         (
@@ -206,9 +226,9 @@ fn schedule_stack_exit(
                 .map_or_else(|| py.None(), |tb| tb.into_any().unbind()),
         )
     };
-    let args = match outcome {
-        Err(err) => exc_info(err),
-        Ok(_) => (py.None(), py.None(), py.None()),
+    let args = match error {
+        Some(err) => exc_info(err),
+        None => (py.None(), py.None(), py.None()),
     };
     let coroutine = stack
         .bind(py)
@@ -225,14 +245,6 @@ fn finish_managed_response(
     metadata: Option<&Py<PyAny>>,
 ) -> Response {
     match exit {
-        Some(Err(err)) if outcome.is_ok() => {
-            log_python_error(py, &err);
-            let mut response = managed_response(py, event_loop, input, outcome, metadata);
-            response
-                .extensions_mut()
-                .insert(UnhandledError(Arc::new(err)));
-            return response;
-        }
         Some(Err(err)) => return python_error_to_response_in(py, &err, Some(input)),
         Some(Ok(suppressed))
             if outcome.is_err() && suppressed.bind(py).is_truthy().unwrap_or(false) =>
@@ -247,7 +259,7 @@ fn finish_managed_response(
         }
         _ => {}
     }
-    managed_response(py, event_loop, input, outcome, metadata)
+    managed_response(py, event_loop, input, outcome, metadata, None)
 }
 
 fn managed_response(
@@ -256,19 +268,21 @@ fn managed_response(
     input: &RequestInput<'_>,
     outcome: ManagedOutcome,
     metadata: Option<&Py<PyAny>>,
+    cleanup: Option<Cleanup>,
 ) -> Response {
-    match outcome {
-        Err(err) => python_error_to_response_in(py, &err, Some(input)),
-        Ok((mut response, explicit)) => {
-            if !explicit
-                && let Some(metadata) = metadata
-                && let Err(err) = apply_response_metadata(py, metadata, &mut response)
-            {
-                return python_error_to_response_in(py, &err, Some(input));
-            }
-            with_background_tasks(event_loop, input, response)
+    let (mut response, explicit) = match outcome {
+        Err(err) => {
+            return with_cleanup(python_error_to_response_in(py, &err, Some(input)), cleanup);
         }
+        Ok(converted) => converted,
+    };
+    if !explicit
+        && let Some(metadata) = metadata
+        && let Err(err) = apply_response_metadata(py, metadata, &mut response)
+    {
+        return with_cleanup(python_error_to_response_in(py, &err, Some(input)), cleanup);
     }
+    finish_request(event_loop, input, response, cleanup)
 }
 
 fn apply_response_metadata(
