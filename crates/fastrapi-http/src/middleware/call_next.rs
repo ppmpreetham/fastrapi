@@ -279,7 +279,7 @@ fn invoke(
     let scope_headers = Bound::new(py, PyScopeHeaders::new(Arc::clone(&headers))).map_err(fail)?;
     _ = scope.set_item(intern!(py, "headers"), scope_headers);
 
-    let req_obj = PyRequest::create_bound(py, scope.into_any().unbind(), Some(headers), None)
+    let req_obj = PyRequest::create_bound(py, scope.into_any().unbind(), Some(headers), None, None)
         .map_err(fail)?
         .into_any()
         .unbind();

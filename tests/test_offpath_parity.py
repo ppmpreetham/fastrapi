@@ -956,3 +956,20 @@ def test_custom_route_class_matches_fastapi():
         return [(r.status_code, r.json(), r.headers.get("x-route")) for r in responses]
 
     both(run)
+
+
+def test_scope_server_is_the_listening_socket():
+    import httpx
+
+    from test_websocket_smoke import _free_port, _serve
+
+    app = fastrapi.FastrAPI()
+
+    @app.get("/server")
+    def server(request: fastrapi.Request):
+        return {"server": list(request.scope["server"]), "client": request.scope["client"][0]}
+
+    port = _free_port()
+    _serve(app, port)
+    response = httpx.get(f"http://127.0.0.1:{port}/server", headers={"host": "example.com"})
+    assert response.json() == {"server": ["127.0.0.1", port], "client": "127.0.0.1"}

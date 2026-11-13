@@ -547,6 +547,7 @@ dependencies = [
  "smallvec",
  "smol_str",
  "strum 0.28.0",
+ "tokio",
  "tracing",
 ]
 
@@ -559,6 +560,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cookie",
+ "fastrapi-core",
  "fastrapi-pyutil",
  "fastrapi-runtime",
  "flate2",

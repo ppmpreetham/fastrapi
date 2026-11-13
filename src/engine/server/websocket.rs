@@ -5,6 +5,7 @@ use crate::engine::executor::{build_request_input_from_parts, schedule_python_co
 use axum::extract::{ConnectInfo, State};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
+use fastrapi_core::connection::PeerAddrs;
 use fastrapi_core::params::PathParamRange;
 use fastrapi_routing::dependencies::{self, execute_teardowns_async};
 use fastrapi_routing::request_data::{Errors, request_param_value};
@@ -19,7 +20,6 @@ use hyper_util::rt::TokioIo;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict, PyList, PyString};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
@@ -534,11 +534,17 @@ fn build_scope(
     }
     _ = scope.set_item(intern!(py, "path_params"), path_params);
     _ = scope.set_item(intern!(py, "app"), app);
-    if let Some(connect) = parts.extensions.get::<ConnectInfo<SocketAddr>>() {
+    if let Some(ConnectInfo(peer)) = parts.extensions.get::<ConnectInfo<PeerAddrs>>() {
         _ = scope.set_item(
             intern!(py, "client"),
-            (connect.0.ip().to_string(), connect.0.port()),
+            (peer.remote.ip().to_string(), peer.remote.port()),
         );
+        if let Some(local) = peer.local {
+            _ = scope.set_item(
+                intern!(py, "server"),
+                (local.ip().to_string(), local.port()),
+            );
+        }
     } else {
         _ = scope.set_item(intern!(py, "client"), py.None());
     }

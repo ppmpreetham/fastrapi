@@ -21,10 +21,10 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{MethodFilter, MethodRouter, any, get, on};
 use bytes::Bytes;
+use fastrapi_core::connection::PeerAddrs;
 use percent_encoding::{CONTROLS, utf8_percent_encode};
 use pyo3::prelude::*;
 use simd_json::OwnedValue as JsonValue;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -390,8 +390,8 @@ fn request_scheme(request: &Request) -> &str {
     }
     let trusted_proxy = request
         .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .is_some_and(|ConnectInfo(addr)| addr.ip().is_loopback());
+        .get::<ConnectInfo<PeerAddrs>>()
+        .is_some_and(|ConnectInfo(peer)| peer.remote.ip().is_loopback());
     request
         .headers()
         .get("x-forwarded-proto")

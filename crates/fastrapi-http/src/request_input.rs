@@ -7,6 +7,7 @@ use axum::extract::ConnectInfo;
 use axum::http::header::COOKIE;
 use axum::http::{Extensions, HeaderMap, HeaderName};
 use cookie::Cookie;
+use fastrapi_core::connection::PeerAddrs;
 use fastrapi_runtime::py_bridge::EventLoop;
 use pyo3::prelude::*;
 use smallvec::SmallVec;
@@ -71,8 +72,15 @@ impl<'a> RequestInput<'a> {
             return Some((Cow::Borrowed(host), *port));
         }
         self.extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(addr)| (Cow::Owned(addr.ip().to_string()), addr.port()))
+            .get::<ConnectInfo<PeerAddrs>>()
+            .map(|ConnectInfo(peer)| (Cow::Owned(peer.remote.ip().to_string()), peer.remote.port()))
+    }
+
+    #[must_use]
+    pub fn server_addr(&self) -> Option<SocketAddr> {
+        self.extensions
+            .get::<ConnectInfo<PeerAddrs>>()
+            .and_then(|ConnectInfo(peer)| peer.local)
     }
 
     pub fn background_tasks(&self, py: Python<'_>) -> PyResult<Py<PyBackgroundTasks>> {

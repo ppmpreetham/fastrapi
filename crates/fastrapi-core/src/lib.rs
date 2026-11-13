@@ -4,6 +4,7 @@
 //! It does not depend on Python, so other FastrAPI crates can use it.
 
 pub mod body;
+pub mod connection;
 pub mod method;
 pub mod params;
 pub mod path;

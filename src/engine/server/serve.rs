@@ -10,7 +10,7 @@ use fastrapi_core::reload::{ReloadConfig, resolve_reload_dirs, run_reload_superv
 
 use crate::engine::config::FastrAPI;
 use axum::Router;
-use axum::serve::ListenerExt;
+use fastrapi_core::connection::PeerAddrs;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -23,7 +23,6 @@ use fastrapi_runtime::server_state::set_server_loop;
 use fastrapi_runtime::tokio_runtime::PYTHON_RUNTIME;
 use std::env::var;
 use std::io;
-use std::net::SocketAddr;
 use std::thread::spawn;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -277,11 +276,7 @@ pub fn serve(
                 info!("📚 Elements UI at http://{}{}", addr, elements_docs);
             }
 
-            let listener = listener.tap_io(|stream| {
-                _ = stream.set_nodelay(true);
-            });
-
-            let service = router.into_make_service_with_connect_info::<SocketAddr>();
+            let service = router.into_make_service_with_connect_info::<PeerAddrs>();
             if let Err(err) = axum::serve(listener, service)
                 .with_graceful_shutdown(wait_for_shutdown_signal())
                 .await

@@ -20,6 +20,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyString, PyTuple};
 use pyo3::{Py, PyClassInitializer, intern};
 use std::borrow::Cow;
+use std::net::SocketAddr;
 use std::str::from_utf8;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::OnceCell;
@@ -90,6 +91,7 @@ pub struct PyHTTPConnection {
     query_params_cache: OnceLock<Py<PyAny>>,
     cookies_cache: OnceLock<Py<PyAny>>,
     scope_complete: OnceLock<()>,
+    server: Option<SocketAddr>,
 }
 
 impl PyHTTPConnection {
@@ -102,7 +104,14 @@ impl PyHTTPConnection {
             query_params_cache: OnceLock::new(),
             cookies_cache: OnceLock::new(),
             scope_complete: OnceLock::new(),
+            server: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_server(mut self, server: Option<SocketAddr>) -> Self {
+        self.server = server;
+        self
     }
 }
 
@@ -134,7 +143,7 @@ fn host_server(scope: &Bound<'_, PyDict>) -> PyResult<Option<(String, u16)>> {
     Ok(None)
 }
 
-fn complete_scope(scope: &Bound<'_, PyAny>) -> PyResult<()> {
+fn complete_scope(scope: &Bound<'_, PyAny>, server: Option<SocketAddr>) -> PyResult<()> {
     let Ok(scope) = scope.cast::<PyDict>() else {
         return Ok(());
     };
@@ -177,7 +186,13 @@ fn complete_scope(scope: &Bound<'_, PyAny>) -> PyResult<()> {
         scope.set_item(intern!(py, "http_version"), intern!(py, "1.1"))?;
     }
     if !scope.contains(intern!(py, "server"))? {
-        scope.set_item(intern!(py, "server"), host_server(scope)?)?;
+        match server {
+            Some(server) => scope.set_item(
+                intern!(py, "server"),
+                (server.ip().to_string(), server.port()),
+            )?,
+            None => scope.set_item(intern!(py, "server"), host_server(scope)?)?,
+        }
     }
     Ok(())
 }
@@ -208,7 +223,7 @@ impl PyHTTPConnection {
     fn get_scope<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let scope = self.scope.bind(py);
         if self.scope_complete.get().is_none() {
-            complete_scope(scope)?;
+            complete_scope(scope, self.server)?;
             _ = self.scope_complete.set(());
         }
         Ok(scope.clone())
@@ -660,8 +675,13 @@ pub fn create_py_request(
         scope.set_item(intern!(py, "session"), slot.session(py)?)?;
     }
 
-    let bound_req =
-        PyRequest::create_bound(py, scope.into_any().unbind(), Some(headers), raw_body)?;
+    let bound_req = PyRequest::create_bound(
+        py,
+        scope.into_any().unbind(),
+        Some(headers),
+        raw_body,
+        input.server_addr(),
+    )?;
     Ok(bound_req.into_any().unbind())
 }
 
@@ -736,7 +756,7 @@ impl PyScopeHeaders {
 pub fn create_stub_request(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let scope = PyDict::new(py);
     scope.set_item(intern!(py, "type"), intern!(py, "http"))?;
-    let bound_req = PyRequest::create_bound(py, scope.into_any().unbind(), None, None)?;
+    let bound_req = PyRequest::create_bound(py, scope.into_any().unbind(), None, None, None)?;
     Ok(bound_req.into_any().unbind())
 }
 
@@ -763,8 +783,9 @@ impl PyRequest {
         scope: Py<PyAny>,
         headers: Option<Arc<HeaderMap>>,
         raw_body: Option<Bytes>,
+        server: Option<SocketAddr>,
     ) -> PyResult<Bound<'_, Self>> {
-        let conn = PyHTTPConnection::from_scope(scope, py.None());
+        let conn = PyHTTPConnection::from_scope(scope, py.None()).with_server(server);
         let req = Self {
             send: py.None(),
             body_cache: Arc::new(OnceCell::new()),

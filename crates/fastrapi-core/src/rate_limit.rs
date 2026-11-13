@@ -2,10 +2,11 @@
 //! Each window keeps the second and the request count in one atomic value.
 //! The module removes old windows one time each second.
 
+use crate::connection::PeerAddrs;
 use Ordering::Relaxed;
 use axum::extract::{ConnectInfo, Request};
 use papaya::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,8 +37,8 @@ pub fn is_rate_limited(req: &Request, handler: usize, limit: NonZeroU32) -> bool
     let limit = limit.get();
     let ip = req
         .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip());
+        .get::<ConnectInfo<PeerAddrs>>()
+        .map(|ConnectInfo(peer)| peer.remote.ip());
     let key = RateLimitKey { handler, ip };
 
     let limits = RATE_LIMITS.get_or_init(HashMap::new);
