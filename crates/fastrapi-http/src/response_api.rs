@@ -3,8 +3,12 @@
 
 use cookie::time::Duration;
 use std::borrow::Cow;
+use crate::middleware::asgi::send_response;
+use crate::response_convert::convert_auto_response;
+use crate::responses::PyStreamingResponse;
 use cookie::{Cookie, SameSite};
 use fastrapi_pyutil::imports::SIMPLE_COOKIE;
+use fastrapi_runtime::py_bridge;
 use pyo3::exceptions::{PyAssertionError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
@@ -280,4 +284,27 @@ pub fn set_cookie(
         .call_method1(pyo3::intern!(py, "encode"), ("latin-1",))?;
     raw.bind(py)
         .append((PyBytes::new(py, b"set-cookie"), encoded))
+}
+
+pub fn asgi_call<'py>(
+    response: &Bound<'py, PyAny>,
+    send: Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = response.py();
+    let converted = convert_auto_response(py, response);
+    let background = response.getattr(intern!(py, "background"))?.unbind();
+    let awaits_background =
+        !background.is_none(py) && !response.is_instance_of::<PyStreamingResponse>();
+    let locals = py_bridge::get_current_locals(py)?;
+    let send = send.unbind();
+    py_bridge::future_into_py_with_locals(py, locals.clone(), async move {
+        send_response(&locals, &send, converted).await?;
+        if awaits_background {
+            let pending = Python::attach(|py| {
+                py_bridge::into_future_with_locals(&locals, background.bind(py).call0()?)
+            })?;
+            pending.await?;
+        }
+        Ok(())
+    })
 }

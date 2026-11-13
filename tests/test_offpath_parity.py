@@ -468,3 +468,32 @@ def test_background_tasks_call_matches_fastapi():
         return calls, len(tasks.tasks)
 
     both(run)
+
+
+def test_responses_as_asgi_apps_match_fastapi():
+    import asyncio
+
+    import httpx
+
+    def run(lib):
+        r = lib.responses
+        calls = []
+        tasks = lib.BackgroundTasks()
+        tasks.add_task(calls.append, "done")
+        responses = [
+            r.JSONResponse({"a": 1}, status_code=201, headers={"x-a": "1"}, background=tasks),
+            r.PlainTextResponse("hi"),
+            r.HTMLResponse("<p/>"),
+            r.RedirectResponse("/to"),
+            r.Response(b"raw", media_type="application/octet-stream"),
+        ]
+
+        async def call(response):
+            transport = httpx.ASGITransport(app=response)
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                got = await c.get("/")
+                return got.status_code, got.content, got.headers.get("content-type"), got.headers.get("x-a"), got.headers.get("location")
+
+        return [asyncio.run(call(response)) for response in responses], calls
+
+    both(run)
