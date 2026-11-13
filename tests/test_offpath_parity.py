@@ -848,3 +848,43 @@ def test_mounted_inside_asgi_app_matches_fastapi():
         return client(outer).get("/sub/x/a").json()
 
     both(run)
+
+
+
+def test_router_attributes_match_fastapi():
+    import asyncio
+
+    def run(lib):
+        router = lib.APIRouter()
+        sent = []
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append({k: v for k, v in message.items() if k != "headers"})
+
+        asyncio.run(router.not_found({"type": "http", "path": "/x"}, receive, send))
+        match, child = router.matches({"type": "http", "path": "/x", "method": "GET"})
+        return sent, match.name, child, [callable(getattr(router, name)) for name in ("app", "handle", "lifespan")]
+
+    both(run)
+
+
+def test_router_is_an_asgi_app():
+    import asyncio
+
+    import httpx
+
+    router = fastrapi.APIRouter(prefix="/r")
+
+    @router.get("/items/{item_id}")
+    def item(item_id: int):
+        return {"item_id": item_id}
+
+    async def call():
+        transport = httpx.ASGITransport(app=router)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            return [(r.status_code, r.json()) for r in [await c.get(p) for p in ("/r/items/3", "/r/missing", "/docs")]]
+
+    assert asyncio.run(call()) == [(200, {"item_id": 3}), (404, {"detail": "Not Found"}), (404, {"detail": "Not Found"})]

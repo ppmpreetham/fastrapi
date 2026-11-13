@@ -10,7 +10,8 @@ use crate::engine::app::{CheckDir, frontend_mount};
 use crate::engine::config::FrontendMount;
 use parking_lot::Mutex;
 use pyo3::Bound;
-use pyo3::prelude::{Py, PyAny, PyAnyMethods, PyResult, Python, pyclass, pymethods};
+use pyo3::prelude::{Py, PyAny, PyAnyMethods, PyErr, PyResult, Python, pyclass, pymethods};
+use pyo3::sync::PyOnceLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
@@ -79,9 +80,31 @@ pub struct PyAPIRouter {
     pub mounts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
     pub hosts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
     pub frontends: Arc<Mutex<Vec<FrontendMount>>>,
+    pub asgi: Arc<PyOnceLock<Py<PyAny>>>,
 }
 
+fastrapi_pyutil::cached_py_import!(STARLETTE_ROUTER, "starlette.routing", "Router");
+fastrapi_pyutil::cached_py_import!(STARLETTE_MATCH, "starlette.routing", "Match");
+
 impl PyAPIRouter {
+    fn asgi<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        slf.borrow()
+            .asgi
+            .get_or_try_init(py, || {
+                let kwargs = PyDict::new(py);
+                for name in ["openapi_url", "docs_url", "redoc_url"] {
+                    kwargs.set_item(name, py.None())?;
+                }
+                let app = py
+                    .get_type::<crate::engine::config::FastrAPI>()
+                    .call((), Some(&kwargs))?;
+                app.call_method1("include_router", (slf,))?;
+                Ok::<_, PyErr>(app.unbind())
+            })
+            .map(|app| app.bind(py).clone())
+    }
+
     #[must_use]
     pub fn with_callbacks(self, callbacks: Option<Py<PyAny>>) -> Self {
         match callbacks {
@@ -131,12 +154,68 @@ impl Default for PyAPIRouter {
             mounts: Arc::new(Mutex::new(Vec::new())),
             hosts: Arc::new(Mutex::new(Vec::new())),
             frontends: Arc::new(Mutex::new(Vec::new())),
+            asgi: Arc::new(PyOnceLock::new()),
         }
     }
 }
 
 #[pymethods]
 impl PyAPIRouter {
+    fn __call__<'py>(
+        slf: &Bound<'py, Self>,
+        scope: &Bound<'py, PyAny>,
+        receive: &Bound<'py, PyAny>,
+        send: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Self::asgi(slf)?.call1((scope, receive, send))
+    }
+
+    fn app<'py>(
+        slf: &Bound<'py, Self>,
+        scope: &Bound<'py, PyAny>,
+        receive: &Bound<'py, PyAny>,
+        send: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Self::__call__(slf, scope, receive, send)
+    }
+
+    fn handle<'py>(
+        slf: &Bound<'py, Self>,
+        scope: &Bound<'py, PyAny>,
+        receive: &Bound<'py, PyAny>,
+        send: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Self::__call__(slf, scope, receive, send)
+    }
+
+    fn lifespan<'py>(
+        slf: &Bound<'py, Self>,
+        scope: &Bound<'py, PyAny>,
+        receive: &Bound<'py, PyAny>,
+        send: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Self::__call__(slf, scope, receive, send)
+    }
+
+    fn not_found<'py>(
+        slf: &Bound<'py, Self>,
+        scope: &Bound<'py, PyAny>,
+        receive: &Bound<'py, PyAny>,
+        send: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        STARLETTE_ROUTER
+            .get(slf.py())?
+            .call_method1("not_found", (slf, scope, receive, send))
+    }
+
+    fn matches<'py>(
+        &self,
+        py: Python<'py>,
+        _scope: &Bound<'py, PyAny>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyDict>)> {
+        Ok((STARLETTE_MATCH.get(py)?.getattr("NONE")?, PyDict::new(py)))
+    }
+
     #[new]
     #[pyo3(signature = (*, prefix=String::new(), tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, generate_unique_id_function=None, route_class=None, on_startup=None, on_shutdown=None, lifespan=None, routes=None, redirect_slashes=true, default=None, callbacks=None, dependency_overrides_provider=None, strict_content_type=None))]
     #[expect(
