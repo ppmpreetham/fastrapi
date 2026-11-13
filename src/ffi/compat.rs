@@ -8,7 +8,7 @@ pub(crate) use fastrapi_pyutil::imports::python_source_module;
 use fastrapi_routing::dependencies::parse_dependencies;
 use pyo3::Bound;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple, PyType};
 use std::collections::HashSet;
 
 const PY_HELPERS: &str = include_str!("py/helpers.py");
@@ -222,6 +222,18 @@ fn get_value_or_default(
         .iter()
         .find(|item| !item.is_instance_of::<DefaultPlaceholder>())
         .map_or(first_item, Bound::unbind)
+}
+
+pub(crate) fn register_virtual_bases(
+    py: Python<'_>,
+    bases: &[(&str, &str, Bound<'_, PyType>)],
+) -> PyResult<()> {
+    for (module, name, class) in bases {
+        py.import(*module)?
+            .getattr(*name)?
+            .call_method1("register", (class,))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn register_types(module: &Bound<'_, PyModule>) -> PyResult<()> {

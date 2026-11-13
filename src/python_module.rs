@@ -452,6 +452,26 @@ mod fastrapi {
         m.add("FastAPI", &app)?;
         m.add("FastrAPI", app)?;
         m.add("Response", py.get_type::<PyResponse>())?;
+        crate::ffi::compat::register_virtual_bases(
+            py,
+            &[
+                (
+                    "starlette.requests",
+                    "HTTPConnection",
+                    py.get_type::<fastrapi_http::request::PyHTTPConnection>(),
+                ),
+                (
+                    "starlette.requests",
+                    "Request",
+                    py.get_type::<fastrapi_http::request::PyRequest>(),
+                ),
+                (
+                    "starlette.websockets",
+                    "WebSocket",
+                    py.get_type::<PyWebSocket>(),
+                ),
+            ],
+        )?;
         m.add(
             "Middleware",
             py.import("starlette.middleware")?.getattr("Middleware")?,

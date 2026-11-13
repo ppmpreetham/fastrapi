@@ -497,3 +497,26 @@ def test_responses_as_asgi_apps_match_fastapi():
         return [asyncio.run(call(response)) for response in responses], calls
 
     both(run)
+
+
+def test_request_hierarchy_matches_fastapi():
+    import collections.abc
+
+    import starlette.requests
+    import starlette.websockets
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/r")
+        def r(request: lib.Request):
+            return [
+                isinstance(request, starlette.requests.Request),
+                isinstance(request, starlette.requests.HTTPConnection),
+                isinstance(request, collections.abc.Mapping),
+                request["type"],
+            ]
+
+        return client(app).get("/r").json(), issubclass(lib.WebSocket, starlette.websockets.WebSocket)
+
+    both(run)
