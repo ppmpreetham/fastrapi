@@ -57,6 +57,9 @@ def _init_field(
     regex=None,
     discriminator=None,
     strict=Unset,
+    validate_default=Unset,
+    union_mode=Unset,
+    fail_fast=Unset,
     multiple_of=Unset,
     allow_inf_nan=Unset,
     max_digits=Unset,
@@ -67,7 +70,6 @@ def _init_field(
     deprecated=None,
     include_in_schema=True,
     json_schema_extra=None,
-    **extra: Any,
 ) -> None:
     if example is not Unset:
         warnings.warn(
@@ -91,11 +93,13 @@ def _init_field(
         min_length=min_length,
         max_length=max_length,
         discriminator=discriminator,
+        validate_default=validate_default,
+        union_mode=union_mode,
+        fail_fast=fail_fast,
         multiple_of=multiple_of,
         allow_inf_nan=allow_inf_nan,
         max_digits=max_digits,
         decimal_places=decimal_places,
-        **extra,
     )
     if examples is not None:
         kwargs["examples"] = examples
@@ -116,7 +120,7 @@ def _init_field(
         validation_alias=validation_alias,
         serialization_alias=serialization_alias,
         strict=strict,
-        json_schema_extra=json_schema_extra or extra,
+        json_schema_extra=json_schema_extra,
         pattern=pattern or regex,
     )
     FieldInfo.__init__(self, **{k: v for k, v in kwargs.items() if v is not Unset})
