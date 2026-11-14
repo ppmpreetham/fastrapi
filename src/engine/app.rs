@@ -69,6 +69,34 @@ fn is_startup_event(event_type: &str) -> PyResult<bool> {
     }
 }
 
+fn telemetry_config(py: Python<'_>, overrides: Option<Bound<'_, PyDict>>) -> PyResult<Py<PyDict>> {
+    let auto_configure = std::env::var("FASTAPI_OTEL_AUTO_CONFIGURE")
+        .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+    let none = py.None();
+    let config = [
+        ("tracer_provider", none.bind(py).clone()),
+        ("meter_provider", none.bind(py).clone()),
+        ("logger_provider", none.bind(py).clone()),
+        ("tracing", true.into_pyobject(py)?.to_owned().into_any()),
+        ("metrics", true.into_pyobject(py)?.to_owned().into_any()),
+        ("logs", true.into_pyobject(py)?.to_owned().into_any()),
+        (
+            "operation_spans",
+            true.into_pyobject(py)?.to_owned().into_any(),
+        ),
+        (
+            "auto_configure",
+            auto_configure.into_pyobject(py)?.to_owned().into_any(),
+        ),
+        ("exclude", none.bind(py).clone()),
+    ]
+    .into_py_dict(py)?;
+    if let Some(overrides) = overrides {
+        config.update(overrides.as_mapping())?;
+    }
+    Ok(config.unbind())
+}
+
 impl FastrAPI {
     pub(crate) fn apply_router_mounts(&mut self, py: Python<'_>) -> PyResult<()> {
         let root = self.router.bind(py).borrow().clone();
@@ -296,7 +324,6 @@ impl FastrAPI {
         terms_of_service=None,
         contact=None,
         license_info=None,
-        openapi_prefix=String::new(),
         root_path=String::new(),
         root_path_in_servers=true,
         responses=None,
@@ -319,7 +346,7 @@ impl FastrAPI {
         request_timeout=None,
         request_id_header=None,
         powered_by_header=None,
-        **extra,
+        telemetry=None,
     ))]
     #[expect(
         clippy::fn_params_excessive_bools,
@@ -354,7 +381,6 @@ impl FastrAPI {
         terms_of_service: Option<String>,
         contact: Option<Py<PyAny>>,
         license_info: Option<Py<PyAny>>,
-        openapi_prefix: String,
         root_path: String,
         root_path_in_servers: bool,
         responses: Option<Py<PyAny>>,
@@ -377,9 +403,17 @@ impl FastrAPI {
         request_timeout: Option<u64>,
         request_id_header: Option<String>,
         powered_by_header: Option<String>,
-        extra: Option<Bound<'_, PyDict>>,
+        telemetry: Option<Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         crate::ffi::decorators::tree::validate_dependencies(py, dependencies.as_ref())?;
+        if !root_path.is_empty() {
+            PyErr::warn(
+                py,
+                &py.get_type::<fastrapi_http::exceptions::PyFastAPIDeprecationWarning>(),
+                c"The `root_path` parameter is deprecated. Configure the server's root path instead, for example with `fastapi run --root-path /api/v1`.",
+                1,
+            )?;
+        }
         let explicit_default_response_class = default_response_class
             .as_ref()
             .map(|class| class.clone_ref(py));
@@ -464,12 +498,7 @@ impl FastrAPI {
             terms_of_service,
             contact,
             license_info,
-            root_path: if root_path.is_empty() {
-                openapi_prefix.clone()
-            } else {
-                root_path
-            },
-            openapi_prefix,
+            root_path,
             root_path_in_servers,
             responses,
             callbacks,
@@ -506,7 +535,7 @@ impl FastrAPI {
             stack_override: None,
             docs_routes: pyo3::sync::PyOnceLock::new(),
             openapi_version: "3.1.0".to_string(),
-            extra: extra.map_or_else(|| PyDict::new(py).unbind(), Bound::unbind),
+            telemetry: telemetry_config(py, telemetry)?,
             router: base_router,
         })
     }

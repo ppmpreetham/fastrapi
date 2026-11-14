@@ -148,8 +148,6 @@ pub struct FastrAPI {
     #[pyo3(get, set)]
     pub license_info: Option<Py<PyAny>>,
     #[pyo3(get, set)]
-    pub openapi_prefix: String,
-    #[pyo3(get, set)]
     pub root_path: String,
     #[pyo3(get, set)]
     pub root_path_in_servers: bool,
@@ -193,8 +191,8 @@ pub struct FastrAPI {
     pub powered_by_header: Option<String>,
     #[pyo3(get, set)]
     pub openapi_version: String,
-    #[pyo3(get)]
-    pub extra: Py<PyDict>,
+    #[pyo3(get, name = "_telemetry")]
+    pub telemetry: Py<PyDict>,
     #[pyo3(get, set)]
     pub router: Py<PyAPIRouter>,
 

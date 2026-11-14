@@ -1,3 +1,4 @@
+import warnings
 from typing import Annotated
 
 import fastapi
@@ -21,6 +22,29 @@ def raises_type_error(call):
     except TypeError:
         return True
     return False
+
+
+@pytest.mark.parametrize("kwargs", [{"team": "core"}, {"openapi_prefix": "/api"}])
+def test_app_rejects_unknown_keyword_arguments(kwargs):
+    both(lambda lib: raises_type_error(lambda: new_app(lib, **kwargs)))
+
+
+def test_root_path_emits_deprecation_warning():
+    def run(lib):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            app = new_app(lib, root_path="/api")
+            new_app(lib)
+        return app.root_path, [(type(w.message).__name__, str(w.message)) for w in caught]
+
+    both(run)
+
+
+def test_telemetry_config_defaults_and_overrides():
+    def run(lib):
+        return new_app(lib)._telemetry, new_app(lib, telemetry={"tracing": False, "exclude": ["/health"]})._telemetry
+
+    both(run)
 
 
 @pytest.mark.parametrize("marker", ["Query", "Header", "Cookie", "Path", "Body", "Form", "File"])

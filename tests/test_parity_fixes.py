@@ -559,20 +559,10 @@ def test_add_event_handler(client, app):
     assert client.get("/events").json() == {"events": ["started"]}
 
 
-def test_openapi_prefix_sets_root_path():
-    assert FastrAPI(openapi_prefix="/api").root_path == "/api"
-    assert FastrAPI(openapi_prefix="/api", root_path="/v1").root_path == "/v1"
-
-
 def test_openapi_version_attribute(client, app):
     assert app.openapi_version == "3.1.0"
     app.openapi_version = "3.0.2"
     assert app.openapi()["openapi"] == "3.0.2"
-
-
-def test_app_keeps_extra_keyword_arguments():
-    assert FastrAPI(team="core").extra == {"team": "core"}
-    assert FastrAPI().extra == {}
 
 
 def test_http_exception_default_detail_uses_http_status_phrase():
