@@ -4,7 +4,7 @@ from typing import Annotated
 import fastapi
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 import fastrapi
 
@@ -106,3 +106,43 @@ def test_field_annotations_reach_parameter_schema():
 
     both(run)
 
+
+def test_param_models_flatten_into_parameters():
+    class Tags(BaseModel):
+        name: str = "n"
+
+    class Filters(BaseModel):
+        limit: int = Field(10, description="max", le=100)
+        tags: list[str] = []
+        nested: Tags | None = None
+
+    class Paging(BaseModel):
+        page: int
+
+    class Headers(BaseModel):
+        x_token: str
+        user_agent: str | None = Field(None, deprecated=True)
+
+    class Cookies(BaseModel):
+        session_id: str = Field(title="Session")
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/single")
+        def single(filters: Annotated[Filters, lib.Query()]):
+            return filters
+
+        @app.get("/combined")
+        def combined(
+            filters: Annotated[Filters, lib.Query()],
+            paging: Annotated[Paging, lib.Query()],
+            headers: Annotated[Headers, lib.Header()],
+            cookies: Annotated[Cookies, lib.Cookie()],
+        ):
+            return [filters, paging]
+
+        schema = app.openapi()
+        return schema["paths"], schema.get("components")
+
+    both(run)

@@ -272,6 +272,63 @@ fn additional_responses(
     Some(JsonValue::Object(Box::new(merged)))
 }
 
+fn model_parameters(
+    py: Python<'_>,
+    param: &ParsedParameter,
+    location: &str,
+    registry: &mut SchemaRegistry,
+) -> Vec<Parameter> {
+    let (Some(keys), Some(model)) = (&param.model_keys, &param.annotation) else {
+        return Vec::new();
+    };
+    let Ok(fields) = model.bind(py).getattr(intern!(py, "model_fields")) else {
+        return Vec::new();
+    };
+    let Ok(fields) = fields.cast_into::<PyDict>() else {
+        return Vec::new();
+    };
+    let Ok(annotated) = py.import(intern!(py, "typing")).and_then(|typing| typing.getattr(intern!(py, "Annotated"))) else {
+        return Vec::new();
+    };
+    fields
+        .values()
+        .iter()
+        .zip(keys.iter())
+        .filter_map(|(info, key)| {
+            let text = |name| {
+                info.getattr(name)
+                    .ok()
+                    .and_then(|value| value.extract::<Option<String>>().ok())
+                    .flatten()
+            };
+            let alias = key.alias.bind(py).to_str().ok()?;
+            let title = text(intern!(py, "title")).unwrap_or_else(|| schema_title(alias));
+            let annotation = annotated
+                .get_item((info.getattr(intern!(py, "annotation")).ok()?, &info))
+                .ok()?;
+            let required = info
+                .call_method0(intern!(py, "is_required"))
+                .and_then(|value| value.extract::<bool>())
+                .ok()?;
+            let deprecated = info
+                .getattr(intern!(py, "deprecated"))
+                .ok()
+                .and_then(|value| value.is_truthy().ok())
+                .filter(|truthy| *truthy);
+            Some(Parameter {
+                name: key.lookup.clone(),
+                location: location.to_string(),
+                required: Some(required),
+                schema: Some(registry.field(&annotation, "validation", Some(title))),
+                description: text(intern!(py, "description")),
+                deprecated,
+                example: None,
+                examples: None,
+            })
+        })
+        .collect()
+}
+
 fn marker_class(py: Python<'_>, param: &ParsedParameter) -> Option<String> {
     let marker = param.param_object.as_ref()?.bind(py).get_type();
     Some(marker.name().ok()?.to_string())
@@ -593,7 +650,7 @@ pub fn build_paths_from_routes(
         });
         let parameters: Vec<Parameter> = all_params
             .iter()
-            .filter_map(|param| {
+            .flat_map(|param| {
                 let location = match param.source {
                     ParameterSource::Path => "path",
                     ParameterSource::Query => "query",
@@ -601,7 +658,7 @@ pub fn build_paths_from_routes(
                     ParameterSource::Cookie => "cookie",
                     ParameterSource::Body
                     | ParameterSource::BackgroundTasks
-                    | ParameterSource::SecurityScopes => return None,
+                    | ParameterSource::SecurityScopes => return Vec::new(),
                 };
 
                 let marker = param.param_object.as_ref().map(|marker| marker.bind(py));
@@ -611,7 +668,10 @@ pub fn build_paths_from_routes(
                     .and_then(|value| value.extract::<bool>().ok())
                     .unwrap_or(true);
                 if !include_in_schema {
-                    return None;
+                    return Vec::new();
+                }
+                if param.model_keys.is_some() {
+                    return model_parameters(py, param, location, &mut registry);
                 }
 
                 let mut schema = param.annotation.as_ref().map_or_else(
@@ -689,7 +749,7 @@ pub fn build_paths_from_routes(
                     .filter(|value| !value.is_none())
                     .map(|value| py_any_to_json(py, &value));
 
-                Some(Parameter {
+                vec![Parameter {
                     name: param.external_name.clone(),
                     location: location.to_string(),
                     required: Some(param.required || location == "path"),
@@ -698,7 +758,7 @@ pub fn build_paths_from_routes(
                     deprecated,
                     example,
                     examples: openapi_examples,
-                })
+                }]
             })
             .collect();
 
