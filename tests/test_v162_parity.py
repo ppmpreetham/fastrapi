@@ -195,3 +195,48 @@ def test_optional_param_models():
         return [(r.status_code, r.json()) for r in calls], app.openapi()["paths"]
 
     both(run)
+
+
+def test_form_models():
+    class Profile(BaseModel):
+        flag: bool = True
+        name: str = "d"
+        count: int | None = None
+
+    class Name(BaseModel):
+        name: str
+
+    class Age(BaseModel):
+        age: int
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.post("/profile")
+        def profile(data: Annotated[Profile, lib.Form()]):
+            return data
+
+        @app.post("/optional")
+        def optional(data: Annotated[Name | None, lib.Form()] = None):
+            return data
+
+        @app.post("/combined")
+        def combined(name: Annotated[Name, lib.Form()], age: Annotated[Age, lib.Form()], note: Annotated[str, lib.Form()] = "-"):
+            return [name, age, note]
+
+        client = TestClient(app)
+        calls = [
+            client.post("/profile", data={"name": ""}),
+            client.post("/profile", data={"count": ""}),
+            client.post("/profile", data={"name": "x", "count": "2", "flag": "false"}),
+            client.post("/optional"),
+            client.post("/optional", data={"name": "n"}),
+            client.post("/optional", data={"name": ""}),
+            client.post("/optional", data={"other": "1"}),
+            client.post("/combined", data={"name": "a", "age": "3"}),
+            client.post("/combined", data={"name": "a", "age": "3", "note": "n"}),
+            client.post("/combined", data={"name": "a"}),
+        ]
+        return [(r.status_code, r.json()) for r in calls]
+
+    both(run)

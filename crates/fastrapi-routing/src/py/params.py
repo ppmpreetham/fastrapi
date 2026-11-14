@@ -294,7 +294,8 @@ def is_union_of_models(annotation: Any) -> bool:
 
 def param_model(field_info: FieldInfo) -> type[BaseModel] | None:
     annotation = field_info.annotation
-    if isinstance(field_info, Param) and _is_union(get_origin(annotation)):
+    unwraps = isinstance(field_info, Param) or (isinstance(field_info, Form) and not field_info.embed)
+    if unwraps and _is_union(get_origin(annotation)):
         args = get_args(annotation)
         if len(args) == 2 and NoneType in args:
             annotation = next(arg for arg in args if arg is not NoneType)

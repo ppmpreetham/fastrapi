@@ -724,13 +724,14 @@ fn form_param_value<'py>(
     let Some(values) = fields.and_then(|fields| fields.get(param.external_name.as_str())) else {
         return Ok(None);
     };
-    if !param.is_list
-        && param.is_form
-        && matches!(values.last(), Some(BodyField::Text(text)) if text.is_empty())
-    {
+    if !param.is_list && param.is_form && is_blank(values) {
         return Ok(None);
     }
     form_values(py, values, param.is_list, param.read_bytes)
+}
+
+fn is_blank(values: &[BodyField]) -> bool {
+    matches!(values.last(), Some(BodyField::Text(text)) if text.is_empty())
 }
 
 fn form_dict<'py>(
@@ -759,8 +760,10 @@ fn form_model<'py>(
     if let Some(fields) = fields {
         model_dict(py, keys, &dict, |key| {
             match fields.get(key.lookup.as_str()) {
-                Some(values) => form_values(py, values, key.sequence, false),
-                None => Ok(None),
+                Some(values) if key.sequence || !is_blank(values) => {
+                    form_values(py, values, key.sequence, false)
+                }
+                _ => Ok(None),
             }
         })?;
     }
@@ -972,16 +975,24 @@ fn apply_form_body<'py>(
 ) -> PyResult<()> {
     if !handler.payload.body_embed {
         let param = params[0];
-        let raw = match &param.model {
-            Some(model) => Some(form_model(py, &model.keys, fields)?),
-            None => form_param_value(py, param, fields)?,
+        let value = if let Some(model) = &param.model {
+            form_model_param(py, param, model, fields, errors)?
+        } else {
+            let raw = form_param_value(py, param, fields)?;
+            resolve(py, param, raw, Loc::Source(&param.source), errors)?
         };
-        if let Some(value) = resolve(py, param, raw, Loc::Source(&param.source), errors)? {
+        if let Some(value) = value {
             kwargs.set(param.name_py.bind(py), value)?;
         }
         return Ok(());
     }
     for param in params {
+        if let Some(model) = param.model.as_ref().filter(|_| !param.embed) {
+            if let Some(value) = form_model_param(py, param, model, fields, errors)? {
+                kwargs.set(param.name_py.bind(py), value)?;
+            }
+            continue;
+        }
         if let Some(value) = form_fast(py, param, fields) {
             kwargs.set(param.name_py.bind(py), value)?;
             continue;
@@ -992,6 +1003,29 @@ fn apply_form_body<'py>(
         }
     }
     Ok(())
+}
+
+fn form_model_param<'py>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+    model: &ParamModel,
+    fields: Option<&FormFields>,
+    errors: &mut Errors<'py>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let present = match model.presence {
+        None => true,
+        Some(ModelPresence::OwnKeys) => fields.is_some_and(|fields| {
+            model
+                .keys
+                .iter()
+                .any(|key| fields.contains_key(key.lookup.as_str()))
+        }),
+        Some(ModelPresence::AnyKey) => fields.is_some_and(|fields| !fields.is_empty()),
+    };
+    let raw = present
+        .then(|| form_model(py, &model.keys, fields))
+        .transpose()?;
+    resolve(py, param, raw, Loc::Source(&param.source), errors)
 }
 
 const fn form_fields(payload: Option<&BodyPayload>) -> Option<&FormFields> {
