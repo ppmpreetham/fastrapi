@@ -350,3 +350,72 @@ def test_middleware_ordering_last_declared_outermost():
     assert status == 200
     # outer middleware observes first; inner second.
     assert body["seen"] == ["outer", "inner"]
+
+
+def _handshake(live: LiveServer, path: str, headers: dict) -> tuple[int, dict, bytes, socket.socket]:
+    sock = socket.create_connection(("127.0.0.1", live.port), timeout=5)
+    extra = "".join(f"{name}: {value}\r\n" for name, value in headers.items())
+    key = base64.b64encode(os.urandom(16)).decode()
+    sock.sendall(
+        (
+            f"GET {path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n{extra}\r\n"
+        ).encode()
+    )
+    raw = sock.recv(4096)
+    head, _, body = raw.partition(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    response_headers = {
+        name.decode().strip().lower(): value.decode().strip()
+        for name, sep, value in (line.partition(b":") for line in lines[1:])
+        if sep
+    }
+    return int(lines[0].split(b" ")[1]), response_headers, body, sock
+
+
+def test_websocket_security_denies_handshake_with_http_exception():
+    from fastrapi import Security, WebSocket
+    from fastrapi.security import APIKeyHeader, HTTPBearer
+
+    app = FastrAPI()
+
+    class Teapot(Exception):
+        pass
+
+    @app.exception_handler(Teapot)
+    async def teapot(websocket, exc):
+        return JSONResponse({"teapot": True}, status_code=418)
+
+    def brew():
+        raise Teapot()
+
+    @app.websocket("/bearer")
+    async def bearer(websocket: WebSocket, creds=Depends(HTTPBearer())):
+        await websocket.accept()
+        await websocket.send_text(creds.credentials)
+        await websocket.close()
+
+    @app.websocket("/key")
+    async def key(websocket: WebSocket, value: str = Security(APIKeyHeader(name="x-key"))):
+        await websocket.accept()
+        await websocket.send_text(value)
+        await websocket.close()
+
+    @app.websocket("/teapot")
+    async def teapot_route(websocket: WebSocket, _=Depends(brew)):
+        await websocket.accept()
+
+    live = LiveServer(app)
+
+    status, _, _, sock = _handshake(live, "/bearer", {"Authorization": "Bearer t"})
+    assert status == 101
+    assert _recv_frame(sock) == (1, b"t")
+
+    status, headers, body, _ = _handshake(live, "/bearer", {})
+    assert (status, headers.get("www-authenticate"), json.loads(body)) == (401, "Bearer", {"detail": "Not authenticated"})
+
+    status, headers, body, _ = _handshake(live, "/key", {})
+    assert (status, headers.get("www-authenticate"), json.loads(body)) == (401, "APIKey", {"detail": "Not authenticated"})
+
+    status, _, body, _ = _handshake(live, "/teapot", {})
+    assert (status, json.loads(body)) == (418, {"teapot": True})

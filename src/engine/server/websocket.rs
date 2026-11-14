@@ -327,6 +327,10 @@ async fn handle_error(
             .exception_handlers()
             .and_then(|registry| find_handler(py, registry.bind(py), &error));
         let Some(handler) = handler else {
+            if let Some(response) = fastrapi_http::exceptions::http_exception_response(value) {
+                let _ = websocket.borrow(py).deny(py, response);
+                return Err(HandlerOutcome::Handled);
+            }
             if let Some((code, reason)) = websocket_exception_close(py, value) {
                 return Err(HandlerOutcome::Close(code, reason));
             }
@@ -354,7 +358,10 @@ async fn handle_error(
                     HandlerOutcome::Unhandled
                 })
             }
-            Ok(_) => Err(HandlerOutcome::Handled),
+            Ok(response) => {
+                deny_with(websocket.bind(py), &response);
+                Err(HandlerOutcome::Handled)
+            }
             Err(handler_error) => {
                 handler_error.print(py);
                 Err(HandlerOutcome::Unhandled)
@@ -363,13 +370,25 @@ async fn handle_error(
     });
     match pending {
         Ok(future) => match future.await {
-            Ok(_) => HandlerOutcome::Handled,
+            Ok(response) => {
+                Python::attach(|py| deny_with(websocket.bind(py), response.bind(py)));
+                HandlerOutcome::Handled
+            }
             Err(error) => {
                 Python::attach(|py| error.print(py));
                 HandlerOutcome::Unhandled
             }
         },
         Err(outcome) => outcome,
+    }
+}
+
+fn deny_with(websocket: &Bound<'_, PyWebSocket>, response: &Bound<'_, PyAny>) {
+    if !response.is_none() {
+        let _ = websocket.call_method1(
+            pyo3::intern!(websocket.py(), "send_denial_response"),
+            (response,),
+        );
     }
 }
 

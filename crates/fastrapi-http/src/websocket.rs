@@ -158,7 +158,7 @@ fn asgi_message(py: Python<'_>, message: WSMessage) -> PyResult<Py<PyAny>> {
 }
 
 impl PyWebSocket {
-    fn deny<'py>(&self, py: Python<'py>, response: Response) -> PyResult<Bound<'py, PyAny>> {
+    pub fn deny<'py>(&self, py: Python<'py>, response: Response) -> PyResult<Bound<'py, PyAny>> {
         if self
             .handshake_state
             .compare_exchange(0, 4, Ordering::AcqRel, Ordering::Acquire)
