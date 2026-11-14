@@ -311,6 +311,12 @@ impl PyAPIRoute {
         }
     }
 
+    #[getter]
+    fn app<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        slf.as_any()
+            .getattr(intern!(slf.py(), "dependency_overrides_provider"))
+    }
+
     fn get_route_handler(slf: &Bound<'_, Self>, py: Python<'_>) -> Py<PyAny> {
         slf.as_any()
             .getattr("_fastrapi_original")

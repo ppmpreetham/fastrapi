@@ -503,6 +503,7 @@ impl FastrAPI {
             openapi_cache: Mutex::new(None),
             openapi_schema: Mutex::new(None),
             asgi: std::sync::OnceLock::new(),
+            stack_override: None,
             docs_routes: pyo3::sync::PyOnceLock::new(),
             openapi_version: "3.1.0".to_string(),
             extra: extra.map_or_else(|| PyDict::new(py).unbind(), Bound::unbind),
@@ -517,6 +518,11 @@ impl FastrAPI {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
+        if self.asgi.get().is_some() || self.stack_override.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "Cannot add middleware after an application has started",
+            ));
+        }
         let py = middleware_class.py();
         let empty_dict;
         let opts = if let Some(dict) = kwargs {
@@ -914,6 +920,41 @@ impl FastrAPI {
             serve(py, host, port, &slf)
         }
     }
+
+    #[getter]
+    fn middleware_stack(slf: &Bound<'_, Self>) -> PyResult<Option<Py<PyAny>>> {
+        let app = slf.borrow();
+        if let Some(stack) = &app.stack_override {
+            return Ok(Some(stack.clone_ref(slf.py())));
+        }
+        if app.asgi.get().is_none() {
+            return Ok(None);
+        }
+        slf.getattr(intern!(slf.py(), "_asgi"))
+            .map(|stack| Some(stack.unbind()))
+    }
+
+    #[setter]
+    fn set_middleware_stack(&mut self, stack: Option<Py<PyAny>>) {
+        if stack.is_none() {
+            self.asgi = std::sync::OnceLock::new();
+        }
+        self.stack_override = stack;
+    }
+
+    #[getter]
+    fn _middleware_stack_override(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.stack_override
+            .as_ref()
+            .map(|stack| stack.clone_ref(py))
+    }
+
+    fn build_middleware_stack<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        slf.borrow_mut().asgi = std::sync::OnceLock::new();
+        slf.getattr(intern!(slf.py(), "_asgi"))
+    }
+
+    const fn setup(&self) {}
 
     fn _asgi<'py>(
         slf: &Bound<'py, Self>,

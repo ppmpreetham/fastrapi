@@ -208,5 +208,6 @@ pub struct FastrAPI {
     pub(crate) openapi_cache: parking_lot::Mutex<Option<OpenApiCacheEntry>>,
     pub(crate) openapi_schema: parking_lot::Mutex<Option<Py<PyAny>>>,
     pub(crate) asgi: std::sync::OnceLock<std::sync::Arc<crate::engine::server::asgi_app::AsgiApp>>,
+    pub(crate) stack_override: Option<Py<PyAny>>,
     pub(crate) docs_routes: pyo3::sync::PyOnceLock<Py<PyList>>,
 }

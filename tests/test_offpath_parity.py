@@ -1269,3 +1269,31 @@ def test_mounted_sub_app_is_isolated_like_fastapi():
         )
 
     both(run)
+
+
+def test_middleware_stack_attributes_match_fastapi():
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/r")
+        def r():
+            return "r"
+
+        before = app.middleware_stack is None
+        c = client(app)
+        c.get("/r")
+        started = app.middleware_stack is not None
+        try:
+            app.add_middleware(submodule(lib, "middleware.gzip").GZipMiddleware)
+            refused = False
+        except RuntimeError as error:
+            refused = str(error)
+        app.middleware_stack = None
+        app.add_middleware(submodule(lib, "middleware.cors").CORSMiddleware, allow_origins=["*"])
+        app.middleware_stack = app.build_middleware_stack()
+        cors = c.get("/r", headers={"origin": "https://a.com"}).headers.get("access-control-allow-origin")
+        app.setup()
+        route = next(route for route in app.routes if getattr(route, "path", "") == "/r")
+        return before, started, refused, cors, callable(route.app)
+
+    both(run)

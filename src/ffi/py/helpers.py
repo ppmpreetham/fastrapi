@@ -315,7 +315,8 @@ def docs_routes(app):
 
 
 async def asgi_call(self, scope, receive, send):
-    await self._asgi(scope, receive, send)
+    stack = self._middleware_stack_override
+    await (self._asgi if stack is None else stack)(scope, receive, send)
 
 
 @asynccontextmanager
