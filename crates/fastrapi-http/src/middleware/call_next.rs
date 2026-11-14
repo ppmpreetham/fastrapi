@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::exceptions::{UnhandledError, plain_server_error, server_error_response};
 use crate::request::{PyRequest, PyScopeHeaders};
+use crate::request_input::AsgiMount;
 use crate::response_convert::convert_auto_response;
 use axum::body::{Body, BodyDataStream};
 use axum::extract::Request;
@@ -314,6 +315,7 @@ fn drive(
         let (parts, body) = request.into_parts();
         let method = parts.method.clone();
         let uri = parts.uri.clone();
+        let mount = parts.extensions.get::<AsgiMount>().cloned();
         let headers = Arc::new(parts.headers.clone());
         let downstream = Downstream {
             middlewares,
@@ -327,7 +329,8 @@ fn drive(
                 py,
                 &mw,
                 method.as_str(),
-                uri.path(),
+                mount.as_ref().map_or_else(|| uri.path(), |mount| &mount.path),
+                mount.as_ref().map(|mount| &*mount.root_path),
                 uri.query().unwrap_or(""),
                 headers,
                 downstream,
@@ -366,6 +369,7 @@ fn invoke(
     mw: &super::PyMiddleware,
     method: &str,
     path: &str,
+    root_path: Option<&str>,
     query: &str,
     headers: Arc<HeaderMap>,
     downstream: Downstream,
@@ -380,6 +384,9 @@ fn invoke(
     _ = scope.set_item(intern!(py, "type"), intern!(py, "http"));
     _ = scope.set_item(intern!(py, "method"), method);
     _ = scope.set_item(intern!(py, "path"), crate::request::decode_path(path));
+    if let Some(root_path) = root_path {
+        _ = scope.set_item(intern!(py, "root_path"), root_path);
+    }
     _ = scope.set_item(
         intern!(py, "query_string"),
         PyBytes::new(py, query.as_bytes()),

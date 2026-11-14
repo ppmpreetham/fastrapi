@@ -1206,3 +1206,66 @@ def test_streaming_response_asgi_methods_match_fastapi():
         return streamed, calls, asyncio.run(direct())
 
     both(run)
+
+
+def test_mounted_sub_app_is_isolated_like_fastapi():
+    def run(lib):
+        seen = []
+
+        def real():
+            return "real"
+
+        def fake():
+            return "fake"
+
+        sub = new_app(lib, title="Sub")
+        sub.dependency_overrides[real] = fake
+
+        @sub.middleware("http")
+        async def sub_mw(request, call_next):
+            seen.append(("sub", request.url.path))
+            return await call_next(request)
+
+        @sub.exception_handler(ValueError)
+        def sub_error(request, exc):
+            return lib.responses.JSONResponse({"handled": "sub"}, status_code=418)
+
+        @sub.get("/items/{x}")
+        def item(x: str, request: lib.Request, dep=lib.Depends(real)):
+            return {"x": x, "dep": dep, "url": str(request.url), "root": request.scope["root_path"]}
+
+        @sub.get("/boom")
+        def boom():
+            raise ValueError("boom")
+
+        app = new_app(lib, title="Parent")
+
+        @app.middleware("http")
+        async def parent_mw(request, call_next):
+            seen.append(("parent", request.url.path))
+            return await call_next(request)
+
+        @app.exception_handler(ValueError)
+        def parent_error(request, exc):
+            return lib.responses.JSONResponse({"handled": "parent"}, status_code=500)
+
+        @app.get("/own")
+        def own():
+            raise ValueError("own")
+
+        app.mount("/sub", sub)
+        c = client(app)
+        responses = [c.get(path) for path in ("/sub/items/a", "/sub/boom", "/own")]
+        parent_doc = c.get("/openapi.json").json()
+        sub_doc = c.get("/sub/openapi.json").json()
+        return (
+            [(r.status_code, r.json()) for r in responses],
+            seen,
+            sorted(parent_doc["paths"]),
+            parent_doc["info"]["title"],
+            sorted(sub_doc["paths"]),
+            sub_doc["info"]["title"],
+            c.get("/sub/docs").status_code,
+        )
+
+    both(run)

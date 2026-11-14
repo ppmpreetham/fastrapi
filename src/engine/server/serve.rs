@@ -77,6 +77,26 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn of(
+        py: Python<'_>,
+        event_loop: EventLoop,
+        app: &Py<FastrAPI>,
+        app_config: &FastrAPI,
+    ) -> Self {
+        Self {
+            event_loop,
+            sync_to_threadpool: app_config.sync_to_threadpool,
+            max_body_size: app_config.max_body_size,
+            max_field_size: app_config.max_field_size,
+            max_file_size: app_config.max_file_size,
+            reject_unknown_multipart_fields: app_config.reject_unknown_multipart_fields,
+            root_path: app_config.root_path.trim_end_matches('/').into(),
+            metrics_enabled: app_config.prometheus_config.is_some(),
+            redirect_slashes: app_config.redirect_slashes,
+            app: app.clone_ref(py).into_any(),
+        }
+    }
+
     #[must_use]
     pub fn leak(self) -> &'static Self {
         Box::leak(Box::new(self))
@@ -128,19 +148,7 @@ fn build_app(py: Python<'_>, app: &Py<FastrAPI>, event_loop: EventLoop) -> PyRes
     app_bound.borrow_mut().apply_router_mounts(py)?;
     let custom_openapi = super::routes::custom_openapi_spec(py, app_bound.as_any());
     let app_config = app_bound.borrow();
-    let app_state = AppState {
-        event_loop,
-        sync_to_threadpool: app_config.sync_to_threadpool,
-        max_body_size: app_config.max_body_size,
-        max_field_size: app_config.max_field_size,
-        max_file_size: app_config.max_file_size,
-        reject_unknown_multipart_fields: app_config.reject_unknown_multipart_fields,
-        root_path: app_config.root_path.trim_end_matches('/').into(),
-        metrics_enabled: app_config.prometheus_config.is_some(),
-        redirect_slashes: app_config.redirect_slashes,
-        app: app.clone_ref(py).into_any(),
-    }
-    .leak();
+    let app_state = AppState::of(py, event_loop, app, &app_config).leak();
     let hooks = lifecycle_hooks(py, &app_config)?;
     let router = build_router(
         py,

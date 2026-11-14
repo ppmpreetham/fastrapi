@@ -27,6 +27,14 @@ impl EventLoop {
         )))))
     }
 
+    #[must_use]
+    pub fn sibling(self, py: Python<'_>) -> Self {
+        Self(Box::leak(Box::new(ServerContext::new(
+            self.0.event_loop.clone_ref(py),
+            Arc::clone(&self.0.bridge),
+        ))))
+    }
+
     #[inline]
     #[must_use]
     pub fn bind(self, py: Python<'_>) -> &Bound<'_, PyAny> {

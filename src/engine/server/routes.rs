@@ -13,7 +13,7 @@ use crate::engine::config::FastrAPI;
 use ahash::AHashMap;
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::extract::{ConnectInfo, Request};
+use axum::extract::{ConnectInfo, OriginalUri, Request};
 use axum::handler::Handler;
 use axum::http::header::{ALLOW, CONTENT_TYPE, HOST, LOCATION};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
@@ -40,11 +40,11 @@ use crate::engine::server::websocket::{
 };
 use crate::ffi::docs;
 use fastrapi_core::method::{HttpMethod, allow_header};
-use fastrapi_core::path::{host_without_port, join_path, strip_root_path};
+use fastrapi_core::path::{host_without_port, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, FrozenRouterBuilder, RoutePattern};
 use fastrapi_http::middleware::asgi::mounted_asgi;
 use fastrapi_http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer};
-use fastrapi_http::request_input::RequestInput;
+use fastrapi_http::request_input::{AsgiMount, RequestInput};
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_routing::route::{ExecutionMode, RouteEntry, RouteHandler, WebSocketEntry};
 use fastrapi_runtime::py_bridge::{self, EventLoop};
@@ -89,20 +89,6 @@ pub(crate) fn build_router(
 
     let mut routes = base_flat.0.clone();
     let mut ws_routes = base_flat.1.clone();
-    for mount in &app_config.app_mounts {
-        let sub_flat = mounted_routes(py, mount.app.bind(py))?;
-        routes.extend(sub_flat.0.iter().map(|route| {
-            let mut route = route.clone();
-            route.path = join_path(&mount.path, &route.path);
-            route
-        }));
-        ws_routes.extend(sub_flat.1.iter().map(|ws| {
-            let mut ws = ws.clone();
-            ws.path = join_path(&mount.path, &ws.path);
-            ws
-        }));
-    }
-
     for mount in &app_config.host_mounts {
         let sub_flat = mounted_routes(py, mount.app.bind(py))?;
         routes.extend(sub_flat.0.iter().map(|route| {
@@ -165,12 +151,66 @@ pub(crate) fn build_router(
         frozen_router,
     );
     let app = register_docs_endpoints(app, py, app_config, docs_url, openapi_url, custom_openapi)?;
+    let app = nest_sub_apps(py, app, app_state, app_config)?;
     Ok(middleware_stack::build_stack(
         app,
         app_config,
         &middlewares,
         app_state.event_loop,
     ))
+}
+
+fn nest_sub_apps(
+    py: Python<'_>,
+    app: Router,
+    parent: &'static AppState,
+    app_config: &FastrAPI,
+) -> PyResult<Router> {
+    app_config.app_mounts.iter().try_fold(app, |app, mount| {
+        let prefix: Arc<str> = mount.path.as_str().into();
+        let sub_app = sub_app_router(py, parent, &mount.app)?.layer(axum::middleware::map_request(
+            move |mut request: Request| {
+                mark_mounted(&mut request, &prefix);
+                async move { request }
+            },
+        ));
+        Ok(app.nest_service(&mount.path, sub_app))
+    })
+}
+
+fn sub_app_router(
+    py: Python<'_>,
+    parent: &'static AppState,
+    app: &Py<FastrAPI>,
+) -> PyResult<Router> {
+    let bound = app.bind(py);
+    bound.borrow_mut().apply_router_mounts(py)?;
+    let event_loop = parent.event_loop.sibling(py);
+    event_loop.server().set_app(app.clone_ref(py).into_any());
+    let custom_openapi = custom_openapi_spec(py, bound.as_any());
+    let config = bound.borrow();
+    let state = AppState::of(py, event_loop, app, &config).leak();
+    build_router(
+        py,
+        state,
+        config.docs_url.as_deref(),
+        config.openapi_url.as_deref(),
+        &config,
+        custom_openapi,
+    )
+}
+
+fn mark_mounted(request: &mut Request, prefix: &str) {
+    let path = request.extensions().get::<OriginalUri>().map_or_else(
+        || request.uri().path().into(),
+        |original| original.path().into(),
+    );
+    request.extensions_mut().insert(AsgiMount {
+        root_path: prefix.into(),
+        path,
+        app_root_path: None,
+        router: None,
+    });
 }
 
 type FlatRoutes = Arc<(Vec<RouteEntry>, Vec<WebSocketEntry>)>;
