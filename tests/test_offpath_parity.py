@@ -1157,3 +1157,52 @@ def test_mounted_asgi_app_streams():
     with httpx.stream("GET", f"http://127.0.0.1:{port}/sub/events", timeout=5) as response:
         lines = list(itertools.islice(response.iter_lines(), 3))
     assert lines == ["chunk 0", "chunk 1", "chunk 2"]
+
+
+def test_streaming_response_asgi_methods_match_fastapi():
+    import asyncio
+
+    import httpx
+
+    def run(lib):
+        r = lib.responses
+        calls = []
+
+        def sync_chunks():
+            yield "a"
+            yield b"b"
+
+        async def async_chunks():
+            yield "c"
+            yield "d"
+
+        tasks = lib.BackgroundTasks()
+        tasks.add_task(calls.append, "done")
+
+        async def call(response):
+            transport = httpx.ASGITransport(app=response)
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                got = await c.get("/")
+                return got.status_code, got.text, got.headers.get("content-type")
+
+        async def direct():
+            sent = []
+
+            async def send(message):
+                sent.append({k: v for k, v in message.items() if k != "headers"})
+
+            async def receive():
+                return {"type": "http.disconnect"}
+
+            response = r.StreamingResponse(sync_chunks(), media_type="text/plain")
+            await response.stream_response(send)
+            await response.listen_for_disconnect(receive)
+            return sent
+
+        streamed = [
+            asyncio.run(call(r.StreamingResponse(sync_chunks(), media_type="text/plain", background=tasks))),
+            asyncio.run(call(r.StreamingResponse(async_chunks(), status_code=201))),
+        ]
+        return streamed, calls, asyncio.run(direct())
+
+    both(run)

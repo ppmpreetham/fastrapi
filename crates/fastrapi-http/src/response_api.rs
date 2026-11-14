@@ -1,18 +1,23 @@
 //! This module contains helper functions for the Python response classes.
 //! The functions render the content, make the header list, and set cookies.
 
-use cookie::time::Duration;
-use std::borrow::Cow;
 use crate::middleware::asgi::send_response;
 use crate::response_convert::convert_auto_response;
 use crate::responses::PyStreamingResponse;
+use crate::sse::PyEventSourceResponse;
+use cookie::time::Duration;
 use cookie::{Cookie, SameSite};
 use fastrapi_pyutil::imports::SIMPLE_COOKIE;
+use fastrapi_runtime::blocking;
 use fastrapi_runtime::py_bridge;
-use pyo3::exceptions::{PyAssertionError, PyValueError};
+use pyo3::exceptions::{
+    PyAssertionError, PyRuntimeError, PyStopAsyncIteration, PyStopIteration, PyValueError,
+};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 use pyo3::{Borrowed, intern};
+use std::borrow::Cow;
+use std::sync::Arc;
 
 pub struct HeadersArg(pub Py<PyDict>);
 
@@ -291,14 +296,21 @@ pub fn asgi_call<'py>(
     send: Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let py = response.py();
-    let converted = convert_auto_response(py, response);
+    let sse = response.is_instance_of::<PyEventSourceResponse>();
+    let body = if response.is_instance_of::<PyStreamingResponse>() && !sse {
+        AsgiBody::Stream(StreamSource::of(response)?)
+    } else {
+        AsgiBody::Converted(convert_auto_response(py, response))
+    };
     let background = response.getattr(intern!(py, "background"))?.unbind();
-    let awaits_background =
-        !background.is_none(py) && !response.is_instance_of::<PyStreamingResponse>();
+    let awaits_background = !background.is_none(py) && !sse;
     let locals = py_bridge::get_current_locals(py)?;
     let send = send.unbind();
     py_bridge::future_into_py_with_locals(py, locals.clone(), async move {
-        send_response(&locals, &send, converted).await?;
+        match body {
+            AsgiBody::Stream(source) => source.send(&locals, &send).await?,
+            AsgiBody::Converted(response) => send_response(&locals, &send, response).await?,
+        }
         if awaits_background {
             let pending = Python::attach(|py| {
                 py_bridge::into_future_with_locals(&locals, background.bind(py).call0()?)
@@ -307,4 +319,164 @@ pub fn asgi_call<'py>(
         }
         Ok(())
     })
+}
+
+enum AsgiBody {
+    Stream(StreamSource),
+    Converted(axum::response::Response),
+}
+
+struct StreamSource {
+    status: u16,
+    headers: Py<PyList>,
+    iterator: Py<PyAny>,
+    is_async: bool,
+    charset: Arc<str>,
+}
+
+impl StreamSource {
+    fn of(response: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let py = response.py();
+        let content = response.getattr(intern!(py, "content"))?;
+        let is_async = content.hasattr(intern!(py, "__aiter__"))?;
+        let iterator = if is_async {
+            content.call_method0(intern!(py, "__aiter__"))?
+        } else {
+            content.try_iter()?.into_any()
+        };
+        Ok(Self {
+            status: response.getattr(intern!(py, "status_code"))?.extract()?,
+            headers: response
+                .getattr(intern!(py, "raw_headers"))?
+                .cast_into()?
+                .unbind(),
+            iterator: iterator.unbind(),
+            is_async,
+            charset: response
+                .getattr(intern!(py, "charset"))?
+                .extract::<String>()
+                .map_or_else(|_| Arc::from("utf-8"), Arc::from),
+        })
+    }
+
+    async fn send(self, locals: &py_bridge::TaskLocals, send: &Py<PyAny>) -> PyResult<()> {
+        send_message(locals, send, |py| {
+            let message = PyDict::new(py);
+            message.set_item(intern!(py, "type"), intern!(py, "http.response.start"))?;
+            message.set_item(intern!(py, "status"), self.status)?;
+            message.set_item(intern!(py, "headers"), self.headers.bind(py))?;
+            Ok(message)
+        })
+        .await?;
+        while let Some(chunk) = self.next_chunk(locals).await? {
+            send_message(locals, send, |py| body_message(py, &chunk, true)).await?;
+        }
+        send_message(locals, send, |py| body_message(py, b"", false)).await
+    }
+
+    async fn next_chunk(&self, locals: &py_bridge::TaskLocals) -> PyResult<Option<Vec<u8>>> {
+        if self.is_async {
+            let pending = Python::attach(|py| {
+                let next = self
+                    .iterator
+                    .bind(py)
+                    .call_method0(intern!(py, "__anext__"))?;
+                py_bridge::into_future_with_locals(locals, next)
+            })?;
+            return match pending.await {
+                Ok(chunk) => {
+                    Python::attach(|py| encode_chunk(chunk.bind(py), &self.charset)).map(Some)
+                }
+                Err(err) if Python::attach(|py| err.is_instance_of::<PyStopAsyncIteration>(py)) => {
+                    Ok(None)
+                }
+                Err(err) => Err(err),
+            };
+        }
+        let iterator = Python::attach(|py| self.iterator.clone_ref(py));
+        let charset = Arc::clone(&self.charset);
+        blocking::run_python(move |py| {
+            match iterator.bind(py).call_method0(intern!(py, "__next__")) {
+                Ok(chunk) => encode_chunk(&chunk, &charset).map(Some),
+                Err(err) if err.is_instance_of::<PyStopIteration>(py) => Ok(None),
+                Err(err) => Err(err),
+            }
+        })
+        .await
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+    }
+}
+
+fn encode_chunk(chunk: &Bound<'_, PyAny>, charset: &str) -> PyResult<Vec<u8>> {
+    if chunk.is_instance_of::<PyString>() {
+        return chunk
+            .call_method1(intern!(chunk.py(), "encode"), (charset,))?
+            .extract();
+    }
+    chunk.extract()
+}
+
+fn body_message<'py>(
+    py: Python<'py>,
+    chunk: &[u8],
+    more_body: bool,
+) -> PyResult<Bound<'py, PyDict>> {
+    let message = PyDict::new(py);
+    message.set_item(intern!(py, "type"), intern!(py, "http.response.body"))?;
+    message.set_item(intern!(py, "body"), PyBytes::new(py, chunk))?;
+    message.set_item(intern!(py, "more_body"), more_body)?;
+    Ok(message)
+}
+
+async fn send_message(
+    locals: &py_bridge::TaskLocals,
+    send: &Py<PyAny>,
+    message: impl for<'py> FnOnce(Python<'py>) -> PyResult<Bound<'py, PyDict>>,
+) -> PyResult<()> {
+    let pending = Python::attach(|py| {
+        py_bridge::into_future_with_locals(locals, send.bind(py).call1((message(py)?,))?)
+    })?;
+    pending.await.map(drop)
+}
+
+#[pymethods]
+impl PyStreamingResponse {
+    fn stream_response<'py>(
+        slf: &Bound<'py, Self>,
+        send: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let source = StreamSource::of(slf.as_any())?;
+        let locals = py_bridge::get_current_locals(py)?;
+        let send = send.unbind();
+        py_bridge::future_into_py_with_locals(py, locals.clone(), async move {
+            source.send(&locals, &send).await
+        })
+    }
+
+    fn listen_for_disconnect<'py>(
+        &self,
+        py: Python<'py>,
+        receive: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let locals = py_bridge::get_current_locals(py)?;
+        let receive = receive.unbind();
+        py_bridge::future_into_py_with_locals(py, locals.clone(), async move {
+            loop {
+                let pending = Python::attach(|py| {
+                    py_bridge::into_future_with_locals(&locals, receive.bind(py).call0()?)
+                })?;
+                let message = pending.await?;
+                let disconnected = Python::attach(|py| {
+                    message
+                        .bind(py)
+                        .get_item(intern!(py, "type"))
+                        .and_then(|kind| kind.eq(intern!(py, "http.disconnect")))
+                })?;
+                if disconnected {
+                    return Ok(());
+                }
+            }
+        })
+    }
 }
