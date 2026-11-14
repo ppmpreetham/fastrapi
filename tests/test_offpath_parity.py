@@ -1061,3 +1061,71 @@ def test_yield_cleanup_timing_matches_fastapi():
         return results
 
     both(run)
+
+
+def test_call_next_response_matches_fastapi():
+    def run(lib):
+        app = new_app(lib)
+
+        @app.middleware("http")
+        async def edit(request, call_next):
+            response = await call_next(request)
+            if request.url.path == "/read":
+                body = b"".join([chunk async for chunk in response.body_iterator])
+                return lib.responses.PlainTextResponse(body.decode().upper(), status_code=response.status_code)
+            response.status_code = 202
+            response.headers["x-mw"] = "1"
+            response.set_cookie("c", "v")
+            return response
+
+        @app.get("/plain")
+        def plain():
+            return {"a": 1}
+
+        @app.get("/read")
+        def read():
+            return "hello"
+
+        @app.get("/stream")
+        def stream():
+            def chunks():
+                yield "a"
+                yield "b"
+
+            return lib.responses.StreamingResponse(chunks(), media_type="text/plain")
+
+        c = client(app)
+        responses = [c.get(path) for path in ("/plain", "/read", "/stream")]
+        return [(r.status_code, r.text, r.headers.get("x-mw"), r.headers.get("set-cookie")) for r in responses]
+
+    both(run)
+
+
+def test_call_next_streams_infinite_responses():
+    import itertools
+    import time
+
+    import httpx
+
+    from test_websocket_smoke import _free_port, _serve
+
+    app = fastrapi.FastrAPI()
+
+    @app.middleware("http")
+    async def passthrough(request, call_next):
+        return await call_next(request)
+
+    @app.get("/events")
+    def events():
+        def forever():
+            for index in itertools.count():
+                yield f"chunk {index}\n"
+                time.sleep(0.01)
+
+        return fastrapi.responses.StreamingResponse(forever(), media_type="text/plain")
+
+    port = _free_port()
+    _serve(app, port)
+    with httpx.stream("GET", f"http://127.0.0.1:{port}/events", timeout=5) as response:
+        lines = list(itertools.islice(response.iter_lines(), 3))
+    assert lines == ["chunk 0", "chunk 1", "chunk 2"]

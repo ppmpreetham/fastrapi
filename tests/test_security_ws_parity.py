@@ -325,8 +325,9 @@ def test_middleware_ordering_last_declared_outermost():
 
         async def __call__(self, request, call_next):
             response = await call_next(request)
+            body = b"".join([chunk async for chunk in response.body_iterator])
             try:
-                seen = _json.loads(response.body).get("seen", [])
+                seen = _json.loads(body).get("seen", [])
             except (ValueError, AttributeError, TypeError):
                 seen = []
             seen.insert(0, self.tag)

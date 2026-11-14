@@ -8,19 +8,21 @@ use std::sync::Arc;
 use crate::exceptions::{UnhandledError, plain_server_error, server_error_response};
 use crate::request::{PyRequest, PyScopeHeaders};
 use crate::response_convert::convert_auto_response;
-use axum::body::{Body, to_bytes};
+use axum::body::{Body, BodyDataStream};
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use fastrapi_runtime::blocking::run_python;
+use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 use pyo3::{Bound, intern};
 use pyo3_async_runtimes::TaskLocals;
+use std::sync::atomic::{AtomicU16, Ordering};
 
 #[pyclass(
     frozen,
@@ -29,31 +31,137 @@ use pyo3_async_runtimes::TaskLocals;
     skip_from_py_object
 )]
 pub struct PyDownstreamResponse {
-    #[pyo3(get)]
-    pub status_code: u16,
+    status_code: AtomicU16,
     #[pyo3(get)]
     pub raw_headers: Py<PyList>,
-    pub body_bytes: bytes::Bytes,
+    stream: BodySlot,
 }
+
+type BodySlot = Arc<Mutex<Option<BodyDataStream>>>;
 
 #[pymethods]
 impl PyDownstreamResponse {
+    #[getter]
+    fn status_code(&self) -> u16 {
+        self.status_code.load(Ordering::Relaxed)
+    }
+
+    #[setter]
+    fn set_status_code(&self, status_code: u16) {
+        self.status_code.store(status_code, Ordering::Relaxed);
+    }
+
     #[getter]
     fn headers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         crate::response_api::headers(py, &self.raw_headers)
     }
 
-    fn __repr__(&self) -> String {
-        format!("DownstreamResponse(status_code={})", self.status_code)
-    }
-
     #[getter]
-    fn body<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.body_bytes)
+    fn body_iterator(&self) -> PyBodyIterator {
+        PyBodyIterator {
+            stream: Arc::clone(&self.stream),
+        }
     }
 
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body_bytes).into_owned()
+    #[pyo3(signature = (key, value=String::new(), max_age=None, expires=None, path=Some("/".to_owned()), domain=None, secure=false, httponly=false, samesite=Some("lax".to_owned()), partitioned=false))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the signature copies starlette Response.set_cookie"
+    )]
+    fn set_cookie(
+        &self,
+        py: Python<'_>,
+        key: String,
+        value: String,
+        max_age: Option<i64>,
+        expires: Option<&Bound<'_, PyAny>>,
+        path: Option<String>,
+        domain: Option<String>,
+        secure: bool,
+        httponly: bool,
+        samesite: Option<String>,
+        partitioned: bool,
+    ) -> PyResult<()> {
+        crate::response_api::set_cookie(
+            py,
+            &self.raw_headers,
+            key,
+            value,
+            max_age,
+            expires,
+            path,
+            domain,
+            secure,
+            httponly,
+            samesite,
+            partitioned,
+        )
+    }
+
+    #[pyo3(signature = (key, path=Some("/".to_owned()), domain=None, secure=false, httponly=false, samesite=Some("lax".to_owned()), partitioned=false))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the signature copies starlette Response.delete_cookie"
+    )]
+    fn delete_cookie(
+        &self,
+        py: Python<'_>,
+        key: String,
+        path: Option<String>,
+        domain: Option<String>,
+        secure: bool,
+        httponly: bool,
+        samesite: Option<String>,
+        partitioned: bool,
+    ) -> PyResult<()> {
+        let expires = pyo3::types::PyInt::new(py, 0);
+        crate::response_api::set_cookie(
+            py,
+            &self.raw_headers,
+            key,
+            String::new(),
+            Some(0),
+            Some(expires.as_any()),
+            path,
+            domain,
+            secure,
+            httponly,
+            samesite,
+            partitioned,
+        )
+    }
+
+    fn __repr__(&self) -> String {
+        format!("DownstreamResponse(status_code={})", self.status_code())
+    }
+}
+
+#[pyclass(frozen, name = "BodyIterator", module = "fastrapi.middleware")]
+pub struct PyBodyIterator {
+    stream: BodySlot,
+}
+
+#[pymethods]
+impl PyBodyIterator {
+    const fn __aiter__(slf: Bound<'_, Self>) -> Bound<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let slot = Arc::clone(&self.stream);
+        py_bridge::future_into_py(py, async move {
+            let Some(mut stream) = slot.lock().take() else {
+                return Err(PyStopAsyncIteration::new_err(()));
+            };
+            match stream.next().await {
+                Some(Ok(chunk)) => {
+                    *slot.lock() = Some(stream);
+                    Ok(Python::attach(|py| PyBytes::new(py, &chunk).unbind()))
+                }
+                Some(Err(err)) => Err(PyRuntimeError::new_err(err.to_string())),
+                None => Err(PyStopAsyncIteration::new_err(())),
+            }
+        })
     }
 }
 
@@ -102,10 +210,7 @@ impl PyCallNext {
                 return Err(Python::attach(|py| err.clone_ref(py)));
             }
             let (parts, body) = split_response(response);
-            let body_bytes = to_bytes(body, usize::MAX)
-                .await
-                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-            Python::attach(|py| Ok(parts_to_py(py, &parts, body_bytes)?.unbind()))
+            Python::attach(|py| Ok(parts_to_py(py, &parts, body)?.unbind()))
         };
         let locals = TaskLocals::new(event_loop.bind(py).clone());
         py_bridge::future_into_py_with_locals(py, locals, bridged)
@@ -131,7 +236,7 @@ fn split_response(response: Response) -> (DownstreamParts, Body) {
 fn parts_to_py<'py>(
     py: Python<'py>,
     parts: &DownstreamParts,
-    body: bytes::Bytes,
+    body: Body,
 ) -> PyResult<Bound<'py, PyAny>> {
     let raw_headers = PyList::empty(py);
     for (name, value) in &parts.headers {
@@ -144,9 +249,9 @@ fn parts_to_py<'py>(
     Bound::new(
         py,
         PyDownstreamResponse {
-            status_code: parts.status,
+            status_code: AtomicU16::new(parts.status),
             raw_headers: raw_headers.unbind(),
-            body_bytes: body,
+            stream: Arc::new(Mutex::new(Some(body.into_data_stream()))),
         },
     )
     .map(Bound::into_any)
@@ -154,18 +259,21 @@ fn parts_to_py<'py>(
 
 fn py_to_response(py: Python<'_>, value: &Bound<'_, PyAny>) -> Response {
     if let Ok(downstream) = value.cast::<PyDownstreamResponse>() {
-        let ds = downstream.borrow();
+        let ds = downstream.get();
         let status =
-            StatusCode::from_u16(ds.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            StatusCode::from_u16(ds.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let mut builder = Response::builder().status(status);
         for item in ds.raw_headers.bind(py).iter() {
             if let Ok((name, value)) = item.extract::<(&[u8], &[u8])>() {
                 builder = builder.header(name, value);
             }
         }
-        return builder
-            .body(Body::from(ds.body_bytes.clone()))
-            .unwrap_or_else(|_| plain_server_error());
+        let body = ds
+            .stream
+            .lock()
+            .take()
+            .map_or_else(Body::empty, Body::from_stream);
+        return builder.body(body).unwrap_or_else(|_| plain_server_error());
     }
 
     convert_auto_response(py, value)
