@@ -85,6 +85,10 @@ impl<'py> Errors<'py> {
                 source: source_name(&param.source),
                 alias: Some(param.alias_py.bind(self.py).clone()),
             },
+            Loc::Alias(source, alias) => ErrorItem::Missing {
+                source: source_name(source),
+                alias: Some(alias.bind(self.py).clone()),
+            },
             Loc::Source(source) => ErrorItem::Missing {
                 source: source_name(source),
                 alias: None,
@@ -240,6 +244,7 @@ const fn source_name(source: &ParameterSource) -> &'static str {
 #[derive(Clone, Copy)]
 enum Loc<'a> {
     Field(&'a ParsedParameter),
+    Alias(&'a ParameterSource, &'a Py<PyString>),
     Source(&'a ParameterSource),
 }
 
@@ -253,9 +258,28 @@ impl Loc<'_> {
                     param.alias_py.bind(py).clone(),
                 ],
             ),
+            Self::Alias(source, alias) => PyTuple::new(
+                py,
+                [
+                    PyString::new(py, source_name(source)),
+                    alias.bind(py).clone(),
+                ],
+            ),
             Self::Source(source) => PyTuple::new(py, [source_name(source)]),
         }
     }
+}
+
+fn choose<T>(param: &ParsedParameter, lookup: impl Fn(&str) -> Option<T>) -> (Option<T>, Loc<'_>) {
+    let Some(choices) = &param.alias_choices else {
+        return (lookup(&param.external_name), Loc::Field(param));
+    };
+    choices
+        .iter()
+        .find_map(|(name, alias)| {
+            lookup(name).map(|found| (Some(found), Loc::Alias(&param.source, alias)))
+        })
+        .unwrap_or((None, Loc::Field(param)))
 }
 
 fn parse_bool(raw: &str) -> Option<bool> {
@@ -653,6 +677,9 @@ pub fn request_param_value<'py>(
     if let Some(model) = &param.model {
         return model_param(py, param, model, input, errors);
     }
+    if param.alias_choices.is_some() {
+        return choice_param(py, param, input, errors);
+    }
     let raw = if param.is_list {
         let values = source_values(&param.source, &param.external_name, input);
         if let Some(converted) = fast_values(py, param, &values) {
@@ -670,6 +697,32 @@ pub fn request_param_value<'py>(
         value.map(|text| PyString::new(py, &text).into_any())
     };
     resolve(py, param, raw, Loc::Field(param), errors)
+}
+
+fn choice_param<'py>(
+    py: Python<'py>,
+    param: &ParsedParameter,
+    input: &RequestInput<'_>,
+    errors: &mut Errors<'py>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let (values, loc) = choose(param, |name| {
+        let values = if param.is_list {
+            source_values(&param.source, name, input)
+        } else {
+            source_value(&param.source, name, input)
+                .into_iter()
+                .collect()
+        };
+        Some(values).filter(|values| !values.is_empty())
+    });
+    let raw = match values {
+        Some(values) if param.is_list => string_list(py, values.iter())?,
+        Some(values) => values
+            .last()
+            .map(|value| PyString::new(py, value).into_any()),
+        None => None,
+    };
+    resolve(py, param, raw, loc, errors)
 }
 
 fn form_field_to_py<'py>(
@@ -719,9 +772,9 @@ fn form_values<'py>(
 fn form_param_value<'py>(
     py: Python<'py>,
     param: &ParsedParameter,
-    fields: Option<&FormFields>,
+    values: Option<&[BodyField]>,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let Some(values) = fields.and_then(|fields| fields.get(param.external_name.as_str())) else {
+    let Some(values) = values else {
         return Ok(None);
     };
     if !param.is_list && param.is_form && is_blank(values) {
@@ -930,13 +983,13 @@ fn apply_json_body<'py>(
     }
     let object = object.flatten();
     for param in params {
-        let found = object.and_then(|object| object.get(param.external_name.as_str()));
+        let (found, loc) = choose(param, |name| object.and_then(|object| object.get(name)));
         if let Some(converted) = found.and_then(|value| fast_json(py, param, value)) {
             kwargs.set(param.name_py.bind(py), converted)?;
             continue;
         }
         let raw = found.and_then(|value| json_value_to_py(py, value).ok());
-        if let Some(value) = resolve(py, param, raw, Loc::Field(param), errors)? {
+        if let Some(value) = resolve(py, param, raw, loc, errors)? {
             kwargs.set(param.name_py.bind(py), value)?;
         }
     }
@@ -946,9 +999,8 @@ fn apply_json_body<'py>(
 fn form_fast<'py>(
     py: Python<'py>,
     param: &ParsedParameter,
-    fields: Option<&FormFields>,
+    values: &[BodyField],
 ) -> Option<Bound<'py, PyAny>> {
-    let values = fields?.get(param.external_name.as_str())?;
     if param.is_list {
         let texts = values
             .iter()
@@ -978,7 +1030,8 @@ fn apply_form_body<'py>(
         let value = if let Some(model) = &param.model {
             form_model_param(py, param, model, fields, errors)?
         } else {
-            let raw = form_param_value(py, param, fields)?;
+            let values = fields.and_then(|fields| fields.get(param.external_name.as_str()));
+            let raw = form_param_value(py, param, values.map(SmallVec::as_slice))?;
             resolve(py, param, raw, Loc::Source(&param.source), errors)?
         };
         if let Some(value) = value {
@@ -993,12 +1046,17 @@ fn apply_form_body<'py>(
             }
             continue;
         }
-        if let Some(value) = form_fast(py, param, fields) {
+        let (values, loc) = choose(param, |name| {
+            fields
+                .and_then(|fields| fields.get(name))
+                .map(SmallVec::as_slice)
+        });
+        if let Some(value) = values.and_then(|values| form_fast(py, param, values)) {
             kwargs.set(param.name_py.bind(py), value)?;
             continue;
         }
-        let raw = form_param_value(py, param, fields)?;
-        if let Some(value) = resolve(py, param, raw, Loc::Field(param), errors)? {
+        let raw = form_param_value(py, param, values)?;
+        if let Some(value) = resolve(py, param, raw, loc, errors)? {
             kwargs.set(param.name_py.bind(py), value)?;
         }
     }

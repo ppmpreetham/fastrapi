@@ -10,7 +10,7 @@ from functools import partial
 from types import NoneType, UnionType
 from typing import Annotated, Any, Union, get_args, get_origin
 
-from pydantic import BaseModel, Field, Json, TypeAdapter
+from pydantic import AliasChoices, BaseModel, Field, Json, TypeAdapter
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined, ValidationError
 
@@ -333,6 +333,13 @@ def validation_alias(field_info: FieldInfo, name: str) -> str:
     return field_info.alias if field_info.alias is not None else name
 
 
+def alias_choices(field_info: FieldInfo) -> list[str] | None:
+    alias = field_info.validation_alias
+    if isinstance(field_info, Path) or not isinstance(alias, AliasChoices):
+        return None
+    return list(alias.choices) if all(isinstance(choice, str) for choice in alias.choices) else None
+
+
 EMPTY_DEFAULTS = {list: "list", dict: "dict", set: "set"}
 CONSTRAINT_NAMES = {"Gt": "gt", "Ge": "ge", "Lt": "lt", "Le": "le", "MinLen": "min_length", "MaxLen": "max_length"}
 NUMERIC_CONSTRAINTS = {"gt", "ge", "lt", "le"}
@@ -441,6 +448,7 @@ class FieldSpec:
         "model_keys",
         "model_class",
         "model_presence",
+        "alias_choices",
         "loc_renames",
         "fast",
         "validate",
@@ -546,7 +554,8 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
         ), f"Query parameter {param_name!r} must be one of the supported types"
     spec = FieldSpec()
     spec.name = param_name
-    spec.alias = validation_alias(field_info, param_name)
+    spec.alias_choices = alias_choices(field_info)
+    spec.alias = spec.alias_choices[0] if spec.alias_choices else validation_alias(field_info, param_name)
     spec.lookup = spec.alias
     spec.field_info = field_info
     spec.annotation = type_annotation

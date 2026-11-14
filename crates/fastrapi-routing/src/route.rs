@@ -59,6 +59,7 @@ pub struct ParsedParameter {
     pub name: String,
     pub name_py: Py<PyString>,
     pub external_name: String,
+    pub alias_choices: Option<Box<[(String, Py<PyString>)]>>,
     pub alias_py: Py<PyString>,
     pub header_name: Option<axum::http::HeaderName>,
     pub source: ParameterSource,

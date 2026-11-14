@@ -4,7 +4,7 @@ from typing import Annotated
 import fastapi
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 import fastrapi
 
@@ -238,5 +238,50 @@ def test_form_models():
             client.post("/combined", data={"name": "a"}),
         ]
         return [(r.status_code, r.json()) for r in calls]
+
+    both(run)
+
+
+def test_alias_choices():
+    class Item(BaseModel):
+        name: str
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/params")
+        def params(
+            q: Annotated[int, lib.Query(validation_alias=AliasChoices("q", "query"))],
+            tags: Annotated[list[str], lib.Query(validation_alias=AliasChoices("tag", "t"))] = [],
+            h: Annotated[str, lib.Header(validation_alias=AliasChoices("x-h", "x-alt"))] = "none",
+            c: Annotated[str | None, lib.Cookie(validation_alias=AliasChoices("c", "cookie_c"))] = None,
+        ):
+            return [q, tags, h, c]
+
+        @app.post("/body")
+        def body(item: Annotated[Item, lib.Body(validation_alias=AliasChoices("item", "payload"), embed=True)]):
+            return item
+
+        @app.post("/form")
+        def form(
+            name: Annotated[str, lib.Form(validation_alias=AliasChoices("name", "n"))],
+            age: Annotated[int, lib.Form()] = 0,
+        ):
+            return [name, age]
+
+        client = TestClient(app)
+        client.cookies.set("cookie_c", "cv")
+        calls = [
+            client.get("/params?query=1&t=a&t=b", headers={"x-alt": "y"}),
+            client.get("/params?q=2&query=3&tag=z"),
+            client.get("/params?query=x"),
+            client.get("/params"),
+            client.post("/body", json={"payload": {"name": "n"}}),
+            client.post("/body", json={"payload": {}}),
+            client.post("/body", json={}),
+            client.post("/form", data={"n": "v", "age": "2"}),
+            client.post("/form", data={"age": "2"}),
+        ]
+        return [(r.status_code, r.json()) for r in calls], app.openapi()["paths"]
 
     both(run)

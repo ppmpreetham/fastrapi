@@ -49,6 +49,23 @@ fn optional<'py>(
     Ok(Some(spec.getattr(name)?).filter(|value| !value.is_none()))
 }
 
+fn alias_choices(spec: &Bound<'_, PyAny>) -> PyResult<Option<Box<[(String, Py<PyString>)]>>> {
+    let py = spec.py();
+    optional(spec, intern!(py, "alias_choices"))?
+        .map(|choices| {
+            choices.extract::<Vec<String>>().map(|choices| {
+                choices
+                    .into_iter()
+                    .map(|choice| {
+                        let alias = PyString::intern(py, &choice).unbind();
+                        (choice, alias)
+                    })
+                    .collect()
+            })
+        })
+        .transpose()
+}
+
 fn param_model(spec: &Bound<'_, PyAny>) -> PyResult<Option<Arc<ParamModel>>> {
     let py = spec.py();
     let Some(keys) = optional(spec, intern!(py, "model_keys"))? else {
@@ -91,6 +108,7 @@ fn injected_parameter(
         alias_py: name_py.clone_ref(py),
         name_py,
         external_name: param_name.to_owned(),
+        alias_choices: None,
         header_name: None,
         source,
         annotation: None,
@@ -210,6 +228,7 @@ pub fn parse_parameter_spec(
         validate_json: optional(&spec, intern!(py, "validate_json"))?.map(Bound::unbind),
         param_object: Some(field_info.unbind()),
         external_name,
+        alias_choices: alias_choices(&spec)?,
         validator_index: None,
     })
 }
