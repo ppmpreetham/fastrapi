@@ -12,7 +12,9 @@ use axum::response::{IntoResponse, Response};
 use bytes::{Bytes, BytesMut};
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
+use fastrapi_runtime::tokio_runtime::spawn;
 use futures_util::StreamExt;
+use futures_util::stream::unfold;
 use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
@@ -20,7 +22,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyList};
 use std::pin::pin;
 use std::sync::Arc;
-use tokio::sync::mpsc::{Sender, channel};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tracing::error;
 
@@ -394,7 +397,7 @@ async fn drive_asgi(
     body_bytes: Bytes,
     event_loop: EventLoop,
 ) -> PyResult<Response> {
-    let (send_tx, mut send_rx) = channel::<Py<PyAny>>(16);
+    let (send_tx, send_rx) = channel::<Py<PyAny>>(16);
     let (finished_tx, finished_rx) = watch::channel(false);
 
     let outcome = Python::attach(|py| -> PyResult<_> {
@@ -422,27 +425,64 @@ async fn drive_asgi(
         py_bridge::schedule_task(py, event_loop, coro)
     });
 
-    let parse = |msg: Py<PyAny>| Python::attach(|py| parse_response_message(py, msg.bind(py)));
-    let mut messages = Vec::new();
-    let failed = match outcome {
-        Ok(fut) => {
-            let mut fut = pin!(fut);
-            loop {
-                tokio::select! {
-                    Some(msg) = send_rx.recv() => messages.push(parse(msg)),
-                    result = &mut fut => break result.err(),
-                }
+    let (head_tx, head_rx) = oneshot::channel();
+    let (body_tx, body_rx) = channel(16);
+    spawn(pump(outcome?, send_rx, head_tx, body_tx));
+    let (status, headers) = head_rx.await.map_err(|_| {
+        PyRuntimeError::new_err("the ASGI app completed without sending a response")
+    })??;
+    let body = unfold(body_rx, |mut body_rx| async move {
+        body_rx.recv().await.map(|chunk| (chunk, body_rx))
+    });
+    Ok(build_response(status, headers, Body::from_stream(body)))
+}
+
+type Head = (u16, Vec<(Bytes, Bytes)>);
+type BodyChunk = Result<Bytes, std::io::Error>;
+
+async fn pump(
+    fut: py_bridge::PyTaskFuture,
+    mut send_rx: Receiver<Py<PyAny>>,
+    head_tx: oneshot::Sender<PyResult<Head>>,
+    body_tx: Sender<BodyChunk>,
+) {
+    let mut head = Some(head_tx);
+    let mut fut = pin!(fut);
+    let result = loop {
+        tokio::select! {
+            Some(msg) = send_rx.recv() => forward(&mut head, &body_tx, msg).await,
+            result = &mut fut => break result,
+        }
+    };
+    while let Ok(msg) = send_rx.try_recv() {
+        forward(&mut head, &body_tx, msg).await;
+    }
+    if let Err(err) = result {
+        if let Some(head_tx) = head.take() {
+            _ = head_tx.send(Err(err));
+        } else {
+            let failure = std::io::Error::other(err.to_string());
+            _ = body_tx.send(Err(failure)).await;
+        }
+    }
+}
+
+async fn forward(
+    head: &mut Option<oneshot::Sender<PyResult<Head>>>,
+    body_tx: &Sender<BodyChunk>,
+    msg: Py<PyAny>,
+) {
+    match Python::attach(|py| parse_response_message(py, msg.bind(py))) {
+        ResponseMessage::Start(status, headers) => {
+            if let Some(head_tx) = head.take() {
+                _ = head_tx.send(Ok((status, headers)));
             }
         }
-        Err(err) => Some(err),
-    };
-    if let Some(err) = failed {
-        return Err(err);
+        ResponseMessage::Body(chunk, _) if !chunk.is_empty() => {
+            _ = body_tx.send(Ok(chunk)).await;
+        }
+        _ => {}
     }
-    while let Ok(msg) = send_rx.try_recv() {
-        messages.push(parse(msg));
-    }
-    Ok(collect_response(messages))
 }
 
 fn parse_response_message(py: Python<'_>, msg: &Bound<'_, PyAny>) -> ResponseMessage {
@@ -483,44 +523,24 @@ fn parse_response_message(py: Python<'_>, msg: &Bound<'_, PyAny>) -> ResponseMes
     }
 }
 
-fn collect_response(messages: Vec<ResponseMessage>) -> Response {
-    let mut status = None;
-    let mut headers = HeaderMap::new();
-    let mut body = BytesMut::new();
-
-    for message in messages {
-        match message {
-            ResponseMessage::Start(msg_status, msg_headers) => {
-                status.get_or_insert(msg_status);
-                for (name, value) in msg_headers {
-                    if let (Ok(name), Ok(value)) = (
-                        HeaderName::try_from(name.as_ref()),
-                        HeaderValue::try_from(value.as_ref()),
-                    ) {
-                        headers.append(name, value);
-                    } else {
-                        error!("asgi middleware sent an invalid response header");
-                    }
-                }
-            }
-            ResponseMessage::Body(chunk, _) => body.extend(chunk),
-            ResponseMessage::Other => {}
+fn build_response(status: u16, headers: Vec<(Bytes, Bytes)>, body: Body) -> Response {
+    let mut header_map = HeaderMap::new();
+    for (name, value) in headers {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::try_from(name.as_ref()),
+            HeaderValue::try_from(value.as_ref()),
+        ) {
+            header_map.append(name, value);
+        } else {
+            error!("the ASGI app sent an invalid response header");
         }
     }
-
-    let Some(status) = status else {
-        error!("asgi middleware completed without sending a response");
-        return plain_server_error();
-    };
-
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder().status(status);
     if let Some(parts) = builder.headers_mut() {
-        *parts = headers;
+        *parts = header_map;
     }
-    builder
-        .body(Body::from(body.freeze()))
-        .unwrap_or_else(|_| plain_server_error())
+    builder.body(body).unwrap_or_else(|_| plain_server_error())
 }
 
 fn build_scope(py: Python<'_>, parts: &Parts, server: EventLoop) -> PyResult<Py<PyDict>> {

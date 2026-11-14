@@ -1129,3 +1129,31 @@ def test_call_next_streams_infinite_responses():
     with httpx.stream("GET", f"http://127.0.0.1:{port}/events", timeout=5) as response:
         lines = list(itertools.islice(response.iter_lines(), 3))
     assert lines == ["chunk 0", "chunk 1", "chunk 2"]
+
+
+def test_mounted_asgi_app_streams():
+    import itertools
+    import time
+
+    import httpx
+    import starlette.applications
+    import starlette.responses
+    import starlette.routing
+
+    from test_websocket_smoke import _free_port, _serve
+
+    def forever():
+        for index in itertools.count():
+            yield f"chunk {index}\n"
+            time.sleep(0.01)
+
+    async def events(request):
+        return starlette.responses.StreamingResponse(forever(), media_type="text/plain")
+
+    app = fastrapi.FastrAPI()
+    app.mount("/sub", starlette.applications.Starlette(routes=[starlette.routing.Route("/events", events)]))
+    port = _free_port()
+    _serve(app, port)
+    with httpx.stream("GET", f"http://127.0.0.1:{port}/sub/events", timeout=5) as response:
+        lines = list(itertools.islice(response.iter_lines(), 3))
+    assert lines == ["chunk 0", "chunk 1", "chunk 2"]
