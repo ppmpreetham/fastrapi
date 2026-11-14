@@ -438,7 +438,10 @@ fn resolve<'py>(
             errors.missing(loc);
             return Ok(None);
         }
-        return default_value(py, param).map(Some);
+        return match default_value(py, param) {
+            Ok(value) => Ok(Some(value)),
+            Err(err) => errors.rejected(err, loc).map(|()| None),
+        };
     };
     match param.validate.bind(py).call1((raw,)) {
         Ok(value) => Ok(Some(value)),

@@ -322,11 +322,15 @@ EXACT_FLOAT = 2**53
 
 
 def empty_default(field_info: FieldInfo) -> str | None:
-    if field_info.is_required() or field_info.default_factory is not None:
+    if field_info.is_required() or field_info.default_factory is not None or field_info.validate_default:
         return None
     default = field_info.default
     kind = EMPTY_DEFAULTS.get(type(default))
     return kind if kind is not None and not default else None
+
+
+def validated_default(field_info: FieldInfo, validate):
+    return lambda: validate(deepcopy(field_info.get_default(call_default_factory=True)))
 
 
 def default_maker(field_info: FieldInfo):
@@ -540,6 +544,8 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
     adapter = type_adapter(field_info)
     spec.validate = partial(adapter.validate_python, from_attributes=True)
     spec.validate_json = adapter.validate_json
+    if field_info.validate_default and not spec.required:
+        spec.make_default = validated_default(field_info, spec.validate)
     spec.core_schema = adapter.core_schema
     spec.fast = None if spec.sequence else fast_kind(field_info, field_info.annotation)
     spec.fast_list = fast_list_kind(field_info, field_info.annotation) if spec.sequence else None
