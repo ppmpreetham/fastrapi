@@ -292,6 +292,21 @@ def is_union_of_models(annotation: Any) -> bool:
     return _is_union(get_origin(annotation)) and all(lenient_issubclass(arg, BaseModel) for arg in get_args(annotation))
 
 
+def param_model(field_info: FieldInfo) -> type[BaseModel] | None:
+    annotation = field_info.annotation
+    if isinstance(field_info, Param) and _is_union(get_origin(annotation)):
+        args = get_args(annotation)
+        if len(args) == 2 and NoneType in args:
+            annotation = next(arg for arg in args if arg is not NoneType)
+    return annotation if lenient_issubclass(annotation, BaseModel) and not _is_json(field_info) else None
+
+
+def model_presence(field_info: FieldInfo, model: type[BaseModel] | None) -> str | None:
+    if model is None or model is field_info.annotation:
+        return None
+    return "any" if model.model_config.get("extra") in ("allow", "forbid") else "own"
+
+
 def copy_field_info(field_info: FieldInfo, annotation: Any) -> FieldInfo:
     merged = type(field_info).from_annotation(annotation)
     new = copy(field_info)
@@ -423,6 +438,8 @@ class FieldSpec:
         "sequence",
         "model",
         "model_keys",
+        "model_class",
+        "model_presence",
         "loc_renames",
         "fast",
         "validate",
@@ -524,7 +541,7 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
         assert (
             is_scalar(field_info.annotation, upload)
             or is_scalar_sequence(field_info.annotation, upload)
-            or lenient_issubclass(field_info.annotation, BaseModel)
+            or param_model(field_info) is not None
         ), f"Query parameter {param_name!r} must be one of the supported types"
     spec = FieldSpec()
     spec.name = param_name
@@ -538,15 +555,18 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
     spec.default = None if spec.required else field_info.get_default(call_default_factory=False)
     spec.make_default = default_maker(field_info)
     spec.sequence = is_sequence(field_info.annotation) and not _is_json(field_info)
-    spec.model = lenient_issubclass(field_info.annotation, BaseModel)
+    model = param_model(field_info)
+    spec.model = model is not None
+    spec.model_class = model
+    spec.model_presence = model_presence(field_info, model)
     spec.model_keys = (
-        _model_keys(field_info.annotation, spec.source, getattr(field_info, "convert_underscores", True))
+        _model_keys(model, spec.source, getattr(field_info, "convert_underscores", True))
         if spec.model and (spec.source != "body" or isinstance(field_info, Form))
         else None
     )
     spec.loc_renames = (
         {key.alias: key.lookup for key in spec.model_keys if key.alias != key.lookup} or None
-        if spec.model_keys and spec.source == "header" and field_info.annotation.model_config.get("loc_by_alias", True)
+        if spec.model_keys and spec.source == "header" and model.model_config.get("loc_by_alias", True)
         else None
     )
     adapter = type_adapter(field_info)

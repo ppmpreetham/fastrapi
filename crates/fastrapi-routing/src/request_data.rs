@@ -5,7 +5,9 @@
 use crate::kernel_validation::{KernelOutcome, kernel_error_object, maybe_validate_with_kernel};
 use crate::params::{errors_with_loc, json_error};
 use crate::pydantic::parse_json;
-use crate::route::{EmptyDefault, FastKind, ModelKey, ParsedParameter, RouteHandler};
+use crate::route::{
+    EmptyDefault, FastKind, ModelKey, ModelPresence, ParamModel, ParsedParameter, RouteHandler,
+};
 use crate::security::PySecurityScopes;
 use ahash::AHashMap;
 use axum::http::header::CONTENT_TYPE;
@@ -554,13 +556,15 @@ fn model_dict<'py>(
     keys: &[ModelKey],
     dict: &Bound<'py, PyDict>,
     value: impl Fn(&ModelKey) -> PyResult<Option<Bound<'py, PyAny>>>,
-) -> PyResult<()> {
+) -> PyResult<bool> {
+    let mut found_any = false;
     for key in keys {
         if let Some(found) = value(key)? {
             dict.set_item(key.alias.bind(py), found)?;
+            found_any = true;
         }
     }
-    Ok(())
+    Ok(found_any)
 }
 
 fn is_model_key(py: Python<'_>, keys: &[ModelKey], name: &str) -> bool {
@@ -572,13 +576,14 @@ fn is_model_key(py: Python<'_>, keys: &[ModelKey], name: &str) -> bool {
 fn model_param<'py>(
     py: Python<'py>,
     param: &ParsedParameter,
-    keys: &[ModelKey],
+    model: &ParamModel,
     input: &RequestInput<'_>,
     errors: &mut Errors<'py>,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
     let source = &param.source;
+    let keys = &model.keys;
     let dict = PyDict::new(py);
-    model_dict(py, keys, &dict, |key| {
+    let found_own = model_dict(py, keys, &dict, |key| {
         if key.sequence {
             string_list(py, source_values(source, &key.lookup, input).iter())
         } else {
@@ -612,6 +617,14 @@ fn model_param<'py>(
         }
         _ => {}
     }
+    let present = match model.presence {
+        None => true,
+        Some(ModelPresence::OwnKeys) => found_own,
+        Some(ModelPresence::AnyKey) => !dict.is_empty(),
+    };
+    if !present {
+        return resolve(py, param, None, Loc::Source(source), errors);
+    }
     match param.validate.bind(py).call1((dict,)) {
         Ok(value) => Ok(Some(value)),
         Err(err) => errors
@@ -637,8 +650,8 @@ pub fn request_param_value<'py>(
         }
         _ => {}
     }
-    if let Some(keys) = &param.model_keys {
-        return model_param(py, param, keys, input, errors);
+    if let Some(model) = &param.model {
+        return model_param(py, param, model, input, errors);
     }
     let raw = if param.is_list {
         let values = source_values(&param.source, &param.external_name, input);
@@ -959,8 +972,8 @@ fn apply_form_body<'py>(
 ) -> PyResult<()> {
     if !handler.payload.body_embed {
         let param = params[0];
-        let raw = match &param.model_keys {
-            Some(keys) => Some(form_model(py, keys, fields)?),
+        let raw = match &param.model {
+            Some(model) => Some(form_model(py, &model.keys, fields)?),
             None => form_param_value(py, param, fields)?,
         };
         if let Some(value) = resolve(py, param, raw, Loc::Source(&param.source), errors)? {

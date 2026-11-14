@@ -37,6 +37,19 @@ pub struct ModelKey {
     pub sequence: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelPresence {
+    OwnKeys,
+    AnyKey,
+}
+
+#[derive(Debug)]
+pub struct ParamModel {
+    pub class: Py<PyAny>,
+    pub keys: Box<[ModelKey]>,
+    pub presence: Option<ModelPresence>,
+}
+
 #[expect(
     clippy::struct_excessive_bools,
     reason = "Parsed parameter tracks multiple boolean validation and extraction flags"
@@ -59,7 +72,7 @@ pub struct ParsedParameter {
     pub constraints: ParameterConstraints,
     pub param_object: Option<Py<PyAny>>,
     pub is_pydantic_model: bool,
-    pub model_keys: Option<Arc<[ModelKey]>>,
+    pub model: Option<Arc<ParamModel>>,
     pub loc_renames: Option<Py<PyAny>>,
     pub is_file: bool,
     pub is_form: bool,

@@ -146,3 +146,52 @@ def test_param_models_flatten_into_parameters():
         return schema["paths"], schema.get("components")
 
     both(run)
+
+
+def test_optional_param_models():
+    class Filters(BaseModel):
+        limit: int = 10
+        tag: str | None = None
+
+    class Strict(BaseModel):
+        model_config = {"extra": "forbid"}
+        limit: int = 10
+
+    class Token(BaseModel):
+        x_token: str
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/query")
+        def query(filters: Annotated[Filters | None, lib.Query()] = None):
+            return filters
+
+        @app.get("/required")
+        def required(filters: Annotated[Filters | None, lib.Query()]):
+            return filters
+
+        @app.get("/strict")
+        def strict(filters: Annotated[Strict | None, lib.Query()] = None):
+            return filters
+
+        @app.get("/header")
+        def header(token: Annotated[Token | None, lib.Header()] = None):
+            return token
+
+        client = TestClient(app)
+        calls = [
+            client.get("/query"),
+            client.get("/query?limit=3"),
+            client.get("/query?other=1"),
+            client.get("/query?limit=x"),
+            client.get("/required"),
+            client.get("/required?tag=a"),
+            client.get("/strict"),
+            client.get("/strict?other=1"),
+            client.get("/header"),
+            client.get("/header", headers={"x-token": "t"}),
+        ]
+        return [(r.status_code, r.json()) for r in calls], app.openapi()["paths"]
+
+    both(run)

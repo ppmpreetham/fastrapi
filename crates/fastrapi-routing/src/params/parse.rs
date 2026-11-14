@@ -5,7 +5,7 @@ use super::constraints::extract_constraints;
 use super::module::analyze;
 use super::utils::{annotation_name, base_annotation, injected_source, is_inspect_empty};
 use crate::kernel_params::ParamKernel;
-use crate::route::{EmptyDefault, FastKind, ModelKey, ParsedParameter};
+use crate::route::{EmptyDefault, FastKind, ModelKey, ModelPresence, ParamModel, ParsedParameter};
 use fastrapi_core::params::{ParameterConstraints, ParameterSource};
 use fastrapi_http::upload_file::PyUploadFile;
 use pyo3::prelude::*;
@@ -49,12 +49,21 @@ fn optional<'py>(
     Ok(Some(spec.getattr(name)?).filter(|value| !value.is_none()))
 }
 
-fn model_keys(spec: &Bound<'_, PyAny>) -> PyResult<Option<Arc<[ModelKey]>>> {
+fn param_model(spec: &Bound<'_, PyAny>) -> PyResult<Option<Arc<ParamModel>>> {
     let py = spec.py();
     let Some(keys) = optional(spec, intern!(py, "model_keys"))? else {
         return Ok(None);
     };
-    keys.try_iter()?
+    let presence = match spec
+        .getattr(intern!(py, "model_presence"))?
+        .extract::<Option<&str>>()?
+    {
+        Some("any") => Some(ModelPresence::AnyKey),
+        Some(_) => Some(ModelPresence::OwnKeys),
+        None => None,
+    };
+    let keys = keys
+        .try_iter()?
         .map(|key| {
             let key = key?;
             Ok(ModelKey {
@@ -63,8 +72,12 @@ fn model_keys(spec: &Bound<'_, PyAny>) -> PyResult<Option<Arc<[ModelKey]>>> {
                 sequence: key.getattr(intern!(py, "sequence"))?.extract()?,
             })
         })
-        .collect::<PyResult<Arc<[ModelKey]>>>()
-        .map(Some)
+        .collect::<PyResult<Box<[ModelKey]>>>()?;
+    Ok(Some(Arc::new(ParamModel {
+        class: spec.getattr(intern!(py, "model_class"))?.unbind(),
+        keys,
+        presence,
+    })))
 }
 
 fn injected_parameter(
@@ -90,7 +103,7 @@ fn injected_parameter(
         constraints: ParameterConstraints::default(),
         param_object: None,
         is_pydantic_model: false,
-        model_keys: None,
+        model: None,
         loc_renames: None,
         is_file: false,
         is_form: false,
@@ -151,7 +164,7 @@ pub fn parse_parameter_spec(
         spec.getattr(intern!(py, "fast_list"))?
             .extract::<Option<&str>>()?,
     );
-    let model_keys = model_keys(&spec)?;
+    let model = param_model(&spec)?;
     let is_model: bool = spec.getattr(intern!(py, "model"))?.extract()?;
     let is_file: bool = spec.getattr(intern!(py, "is_file"))?.extract()?;
     let kernel = (!is_model && !is_file)
@@ -179,7 +192,7 @@ pub fn parse_parameter_spec(
             .extract::<Option<String>>()?,
         constraints,
         is_pydantic_model: is_model,
-        model_keys,
+        model,
         loc_renames: optional(&spec, intern!(py, "loc_renames"))?.map(Bound::unbind),
         is_file,
         is_form: spec.getattr(intern!(py, "is_form"))?.extract()?,

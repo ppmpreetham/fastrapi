@@ -278,22 +278,26 @@ fn model_parameters(
     location: &str,
     registry: &mut SchemaRegistry,
 ) -> Vec<Parameter> {
-    let (Some(keys), Some(model)) = (&param.model_keys, &param.annotation) else {
+    let Some(model) = &param.model else {
         return Vec::new();
     };
-    let Ok(fields) = model.bind(py).getattr(intern!(py, "model_fields")) else {
+    let optional = model.presence.is_some() && !param.required;
+    let Ok(fields) = model.class.bind(py).getattr(intern!(py, "model_fields")) else {
         return Vec::new();
     };
     let Ok(fields) = fields.cast_into::<PyDict>() else {
         return Vec::new();
     };
-    let Ok(annotated) = py.import(intern!(py, "typing")).and_then(|typing| typing.getattr(intern!(py, "Annotated"))) else {
+    let Ok(annotated) = py
+        .import(intern!(py, "typing"))
+        .and_then(|typing| typing.getattr(intern!(py, "Annotated")))
+    else {
         return Vec::new();
     };
     fields
         .values()
         .iter()
-        .zip(keys.iter())
+        .zip(model.keys.iter())
         .filter_map(|(info, key)| {
             let text = |name| {
                 info.getattr(name)
@@ -318,7 +322,7 @@ fn model_parameters(
             Some(Parameter {
                 name: key.lookup.clone(),
                 location: location.to_string(),
-                required: Some(required),
+                required: Some(required && !optional),
                 schema: Some(registry.field(&annotation, "validation", Some(title))),
                 description: text(intern!(py, "description")),
                 deprecated,
@@ -670,7 +674,7 @@ pub fn build_paths_from_routes(
                 if !include_in_schema {
                     return Vec::new();
                 }
-                if param.model_keys.is_some() {
+                if param.model.is_some() {
                     return model_parameters(py, param, location, &mut registry);
                 }
 
