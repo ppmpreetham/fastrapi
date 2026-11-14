@@ -295,6 +295,9 @@ def is_union_of_models(annotation: Any) -> bool:
 def copy_field_info(field_info: FieldInfo, annotation: Any) -> FieldInfo:
     merged = type(field_info).from_annotation(annotation)
     new = copy(field_info)
+    for name, value in merged.asdict()["attributes"].items():
+        setattr(new, name, value)
+    new._attributes_set = merged._attributes_set.copy()
     new.metadata = merged.metadata
     new.annotation = merged.annotation
     return new
@@ -501,6 +504,11 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
             field_info = Body(annotation=use_annotation, default=default)
         else:
             field_info = Query(annotation=use_annotation, default=default)
+        if get_origin(use_annotation) is Annotated:
+            field_info = copy_field_info(field_info, use_annotation)
+            field_info.default = default
+            if is_path_param:
+                field_info.default_factory = None
     if is_path_param:
         assert isinstance(field_info, Path), f"Cannot use `{field_info.__class__.__name__}` for path param {param_name!r}"
     elif isinstance(field_info, Param) and getattr(field_info, "in_", None) is None:

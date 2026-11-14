@@ -4,6 +4,7 @@ from typing import Annotated
 import fastapi
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import Field
 
 import fastrapi
 
@@ -87,3 +88,21 @@ def test_validate_default_validates_missing_values():
         )
 
     both(run)
+
+
+def test_field_annotations_reach_parameter_schema():
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/f")
+        def f(
+            q: Annotated[int, Field(gt=3, description="d")] = 5,
+            r: Annotated[str, lib.Query(), Field(max_length=3, title="T")] = "x",
+        ):
+            return [q, r]
+
+        client = TestClient(app)
+        return app.openapi()["paths"], client.get("/f?q=1").status_code, client.get("/f?q=4&r=ab").json()
+
+    both(run)
+
