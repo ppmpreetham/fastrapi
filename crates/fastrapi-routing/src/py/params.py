@@ -700,8 +700,31 @@ def _is_depends(value: Any) -> bool:
     return hasattr(value, "dependency") and hasattr(value, "use_cache")
 
 
-def analyze_param(*, param_name: str, annotation: Any, value: Any, is_path_param: bool) -> ParamDetails:
+def _is_injected(annotation: Any) -> bool:
+    import fastrapi
+    import fastrapi.security
+    from starlette.background import BackgroundTasks
+    from starlette.requests import HTTPConnection
+    from starlette.responses import Response
+
+    injected = (
+        HTTPConnection,
+        Response,
+        BackgroundTasks,
+        fastrapi.Request,
+        fastrapi.WebSocket,
+        fastrapi.Response,
+        fastrapi.BackgroundTasks,
+        fastrapi.security.SecurityScopes,
+    )
+    return inspect.isclass(annotation) and issubclass(annotation, injected)
+
+
+def analyze_param(*, param_name: str, annotation: Any, value: Any, path_param_names: set) -> ParamDetails:
     from fastrapi import UploadFile
+    from fastrapi._helpers import ModelField
+
+    is_path_param = param_name in path_param_names
 
     annotated = get_origin(annotation) is Annotated
     type_annotation = get_args(annotation)[0] if annotated else annotation
@@ -709,6 +732,8 @@ def analyze_param(*, param_name: str, annotation: Any, value: Any, is_path_param
     depends = value if _is_depends(value) else next((marker for marker in reversed(markers) if _is_depends(marker)), None)
     if depends is not None:
         return ParamDetails(type_annotation, depends, None)
+    if _is_injected(type_annotation):
+        return ParamDetails(type_annotation, None, None)
     parameter = inspect.Parameter(param_name, inspect.Parameter.POSITIONAL_OR_KEYWORD, default=value, annotation=annotation)
     spec = analyze(param_name, parameter, is_path_param, (UploadFile,))
-    return ParamDetails(spec.annotation, None, spec)
+    return ParamDetails(spec.annotation, None, ModelField(field_info=spec.field_info, name=param_name))

@@ -5,13 +5,28 @@ use fastrapi_core::path::extract_path_param_names;
 use fastrapi_http::exceptions::deprecation_warning_type;
 use fastrapi_openapi::schema::native_operation_id;
 pub(crate) use fastrapi_pyutil::imports::python_source_module;
-use fastrapi_routing::dependencies::parse_dependencies;
 use pyo3::Bound;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple, PyType};
 use std::collections::HashSet;
 
 const PY_HELPERS: &str = include_str!("py/helpers.py");
+const PY_DEPENDANT: &str = include_str!("py/dependant.py");
+static PY_DEPENDANT_MODULE: pyo3::sync::PyOnceLock<Py<PyModule>> = pyo3::sync::PyOnceLock::new();
+
+pub(crate) fn py_dependant(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
+    PY_DEPENDANT_MODULE
+        .get_or_try_init(py, || {
+            python_source_module(
+                py,
+                PY_DEPENDANT,
+                c"fastrapi/dependencies/_dependant.py",
+                c"fastrapi.dependencies._dependant",
+            )
+            .map(Bound::unbind)
+        })
+        .map(|module| module.bind(py).clone())
+}
 
 static PY_HELPERS_MODULE: pyo3::sync::PyOnceLock<Py<PyModule>> = pyo3::sync::PyOnceLock::new();
 
@@ -27,16 +42,6 @@ pub(crate) fn py_helpers(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
             .map(Bound::unbind)
         })
         .map(|module| module.bind(py).clone())
-}
-
-fn python_type<'py>(
-    py: Python<'py>,
-    name: &str,
-    bases: &Bound<'py, PyTuple>,
-) -> PyResult<Bound<'py, PyAny>> {
-    py.import("builtins")?
-        .getattr("type")?
-        .call1((name, bases, PyDict::new(py)))
 }
 
 pub(crate) fn register_security(parent: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -93,45 +98,8 @@ pub(crate) fn register_security(parent: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (call, *, path="/", path_param_names=None, security_scopes=None))]
-fn get_dependant(
-    py: Python<'_>,
-    call: &Bound<'_, PyAny>,
-    path: &str,
-    path_param_names: Option<Vec<String>>,
-    security_scopes: Option<Vec<String>>,
-) -> PyResult<Py<PyAny>> {
-    let names = path_param_names.unwrap_or_default();
-    let plan = parse_dependencies(py, call, &names)?;
-    let dependencies = PyList::empty(py);
-    let namespace = py.import("types")?.getattr("SimpleNamespace")?;
-    for node in plan {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("call", node.func.bind(py))?;
-        kwargs.set_item("use_cache", node.use_cache)?;
-        kwargs.set_item("security_scopes", node.scopes.to_vec())?;
-        dependencies.append(namespace.call((), Some(&kwargs))?)?;
-    }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("call", call)?;
-    kwargs.set_item("path", path)?;
-    kwargs.set_item("security_scopes", security_scopes.unwrap_or_default())?;
-    kwargs.set_item("dependencies", dependencies)?;
-    Ok(namespace.call((), Some(&kwargs))?.unbind())
-}
-
-#[pyfunction]
 fn get_path_param_names(path: &str) -> HashSet<String> {
     extract_path_param_names(path).into_iter().collect()
-}
-
-#[pyfunction]
-#[pyo3(signature = (*args, **_kwargs))]
-fn get_flat_dependant(
-    args: &Bound<'_, PyTuple>,
-    _kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    args.get_item(0).map(Bound::unbind)
 }
 
 #[pyfunction]
@@ -279,15 +247,26 @@ pub(crate) fn register_types(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 pub(crate) fn register_dependencies(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
-    parent.add_function(wrap_pyfunction!(get_dependant, parent)?)?;
     parent.add_function(wrap_pyfunction!(get_path_param_names, parent)?)?;
     let utils = PyModule::new(py, "utils")?;
-    utils.add("get_dependant", parent.getattr("get_dependant")?)?;
     utils.add(
         "get_path_param_names",
         parent.getattr("get_path_param_names")?,
     )?;
-    utils.add_function(wrap_pyfunction!(get_flat_dependant, &utils)?)?;
+    let dependant = py_dependant(py)?;
+    for name in [
+        "get_dependant",
+        "get_flat_params",
+        "get_parameterless_sub_dependant",
+        "add_non_field_param_to_dependency",
+        "add_param_to_fields",
+        "solve_dependencies",
+        "request_params_to_args",
+        "request_body_to_args",
+    ] {
+        utils.add(name, dependant.getattr(name)?)?;
+    }
+    parent.add("get_dependant", dependant.getattr("get_dependant")?)?;
     let params = fastrapi_routing::params::params_module(py)?;
     for name in [
         "analyze_param",
@@ -305,13 +284,9 @@ pub(crate) fn register_dependencies(parent: &Bound<'_, PyModule>) -> PyResult<()
     fastrapi_pyutil::imports::register_module(py, "fastrapi.dependencies", parent)?;
     fastrapi_pyutil::imports::register_module(py, "fastrapi.dependencies.utils", &utils)?;
     let models = PyModule::new(py, "models")?;
-    let object = py.import("builtins")?.getattr("object")?;
-    let bases = PyTuple::new(py, [object])?;
-    models.add("Dependant", python_type(py, "Dependant", &bases)?)?;
-    models.add(
-        "SecurityRequirement",
-        python_type(py, "SecurityRequirement", &bases)?,
-    )?;
+    for name in ["Dependant", "SecurityRequirement"] {
+        models.add(name, dependant.getattr(name)?)?;
+    }
     parent.add_submodule(&models)?;
     fastrapi_pyutil::imports::register_module(py, "fastrapi.dependencies.models", &models)?;
     Ok(())

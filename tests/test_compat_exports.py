@@ -21,7 +21,7 @@ def test_dependency_helper_uses_native_parser():
     def endpoint(value=Depends(dependency)):
         return value
 
-    dependant = get_dependant(endpoint)
+    dependant = get_dependant(path="/", call=endpoint)
     assert dependant.call is endpoint
     assert dependant.dependencies[0].call is dependency
 

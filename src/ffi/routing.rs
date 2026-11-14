@@ -7,7 +7,9 @@ use std::str::FromStr;
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PySet, PyTuple};
+use pyo3::types::{
+    PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PySet, PyString, PyTuple,
+};
 
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::path::extract_path_param_names;
@@ -312,6 +314,25 @@ impl PyAPIRoute {
     }
 
     #[getter]
+    fn dependant<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        cached_route_value(slf, intern!(slf.py(), "_dependant"), "route_dependant")
+    }
+
+    #[getter]
+    fn body_field<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        cached_route_value(slf, intern!(slf.py(), "_body_field"), "route_body_field")
+    }
+
+    #[getter]
+    fn response_field<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        cached_route_value(
+            slf,
+            intern!(slf.py(), "_response_field"),
+            "route_response_field",
+        )
+    }
+
+    #[getter]
     fn app<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         slf.as_any()
             .getattr(intern!(slf.py(), "dependency_overrides_provider"))
@@ -386,6 +407,11 @@ pub(crate) fn route_objects<'py>(
             Some(responses) => kwargs.set_item("responses", responses)?,
             None => kwargs.set_item("responses", PyDict::new(py))?,
         }
+        let markers = match &entry.dependency_markers {
+            Some(markers) => py.get_type::<PyList>().call1((markers,))?,
+            None => PyList::empty(py).into_any(),
+        };
+        kwargs.set_item("dependencies", markers)?;
         let callbacks = match &entry.callback_routes {
             Some(routes) => py.get_type::<PyList>().call1((routes,))?,
             None => PyList::empty(py).into_any(),
@@ -609,6 +635,24 @@ pub fn iter_route_contexts(py: Python<'_>, routes: &Bound<'_, PyAny>) -> PyResul
         .getattr("iter")?
         .call1((contexts,))?
         .unbind())
+}
+
+fn cached_route_value<'py>(
+    route: &Bound<'py, PyAPIRoute>,
+    slot: &Bound<'py, PyString>,
+    builder: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = route.py();
+    let instance = route.as_any().getattr(intern!(py, "__dict__"))?;
+    let instance = instance.cast::<PyDict>()?;
+    if let Some(value) = instance.get_item(slot)? {
+        return Ok(value);
+    }
+    let value = crate::ffi::compat::py_dependant(py)?
+        .getattr(builder)?
+        .call1((route,))?;
+    instance.set_item(slot, &value)?;
+    Ok(value)
 }
 
 /// Adds the classes and functions of the `fastrapi.routing` module to `module`.

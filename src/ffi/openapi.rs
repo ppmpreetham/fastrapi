@@ -200,6 +200,13 @@ pub(crate) fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     ] {
         utils.add(name, helpers.getattr(name)?)?;
     }
+    let dependant = crate::ffi::compat::py_dependant(py)?;
+    for name in [
+        "get_fields_from_routes",
+        "get_openapi_operation_request_body",
+    ] {
+        utils.add(name, dependant.getattr(name)?)?;
+    }
     openapi_module.add_submodule(&utils)?;
     parent.add_submodule(&openapi_module)?;
 

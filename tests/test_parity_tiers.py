@@ -347,9 +347,9 @@ def test_dependency_utils_helpers():
 
     signature = get_typed_signature(handler)
     assert signature.parameters["item_id"].annotation is int
-    path = analyze_param(param_name="item_id", annotation=int, value=inspect.Signature.empty, is_path_param=True)
-    assert path.depends is None and path.field.source == "path"
-    query = analyze_param(param_name="q", annotation=signature.parameters["q"].annotation, value="x", is_path_param=False)
+    path = analyze_param(param_name="item_id", annotation=int, value=inspect.Signature.empty, path_param_names={"item_id"})
+    assert path.depends is None and path.field.field_info.in_.value == "path"
+    query = analyze_param(param_name="q", annotation=signature.parameters["q"].annotation, value="x", path_param_names=set())
     assert query.type_annotation is str and query.field.alias == "q"
-    depends = analyze_param(param_name="dep", annotation=int, value=signature.parameters["dep"].default, is_path_param=False)
+    depends = analyze_param(param_name="dep", annotation=int, value=signature.parameters["dep"].default, path_param_names=set())
     assert depends.depends is not None and depends.field is None

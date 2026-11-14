@@ -166,12 +166,12 @@ def test_dependency_helpers_capture_cache_scopes_and_path_names():
     def endpoint(value=Depends(dep), secured=Security(secured_dep, scopes=["read"])):
         return value + secured
 
-    dependant = get_dependant(endpoint, path="/items/{item_id}", path_param_names=["item_id"], security_scopes=["outer"])
+    dependant = get_dependant(path="/items/{item_id}", call=endpoint, own_oauth_scopes=["outer"])
     assert dependant.call is endpoint
     assert len(dependant.dependencies) == 2
     assert dependant.dependencies[0].use_cache is True
-    security_scopes = getattr(dependant.dependencies[1], "security_scopes", None)
-    assert security_scopes == ["read"] or getattr(dependant.dependencies[1], "scopes", None) == ["read"]
+    assert dependant.dependencies[1].own_oauth_scopes == ["read"]
+    assert dependant.dependencies[1].parent_oauth_scopes == ["outer"]
     assert get_path_param_names("/a/{x}/b/{tail:path}/{x}") == {"x", "tail"}
 
 

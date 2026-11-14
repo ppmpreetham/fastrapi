@@ -813,6 +813,10 @@ impl PyAPIRouter {
                     .map(|responses| responses.clone_ref(py)),
                 openapi_extra: opts.openapi_extra.clone().or(extra_openapi),
                 callbacks: opts.callbacks.clone(),
+                dependency_markers: opts
+                    .dependencies
+                    .as_ref()
+                    .map(|markers| markers.clone_ref(py)),
                 callback_routes: opts
                     .callback_routes
                     .as_ref()

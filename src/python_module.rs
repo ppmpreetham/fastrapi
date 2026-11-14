@@ -212,6 +212,14 @@ mod fastrapi {
                     m.add(name, value)?;
                 }
             }
+            let dependant = crate::ffi::compat::py_dependant(py)?;
+            for name in [
+                "serialize_response",
+                "run_endpoint_function",
+                "get_request_handler",
+            ] {
+                m.add(name, dependant.getattr(name)?)?;
+            }
             Ok(())
         }
     }

@@ -1297,3 +1297,115 @@ def test_middleware_stack_attributes_match_fastapi():
         return before, started, refused, cors, callable(route.app)
 
     both(run)
+
+
+def test_dependant_model_matches_fastapi():
+    import asyncio
+    from typing import Annotated
+
+    from pydantic import BaseModel
+
+    class Item(BaseModel):
+        name: str
+
+    class Out(BaseModel):
+        name: str
+
+    def run(lib):
+        utils = submodule(lib, "dependencies.utils")
+        routing = submodule(lib, "routing")
+        openapi_utils = submodule(lib, "openapi.utils")
+        s = submodule(lib, "security")
+
+        def common(q: str = "x", x_token: Annotated[str, lib.Header()] = "t"):
+            return q
+
+        app = new_app(lib)
+
+        @app.post("/items/{item_id}", response_model=Out, dependencies=[lib.Depends(common)])
+        def create(
+            item_id: int,
+            item: Item,
+            request: lib.Request,
+            tasks: lib.BackgroundTasks,
+            scopes: s.SecurityScopes,
+            session: Annotated[str | None, lib.Cookie()] = None,
+            dep=lib.Security(common, scopes=["a"]),
+        ):
+            return item
+
+        route = next(r for r in app.routes if getattr(r, "path", "") == "/items/{item_id}")
+        dependant = route.dependant
+        groups = {
+            group: [field.name for field in getattr(dependant, group)]
+            for group in ("path_params", "query_params", "header_params", "cookie_params", "body_params")
+        }
+        specials = [
+            dependant.request_param_name,
+            dependant.background_tasks_param_name,
+            dependant.security_scopes_param_name,
+        ]
+        subs = [(d.name, d.call is common, d.own_oauth_scopes, d.use_cache) for d in dependant.dependencies]
+        flat = sorted(field.alias for field in utils.get_flat_params(dependant))
+        built = utils.get_dependant(path="/x/{y}", call=common)
+        parameterless = utils.get_parameterless_sub_dependant(depends=lib.Depends(common), path="/p")
+        serialized = asyncio.run(routing.serialize_response(field=route.response_field, response_content={"name": "n", "extra": 1}))
+        ran = asyncio.run(routing.run_endpoint_function(dependant=built, values={"q": "v"}, is_coroutine=False))
+        request_body = openapi_utils.get_openapi_operation_request_body(body_field=route.body_field, model_name_map={}, field_mapping={(route.body_field, "validation"): {"$ref": "x"}})
+        return (
+            groups,
+            specials,
+            subs,
+            flat,
+            route.body_field.alias,
+            route.body_field.field_info.is_required(),
+            route.response_field.name,
+            [field.name for field in built.query_params],
+            parameterless.call is common,
+            serialized,
+            ran,
+            request_body,
+            len(openapi_utils.get_fields_from_routes([route])),
+        )
+
+    both(run)
+
+
+def test_request_handler_from_dependant():
+    import asyncio
+    import json
+
+    from pydantic import BaseModel
+    from starlette.requests import Request
+
+    from fastrapi.routing import get_request_handler
+
+    class Item(BaseModel):
+        name: str
+
+    def token(q: str = "x"):
+        return q.upper()
+
+    app = fastrapi.FastrAPI()
+
+    @app.post("/items/{item_id}", response_model=Item)
+    def create(item_id: int, item: Item, tag=fastrapi.Depends(token)):
+        return {"name": f"{item.name}-{item_id}-{tag}", "ignored": True}
+
+    route = next(r for r in app.routes if getattr(r, "path", "") == "/items/{item_id}")
+    handler = get_request_handler(route.dependant, body_field=route.body_field, response_field=route.response_field)
+    body = json.dumps({"name": "n"}).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/items/3",
+        "query_string": b"q=ab",
+        "headers": [(b"content-type", b"application/json")],
+        "path_params": {"item_id": "3"},
+    }
+    response = asyncio.run(handler(Request(scope, receive)))
+    assert json.loads(bytes(response.body)) == {"name": "n-3-AB"}
