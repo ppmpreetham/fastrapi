@@ -13,6 +13,7 @@ struct Field {
     annotation: Py<PyAny>,
     mode: &'static str,
     title: Option<String>,
+    default: Option<JsonValue>,
 }
 
 #[derive(Default)]
@@ -27,11 +28,22 @@ impl SchemaRegistry {
         mode: &'static str,
         title: Option<String>,
     ) -> JsonValue {
+        self.field_with_default(annotation, mode, title, None)
+    }
+
+    pub(crate) fn field_with_default(
+        &mut self,
+        annotation: &Bound<'_, PyAny>,
+        mode: &'static str,
+        title: Option<String>,
+        default: Option<JsonValue>,
+    ) -> JsonValue {
         let index = self.fields.len();
         self.fields.push(Field {
             annotation: annotation.clone().unbind(),
             mode,
             title,
+            default,
         });
         json!({ MARKER: index })
     }
@@ -115,11 +127,16 @@ impl SchemaRegistry {
         for (key, schema) in mapping.iter() {
             let (index, _mode): (usize, String) = key.extract()?;
             let mut schema = py_any_to_json(py, &schema);
-            if let Some(title) = &self.fields[index].title
-                && schema.get("$ref").is_none()
-                && let Some(object) = schema.as_object_mut()
-            {
-                object.insert("title".to_string(), json!(title.as_str()));
+            let field = &self.fields[index];
+            if let Some(object) = schema.as_object_mut() {
+                if let Some(title) = &field.title
+                    && !object.contains_key("$ref")
+                {
+                    object.insert("title".to_string(), json!(title.as_str()));
+                }
+                if let Some(default) = &field.default {
+                    object.insert("default".to_string(), default.clone());
+                }
             }
             values.push((index, schema));
         }

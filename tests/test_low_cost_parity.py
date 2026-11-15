@@ -217,3 +217,12 @@ def test_form_model_unions(path, data):
         return response.status_code, response.json()
 
     both(run)
+
+
+def test_form_model_request_body_schemas():
+    def run(lib):
+        spec = form_app(lib).openapi()
+        bodies = {path: item["post"]["requestBody"] for path, item in spec["paths"].items()}
+        return bodies, spec["components"]["schemas"]
+
+    both(run)

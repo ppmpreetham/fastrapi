@@ -16,7 +16,9 @@ use fastrapi_core::security::SecurityKind;
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
 use fastrapi_routing::dependencies::InjectionType;
-use fastrapi_routing::route::{ParsedParameter, RouteEntry, RouteHandler};
+use fastrapi_routing::route::{
+    ModelPresence, ParamModel, ParsedParameter, RouteEntry, RouteHandler,
+};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
@@ -347,6 +349,23 @@ fn body_field_schema(
     param: &ParsedParameter,
     registry: &mut SchemaRegistry,
 ) -> JsonValue {
+    field_schema(py, param, registry, None)
+}
+
+fn embedded_field_schema(
+    py: Python<'_>,
+    param: &ParsedParameter,
+    registry: &mut SchemaRegistry,
+) -> JsonValue {
+    field_schema(py, param, registry, jsonable_default(py, param))
+}
+
+fn field_schema(
+    py: Python<'_>,
+    param: &ParsedParameter,
+    registry: &mut SchemaRegistry,
+    default: Option<JsonValue>,
+) -> JsonValue {
     let title = schema_title(&param.external_name);
     if param.is_file || marker_class(py, param).as_deref() == Some("File") {
         let binary = json!({ "type": "string", "contentMediaType": "application/octet-stream" });
@@ -366,7 +385,144 @@ fn body_field_schema(
             .unwrap_or_else(|_| annotation.bind(py).clone()),
         None => annotation.bind(py).clone(),
     };
-    registry.field(&annotation, "validation", Some(title))
+    registry.field_with_default(&annotation, "validation", Some(title), default)
+}
+
+fn jsonable_default(py: Python<'_>, param: &ParsedParameter) -> Option<JsonValue> {
+    let default = param
+        .default_value
+        .as_ref()
+        .filter(|_| param.has_default)?
+        .bind(py);
+    if default.is_none() {
+        return None;
+    }
+    let default = py
+        .import(intern!(py, "pydantic_core"))
+        .and_then(|core| core.call_method1(intern!(py, "to_jsonable_python"), (default,)))
+        .unwrap_or_else(|_| default.clone());
+    Some(py_any_to_json(py, &default))
+}
+
+const fn is_required(param: &ParsedParameter) -> bool {
+    param.required || !param.has_default
+}
+
+fn form_model(param: &ParsedParameter) -> Option<&ParamModel> {
+    param
+        .model
+        .as_deref()
+        .filter(|_| param.is_form && !param.embed)
+}
+
+fn form_body_schema(
+    py: Python<'_>,
+    params: &[&ParsedParameter],
+    title: &str,
+    registry: &mut SchemaRegistry,
+) -> JsonValue {
+    let mut properties = Object::new();
+    let mut required: Vec<JsonValue> = Vec::new();
+    let mut conditions = Vec::new();
+    for param in params {
+        if let Some(model) = form_model(param) {
+            push_form_model_conditions(py, param, model, registry, &mut conditions);
+            continue;
+        }
+        let alias = param.external_name.as_str();
+        let schema = embedded_field_schema(py, param, registry);
+        if properties.contains_key(alias) {
+            conditions.push(json!({ "properties": { alias: schema } }));
+        } else {
+            properties.insert(alias.to_owned(), schema);
+        }
+        if is_required(param) && !required.iter().any(|name| name.as_str() == Some(alias)) {
+            required.push(json!(alias));
+        }
+    }
+    let mut schema = Object::new();
+    schema.insert("type".to_owned(), json!("object"));
+    schema.insert("title".to_owned(), json!(title));
+    if !properties.is_empty() {
+        schema.insert("properties".to_owned(), JsonValue::from(properties));
+    }
+    if !required.is_empty() {
+        schema.insert("required".to_owned(), JsonValue::Array(Box::new(required)));
+    }
+    schema.insert("allOf".to_owned(), JsonValue::Array(Box::new(conditions)));
+    JsonValue::from(schema)
+}
+
+fn push_form_model_conditions(
+    py: Python<'_>,
+    param: &ParsedParameter,
+    model: &ParamModel,
+    registry: &mut SchemaRegistry,
+    conditions: &mut Vec<JsonValue>,
+) {
+    let title = marker_attr(py, param, intern!(py, "title"))
+        .and_then(|title| title.extract::<String>().ok())
+        .unwrap_or_else(|| schema_title(&param.name));
+    let annotation = model.annotation.bind(py);
+    let Some(presence) = model.presence else {
+        conditions.push(registry.field(annotation, "validation", Some(title)));
+        return;
+    };
+    let schema = if model.union {
+        registry.field(annotation, "validation", Some(title))
+    } else {
+        json!({ "anyOf": [registry.field(annotation, "validation", None)], "title": title })
+    };
+    let absent = absent_form_model(model, presence);
+    if is_required(param) {
+        conditions.push(json!({ "not": absent }));
+        conditions.push(schema);
+    } else {
+        conditions.push(json!({ "anyOf": [absent, schema] }));
+    }
+}
+
+fn absent_form_model(model: &ParamModel, presence: ModelPresence) -> JsonValue {
+    if presence == ModelPresence::AnyKey {
+        return json!({ "maxProperties": 0 });
+    }
+    let mut names: Vec<&str> = model.keys.iter().map(|key| key.lookup.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        return json!({});
+    }
+    let required: Vec<JsonValue> = names
+        .into_iter()
+        .map(|name| json!({ "required": [name] }))
+        .collect();
+    json!({ "not": { "anyOf": required } })
+}
+
+fn embedded_body_schema(
+    py: Python<'_>,
+    params: &[&ParsedParameter],
+    title: &str,
+    registry: &mut SchemaRegistry,
+) -> JsonValue {
+    let mut properties = Object::new();
+    let mut required = Vec::new();
+    for param in params {
+        properties.insert(
+            param.external_name.clone(),
+            embedded_field_schema(py, param, registry),
+        );
+        if is_required(param) {
+            required.push(json!(param.external_name.as_str()));
+        }
+    }
+    let mut schema = json!({ "properties": properties, "type": "object", "title": title });
+    if !required.is_empty()
+        && let Some(object) = schema.as_object_mut()
+    {
+        object.insert("required".to_string(), JsonValue::Array(Box::new(required)));
+    }
+    schema
 }
 
 fn with_schema_extra(py: Python<'_>, mut schema: JsonValue, extra: &Bound<'_, PyAny>) -> JsonValue {
@@ -467,35 +623,21 @@ fn build_request_body(
         "application/json"
     };
     let first = body_params[0];
-    let single_model_form = body_params.len() == 1 && has_form && first.is_pydantic_model;
+    let single_model_form = body_params.len() == 1
+        && has_form
+        && (first.is_pydantic_model || form_model(first).is_some());
     let embed = body_params.len() > 1 || first.embed || (has_form && !single_model_form);
+    let mut form_models = body_params.iter().filter_map(|param| form_model(param)).peekable();
+    let composed = form_models.peek().is_some()
+        && (embed || form_models.any(|model| model.presence.is_some()));
 
-    let (schema, required, media_type) = if embed {
-        let mut properties = Object::new();
-        let mut required_fields = Vec::new();
-        for param in body_params {
-            properties.insert(
-                param.external_name.clone(),
-                body_field_schema(py, param, registry),
-            );
-            if param.required || !param.has_default {
-                required_fields.push(json!(param.external_name.as_str()));
-            }
-        }
+    let (schema, required, media_type) = if embed || composed {
         let wrapper_name = format!("Body_{unique_id}");
-        let mut wrapper = json!({
-            "properties": properties,
-            "type": "object",
-            "title": wrapper_name.as_str(),
-        });
-        if !required_fields.is_empty()
-            && let Some(object) = wrapper.as_object_mut()
-        {
-            object.insert(
-                "required".to_string(),
-                JsonValue::Array(Box::new(required_fields.clone())),
-            );
-        }
+        let wrapper = if composed {
+            form_body_schema(py, body_params, &wrapper_name, registry)
+        } else {
+            embedded_body_schema(py, body_params, &wrapper_name, registry)
+        };
         schemas.insert(wrapper_name.clone(), wrapper);
         let media_types: Vec<String> = body_params
             .iter()
@@ -514,7 +656,7 @@ fn build_request_body(
         };
         (
             json!({ "$ref": format!("#/components/schemas/{wrapper_name}") }),
-            !required_fields.is_empty(),
+            body_params.iter().any(|param| is_required(param)),
             media_type,
         )
     } else {
@@ -720,17 +862,8 @@ pub fn build_paths_from_routes(
                             json!(schema_title(&param.external_name)),
                         );
                     }
-                    if param.has_default
-                        && let Some(default) = &param.default_value
-                        && !default.bind(py).is_none()
-                    {
-                        let default = py
-                            .import(intern!(py, "pydantic_core"))
-                            .and_then(|core| {
-                                core.call_method1(intern!(py, "to_jsonable_python"), (default,))
-                            })
-                            .unwrap_or_else(|_| default.bind(py).clone());
-                        obj.insert("default".to_string(), py_any_to_json(py, &default));
+                    if let Some(default) = jsonable_default(py, param) {
+                        obj.insert("default".to_string(), default);
                     }
                 }
 
