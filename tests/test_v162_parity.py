@@ -310,3 +310,40 @@ def test_returned_models_serialize_by_alias():
         return [client.get(path).json() for path in ("/model", "/nested", "/response")]
 
     both(run)
+
+
+def test_body_media_types_in_openapi():
+    class Data(BaseModel):
+        a: str
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.post("/model")
+        def model(data: Annotated[Data, lib.Form(media_type="multipart/form-data")]):
+            return data
+
+        @app.post("/single")
+        def single(a: Annotated[str, lib.Form(media_type="multipart/form-data")]):
+            return a
+
+        @app.post("/mixed")
+        def mixed(a: Annotated[str, lib.Form()], b: Annotated[str, lib.Form(media_type="multipart/form-data")]):
+            return a
+
+        @app.post("/custom")
+        def custom(a: Annotated[str, lib.Form(media_type="text/x-form")], b: Annotated[str, lib.Form(media_type="text/x-form")]):
+            return a
+
+        @app.post("/json")
+        def json_body(a: Annotated[int, lib.Body(media_type="application/vnd+json")], b: Annotated[int, lib.Body(media_type="application/vnd+json")]):
+            return a
+
+        @app.post("/differ")
+        def differ(a: Annotated[int, lib.Body(media_type="application/vnd+json")], b: Annotated[int, lib.Body()]):
+            return a
+
+        paths = app.openapi()["paths"]
+        return {path: list(item["post"]["requestBody"]["content"]) for path, item in paths.items()}
+
+    both(run)

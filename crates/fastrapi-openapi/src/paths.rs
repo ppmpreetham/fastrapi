@@ -333,6 +333,10 @@ fn model_parameters(
         .collect()
 }
 
+fn marker_media_type(py: Python<'_>, param: &ParsedParameter) -> Option<String> {
+    marker_attr(py, param, intern!(py, "media_type"))?.extract().ok()
+}
+
 fn marker_class(py: Python<'_>, param: &ParsedParameter) -> Option<String> {
     let marker = param.param_object.as_ref()?.bind(py).get_type();
     Some(marker.name().ok()?.to_string())
@@ -493,18 +497,28 @@ fn build_request_body(
             );
         }
         schemas.insert(wrapper_name.clone(), wrapper);
+        let media_types: Vec<String> = body_params
+            .iter()
+            .filter(|param| !has_form || is_form(param))
+            .filter_map(|param| marker_media_type(py, param))
+            .collect();
+        let media_type = if has_file
+            || (has_form && media_types.iter().any(|media| media == "multipart/form-data"))
+        {
+            "multipart/form-data".to_string()
+        } else {
+            match media_types.split_first() {
+                Some((media, rest)) if rest.iter().all(|other| other == media) => media.clone(),
+                _ => default_media_type.to_string(),
+            }
+        };
         (
             json!({ "$ref": format!("#/components/schemas/{wrapper_name}") }),
             !required_fields.is_empty(),
-            default_media_type.to_string(),
+            media_type,
         )
     } else {
-        let media_type = first
-            .param_object
-            .as_ref()
-            .and_then(|marker| marker.bind(py).getattr(intern!(py, "media_type")).ok())
-            .and_then(|value| value.extract::<String>().ok())
-            .filter(|_| !has_form)
+        let media_type = marker_media_type(py, first)
             .unwrap_or_else(|| default_media_type.to_string());
         (
             body_field_schema(py, first, registry),
