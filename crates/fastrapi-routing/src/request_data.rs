@@ -191,15 +191,19 @@ impl<'py> Errors<'py> {
         Ok(out)
     }
 
+    pub fn into_error(self, body: impl FnOnce() -> PyResult<Option<Bound<'py, PyAny>>>) -> PyErr {
+        self.check(body).err().unwrap_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("validation errors disappeared")
+        })
+    }
+
     pub fn reject(
         self,
         input: &RequestInput<'_>,
         body: impl FnOnce() -> PyResult<Option<Bound<'py, PyAny>>>,
     ) -> Rejection {
         if has_validation_handler(self.py, input) {
-            return Rejection::Python(self.check(body).err().unwrap_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("validation errors disappeared")
-            }));
+            return Rejection::Python(self.into_error(body));
         }
         match self.json() {
             Ok(body) => Rejection::Response(
@@ -1175,7 +1179,10 @@ pub fn apply_request_data(
     if errors.is_empty() {
         return Ok(());
     }
-    Err(errors.reject(request_input, || {
-        received_body(py, handler, payload, request_input.headers)
-    }))
+    let body = || received_body(py, handler, payload, request_input.headers);
+    if handler.payload.dependencies.is_empty() {
+        Err(errors.reject(request_input, body))
+    } else {
+        Err(Rejection::Python(errors.into_error(body)))
+    }
 }

@@ -313,3 +313,93 @@ def test_websocket_errors_reach_yield_dependencies():
             time.sleep(0.02)
         actual[path] = list(events)
     assert actual == expected
+
+
+def validation_order_app(lib, events):
+    app = lib.FastAPI() if lib is fastapi else lib.FastrAPI()
+
+    def auth(token: str | None = lib.Header(None)):
+        if token != "ok":
+            raise lib.HTTPException(401, "nope", headers={"WWW-Authenticate": "Bearer"})
+        events.append("auth")
+        return token
+
+    async def async_auth(token: str | None = lib.Header(None)):
+        return auth(token)
+
+    def paged(page: int = 1):
+        events.append("paged")
+        return page
+
+    def session():
+        try:
+            yield
+        except Exception as exc:
+            events.append(type(exc).__name__)
+            raise
+
+    @app.get("/sync")
+    def sync_route(q: int, user=lib.Depends(auth)):
+        return q
+
+    @app.get("/async-sync")
+    async def async_sync(q: int, user=lib.Depends(auth)):
+        return q
+
+    @app.get("/async-async")
+    async def async_async(q: int, user=lib.Depends(async_auth)):
+        return q
+
+    @app.get("/request")
+    def with_request(request: lib.Request, q: int, user=lib.Depends(auth)):
+        return q
+
+    @app.get("/yield")
+    async def with_yield(q: int, db=lib.Depends(session), user=lib.Depends(auth)):
+        return q
+
+    @app.get("/combined")
+    def combined(q: int, page=lib.Depends(paged)):
+        return q
+
+    @app.get("/route-deps", dependencies=[lib.Depends(auth)])
+    def route_deps(q: int):
+        return q
+
+    @app.get("/plain")
+    def plain(q: int):
+        return q
+
+    return app
+
+
+VALIDATION_ORDER_CASES = [
+    ("/sync", {}),
+    ("/sync", {"token": "ok"}),
+    ("/sync?q=1", {"token": "ok"}),
+    ("/async-sync", {}),
+    ("/async-sync", {"token": "ok"}),
+    ("/async-async", {}),
+    ("/async-async", {"token": "ok"}),
+    ("/request", {}),
+    ("/yield", {}),
+    ("/yield", {"token": "ok"}),
+    ("/combined?page=x", {}),
+    ("/combined?page=x&q=y", {}),
+    ("/route-deps", {}),
+    ("/plain", {}),
+]
+
+
+@pytest.mark.parametrize(("path", "headers"), VALIDATION_ORDER_CASES)
+@pytest.mark.parametrize("override", [False, True])
+def test_dependencies_run_before_validation_errors(path, headers, override):
+    def run(lib):
+        events = []
+        app = validation_order_app(lib, events)
+        if override:
+            app.dependency_overrides[print] = print
+        response = TestClient(app, raise_server_exceptions=False).get(path, headers=headers)
+        return response.status_code, response.json(), response.headers.get("www-authenticate"), events
+
+    both(run)

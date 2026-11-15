@@ -2,7 +2,8 @@
 //! It injects the dependencies, applies the response metadata and closes the dependency exit stacks.
 
 use super::deferred::{Cleanup, finish_request, with_cleanup};
-use super::executor::{build_request_input_from_parts, prepare_kwargs_and_payload, request_object};
+use super::executor::{build_request_input_from_parts, kwargs_or_pending, request_object};
+use super::pending_validation::dependency_failure;
 use super::handler_errors::python_error_to_response_in;
 use axum::http::request::Parts;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
@@ -40,7 +41,7 @@ pub(crate) async fn run_managed_handler(
         event_loop,
     );
     let setup = Python::attach(|py| -> Result<_, Response> {
-        let mut kwargs = prepare_kwargs_and_payload(py, handler, &input, payload.as_ref())?;
+        let (mut kwargs, pending) = kwargs_or_pending(py, handler, &input, payload.as_ref())?;
         let objects = (|| -> PyResult<_> {
             let plan = dependencies::request_plan(
                 py,
@@ -78,11 +79,11 @@ pub(crate) async fn run_managed_handler(
             } else {
                 None
             };
-            Ok((kwargs, request, response, plan))
+            Ok((kwargs, request, response, plan, pending))
         })();
         objects.map_err(|err| python_error_to_response_in(py, &err, Some(&input)))
     });
-    let (mut kwargs, request, metadata, plan) = match setup {
+    let (mut kwargs, request, metadata, plan, pending) = match setup {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -98,7 +99,12 @@ pub(crate) async fn run_managed_handler(
             &mut stacks,
             sync_to_threadpool,
         )
-        .await?;
+        .await;
+        let values = match (values, pending) {
+            (Ok(_), Some(pending)) => return Err(pending.into_error()),
+            (Ok(values), None) => values,
+            (Err(err), pending) => return Err(Python::attach(|py| dependency_failure(py, pending, err))),
+        };
         if !handler.execution.is_async && sync_to_threadpool {
             return blocking::run_python(move |py| {
                 inject_dependencies(py, &mut kwargs, values)?;

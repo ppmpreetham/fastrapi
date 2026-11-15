@@ -6,6 +6,7 @@ use super::handler_errors::{
     error_response, python_error_to_response, python_error_to_response_in,
 };
 use super::managed::run_managed_handler;
+use super::pending_validation::{PendingValidation, dependency_failure};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
@@ -104,12 +105,12 @@ pub(crate) fn build_request_input_from_parts<'a>(
 }
 
 #[inline(always)]
-pub(crate) fn prepare_kwargs_and_payload(
+fn request_kwargs(
     py: Python<'_>,
     handler: &RouteHandler,
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
-) -> Result<CallArgs, Response> {
+) -> Result<CallArgs, Rejection> {
     let mut kwargs = CallArgs::new();
     fastrapi_routing::request_data::apply_request_data(
         py,
@@ -117,13 +118,46 @@ pub(crate) fn prepare_kwargs_and_payload(
         request_input,
         payload,
         &mut kwargs,
-    )
-    .map_err(|rejection| match rejection {
+    )?;
+    Ok(kwargs)
+}
+
+fn rejection_response(
+    py: Python<'_>,
+    rejection: Rejection,
+    request_input: &RequestInput<'_>,
+) -> Response {
+    match rejection {
         Rejection::Python(err) => python_error_to_response_in(py, &err, Some(request_input)),
         Rejection::Response(response) => response,
-    })?;
+    }
+}
 
-    Ok(kwargs)
+#[inline(always)]
+pub(crate) fn prepare_kwargs_and_payload(
+    py: Python<'_>,
+    handler: &RouteHandler,
+    request_input: &RequestInput<'_>,
+    payload: Option<&BodyPayload>,
+) -> Result<CallArgs, Response> {
+    request_kwargs(py, handler, request_input, payload)
+        .map_err(|rejection| rejection_response(py, rejection, request_input))
+}
+
+/// Builds the handler arguments, or holds a validation error until the dependencies have run.
+#[inline(always)]
+pub(crate) fn kwargs_or_pending(
+    py: Python<'_>,
+    handler: &RouteHandler,
+    request_input: &RequestInput<'_>,
+    payload: Option<&BodyPayload>,
+) -> Result<(CallArgs, Option<PendingValidation>), Response> {
+    match request_kwargs(py, handler, request_input, payload) {
+        Ok(kwargs) => Ok((kwargs, None)),
+        Err(rejection) => PendingValidation::hold(py, handler, rejection)
+            .map(|pending| (CallArgs::new(), Some(pending)))
+            .map_err(|rejection| rejection_response(py, rejection, request_input)),
+    }
 }
 
 pub(crate) fn request_object(
@@ -148,14 +182,24 @@ fn resolve_sync_deps(
     request_input: &RequestInput<'_>,
     request_object: Option<Py<PyAny>>,
     kwargs: &mut CallArgs,
+    pending: Option<PendingValidation>,
 ) -> Result<TeardownTasks, Response> {
-    let (dep_results, teardowns) = dependencies::execute_dependencies_sync(
+    let (dep_results, teardowns) = match dependencies::execute_dependencies_sync(
         py,
         &handler.payload.dependencies,
         request_input,
         request_object,
-    )
-    .map_err(|err| python_error_to_response_in(py, &err, Some(request_input)))?;
+    ) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            let err = dependency_failure(py, pending, err);
+            return Err(python_error_to_response_in(py, &err, Some(request_input)));
+        }
+    };
+    if let Some(pending) = pending {
+        execute_teardowns_sync(py, teardowns, Some(pending.error()));
+        return Err(python_error_to_response_in(py, pending.error(), Some(request_input)));
+    }
 
     dep_results.into_iter().try_for_each(|(name, value)| {
         kwargs
@@ -435,7 +479,7 @@ fn run_sync_gil_section(
         server,
     } = *state;
 
-    let mut kwargs = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
+    let (mut kwargs, pending) = kwargs_or_pending(py, handler, request_input, payload)?;
 
     let req_obj = if needs_request_object {
         Some(
@@ -446,7 +490,7 @@ fn run_sync_gil_section(
         None
     };
 
-    let teardowns = resolve_sync_deps(py, handler, request_input, req_obj, &mut kwargs)?;
+    let teardowns = resolve_sync_deps(py, handler, request_input, req_obj, &mut kwargs, pending)?;
 
     let response =
         call_handler_and_convert(py, handler, Some(&kwargs), Some(request_input), server);
@@ -677,7 +721,7 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
     request_input: &RequestInput<'_>,
     payload: Option<&BodyPayload>,
 ) -> Result<HandlerRun, Response> {
-    let mut kwargs = prepare_kwargs_and_payload(py, handler, request_input, payload)?;
+    let (mut kwargs, pending) = kwargs_or_pending(py, handler, request_input, payload)?;
 
     let req_obj = if NEEDS_REQ {
         Some(
@@ -688,7 +732,7 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
         None
     };
 
-    resolve_sync_deps(py, handler, request_input, req_obj, &mut kwargs)?;
+    resolve_sync_deps(py, handler, request_input, req_obj, &mut kwargs, pending)?;
 
     let coroutine = kwargs
         .call(
@@ -700,7 +744,7 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
     start_coroutine(py, event_loop, handler, Some(request_input), coroutine)
 }
 
-type AsyncDepsPrep = (Option<Py<PyAny>>, CallArgs);
+type AsyncDepsPrep = (Option<Py<PyAny>>, CallArgs, Option<PendingValidation>);
 
 async fn core_async_async_deps<const NEEDS_REQ: bool>(
     event_loop: EventLoop,
@@ -720,7 +764,8 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
             return None;
         }
         Some((|| {
-            let kwargs = prepare_kwargs_and_payload(py, handler, &request_input, payload.as_ref())?;
+            let (kwargs, pending) =
+                kwargs_or_pending(py, handler, &request_input, payload.as_ref())?;
             let req_obj = if NEEDS_REQ {
                 Some(
                     request_object(py, handler, &kwargs, &request_input, payload.as_ref())
@@ -729,11 +774,11 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
             } else {
                 None
             };
-            Ok((req_obj, kwargs))
+            Ok((req_obj, kwargs, pending))
         })())
     });
 
-    let (request_object, mut kwargs) = match prep {
+    let (request_object, mut kwargs, pending) = match prep {
         Some(Ok(res)) => res,
         Some(Err(r)) => return r,
         None => {
@@ -761,10 +806,17 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
         Ok(results) => results,
         Err(err) => {
             return Python::attach(|py| {
+                let err = dependency_failure(py, pending, err);
                 python_error_to_response_in(py, &err, Some(&request_input))
             });
         }
     };
+    if let Some(pending) = pending {
+        execute_teardowns_async(event_loop, teardowns, Some(pending.error())).await;
+        return Python::attach(|py| {
+            python_error_to_response_in(py, pending.error(), Some(&request_input))
+        });
+    }
 
     let setup = Python::attach(|py| -> Result<_, Response> {
         dependency_results
