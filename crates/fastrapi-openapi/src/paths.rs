@@ -735,7 +735,7 @@ pub fn build_paths_from_routes(
                 }
 
                 let mut schema =
-                    apply_parameter_constraints(schema, &param.constraints, param.is_list);
+                    apply_parameter_constraints(schema, marker, &param.constraints, param.is_list);
 
                 let deprecated = marker
                     .and_then(|marker| marker.getattr(intern!(py, "deprecated")).ok())

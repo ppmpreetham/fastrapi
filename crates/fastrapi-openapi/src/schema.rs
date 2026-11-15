@@ -330,8 +330,16 @@ pub(crate) fn python_type_to_openapi_type(
     json!({ "type": "string" })
 }
 
+const NUMERIC_BOUNDS: [(&str, &str); 4] = [
+    ("gt", "exclusiveMinimum"),
+    ("ge", "minimum"),
+    ("lt", "exclusiveMaximum"),
+    ("le", "maximum"),
+];
+
 pub(crate) fn apply_parameter_constraints(
     mut schema: JsonValue,
+    marker: Option<&Bound<'_, PyAny>>,
     constraints: &ParameterConstraints,
     is_list: bool,
 ) -> JsonValue {
@@ -341,17 +349,8 @@ pub(crate) fn apply_parameter_constraints(
         ("minLength", "maxLength")
     };
     if let Some(object) = schema.as_object_mut() {
-        if let Some(gt) = constraints.gt {
-            object.insert("exclusiveMinimum".to_string(), json!(gt));
-        }
-        if let Some(ge) = constraints.ge {
-            object.insert("minimum".to_string(), json!(ge));
-        }
-        if let Some(lt) = constraints.lt {
-            object.insert("exclusiveMaximum".to_string(), json!(lt));
-        }
-        if let Some(le) = constraints.le {
-            object.insert("maximum".to_string(), json!(le));
+        if let Some(marker) = marker {
+            insert_numeric_bounds(object, marker);
         }
         if let Some(min_length) = constraints.min_length {
             object.insert(min_key.to_string(), json!(min_length));
@@ -365,6 +364,25 @@ pub(crate) fn apply_parameter_constraints(
         }
     }
     schema
+}
+
+fn insert_numeric_bounds(
+    object: &mut simd_json::owned::Object,
+    marker: &Bound<'_, PyAny>,
+) {
+    let py = marker.py();
+    let Ok(metadata) = marker.getattr(intern!(py, "metadata")) else {
+        return;
+    };
+    for item in metadata.try_iter().into_iter().flatten().flatten() {
+        for (attribute, key) in NUMERIC_BOUNDS {
+            if let Ok(value) = item.getattr(attribute)
+                && !value.is_none()
+            {
+                object.insert(key.to_string(), py_any_to_json(py, &value));
+            }
+        }
+    }
 }
 
 /// Converts a Python list of dicts into a list of JSON values.
