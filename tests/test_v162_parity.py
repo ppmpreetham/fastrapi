@@ -4,7 +4,7 @@ from typing import Annotated
 import fastapi
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 import fastrapi
 
@@ -345,5 +345,51 @@ def test_body_media_types_in_openapi():
 
         paths = app.openapi()["paths"]
         return {path: list(item["post"]["requestBody"]["content"]) for path, item in paths.items()}
+
+    both(run)
+
+
+def test_param_models_respect_alias_settings():
+    class Paging(BaseModel):
+        model_config = ConfigDict(populate_by_name=True)
+        page_size: int = Field(10, alias="pageSize")
+
+    class ByName(BaseModel):
+        model_config = ConfigDict(validate_by_alias=False, validate_by_name=True)
+        x_token: str = Field(alias="tok")
+
+    class Session(BaseModel):
+        model_config = ConfigDict(validate_by_alias=False, validate_by_name=True)
+        session_id: str = Field(alias="sid")
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/query")
+        def query(params: Annotated[Paging, lib.Query()]):
+            return params
+
+        @app.get("/header")
+        def header(params: Annotated[ByName, lib.Header()]):
+            return params
+
+        @app.get("/cookie")
+        def cookie(params: Annotated[Session, lib.Cookie()]):
+            return params
+
+        client = TestClient(app)
+        calls = [
+            client.get("/query?pageSize=3"),
+            client.get("/query?page_size=4"),
+            client.get("/header", headers={"x-token": "a"}),
+            client.get("/header", headers={"tok": "b"}),
+            client.get("/cookie", headers={"cookie": "session_id=s"}),
+            client.get("/cookie", headers={"cookie": "sid=s"}),
+        ]
+        results = [(r.status_code, r.json()) for r in calls]
+        for _, body in results:
+            for error in body.get("detail", []) if isinstance(body, dict) else []:
+                error.pop("input", None)
+        return results, app.openapi()["paths"]
 
     both(run)

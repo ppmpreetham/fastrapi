@@ -468,8 +468,9 @@ class FieldSpec:
 
 def _model_keys(model: type[BaseModel], source: str, convert_underscores: bool) -> list[ModelKey]:
     keys = []
+    by_alias = model.model_config.get("validate_by_alias") is not False
     for name, info in model.model_fields.items():
-        alias = validation_alias(info, name)
+        alias = validation_alias(info, name) if by_alias else name
         lookup = alias
         if source == "header" and getattr(info, "convert_underscores", convert_underscores) and alias == name:
             lookup = alias.replace("_", "-")
