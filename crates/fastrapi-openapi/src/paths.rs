@@ -282,7 +282,7 @@ fn model_parameters(
         return Vec::new();
     };
     let optional = model.presence.is_some() && !param.required;
-    let Ok(fields) = model.class.bind(py).getattr(intern!(py, "model_fields")) else {
+    let Ok(fields) = model.annotation.bind(py).getattr(intern!(py, "model_fields")) else {
         return Vec::new();
     };
     let Ok(fields) = fields.cast_into::<PyDict>() else {

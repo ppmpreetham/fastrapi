@@ -1,9 +1,12 @@
 import asyncio
 import threading
 import time
+from typing import Annotated, Literal
 
 import fastapi
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 import fastrapi
@@ -143,5 +146,74 @@ def test_route_dependencies_keep_marker_options():
         app.include_router(router)
         body = TestClient(app).get("/stream").text
         return body, events
+
+    both(run)
+
+
+class Cat(BaseModel):
+    kind: Literal["cat"]
+    meow: str
+
+
+class Dog(BaseModel):
+    kind: Literal["dog"]
+    bark: str
+    tags: list[str] = []
+
+
+class Profile(BaseModel):
+    name: str
+    age: int = 1
+
+
+class Extra(BaseModel):
+    note: str
+
+
+def form_app(lib):
+    app = new_app(lib)
+
+    @app.post("/union")
+    def union(pet: Annotated[Cat | Dog, lib.Form()]):
+        return pet
+
+    @app.post("/optional-union")
+    def optional_union(pet: Annotated[Cat | Dog | None, lib.Form()] = None):
+        return pet
+
+    @app.post("/optional")
+    def optional(profile: Annotated[Profile | None, lib.Form()] = None):
+        return profile
+
+    @app.post("/combined")
+    def combined(profile: Annotated[Profile, lib.Form()], extra: Annotated[Extra, lib.Form()]):
+        return [profile, extra]
+
+    @app.post("/mixed")
+    def mixed(profile: Annotated[Profile, lib.Form()], note: Annotated[str, lib.Form()] = "x"):
+        return [profile, note]
+
+    @app.post("/json")
+    def json_body(count: int = lib.Body(5), profile: Profile = lib.Body(Profile(name="p")), label: str = lib.Body(embed=True)):
+        return count
+
+    return app
+
+
+@pytest.mark.parametrize(
+    ("path", "data"),
+    [
+        ("/union", {"kind": "dog", "bark": "w", "tags": ["a", "b"]}),
+        ("/union", {"kind": "cat", "meow": "m", "bark": ""}),
+        ("/union", {"kind": "x"}),
+        ("/optional-union", {}),
+        ("/optional-union", {"kind": "cat", "meow": "m"}),
+        ("/optional-union", {"other": "1"}),
+    ],
+)
+def test_form_model_unions(path, data):
+    def run(lib):
+        response = TestClient(form_app(lib)).post(path, data=data)
+        return response.status_code, response.json()
 
     both(run)

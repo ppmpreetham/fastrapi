@@ -45,9 +45,10 @@ pub enum ModelPresence {
 
 #[derive(Debug)]
 pub struct ParamModel {
-    pub class: Py<PyAny>,
+    pub annotation: Py<PyAny>,
     pub keys: Box<[ModelKey]>,
     pub presence: Option<ModelPresence>,
+    pub union: bool,
 }
 
 #[expect(

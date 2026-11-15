@@ -91,9 +91,10 @@ fn param_model(spec: &Bound<'_, PyAny>) -> PyResult<Option<Arc<ParamModel>>> {
         })
         .collect::<PyResult<Box<[ModelKey]>>>()?;
     Ok(Some(Arc::new(ParamModel {
-        class: spec.getattr(intern!(py, "model_class"))?.unbind(),
+        annotation: spec.getattr(intern!(py, "model_class"))?.unbind(),
         keys,
         presence,
+        union: spec.getattr(intern!(py, "model_union"))?.extract()?,
     })))
 }
 

@@ -806,10 +806,15 @@ fn form_dict<'py>(
 
 fn form_model<'py>(
     py: Python<'py>,
-    keys: &[ModelKey],
+    model: &ParamModel,
     fields: Option<&FormFields>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let dict = PyDict::new(py);
+    if model.union {
+        form_dict(py, fields, |_| false, &dict)?;
+        return Ok(dict.into_any());
+    }
+    let keys = &model.keys;
     if let Some(fields) = fields {
         model_dict(py, keys, &dict, |key| {
             match fields.get(key.lookup.as_str()) {
@@ -1081,7 +1086,7 @@ fn form_model_param<'py>(
         Some(ModelPresence::AnyKey) => fields.is_some_and(|fields| !fields.is_empty()),
     };
     let raw = present
-        .then(|| form_model(py, &model.keys, fields))
+        .then(|| form_model(py, model, fields))
         .transpose()?;
     resolve(py, param, raw, Loc::Source(&param.source), errors)
 }

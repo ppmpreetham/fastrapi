@@ -10,7 +10,7 @@ from functools import partial
 from types import NoneType, UnionType
 from typing import Annotated, Any, Union, get_args, get_origin
 
-from pydantic import AliasChoices, BaseModel, Field, Json, TypeAdapter
+from pydantic import AliasChoices, BaseModel, BeforeValidator, Field, Json, Tag, TypeAdapter
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined, ValidationError
 
@@ -295,10 +295,6 @@ def is_type_sequence(annotation: Any, types: tuple) -> bool:
     return is_sequence(annotation) and all(is_type(arg, types) for arg in get_args(annotation))
 
 
-def is_union_of_models(annotation: Any) -> bool:
-    return _is_union(get_origin(annotation)) and all(lenient_issubclass(arg, BaseModel) for arg in get_args(annotation))
-
-
 def param_model(field_info: FieldInfo) -> type[BaseModel] | None:
     annotation = field_info.annotation
     unwraps = isinstance(field_info, Param) or (isinstance(field_info, Form) and not field_info.embed)
@@ -309,10 +305,53 @@ def param_model(field_info: FieldInfo) -> type[BaseModel] | None:
     return annotation if lenient_issubclass(annotation, BaseModel) and not _is_json(field_info) else None
 
 
-def model_presence(field_info: FieldInfo, model: type[BaseModel] | None) -> str | None:
-    if model is None or model is field_info.annotation:
+def form_union_models(field_info: FieldInfo) -> list[type[BaseModel]]:
+    annotation = field_info.annotation
+    if not isinstance(field_info, Form) or field_info.embed or _is_json(field_info) or not _is_union(get_origin(annotation)):
+        return []
+    models = []
+    for arg in get_args(annotation):
+        if arg is NoneType:
+            continue
+        model = get_args(arg)[0] if get_origin(arg) is Annotated else arg
+        if not lenient_issubclass(model, BaseModel):
+            return []
+        models.append(model)
+    return models if len(models) > 1 else []
+
+
+def form_union_annotation(annotation: Any) -> Any:
+    choices = []
+    for choice in get_args(annotation):
+        if choice is NoneType:
+            choices.append(choice)
+            continue
+        model, *metadata = get_args(choice) if get_origin(choice) is Annotated else (choice,)
+        tag = next((item for item in reversed(metadata) if isinstance(item, Tag)), Tag(model.__name__))
+        choices.append(Annotated[choice, BeforeValidator(partial(form_union_branch, keys=_model_keys(model, "body", False))), tag])
+    return Union[tuple(choices)]
+
+
+def form_union_branch(value: Any, *, keys: list["ModelKey"]) -> Any:
+    if not isinstance(value, dict):
+        return value
+    branch = {}
+    for key in keys:
+        if key.lookup not in value:
+            continue
+        items = value[key.lookup]
+        items = items if isinstance(items, list) else [items]
+        if key.sequence:
+            branch[key.alias] = items
+        elif items[-1] != "":
+            branch[key.alias] = items[-1]
+    return branch
+
+
+def model_presence(field_info: FieldInfo, models: list[type[BaseModel]]) -> str | None:
+    if not models or NoneType not in get_args(field_info.annotation):
         return None
-    return "any" if model.model_config.get("extra") in ("allow", "forbid") else "own"
+    return "any" if any(model.model_config.get("extra") in ("allow", "forbid") for model in models) else "own"
 
 
 def copy_field_info(field_info: FieldInfo, annotation: Any) -> FieldInfo:
@@ -455,6 +494,7 @@ class FieldSpec:
         "model_keys",
         "model_class",
         "model_presence",
+        "model_union",
         "alias_choices",
         "loc_renames",
         "fast",
@@ -483,6 +523,20 @@ def _model_keys(model: type[BaseModel], source: str, convert_underscores: bool) 
             lookup = alias.replace("_", "-")
         keys.append(ModelKey(lookup, alias, info))
     return keys
+
+
+def _merged_model_keys(models: list[type[BaseModel]], source: str, convert_underscores: bool) -> list[ModelKey]:
+    keys = {}
+    for model in models:
+        for key in _model_keys(model, source, convert_underscores):
+            keys.setdefault(key.lookup, key)
+    return list(keys.values())
+
+
+def _with_annotation(field_info: FieldInfo, annotation: Any) -> FieldInfo:
+    replaced = copy(field_info)
+    replaced.annotation = annotation
+    return replaced
 
 
 def _is_json(field_info: FieldInfo) -> bool:
@@ -574,11 +628,14 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
     spec.make_default = default_maker(field_info)
     spec.sequence = is_sequence(field_info.annotation) and not _is_json(field_info)
     model = param_model(field_info)
-    spec.model = model is not None
-    spec.model_class = model
-    spec.model_presence = model_presence(field_info, model)
+    union_models = form_union_models(field_info)
+    models = union_models or ([model] if model is not None else [])
+    spec.model = bool(models)
+    spec.model_union = bool(union_models)
+    spec.model_class = Union[tuple(union_models)] if union_models else model
+    spec.model_presence = model_presence(field_info, models)
     spec.model_keys = (
-        _model_keys(model, spec.source, getattr(field_info, "convert_underscores", True))
+        _merged_model_keys(models, spec.source, getattr(field_info, "convert_underscores", True))
         if spec.model and (spec.source != "body" or isinstance(field_info, Form))
         else None
     )
@@ -587,7 +644,7 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
         if spec.model_keys and spec.source == "header" and model.model_config.get("loc_by_alias", True)
         else None
     )
-    adapter = type_adapter(field_info)
+    adapter = type_adapter(_with_annotation(field_info, form_union_annotation(field_info.annotation)) if union_models else field_info)
     spec.validate = partial(adapter.validate_python, from_attributes=True)
     spec.validate_json = adapter.validate_json
     if field_info.validate_default and not spec.required:
@@ -612,7 +669,7 @@ def should_embed(specs: list[FieldSpec]) -> bool:
         return True
     first = specs[0]
     return first.embed or (
-        first.is_form and not first.model and not is_union_of_models(first.field_info.annotation)
+        first.is_form and not first.model
     )
 
 
