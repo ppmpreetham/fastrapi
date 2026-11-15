@@ -102,7 +102,7 @@ def test_kernel_fast_path_is_identical_to_pydantic_and_engages():
     )
 
     by_name = _find(kernel["results"], "by-name")
-    assert by_name["status"] == 200 and by_name["body"]["nick"] == "ann"
+    assert by_name["status"] == 200 and by_name["body"]["userName"] == "ann"
 
     # 5. semantics: coercions, defaults and aliasing survived the fast path
     full = _find(kernel["results"], "full")
@@ -110,7 +110,7 @@ def test_kernel_fast_path_is_identical_to_pydantic_and_engages():
     body = full["body"]
     assert body["age"] == 42 and isinstance(body["age"], int)
     assert body["active"] is True and body["scale"] == 1.5
-    assert body["bio"] == "hey" and body["nick"] == "ann"
+    assert body["bio"] == "hey" and body["userName"] == "ann"
     assert body["shout"] == "WHISPER"
     assert body["counts"] == {"x": 1, "y": 2}
     assert body["token"] == "aGk="  # Base64Bytes serializes back to base64

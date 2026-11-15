@@ -285,3 +285,28 @@ def test_alias_choices():
         return [(r.status_code, r.json()) for r in calls], app.openapi()["paths"]
 
     both(run)
+
+
+def test_returned_models_serialize_by_alias():
+    class Page(BaseModel):
+        page_size: int = Field(10, alias="pageSize")
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/model")
+        def model():
+            return Page(pageSize=3)
+
+        @app.get("/nested")
+        def nested():
+            return {"items": [Page(pageSize=4)], "page": Page()}
+
+        @app.get("/response", response_class=lib.responses.JSONResponse)
+        def response():
+            return lib.responses.JSONResponse(lib.encoders.jsonable_encoder(Page(pageSize=5)))
+
+        client = TestClient(app)
+        return [client.get(path).json() for path in ("/model", "/nested", "/response")]
+
+    both(run)

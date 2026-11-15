@@ -69,6 +69,19 @@ crate::cached_py_import!(UUID_TYPE, "uuid", "UUID");
 crate::cached_py_import!(PURE_PATH_TYPE, "pathlib", "PurePath");
 crate::cached_py_import!(IP_ADDRESS_BASE, "ipaddress", "_IPAddressBase");
 
+static BY_ALIAS: pyo3::sync::PyOnceLock<Py<PyDict>> = pyo3::sync::PyOnceLock::new();
+
+fn by_alias(py: Python<'_>) -> Option<&Bound<'_, PyDict>> {
+    BY_ALIAS
+        .get_or_try_init(py, || {
+            let options = PyDict::new(py);
+            options.set_item(intern!(py, "by_alias"), true)?;
+            Ok::<_, PyErr>(options.unbind())
+        })
+        .ok()
+        .map(|options| options.bind(py))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SerializationHint {
     #[default]
@@ -114,7 +127,7 @@ pub fn write_pydantic_model_json<W: Write>(
     value: &Bound<'_, PyAny>,
     writer: &mut W,
 ) -> PyResult<bool> {
-    write_pydantic_model_json_opts(py, value, writer, None)
+    write_pydantic_model_json_opts(py, value, writer, by_alias(py))
 }
 
 #[inline]
@@ -706,7 +719,7 @@ pub fn write_py_json<W: Write>(
                 return Ok(());
             }
 
-            if let Ok(dumped) = value.call_method0(intern!(py, "model_dump")) {
+            if let Ok(dumped) = value.call_method(intern!(py, "model_dump"), (), by_alias(py)) {
                 return write_py_json(py, &dumped, writer);
             }
 
@@ -1014,7 +1027,7 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         }
 
         PyJsonKind::PydanticModel => {
-            if let Ok(json) = value.call_method0(intern!(py, "model_dump_json"))
+            if let Ok(json) = value.call_method(intern!(py, "model_dump_json"), (), by_alias(py))
                 && let Ok(s) = json.cast::<PyString>()
             {
                 let mut json_buf = s.to_str().unwrap_or_default().as_bytes().to_vec();
@@ -1022,7 +1035,7 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
                     return parsed;
                 }
             }
-            if let Ok(dumped) = value.call_method0(intern!(py, "model_dump")) {
+            if let Ok(dumped) = value.call_method(intern!(py, "model_dump"), (), by_alias(py)) {
                 return py_any_to_json(py, &dumped);
             }
             simd_json::json!(null)
