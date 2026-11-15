@@ -492,6 +492,28 @@ def get_request_handler(
     return app
 
 
+def get_websocket_app(dependant, dependency_overrides_provider=None, embed_body_fields=False):
+    from contextlib import AsyncExitStack
+
+    from fastrapi.exceptions import WebSocketRequestValidationError
+
+    async def app(websocket):
+        async with AsyncExitStack() as stack:
+            solved = await solve_dependencies(
+                request=websocket,
+                dependant=dependant,
+                dependency_overrides_provider=dependency_overrides_provider,
+                async_exit_stack=stack,
+                embed_body_fields=embed_body_fields,
+            )
+            if solved.errors:
+                raise WebSocketRequestValidationError(solved.errors)
+            assert dependant.call is not None, "dependant.call must be a function"
+            await dependant.call(**solved.values)
+
+    return app
+
+
 def get_fields_from_routes(routes):
     fields = []
     for route in routes:

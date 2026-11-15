@@ -217,6 +217,7 @@ mod fastrapi {
                 "serialize_response",
                 "run_endpoint_function",
                 "get_request_handler",
+                "get_websocket_app",
             ] {
                 m.add(name, dependant.getattr(name)?)?;
             }

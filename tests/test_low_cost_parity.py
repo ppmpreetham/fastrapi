@@ -73,3 +73,33 @@ def test_background_tasks_run_in_order_and_stop_at_first_failure():
         return bodies, log
 
     both(run)
+
+
+def test_get_websocket_app_solves_dependencies():
+    from starlette.applications import Starlette
+    from starlette.routing import WebSocketRoute
+    from starlette.testclient import TestClient as StarletteClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from fastrapi.dependencies.utils import get_dependant
+    from fastrapi.routing import get_websocket_app
+
+    def prefix():
+        return "hi"
+
+    async def endpoint(websocket: fastrapi.WebSocket, name: str, greeting: str = fastrapi.Depends(prefix)):
+        await websocket.accept()
+        await websocket.send_text(f"{greeting} {name}")
+        await websocket.close()
+
+    app = get_websocket_app(get_dependant(path="/ws", call=endpoint))
+    client = StarletteClient(Starlette(routes=[WebSocketRoute("/ws", app)]))
+    with client.websocket_connect("/ws?name=bob") as websocket:
+        assert websocket.receive_text() == "hi bob"
+    try:
+        with client.websocket_connect("/ws") as websocket:
+            websocket.receive_text()
+    except Exception as exc:
+        assert isinstance(exc, (WebSocketDisconnect, fastrapi.exceptions.WebSocketRequestValidationError))
+    else:
+        raise AssertionError("missing query parameter was accepted")
