@@ -615,7 +615,7 @@ fn adapt_security_schemes(py: Python<'_>, nodes: &mut [DependencyNode]) {
 
 pub fn parse_external_dependencies(
     py: Python<'_>,
-    callables: &[Py<PyAny>],
+    markers: &[Py<PyAny>],
     path_param_names: &[String],
 ) -> PyResult<Vec<DependencyNode>> {
     let inspect = INSPECT.get(py)?;
@@ -623,18 +623,28 @@ pub fn parse_external_dependencies(
     let mut flat_plan = Vec::new();
     let mut visited = HashMap::new();
 
-    for callable in callables {
-        let bound = callable.bind(py);
+    for marker in markers {
+        let marker = marker.bind(py);
+        let callable = marker
+            .getattr(keys.dependency)
+            .ok()
+            .filter(|dependency| !dependency.is_none())
+            .unwrap_or_else(|| marker.clone());
+        let scopes = marker
+            .getattr(keys.scopes)
+            .ok()
+            .and_then(|value| extract_string_list(&value))
+            .unwrap_or_default();
         extract_and_flatten(
             py,
             inspect,
             &keys,
-            bound,
+            &callable,
             path_param_names,
             true,
             None,
-            Vec::new(),
-            MarkerOptions::ROOT,
+            scopes,
+            MarkerOptions::of(marker, &keys),
             &mut flat_plan,
             &mut visited,
         )?;
@@ -658,7 +668,7 @@ pub fn merge_dependencies(
         }
         let cached = node
             .use_cache
-            .then(|| merged.iter().position(|other| shares_cache(other, &node)))
+            .then(|| merged.iter().position(|other| same_cache_key(other, &node)))
             .flatten();
         let position = if let Some(position) = cached {
             let target = &mut merged[position];
@@ -675,28 +685,18 @@ pub fn merge_dependencies(
     merged
 }
 
-fn shares_cache(a: &DependencyNode, b: &DependencyNode) -> bool {
-    a.use_cache && a.func_id == b.func_id && cache_scopes(&a.scopes) == cache_scopes(&b.scopes)
+fn same_cache_key(a: &DependencyNode, b: &DependencyNode) -> bool {
+    a.func_id == b.func_id && cache_scopes(&a.scopes) == cache_scopes(&b.scopes)
 }
 
 #[must_use]
-pub fn collect_dependency_callables(
+pub fn collect_dependency_markers(
     py: Python<'_>,
     dependencies: Option<&Py<PyAny>>,
 ) -> Vec<Py<PyAny>> {
     dependencies
         .and_then(|deps| deps.bind(py).try_iter().ok())
-        .map(|iter| {
-            iter.flatten()
-                .filter_map(|item| {
-                    item.getattr(intern!(py, "dependency"))
-                        .ok()
-                        .filter(|dependency| !dependency.is_none())
-                        .map(Bound::unbind)
-                        .or_else(|| Some(item.unbind()))
-                })
-                .collect()
-        })
+        .map(|iter| iter.flatten().map(Bound::unbind).collect())
         .unwrap_or_default()
 }
 
@@ -846,9 +846,7 @@ fn extract_and_flatten(
         call_layout: None,
     });
 
-    if use_cache {
-        visited.insert(cache_key, node_index);
-    }
+    visited.entry(cache_key).or_insert(node_index);
 
     Ok(node_index)
 }

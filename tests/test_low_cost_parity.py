@@ -103,3 +103,45 @@ def test_get_websocket_app_solves_dependencies():
         assert isinstance(exc, (WebSocketDisconnect, fastrapi.exceptions.WebSocketRequestValidationError))
     else:
         raise AssertionError("missing query parameter was accepted")
+
+
+def test_route_dependencies_keep_marker_options():
+    def run(lib):
+        events = []
+
+        def function_session():
+            yield
+            events.append("function cleanup")
+
+        def request_session():
+            yield
+            events.append("request cleanup")
+
+        def counted():
+            events.append("counted")
+
+        def scoped(security_scopes: lib.security.SecurityScopes):
+            events.append(security_scopes.scopes)
+
+        router = lib.APIRouter(dependencies=[lib.Depends(function_session, scope="function")])
+
+        @router.get(
+            "/stream",
+            dependencies=[
+                lib.Depends(request_session),
+                lib.Depends(counted, use_cache=False),
+                lib.Security(scoped, scopes=["items"]),
+            ],
+        )
+        def stream(again=lib.Depends(counted), fresh=lib.Depends(counted, use_cache=False)):
+            def chunks():
+                yield "chunk"
+
+            return lib.responses.StreamingResponse(chunks())
+
+        app = new_app(lib)
+        app.include_router(router)
+        body = TestClient(app).get("/stream").text
+        return body, events
+
+    both(run)

@@ -7,7 +7,7 @@ use fastrapi_openapi::document::deep_merge_json;
 use fastrapi_openapi::paths::parse_callbacks_to_json;
 use fastrapi_routing::analysis::get_response_type_from_class;
 use fastrapi_routing::dependencies::{
-    DependencyNode, collect_dependency_callables, merge_dependencies, parse_external_dependencies,
+    DependencyNode, collect_dependency_markers, merge_dependencies, parse_external_dependencies,
 };
 use fastrapi_routing::route::{RouteEntry, RouteHandler, WebSocketEntry};
 use pyo3::Py;
@@ -221,9 +221,9 @@ fn merge_callbacks(base: Option<&JsonValue>, extra: Option<&JsonValue>) -> Optio
 }
 
 pub fn validate_dependencies(py: Python<'_>, dependencies: Option<&Py<PyAny>>) -> PyResult<()> {
-    let callables = collect_dependency_callables(py, dependencies);
-    if !callables.is_empty() {
-        parse_external_dependencies(py, &callables, &[])?;
+    let markers = collect_dependency_markers(py, dependencies);
+    if !markers.is_empty() {
+        parse_external_dependencies(py, &markers, &[])?;
     }
     Ok(())
 }
@@ -270,7 +270,7 @@ pub fn flatten_router(
         });
 
         let mut chain_deps = level.dependencies;
-        chain_deps.extend(collect_dependency_callables(
+        chain_deps.extend(collect_dependency_markers(
             py,
             router.dependencies.as_ref(),
         ));
@@ -364,7 +364,7 @@ pub fn flatten_router(
 
             let mut sub_deps = chain_deps.clone();
             if let Some(deps) = sub.dependencies.as_ref() {
-                sub_deps.extend(collect_dependency_callables(py, Some(deps)));
+                sub_deps.extend(collect_dependency_markers(py, Some(deps)));
             }
 
             let sub_callbacks = sub.callbacks.as_ref().and_then(|callbacks| {

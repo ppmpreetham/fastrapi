@@ -16,7 +16,7 @@ use fastrapi_routing::analysis::{
     parse_websocket_signature,
 };
 use fastrapi_routing::dependencies::{
-    DependencyNode, OverrideCache, collect_dependency_callables, merge_dependencies,
+    DependencyNode, OverrideCache, collect_dependency_markers, merge_dependencies,
     parse_dependencies, parse_external_dependencies,
 };
 use fastrapi_routing::route::{
@@ -591,8 +591,8 @@ impl PyAPIRouter {
             let mut metadata = parse_route_metadata(py, &func, &path_for_closure)?;
             if let Some(dependencies) = &opts.dependencies {
                 let path_param_names = extract_path_param_names(&path_for_closure);
-                let callables = collect_dependency_callables(py, Some(dependencies));
-                let external = parse_external_dependencies(py, &callables, &path_param_names)?;
+                let markers = collect_dependency_markers(py, Some(dependencies));
+                let external = parse_external_dependencies(py, &markers, &path_param_names)?;
                 metadata.dependencies = merge_dependencies(external, metadata.dependencies);
             }
             let analysis = RouteAnalysis::new(&metadata);
@@ -858,8 +858,8 @@ impl PyAPIRouter {
             super::tree::ensure_unfrozen(&frozen)?;
             let mut nodes = parse_dependencies(py, func.bind(py), &path_param_names)?;
             if let Some(dependencies) = &dependencies {
-                let callables = collect_dependency_callables(py, Some(dependencies));
-                let external = parse_external_dependencies(py, &callables, &path_param_names)?;
+                let markers = collect_dependency_markers(py, Some(dependencies));
+                let external = parse_external_dependencies(py, &markers, &path_param_names)?;
                 nodes = merge_dependencies(external, nodes);
             }
             let deps: SmallVec<[DependencyNode; 4]> = nodes.into();
