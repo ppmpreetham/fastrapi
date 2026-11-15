@@ -15,10 +15,15 @@ pub struct ServerContext {
     exception_handlers: OnceLock<Py<PyDict>>,
     status_handlers: OnceLock<bool>,
     lifespan_state: RwLock<Option<Py<PyAny>>>,
+    parent: Option<&'static Self>,
 }
 
 impl ServerContext {
-    pub(crate) const fn new(event_loop: Py<PyAny>, bridge: Arc<pyaio_faq::Bridge>) -> Self {
+    pub(crate) const fn new(
+        event_loop: Py<PyAny>,
+        bridge: Arc<pyaio_faq::Bridge>,
+        parent: Option<&'static Self>,
+    ) -> Self {
         Self {
             event_loop,
             bridge,
@@ -26,6 +31,7 @@ impl ServerContext {
             exception_handlers: OnceLock::new(),
             status_handlers: OnceLock::new(),
             lifespan_state: RwLock::new(None),
+            parent,
         }
     }
 
@@ -63,11 +69,13 @@ impl ServerContext {
         *self.lifespan_state.write() = None;
     }
 
+    /// Returns this server's lifespan state, or the state of the app it is mounted in.
     pub fn lifespan_state(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         self.lifespan_state
             .read()
             .as_ref()
             .map(|state| state.clone_ref(py))
+            .or_else(|| self.parent?.lifespan_state(py))
     }
 }
 

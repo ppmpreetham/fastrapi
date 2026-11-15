@@ -457,3 +457,27 @@ def test_request_state_is_shared_with_dependencies_and_copied_from_lifespan():
     assert run(fastrapi) == expected
     live = LiveServer(request_state_app(fastrapi))
     assert [live.http("GET", path)[1] for path in paths] == expected
+
+
+def test_mounted_app_sees_parent_lifespan_state():
+    def build(lib):
+        @contextlib.asynccontextmanager
+        async def lifespan(app):
+            yield {"db": "parent"}
+
+        app = new_app(lib, lifespan=lifespan)
+        sub = new_app(lib)
+
+        @sub.get("/state")
+        def state(request: lib.Request):
+            return getattr(request.state, "db", None)
+
+        app.mount("/sub", sub)
+        return app
+
+    def run(lib):
+        with TestClient(build(lib)) as client:
+            return client.get("/sub/state").json()
+
+    assert run(fastrapi) == run(fastapi)
+    assert LiveServer(build(fastrapi)).http("GET", "/sub/state") == (200, "parent")

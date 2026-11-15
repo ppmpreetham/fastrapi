@@ -23,7 +23,7 @@ impl EventLoop {
     pub fn leak(py: Python<'_>, event_loop: Py<PyAny>) -> PyResult<Self> {
         let bridge = pyaio_faq::Bridge::for_loop(py, event_loop.bind(py))?;
         Ok(Self(Box::leak(Box::new(ServerContext::new(
-            event_loop, bridge,
+            event_loop, bridge, None,
         )))))
     }
 
@@ -32,6 +32,7 @@ impl EventLoop {
         Self(Box::leak(Box::new(ServerContext::new(
             self.0.event_loop.clone_ref(py),
             Arc::clone(&self.0.bridge),
+            Some(self.0),
         ))))
     }
 
