@@ -4,12 +4,14 @@
 use axum::body::Body;
 use axum::response::Response;
 use bytes::Bytes;
+use fastrapi_runtime::blocking::run_python;
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::server_state::current_server;
 use fastrapi_runtime::tokio_runtime::spawn;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use parking_lot::Mutex;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyTuple};
@@ -18,6 +20,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tracing::error;
+
+fastrapi_pyutil::cached_py_import!(IS_ASYNC_CALLABLE, "starlette._utils", "is_async_callable");
 
 /// A collection of background tasks that will be called after a response has been
 /// sent to the client.
@@ -47,7 +51,7 @@ use tracing::error;
 #[pyclass(name = "BackgroundTasks", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyBackgroundTasks {
-    tasks: Arc<Mutex<Vec<(Py<PyAny>, Vec<Py<PyAny>>, Option<Py<PyDict>>)>>>,
+    tasks: Arc<Mutex<Vec<Task>>>,
 }
 
 impl Default for PyBackgroundTasks {
@@ -61,24 +65,13 @@ impl PyBackgroundTasks {
     #[new]
     #[pyo3(signature = (tasks=None))]
     fn py_new(tasks: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let mut stored = Vec::new();
-        if let Some(tasks) = tasks {
-            for task in tasks.try_iter()? {
-                let task = task?;
-                let py = task.py();
-                let kwargs = task.getattr(intern!(py, "kwargs"))?;
-                let kwargs = if kwargs.is_none() {
-                    None
-                } else {
-                    Some(kwargs.cast_into::<PyDict>()?.unbind())
-                };
-                stored.push((
-                    task.getattr(intern!(py, "func"))?.unbind(),
-                    task.getattr(intern!(py, "args"))?.extract()?,
-                    kwargs,
-                ));
-            }
-        }
+        let stored = match tasks {
+            Some(tasks) => tasks
+                .try_iter()?
+                .map(|task| Task::from_starlette(&task?))
+                .collect::<PyResult<_>>()?,
+            None => Vec::new(),
+        };
         Ok(Self {
             tasks: Arc::new(Mutex::new(stored)),
         })
@@ -90,13 +83,8 @@ impl PyBackgroundTasks {
             .import(intern!(py, "starlette.background"))?
             .getattr(intern!(py, "BackgroundTask"))?;
         let tasks = PyList::empty(py);
-        for (func, args, kwargs) in &self.snapshot(py) {
-            let mut call_args = vec![func.clone_ref(py)];
-            call_args.extend(args.iter().map(|arg| arg.clone_ref(py)));
-            tasks.append(task_class.call(
-                PyTuple::new(py, call_args)?,
-                kwargs.as_ref().map(|kwargs| kwargs.bind(py)),
-            )?)?;
+        for task in &self.snapshot(py) {
+            tasks.append(task.to_starlette(py, &task_class)?)?;
         }
         Ok(tasks)
     }
@@ -106,33 +94,106 @@ impl PyBackgroundTasks {
     /// Read more about it in the
     /// [FastAPI docs for Background Tasks](https://fastapi.tiangolo.com/tutorial/background-tasks/).
     #[pyo3(signature = (func, *args, **kwargs))]
-    fn add_task(&self, func: Py<PyAny>, args: Vec<Py<PyAny>>, kwargs: Option<&Bound<'_, PyDict>>) {
-        let mut tasks = self.tasks.lock();
-        tasks.push((func, args, kwargs.map(|kw| kw.clone().unbind())));
+    fn add_task(
+        &self,
+        func: Bound<'_, PyAny>,
+        args: Vec<Py<PyAny>>,
+        kwargs: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let task = Task::new(func, args, kwargs)?;
+        self.tasks.lock().push(task);
+        Ok(())
     }
 
     async fn __call__(&self) -> PyResult<()> {
         let (tasks, locals) = Python::attach(|py| {
             py_bridge::get_current_locals(py).map(|locals| (self.snapshot(py), locals))
         })?;
-        for (func, args, kwargs) in tasks {
-            let pending = Python::attach(|py| -> PyResult<_> {
-                let kwargs = kwargs.as_ref().map(|kwargs| kwargs.bind(py));
-                let result = func.bind(py).call(PyTuple::new(py, args)?, kwargs)?;
-                if result.hasattr(intern!(py, "__await__"))? {
-                    return py_bridge::into_future_with_locals(&locals, result).map(Some);
-                }
-                Ok(None)
-            })?;
-            if let Some(pending) = pending {
-                pending.await?;
-            }
+        for task in tasks {
+            task.run(|awaitable| py_bridge::into_future_with_locals(&locals, awaitable))
+                .await?;
         }
         Ok(())
     }
 }
 
-type Task = (Py<PyAny>, Vec<Py<PyAny>>, Option<Py<PyDict>>);
+struct Task {
+    func: Py<PyAny>,
+    args: Vec<Py<PyAny>>,
+    kwargs: Option<Py<PyDict>>,
+    is_async: bool,
+}
+
+impl Task {
+    fn new(
+        func: Bound<'_, PyAny>,
+        args: Vec<Py<PyAny>>,
+        kwargs: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let is_async = IS_ASYNC_CALLABLE
+            .get(func.py())?
+            .call1((&func,))?
+            .is_truthy()?;
+        Ok(Self {
+            func: func.unbind(),
+            args,
+            kwargs: kwargs.map(Bound::unbind),
+            is_async,
+        })
+    }
+
+    fn from_starlette(task: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let py = task.py();
+        Ok(Self {
+            func: task.getattr(intern!(py, "func"))?.unbind(),
+            args: task.getattr(intern!(py, "args"))?.extract()?,
+            kwargs: Some(task.getattr(intern!(py, "kwargs"))?.cast_into::<PyDict>()?.unbind()),
+            is_async: task.getattr(intern!(py, "is_async"))?.is_truthy()?,
+        })
+    }
+
+    fn to_starlette<'py>(
+        &self,
+        py: Python<'py>,
+        task_class: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let args: Vec<&Py<PyAny>> = std::iter::once(&self.func).chain(&self.args).collect();
+        task_class.call(PyTuple::new(py, args)?, self.kwargs(py))
+    }
+
+    fn clone_ref(&self, py: Python<'_>) -> Self {
+        Self {
+            func: self.func.clone_ref(py),
+            args: self.args.iter().map(|arg| arg.clone_ref(py)).collect(),
+            kwargs: self.kwargs.as_ref().map(|kwargs| kwargs.clone_ref(py)),
+            is_async: self.is_async,
+        }
+    }
+
+    fn kwargs<'py>(&self, py: Python<'py>) -> Option<&Bound<'py, PyDict>> {
+        self.kwargs.as_ref().map(|kwargs| kwargs.bind(py))
+    }
+
+    fn call<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.func
+            .bind(py)
+            .call(PyTuple::new(py, &self.args)?, self.kwargs(py))
+    }
+
+    async fn run<F, Fut>(self, schedule: F) -> PyResult<()>
+    where
+        F: for<'py> FnOnce(Bound<'py, PyAny>) -> PyResult<Fut>,
+        Fut: Future<Output = PyResult<Py<PyAny>>>,
+    {
+        if self.is_async {
+            let pending = Python::attach(|py| schedule(self.call(py)?))?;
+            return pending.await.map(drop);
+        }
+        run_python(move |py| self.call(py).map(drop))
+            .await
+            .map_err(|panicked| PyRuntimeError::new_err(panicked.to_string()))?
+    }
+}
 
 /// The tasks of one `BackgroundTasks` object, taken out to run after the response.
 pub struct PendingTasks {
@@ -141,53 +202,16 @@ pub struct PendingTasks {
 }
 
 impl PendingTasks {
-    /// Runs the synchronous tasks, then waits for the asynchronous tasks in order.
+    /// Runs the tasks one after another, like Starlette, and stops at the first failure.
     pub async fn run(self) {
-        if self.tasks.is_empty() {
-            return;
-        }
         let Self { event_loop, tasks } = self;
-        let futures: Vec<py_bridge::PyTaskFuture> = Python::attach(move |py| {
-            let mut futs = Vec::new();
-            for (func, args, kwargs) in tasks {
-                let Ok(args_tuple) = PyTuple::new(py, &args) else {
-                    error!("Background task: failed to build args tuple");
-                    continue;
-                };
-                let call_result = match kwargs {
-                    Some(kw) => func
-                        .into_bound(py)
-                        .call(args_tuple, Some(kw.bind(py)))
-                        .map(Bound::unbind),
-                    None => func.into_bound(py).call1(&args_tuple).map(Bound::unbind),
-                };
-                match call_result {
-                    Ok(result) => {
-                        if !result
-                            .bind(py)
-                            .hasattr(intern!(py, "__await__"))
-                            .unwrap_or(false)
-                        {
-                            continue;
-                        }
-                        match py_bridge::schedule_task(py, event_loop, result.into_bound(py)) {
-                            Ok(fut) => futs.push(fut),
-                            Err(e) => {
-                                error!("Background task scheduling error: {}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Background task error: {}", e);
-                        e.print(py);
-                    }
-                }
-            }
-            futs
-        });
-        for future in futures {
-            if let Err(e) = future.await {
-                error!("Async background task error: {}", e);
+        for task in tasks {
+            let scheduled = task.run(|awaitable| {
+                py_bridge::schedule_task(awaitable.py(), event_loop, awaitable)
+            });
+            if let Err(err) = scheduled.await {
+                Python::attach(|py| err.print(py));
+                return;
             }
         }
     }
@@ -198,13 +222,7 @@ impl PyBackgroundTasks {
         self.tasks
             .lock()
             .iter()
-            .map(|(func, args, kwargs)| {
-                (
-                    func.clone_ref(py),
-                    args.iter().map(|arg| arg.clone_ref(py)).collect(),
-                    kwargs.as_ref().map(|kwargs| kwargs.clone_ref(py)),
-                )
-            })
+            .map(|task| task.clone_ref(py))
             .collect()
     }
 
@@ -261,13 +279,16 @@ impl BackgroundJob {
                     }
                 }
             },
-            Self::Value(background) => background.bind(py).cast::<PyBackgroundTasks>().map_or_else(
-                |_| PendingTasks {
+            Self::Value(background) => match background.bind(py).cast::<PyBackgroundTasks>() {
+                Ok(tasks) => tasks.borrow().execute_all(event_loop),
+                Err(_) => PendingTasks {
                     event_loop,
-                    tasks: vec![(background.clone_ref(py), Vec::new(), None)],
+                    tasks: Task::new(background.into_bound(py), Vec::new(), None)
+                        .inspect_err(|err| err.print(py))
+                        .into_iter()
+                        .collect(),
                 },
-                |tasks| tasks.borrow().execute_all(event_loop),
-            ),
+            },
         });
         pending.run().await;
     }
