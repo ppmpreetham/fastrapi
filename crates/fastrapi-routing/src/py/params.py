@@ -70,7 +70,10 @@ def _init_field(
     deprecated=None,
     include_in_schema=True,
     json_schema_extra=None,
+    **unexpected: Any,
 ) -> None:
+    if unexpected:
+        raise TypeError(f"{type(self).__name__}() got an unexpected keyword argument {next(iter(unexpected))!r}")
     if example is not Unset:
         warnings.warn(
             "`example` has been deprecated, please use `examples` instead",
@@ -188,7 +191,11 @@ class File(Form):
 
 
 def _marker_signature(default: Any = Undefined, after: str = "default_factory", **extra: Any) -> inspect.Signature:
-    params = [param for param in inspect.signature(_init_field).parameters.values() if param.name not in ("self", "annotation")]
+    params = [
+        param
+        for param in inspect.signature(_init_field).parameters.values()
+        if param.name not in ("self", "annotation") and param.kind is not inspect.Parameter.VAR_KEYWORD
+    ]
     params[0] = params[0].replace(default=default)
     index = next(i for i, param in enumerate(params) if param.name == after) + 1
     added = [inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=value) for name, value in extra.items()]

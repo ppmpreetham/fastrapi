@@ -50,7 +50,12 @@ def test_telemetry_config_defaults_and_overrides():
 
 @pytest.mark.parametrize("marker", ["Query", "Header", "Cookie", "Path", "Body", "Form", "File"])
 def test_param_functions_reject_unknown_keyword_arguments(marker):
-    both(lambda lib: raises_type_error(lambda: getattr(lib, marker)(foo=1)))
+    def run(lib):
+        with pytest.raises(TypeError) as caught:
+            getattr(lib, marker)(foo=1)
+        return str(caught.value)
+
+    both(run)
 
 
 @pytest.mark.parametrize("marker", ["Query", "Header", "Body", "Form"])
