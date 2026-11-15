@@ -11,6 +11,7 @@ use fastrapi_core::body::BodyPayload;
 use fastrapi_core::params::PathParamRange;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_pyutil::call::CallArgs;
+use fastrapi_pyutil::errors::exc_info;
 use fastrapi_routing::dependencies::{self, ExitStacks, RequestPlan};
 use fastrapi_routing::route::RouteHandler;
 use fastrapi_runtime::py_bridge::EventLoop;
@@ -218,21 +219,11 @@ fn schedule_stack_exit(
     stack: &Py<PyAny>,
     error: Option<&PyErr>,
 ) -> PyResult<py_bridge::PyTaskFuture> {
-    let exc_info = |err: &PyErr| {
-        (
-            err.get_type(py).into_any().unbind(),
-            err.value(py).clone().into_any().unbind(),
-            err.traceback(py)
-                .map_or_else(|| py.None(), |tb| tb.into_any().unbind()),
-        )
+    let stack = stack.bind(py);
+    let coroutine = match error {
+        Some(err) => stack.call_method1(intern!(py, "__aexit__"), exc_info(py, err))?,
+        None => stack.call_method1(intern!(py, "__aexit__"), (py.None(), py.None(), py.None()))?,
     };
-    let args = match error {
-        Some(err) => exc_info(err),
-        None => (py.None(), py.None(), py.None()),
-    };
-    let coroutine = stack
-        .bind(py)
-        .call_method1(intern!(py, "__aexit__"), args)?;
     py_bridge::schedule_task(py, event_loop, coroutine)
 }
 

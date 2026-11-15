@@ -9,6 +9,7 @@ use crate::route::ParsedParameter;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::responses::PyResponse;
 use fastrapi_pyutil::call::{CallArgs, CallLayout};
+use fastrapi_pyutil::errors::exc_info;
 use fastrapi_pyutil::imports::INSPECT;
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::{blocking, py_bridge};
@@ -1005,7 +1006,7 @@ pub async fn execute_dependencies(
     {
         Ok(results) => Ok((results, teardowns)),
         Err(error) => {
-            execute_teardowns_async(event_loop, teardowns).await;
+            execute_teardowns_async(event_loop, teardowns, Some(&error)).await;
             Err(error)
         }
     }
@@ -1191,86 +1192,79 @@ pub fn execute_teardowns_sync(py: Python<'_>, teardowns: TeardownTasks, error: O
             tracing::error!("Async generator dependency found in sync route!");
         } else {
             let _entered = py_bridge::enter_request_copy(py);
-            let result = if let Some(error) = error {
-                let traceback = error
-                    .traceback(py)
-                    .map_or_else(|| py.None(), |value| value.into_any().unbind());
-                task.generator.bind(py).call_method1(
-                    pyo3::intern!(py, "throw"),
-                    (error.get_type(py), error.value(py), traceback),
-                )
-            } else {
-                task.generator
-                    .bind(py)
-                    .call_method0(pyo3::intern!(py, "__next__"))
-            };
-            match result {
-                Ok(_) => tracing::error!("Sync generator dependency yielded twice!"),
-                Err(e) => {
-                    if !e.is_instance_of::<PyStopIteration>(py) {
-                        tracing::error!("Error during sync generator dependency teardown: {}", e);
-                    }
-                }
-            }
+            finish_sync_generator(py, task.generator.bind(py), error);
         }
     }
 }
 
-pub async fn execute_teardowns_async(event_loop: EventLoop, teardowns: TeardownTasks) {
+pub async fn execute_teardowns_async(
+    event_loop: EventLoop,
+    teardowns: TeardownTasks,
+    error: Option<&PyErr>,
+) {
     let mut sync_batch: Vec<Py<PyAny>> = Vec::new();
 
     for task in teardowns.into_iter().rev() {
         if task.is_async {
-            flush_sync_teardowns(&mut sync_batch).await;
-            let resume = Python::attach(|py| -> PyResult<_> {
-                let coroutine = task
-                    .generator
-                    .bind(py)
-                    .call_method0(pyo3::intern!(py, "__anext__"))?;
+            flush_sync_teardowns(&mut sync_batch, error).await;
+            let resume = Python::attach(|py| {
+                let coroutine = resume_generator(py, task.generator.bind(py), error, true)?;
                 py_bridge::schedule_task(py, event_loop, coroutine)
             });
-            match resume {
-                Ok(fut) => match fut.await {
-                    Ok(_) => tracing::error!("Async generator dependency yielded twice!"),
-                    Err(e) => Python::attach(|py| {
-                        if !e.is_instance_of::<PyStopAsyncIteration>(py) {
-                            tracing::error!(
-                                "Error during async generator dependency teardown: {}",
-                                e
-                            );
-                        }
-                    }),
-                },
-                Err(e) => {
-                    tracing::error!("Failed to tear down async generator dependency: {}", e);
-                }
-            }
+            let finished = match resume {
+                Ok(fut) => fut.await,
+                Err(e) => Err(e),
+            };
+            Python::attach(|py| report_teardown::<PyStopAsyncIteration>(py, finished, error));
         } else {
             sync_batch.push(task.generator);
         }
     }
-    flush_sync_teardowns(&mut sync_batch).await;
+    flush_sync_teardowns(&mut sync_batch, error).await;
 }
 
-async fn flush_sync_teardowns(batch: &mut Vec<Py<PyAny>>) {
+async fn flush_sync_teardowns(batch: &mut Vec<Py<PyAny>>, error: Option<&PyErr>) {
     if batch.is_empty() {
         return;
     }
     let generators = take(batch);
+    let error = error.map(|error| Python::attach(|py| error.clone_ref(py)));
     _ = blocking::run_python(move |py| {
-        for task_gen in generators {
-            match task_gen
-                .bind(py)
-                .call_method0(pyo3::intern!(py, "__next__"))
-            {
-                Ok(_) => tracing::error!("Sync generator dependency yielded twice!"),
-                Err(e) => {
-                    if !e.is_instance_of::<PyStopIteration>(py) {
-                        tracing::error!("Error during sync generator dependency teardown: {}", e);
-                    }
-                }
-            }
+        for generator in generators {
+            finish_sync_generator(py, generator.bind(py), error.as_ref());
         }
     })
     .await;
+}
+
+fn finish_sync_generator(py: Python<'_>, generator: &Bound<'_, PyAny>, error: Option<&PyErr>) {
+    let finished = resume_generator(py, generator, error, false).map(Bound::unbind);
+    report_teardown::<PyStopIteration>(py, finished, error);
+}
+
+fn resume_generator<'py>(
+    py: Python<'py>,
+    generator: &Bound<'py, PyAny>,
+    error: Option<&PyErr>,
+    asynchronous: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    match (error, asynchronous) {
+        (Some(error), false) => generator.call_method1(intern!(py, "throw"), exc_info(py, error)),
+        (Some(error), true) => generator.call_method1(intern!(py, "athrow"), exc_info(py, error)),
+        (None, false) => generator.call_method0(intern!(py, "__next__")),
+        (None, true) => generator.call_method0(intern!(py, "__anext__")),
+    }
+}
+
+fn report_teardown<Done: pyo3::PyTypeInfo>(
+    py: Python<'_>,
+    finished: PyResult<Py<PyAny>>,
+    error: Option<&PyErr>,
+) {
+    match finished {
+        Ok(_) => tracing::error!("Generator dependency yielded twice!"),
+        Err(raised) if raised.is_instance_of::<Done>(py) => {}
+        Err(raised) if error.is_some_and(|error| raised.value(py).is(error.value(py))) => {}
+        Err(raised) => tracing::error!("Error during generator dependency teardown: {raised}"),
+    }
 }

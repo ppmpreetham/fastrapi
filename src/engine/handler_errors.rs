@@ -6,6 +6,7 @@ use fastrapi_http::exceptions::{
     http_exception_response, server_error_response, validation_error_response,
 };
 use fastrapi_http::request_input::RequestInput;
+use fastrapi_pyutil::errors::exc_info;
 use fastrapi_runtime::py_bridge::EventLoop;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -65,13 +66,8 @@ pub(crate) fn log_python_error(py: Python<'_>, err: &PyErr) {
     let rendered = (|| -> PyResult<String> {
         let traceback_bound = TRACEBACK_MODULE.get(py)?;
 
-        let traceback_obj = err
-            .traceback(py)
-            .map_or_else(|| py.None(), |tb| tb.into_any().unbind());
-        let lines = traceback_bound.call_method1(
-            intern!(py, "format_exception"),
-            (err.get_type(py), err.value(py), traceback_obj.bind(py)),
-        )?;
+        let lines =
+            traceback_bound.call_method1(intern!(py, "format_exception"), exc_info(py, err))?;
         Ok(lines.extract::<Vec<String>>()?.concat())
     })();
 

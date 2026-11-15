@@ -27,7 +27,7 @@ impl Cleanup {
             .await
             .map_err(|err| PyRuntimeError::new_err(err.to_string())),
             Self::Async(teardowns, event_loop) => {
-                execute_teardowns_async(event_loop, teardowns).await;
+                execute_teardowns_async(event_loop, teardowns, None).await;
                 Ok(())
             }
             Self::Stack(stack, event_loop) => {

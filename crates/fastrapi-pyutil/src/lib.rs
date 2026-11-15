@@ -3,6 +3,7 @@
 
 pub mod body;
 pub mod call;
+pub mod errors;
 pub mod imports;
 pub mod json;
 pub mod lazy;

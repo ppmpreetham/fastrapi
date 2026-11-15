@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import os
+import socket
 import threading
 import time
 from typing import Annotated, Literal
@@ -10,6 +13,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 import fastrapi
+from test_security_ws_parity import LiveServer
 
 
 def new_app(lib, **kwargs):
@@ -226,3 +230,86 @@ def test_form_model_request_body_schemas():
         return bodies, spec["components"]["schemas"]
 
     both(run)
+
+
+def websocket_teardown_app(lib, events):
+    app = lib.FastAPI() if lib is fastapi else lib.FastrAPI()
+
+    def session():
+        try:
+            yield "db"
+        except Exception as exc:
+            events.append(("sync", type(exc).__name__))
+            raise
+        events.append(("sync", "clean"))
+
+    async def async_session():
+        try:
+            yield "adb"
+        except Exception as exc:
+            events.append(("async", type(exc).__name__))
+            raise
+        events.append(("async", "clean"))
+
+    def broken(db=lib.Depends(session)):
+        raise ValueError("broken dependency")
+
+    @app.websocket("/after-accept")
+    async def after_accept(websocket: lib.WebSocket, db=lib.Depends(session), adb=lib.Depends(async_session)):
+        await websocket.accept()
+        raise KeyError("endpoint")
+
+    @app.websocket("/dependency")
+    async def dependency(websocket: lib.WebSocket, value=lib.Depends(broken)):
+        await websocket.accept()
+
+    @app.websocket("/validation")
+    async def validation(websocket: lib.WebSocket, q: int, db=lib.Depends(session)):
+        await websocket.accept()
+
+    @app.websocket("/ok")
+    async def ok(websocket: lib.WebSocket, db=lib.Depends(session), adb=lib.Depends(async_session)):
+        await websocket.accept()
+        await websocket.close()
+
+    return app
+
+
+WEBSOCKET_TEARDOWN_PATHS = ("/after-accept", "/dependency", "/validation", "/ok")
+
+
+def test_websocket_errors_reach_yield_dependencies():
+    expected = {}
+    for path in WEBSOCKET_TEARDOWN_PATHS:
+        events = []
+        client = TestClient(websocket_teardown_app(fastapi, events), raise_server_exceptions=False)
+        try:
+            with client.websocket_connect(path) as websocket:
+                websocket.receive()
+        except BaseException:
+            pass
+        expected[path] = events
+
+    events = []
+    live = LiveServer(websocket_teardown_app(fastrapi, events))
+    actual = {}
+    for path in WEBSOCKET_TEARDOWN_PATHS:
+        events.clear()
+        key = base64.b64encode(os.urandom(16)).decode()
+        with socket.create_connection(("127.0.0.1", live.port), timeout=5) as sock:
+            sock.sendall(
+                (
+                    f"GET {path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                ).encode()
+            )
+            try:
+                sock.recv(4096)
+                sock.recv(4096)
+            except OSError:
+                pass
+        deadline = time.time() + 2
+        while len(events) < len(expected[path]) and time.time() < deadline:
+            time.sleep(0.02)
+        actual[path] = list(events)
+    assert actual == expected

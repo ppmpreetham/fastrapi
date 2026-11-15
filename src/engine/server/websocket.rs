@@ -20,6 +20,7 @@ use hyper_util::rt::TokioIo;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict, PyList, PyString};
+use std::mem::take;
 use std::sync::Arc;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
@@ -203,7 +204,7 @@ pub async fn ws_handler(
             (decision, HandlerRun::Running(python_handler_future))
         }
         Handshake::Decision(None) => {
-            execute_teardowns_async(route.event_loop, teardowns).await;
+            execute_teardowns_async(route.event_loop, teardowns, None).await;
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
         Handshake::Finished(Err(error)) => {
@@ -212,7 +213,7 @@ pub async fn ws_handler(
         Handshake::Finished(Ok(value)) => {
             let Ok(decision) = decision_rx.try_recv() else {
                 error!("Python websocket handler returned before handshake");
-                execute_teardowns_async(route.event_loop, teardowns).await;
+                execute_teardowns_async(route.event_loop, teardowns, None).await;
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             };
             (decision, HandlerRun::Finished(Ok(value)))
@@ -221,11 +222,11 @@ pub async fn ws_handler(
 
     match decision {
         WSDecision::Reject(_) => {
-            execute_teardowns_async(route.event_loop, teardowns).await;
+            execute_teardowns_async(route.event_loop, teardowns, None).await;
             StatusCode::FORBIDDEN.into_response()
         }
         WSDecision::Deny(response) => {
-            execute_teardowns_async(route.event_loop, teardowns).await;
+            execute_teardowns_async(route.event_loop, teardowns, None).await;
             response
         }
         WSDecision::Accept(headers) => {
@@ -399,10 +400,10 @@ async fn rejected(
     decision_rx: &mut oneshot::Receiver<WSDecision>,
     teardowns: Option<dependencies::TeardownTasks>,
 ) -> Response {
-    let outcome = handle_error(route, websocket, error).await;
     if let Some(teardowns) = teardowns {
-        execute_teardowns_async(route.event_loop, teardowns).await;
+        execute_teardowns_async(route.event_loop, teardowns, Some(&error)).await;
     }
+    let outcome = handle_error(route, websocket, error).await;
     match decision_rx.try_recv() {
         Ok(WSDecision::Reject(_)) => StatusCode::FORBIDDEN.into_response(),
         Ok(WSDecision::Deny(response)) => response,
@@ -418,7 +419,7 @@ async fn handle_connection(
     fut: upgrade::UpgradeFut,
     py_ws_obj: Py<PyWebSocket>,
     handler_run: HandlerRun,
-    teardowns: dependencies::TeardownTasks,
+    mut teardowns: dependencies::TeardownTasks,
     route: Arc<WsRouteState>,
     tx_to_python: mpsc::Sender<WSMessage>,
     mut rx_from_python: mpsc::Receiver<WSMessage>,
@@ -440,6 +441,9 @@ async fn handle_connection(
         },
     };
     if let Some(result) = handler_result {
+        if let Err(error) = &result {
+            execute_teardowns_async(route.event_loop, take(&mut teardowns), Some(error)).await;
+        }
         let close = match result {
             Ok(_) => Some((1000, String::new())),
             Err(error) => match handle_error(&route, &py_ws_obj, error).await {
@@ -458,7 +462,7 @@ async fn handle_connection(
             websocket.is_connected.store(false, Ordering::Release);
         }
     });
-    execute_teardowns_async(route.event_loop, teardowns).await;
+    execute_teardowns_async(route.event_loop, teardowns, None).await;
     Ok(())
 }
 

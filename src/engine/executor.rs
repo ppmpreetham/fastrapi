@@ -793,12 +793,12 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
     match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
             let (function, request) = split_function_scope(teardowns);
-            execute_teardowns_async(event_loop, function).await;
+            execute_teardowns_async(event_loop, function, None).await;
             let cleanup = (!request.is_empty()).then(|| Cleanup::Async(request, event_loop));
             finish_request(event_loop, &request_input, response, cleanup)
         }
         Err(err_resp) => {
-            execute_teardowns_async(event_loop, teardowns).await;
+            execute_teardowns_async(event_loop, teardowns, None).await;
             err_resp
         }
     }
