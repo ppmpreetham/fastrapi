@@ -618,6 +618,14 @@ fn process_asgi_message(message: &Bound<'_, PyAny>, full_body: &mut Vec<u8>) -> 
     Ok(!more_body)
 }
 
+/// Gives each request a shallow copy of the lifespan state, like uvicorn.
+fn request_state<'py>(state: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    match state.cast::<PyDict>() {
+        Ok(state) => state.copy().map(Bound::into_any),
+        Err(_) => state.call_method0(intern!(state.py(), "copy")),
+    }
+}
+
 pub fn create_py_request(
     py: Python<'_>,
     input: &RequestInput<'_>,
@@ -657,7 +665,7 @@ pub fn create_py_request(
             scope.set_item(intern!(py, "app"), app.bind(py))?;
         }
         if let Some(state) = server.lifespan_state(py) {
-            scope.set_item(intern!(py, "state"), state.bind(py))?;
+            scope.set_item(intern!(py, "state"), request_state(state.bind(py))?)?;
         }
     }
 

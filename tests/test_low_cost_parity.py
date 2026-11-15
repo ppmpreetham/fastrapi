@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import base64
 import os
 import socket
@@ -403,3 +404,56 @@ def test_dependencies_run_before_validation_errors(path, headers, override):
         return response.status_code, response.json(), response.headers.get("www-authenticate"), events
 
     both(run)
+
+
+def request_state_app(lib):
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        yield {"counter": 0, "items": []}
+
+    app = lib.FastAPI(lifespan=lifespan) if lib is fastapi else lib.FastrAPI(lifespan=lifespan)
+
+    def mark(request: lib.Request):
+        request.state.marked = "dep"
+        return "ok"
+
+    async def amark(request: lib.Request):
+        request.state.amarked = "adep"
+
+    @app.get("/shared")
+    def shared(request: lib.Request, m=lib.Depends(mark), a=lib.Depends(amark)):
+        return [getattr(request.state, "marked", None), getattr(request.state, "amarked", None)]
+
+    @app.get("/shared-async")
+    async def shared_async(request: lib.Request, m=lib.Depends(mark)):
+        return getattr(request.state, "marked", None)
+
+    @app.get("/no-request")
+    def no_request(m=lib.Depends(mark)):
+        return "ok"
+
+    @app.get("/bump")
+    def bump(request: lib.Request):
+        request.state.counter += 1
+        request.state.items.append(1)
+        return [request.state.counter, len(request.state.items)]
+
+    @app.get("/new")
+    def new(request: lib.Request):
+        request.state.fresh = getattr(request.state, "fresh", 0) + 1
+        return request.state.fresh
+
+    return app
+
+
+def test_request_state_is_shared_with_dependencies_and_copied_from_lifespan():
+    paths = ("/shared", "/shared-async", "/no-request", "/bump", "/bump", "/new", "/new")
+
+    def run(lib):
+        with TestClient(request_state_app(lib)) as client:
+            return [client.get(path).json() for path in paths]
+
+    expected = run(fastapi)
+    assert run(fastrapi) == expected
+    live = LiveServer(request_state_app(fastrapi))
+    assert [live.http("GET", path)[1] for path in paths] == expected
