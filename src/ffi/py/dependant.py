@@ -281,7 +281,15 @@ async def request_body_to_args(body_fields, received_body, embed_body_fields):
     return values, errors
 
 
+def _sync_resolve(call):
+    resolve = getattr(call, "_resolve", None)
+    if resolve is None or inspect.isfunction(getattr(type(call), "__call__", None)):
+        return call
+    return resolve
+
+
 async def _call_dependency(call, values, stack):
+    call = _sync_resolve(call)
     if inspect.isasyncgenfunction(call):
         return await stack.enter_async_context(asynccontextmanager(call)(**values))
     if inspect.isgeneratorfunction(call):

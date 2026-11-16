@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 
 import fastapi
 import fastapi.routing
+import fastapi.security
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ from starlette.background import BackgroundTask
 
 import fastrapi
 import fastrapi.routing
+import fastrapi.security
 from test_security_ws_parity import LiveServer
 
 
@@ -545,5 +547,78 @@ def test_route_class_handler_sees_raised_errors(method, path, body):
         except ValueError:
             content = response.text
         return response.status_code, content, response.headers.get("x-wrapped")
+
+    both(run)
+
+
+def awaited_security_app(lib):
+    security = lib.security
+
+    class Upper(security.HTTPBearer):
+        async def __call__(self, request: lib.Request):
+            credentials = await super().__call__(request)
+            return credentials.credentials.upper() if credentials else None
+
+    class Keyed(security.APIKeyHeader):
+        async def __call__(self, request: lib.Request):
+            return f"key:{await super().__call__(request)}"
+
+    class Password(security.OAuth2PasswordBearer):
+        async def __call__(self, request: lib.Request):
+            return f"token:{await super().__call__(request)}"
+
+    optional = security.HTTPBearer(auto_error=False)
+    app = lib.FastAPI() if lib is fastapi else lib.FastrAPI()
+
+    @app.get("/upper")
+    def upper(token=lib.Depends(Upper())):
+        return token
+
+    @app.get("/keyed")
+    async def keyed(key=lib.Security(Keyed(name="x-key"))):
+        return key
+
+    @app.get("/password")
+    def password(token=lib.Depends(Password(tokenUrl="/t"))):
+        return token
+
+    @app.get("/plain")
+    def plain(credentials=lib.Depends(security.HTTPBasic())):
+        return [credentials.username, credentials.password]
+
+    @app.get("/direct")
+    async def direct(request: lib.Request):
+        credentials = await optional(request)
+        return credentials.credentials if credentials else None
+
+    return app
+
+
+AWAITED_SECURITY_REQUESTS = [
+    ("/upper", {"Authorization": "Bearer abc"}),
+    ("/upper", {}),
+    ("/keyed", {"x-key": "k1"}),
+    ("/keyed", {}),
+    ("/password", {"Authorization": "Bearer pw"}),
+    ("/plain", {"Authorization": "Basic dXNlcjpwYXNz"}),
+    ("/plain", {}),
+    ("/direct", {"Authorization": "Bearer d"}),
+    ("/direct", {}),
+]
+
+
+@pytest.mark.parametrize(("path", "headers"), AWAITED_SECURITY_REQUESTS)
+def test_security_schemes_are_awaitable(path, headers):
+    def run(lib):
+        response = TestClient(awaited_security_app(lib), raise_server_exceptions=False).get(path, headers=headers)
+        return response.status_code, response.json(), response.headers.get("www-authenticate")
+
+    both(run)
+
+
+def test_awaitable_security_subclasses_keep_openapi_schemes():
+    def run(lib):
+        spec = awaited_security_app(lib).openapi()
+        return spec["components"]["securitySchemes"], {path: item["get"].get("security") for path, item in spec["paths"].items()}
 
     both(run)

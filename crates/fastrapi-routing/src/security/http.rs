@@ -77,8 +77,8 @@ impl HTTPBearer {
         })
     }
 
-    /// Call self as a function.
-    fn __call__(
+    #[pyo3(name = "_resolve")]
+    fn resolve(
         slf: &Bound<'_, Self>,
         request: &Bound<'_, PyAny>,
     ) -> PyResult<Option<super::HTTPAuthorizationCredentials>> {
@@ -170,8 +170,8 @@ impl HTTPBasic {
         })
     }
 
-    /// Call self as a function.
-    fn __call__(
+    #[pyo3(name = "_resolve")]
+    fn resolve(
         slf: &Bound<'_, Self>,
         request: &Bound<'_, PyAny>,
     ) -> PyResult<Option<super::HTTPBasicCredentials>> {
@@ -262,8 +262,8 @@ impl HTTPDigest {
         })
     }
 
-    /// Call self as a function.
-    fn __call__(
+    #[pyo3(name = "_resolve")]
+    fn resolve(
         slf: &Bound<'_, Self>,
         request: &Bound<'_, PyAny>,
     ) -> PyResult<Option<HTTPAuthorizationCredentials>> {

@@ -54,8 +54,8 @@ impl OAuth2 {
         })
     }
 
-    /// Call self as a function.
-    fn __call__(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    #[pyo3(name = "_resolve")]
+    fn resolve(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
         callable::raw_authorization(slf.as_any(), slf.get().auto_error, request)
     }
 
@@ -133,8 +133,8 @@ impl OAuth2PasswordBearer {
         })
     }
 
-    /// Call self as a function.
-    fn __call__(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    #[pyo3(name = "_resolve")]
+    fn resolve(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
         callable::bearer_token(slf.as_any(), slf.get().auto_error, request)
     }
 
@@ -228,8 +228,8 @@ impl OAuth2AuthorizationCodeBearer {
         })
     }
 
-    /// Call self as a function.
-    fn __call__(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    #[pyo3(name = "_resolve")]
+    fn resolve(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
         callable::bearer_token(slf.as_any(), slf.get().auto_error, request)
     }
 
@@ -315,8 +315,8 @@ impl OpenIdConnect {
         })
     }
 
-    /// Call self as a function.
-    fn __call__(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    #[pyo3(name = "_resolve")]
+    fn resolve(slf: &Bound<'_, Self>, request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
         callable::raw_authorization(slf.as_any(), slf.get().auto_error, request)
     }
 

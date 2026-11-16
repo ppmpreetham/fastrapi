@@ -19,7 +19,7 @@ use fastrapi_core::security::SecurityKind;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyStopIteration};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyModule, PyString, PyTuple, PyType};
+use pyo3::types::{PyAny, PyDict, PyFunction, PyModule, PyString, PyTuple, PyType};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::mem::take;
@@ -104,7 +104,10 @@ pub enum InjectionType {
 #[derive(Clone, Debug)]
 pub struct DependencyNode {
     pub func_id: u64,
+    /// The dependency as the user declared it, used for caching, overrides and `OpenAPI`.
     pub func: Py<PyAny>,
+    /// The callable the executor invokes, which is a security scheme's sync `_resolve`.
+    pub call: Py<PyAny>,
     pub is_async: bool,
     pub is_generator: bool,
     pub is_async_generator: bool,
@@ -378,7 +381,7 @@ pub async fn execute_request_dependencies(
                     }
                 }
             }
-            let func = node.func.bind(py);
+            let func = node.call.bind(py);
             let pending = |future, exit| Ok(NodeStep::Pending { future, exit });
             if node.is_generator || node.is_async_generator {
                 let manager = node
@@ -600,6 +603,7 @@ fn adapt_security_schemes(py: Python<'_>, nodes: &mut [DependencyNode]) {
             .is_instance_of::<OAuth2PasswordRequestForm>();
         if is_form_type && let Ok(instance) = node.func.bind(py).call0() {
             node.func = instance.unbind();
+            node.call = node.func.clone_ref(py);
         }
         let native_scheme = describe_scheme(py, node.func.bind(py))
             .is_some_and(|spec| !matches!(spec.kind, SecurityKind::Model { .. }));
@@ -610,8 +614,21 @@ fn adapt_security_schemes(py: Python<'_>, nodes: &mut [DependencyNode]) {
             )];
             node.needs_request_object = true;
         }
-        node.call_layout = CallLayout::of(node.func.bind(py)).map(Arc::new);
+        if native_scheme && let Some(resolve) = sync_resolve(node.func.bind(py)) {
+            node.call = resolve.unbind();
+        }
+        node.call_layout = CallLayout::of(node.call.bind(py)).map(Arc::new);
     }
+}
+
+/// Returns the sync `_resolve` of a security scheme whose awaitable `__call__` is not overridden in Python.
+fn sync_resolve<'py>(scheme: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
+    let py = scheme.py();
+    let call = scheme.get_type().getattr(intern!(py, "__call__")).ok()?;
+    if call.is_instance_of::<PyFunction>() {
+        return None;
+    }
+    scheme.getattr(intern!(py, "_resolve")).ok()
 }
 
 pub fn parse_external_dependencies(
@@ -828,6 +845,7 @@ fn extract_and_flatten(
     flat_plan.push(DependencyNode {
         func_id,
         func: func.as_unbound().clone(),
+        call: func.as_unbound().clone(),
         is_async,
         is_generator,
         is_async_generator,
@@ -1177,7 +1195,7 @@ fn call_dependency<'py>(
     request_input: &RequestInput<'_>,
     request: Option<&SharedPyObject>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let func = dep.func.bind(py);
+    let func = dep.call.bind(py);
     if dep.injection_plan.is_empty() {
         return func.call0();
     }

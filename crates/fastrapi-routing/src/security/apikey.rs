@@ -134,7 +134,8 @@ macro_rules! define_api_key_security {
                 })
             }
 
-            fn __call__(
+            #[pyo3(name = "_resolve")]
+            fn resolve(
                 slf: &pyo3::Bound<'_, Self>,
                 request: &pyo3::Bound<'_, pyo3::types::PyAny>,
             ) -> pyo3::PyResult<Option<String>> {
