@@ -158,6 +158,7 @@ hyper.workspace = true
 hyper-util.workspace = true
 tower-http.workspace = true
 tower.workspace = true
+regex.workspace = true
 cookie.workspace = true
 form_urlencoded.workspace = true
 parking_lot.workspace = true

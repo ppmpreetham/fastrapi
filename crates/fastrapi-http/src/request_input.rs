@@ -11,6 +11,7 @@ use fastrapi_core::connection::PeerAddrs;
 use fastrapi_runtime::py_bridge::EventLoop;
 use parking_lot::Mutex;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::net::SocketAddr;
@@ -29,6 +30,10 @@ pub struct AsgiMount {
 
 pub type PathParams<'a> = OnceLock<SmallVec<[(&'a str, &'a str); 8]>>;
 pub type QueryParams<'a> = OnceLock<SmallVec<[(Cow<'a, str>, Cow<'a, str>); 8]>>;
+
+/// The path parameters an `app.host()` pattern captured, converted like Starlette's.
+#[derive(Clone)]
+pub struct HostPathParams(pub Py<PyDict>);
 
 /// Holds the error of a request made by a custom route class's original handler,
 /// so that the handler raises it in Python instead of answering with an error response.

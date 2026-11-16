@@ -518,6 +518,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "pyo3",
+ "regex",
  "serde",
  "serde_json",
  "simd-json",

@@ -4,7 +4,7 @@
 use crate::exceptions::http_exception;
 use crate::form;
 use crate::middleware::SessionHandle;
-use crate::request_input::{AsgiMount, RequestInput};
+use crate::request_input::{AsgiMount, HostPathParams, RequestInput};
 use crate::url::PyURL;
 use axum::http::HeaderMap;
 use axum::http::header::COOKIE;
@@ -669,7 +669,10 @@ pub fn create_py_request(
         }
     }
 
-    let path_params = PyDict::new(py);
+    let path_params = match input.extensions.get::<HostPathParams>() {
+        Some(HostPathParams(host)) => host.bind(py).copy()?,
+        None => PyDict::new(py),
+    };
     if let Some(params) = input.path_params.get() {
         params
             .iter()

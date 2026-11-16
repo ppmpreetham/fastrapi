@@ -778,3 +778,48 @@ def test_upload_file_subclasses_starlette_upload_file():
         )
 
     both(run)
+
+
+def host_pattern_app(lib):
+    app = lib.FastAPI() if lib is fastapi else lib.FastrAPI()
+    tenant = lib.FastAPI() if lib is fastapi else lib.FastrAPI()
+    numbered = lib.FastAPI() if lib is fastapi else lib.FastrAPI()
+
+    @tenant.get("/who")
+    def who(request: lib.Request):
+        return {"params": dict(request.path_params), "app": "tenant"}
+
+    @tenant.get("/items/{item}")
+    def item(item: str, request: lib.Request):
+        return dict(request.path_params)
+
+    @numbered.get("/who")
+    def number(request: lib.Request):
+        return {"params": dict(request.path_params), "types": [type(v).__name__ for v in request.path_params.values()]}
+
+    @app.get("/parent")
+    def parent_missing():
+        return "parent"
+
+    app.host("{id:int}.nums.com", numbered)
+    app.host("{tenant}.example.com", tenant)
+    return app
+
+
+HOST_PATTERN_REQUESTS = [
+    ("/who", "acme.example.com"),
+    ("/items/7", "Acme.Example.com:8443"),
+    ("/who", "42.nums.com"),
+    ("/who", "x.nums.com"),
+    ("/missing", "acme.example.com"),
+    ("/missing", "other.org"),
+]
+
+
+@pytest.mark.parametrize(("path", "host"), HOST_PATTERN_REQUESTS)
+def test_host_patterns(path, host):
+    def run(lib):
+        response = TestClient(host_pattern_app(lib)).get(path, headers={"host": host})
+        return response.status_code, response.json()
+
+    both(run)

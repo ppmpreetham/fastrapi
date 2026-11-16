@@ -23,8 +23,10 @@ use axum::routing::{MethodFilter, MethodRouter, any, get, on};
 use bytes::Bytes;
 use fastrapi_core::connection::PeerAddrs;
 use percent_encoding::{CONTROLS, utf8_percent_encode};
+use pyo3::intern;
 use pyo3::prelude::*;
 use simd_json::OwnedValue as JsonValue;
+use regex::{Captures, Regex, RegexBuilder};
 use std::sync::Arc;
 use tower::ServiceExt;
 use std::time::Instant;
@@ -45,7 +47,7 @@ use fastrapi_core::path::{host_without_port, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, FrozenRouterBuilder, RoutePattern};
 use fastrapi_http::middleware::asgi::mounted_asgi;
 use fastrapi_http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer};
-use fastrapi_http::request_input::{AsgiMount, RequestInput};
+use fastrapi_http::request_input::{AsgiMount, HostPathParams, RequestInput};
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_routing::route::{ExecutionMode, RouteEntry, RouteHandler, WebSocketEntry};
 use fastrapi_runtime::py_bridge::{self, EventLoop};
@@ -171,9 +173,44 @@ fn nest_sub_apps(
 /// An app mounted with `app.host()`, which serves every request for its host
 /// that the parent app has no route for, like Starlette's `Host` route.
 struct HostApp {
-    host: Box<str>,
+    pattern: Regex,
+    convertors: Option<Py<PyDict>>,
     router: Router,
 }
+
+impl HostApp {
+    /// Compiles the host pattern with Starlette's `compile_path`, like its `Host` route.
+    fn new(py: Python<'_>, host: &str, router: Router) -> PyResult<Self> {
+        let compiled = STARLETTE_COMPILE_PATH.get(py)?.call1((host,))?;
+        let regex = compiled.get_item(0)?.getattr(intern!(py, "pattern"))?;
+        let pattern = RegexBuilder::new(regex.extract::<&str>()?)
+            .case_insensitive(true)
+            .build()
+            .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+        let convertors = compiled.get_item(2)?.cast_into::<PyDict>()?;
+        Ok(Self {
+            pattern,
+            convertors: (!convertors.is_empty()).then(|| convertors.unbind()),
+            router,
+        })
+    }
+
+    fn path_params(&self, captures: &Captures<'_>) -> PyResult<Option<HostPathParams>> {
+        let Some(convertors) = &self.convertors else {
+            return Ok(None);
+        };
+        Python::attach(|py| {
+            let params = PyDict::new(py);
+            for (name, convertor) in convertors.bind(py) {
+                let value = captures.name(name.extract::<&str>()?).map_or("", |found| found.as_str());
+                params.set_item(&name, convertor.call_method1(intern!(py, "convert"), (value,))?)?;
+            }
+            Ok(Some(HostPathParams(params.unbind())))
+        })
+    }
+}
+
+fastrapi_pyutil::cached_py_import!(STARLETTE_COMPILE_PATH, "starlette.routing", "compile_path");
 
 fn host_apps(
     py: Python<'_>,
@@ -183,28 +220,36 @@ fn host_apps(
     let apps = app_config
         .host_mounts
         .iter()
-        .map(|mount| {
-            Ok(HostApp {
-                host: mount.host.as_str().into(),
-                router: sub_app_router(py, parent, &mount.app)?,
-            })
-        })
+        .map(|mount| HostApp::new(py, &mount.host, sub_app_router(py, parent, &mount.app)?))
         .collect::<PyResult<Vec<_>>>()?;
     Ok(Vec::leak(apps))
 }
 
-async fn serve_host_app(host_apps: &'static [HostApp], request: Request) -> Result<Response, Request> {
+async fn serve_host_app(host_apps: &'static [HostApp], mut request: Request) -> Result<Response, Request> {
     if host_apps.is_empty() {
         return Err(request);
     }
-    let host = request
+    let Some(host) = request
         .headers()
         .get(HOST)
         .and_then(|value| value.to_str().ok())
-        .map(host_without_port);
-    let Some(app) = host.and_then(|host| host_apps.iter().find(|app| *app.host == *host)) else {
+        .map(|host| host_without_port(host).to_ascii_lowercase())
+    else {
         return Err(request);
     };
+    let Some((app, captures)) = host_apps
+        .iter()
+        .find_map(|app| app.pattern.captures(&host).map(|captures| (app, captures)))
+    else {
+        return Err(request);
+    };
+    match app.path_params(&captures) {
+        Ok(Some(params)) => {
+            request.extensions_mut().insert(params);
+        }
+        Ok(None) => {}
+        Err(err) => Python::attach(|py| err.print(py)),
+    }
     match app.router.clone().oneshot(request).await {
         Ok(response) => Ok(response),
         Err(never) => match never {},
