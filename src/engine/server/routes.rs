@@ -26,6 +26,7 @@ use percent_encoding::{CONTROLS, utf8_percent_encode};
 use pyo3::prelude::*;
 use simd_json::OwnedValue as JsonValue;
 use std::sync::Arc;
+use tower::ServiceExt;
 use std::time::Instant;
 
 use crate::engine::exception_dispatch::{
@@ -89,19 +90,6 @@ pub(crate) fn build_router(
 
     let mut routes = base_flat.0.clone();
     let mut ws_routes = base_flat.1.clone();
-    for mount in &app_config.host_mounts {
-        let sub_flat = mounted_routes(py, mount.app.bind(py))?;
-        routes.extend(sub_flat.0.iter().map(|route| {
-            let mut route = route.clone();
-            route.host = Some(mount.host.clone());
-            route
-        }));
-        ws_routes.extend(sub_flat.1.iter().map(|ws| {
-            let mut ws = ws.clone();
-            ws.host = Some(mount.host.clone());
-            ws
-        }));
-    }
     let encoded_routes: Vec<RouteEntry> = routes
         .iter()
         .filter_map(|route| {
@@ -140,6 +128,7 @@ pub(crate) fn build_router(
         Box::leak(Box::new(frozen_router_builder.build()));
     install_custom_handlers(py, routes, frozen_router, app_state)?;
 
+    let host_apps = host_apps(py, app_state, app_config)?;
     let app = Router::new();
     let app = register_routes(
         app,
@@ -149,6 +138,7 @@ pub(crate) fn build_router(
         routes,
         &ws_routes,
         frozen_router,
+        host_apps,
     );
     let app = register_docs_endpoints(app, py, app_config, docs_url, openapi_url, custom_openapi)?;
     let app = nest_sub_apps(py, app, app_state, app_config)?;
@@ -176,6 +166,49 @@ fn nest_sub_apps(
         ));
         Ok(app.nest_service(&mount.path, sub_app))
     })
+}
+
+/// An app mounted with `app.host()`, which serves every request for its host
+/// that the parent app has no route for, like Starlette's `Host` route.
+struct HostApp {
+    host: Box<str>,
+    router: Router,
+}
+
+fn host_apps(
+    py: Python<'_>,
+    parent: &'static AppState,
+    app_config: &FastrAPI,
+) -> PyResult<&'static [HostApp]> {
+    let apps = app_config
+        .host_mounts
+        .iter()
+        .map(|mount| {
+            Ok(HostApp {
+                host: mount.host.as_str().into(),
+                router: sub_app_router(py, parent, &mount.app)?,
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Vec::leak(apps))
+}
+
+async fn serve_host_app(host_apps: &'static [HostApp], request: Request) -> Result<Response, Request> {
+    if host_apps.is_empty() {
+        return Err(request);
+    }
+    let host = request
+        .headers()
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(host_without_port);
+    let Some(app) = host.and_then(|host| host_apps.iter().find(|app| *app.host == *host)) else {
+        return Err(request);
+    };
+    match app.router.clone().oneshot(request).await {
+        Ok(response) => Ok(response),
+        Err(never) => match never {},
+    }
 }
 
 fn sub_app_router(
@@ -213,26 +246,6 @@ fn mark_mounted(request: &mut Request, prefix: &str) {
     });
 }
 
-type FlatRoutes = Arc<(Vec<RouteEntry>, Vec<WebSocketEntry>)>;
-
-fn mounted_routes(py: Python<'_>, app: &Bound<'_, FastrAPI>) -> PyResult<FlatRoutes> {
-    let app = app.borrow();
-    let router = app.router.bind(py);
-    {
-        let mut router = router.borrow_mut();
-        if router
-            .dependencies
-            .as_ref()
-            .is_none_or(|deps| deps.bind(py).len().is_ok_and(|len| len == 0))
-        {
-            router.dependencies.clone_from(&app.dependencies);
-        }
-    }
-    let router = router.borrow();
-    router.freeze(py)?;
-    router.flatten(py)
-}
-
 fn register_routes(
     mut app: Router,
     py: Python<'_>,
@@ -241,6 +254,7 @@ fn register_routes(
     routes: &'static [RouteEntry],
     ws_routes: &[WebSocketEntry],
     frozen_router: &'static FrozenRouter<RouteHandler>,
+    host_apps: &'static [HostApp],
 ) -> Router {
     let frontend_mounts = Arc::new(app_config.frontend_mounts.clone());
     let head_dispatch = on(MethodFilter::HEAD, move |req: Request| async move {
@@ -364,6 +378,10 @@ fn register_routes(
         });
 
     app = app.method_not_allowed_fallback(move |req: Request| async move {
+        let req = match serve_host_app(host_apps, req).await {
+            Ok(response) => return response,
+            Err(req) => req,
+        };
         let allow = allowed_methods_header(frozen_router, &app_state.root_path, &req);
         let handled = status_handler(app_state.event_loop, StatusCode::METHOD_NOT_ALLOWED, &req);
         method_not_allowed_response(handled, allow).await
@@ -374,6 +392,10 @@ fn register_routes(
             match dispatch_or_not_found(frozen_router, app_state, req).await {
                 Ok(resp) => resp,
                 Err(req) => {
+                    let req = match serve_host_app(host_apps, req).await {
+                        Ok(response) => return response,
+                        Err(req) => req,
+                    };
                     if let Some(redirect) = slash_redirect(frozen_router, app_state, &req) {
                         return redirect;
                     }

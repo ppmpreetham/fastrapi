@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 import base64
 import os
 import socket
@@ -622,3 +623,79 @@ def test_awaitable_security_subclasses_keep_openapi_schemes():
         return spec["components"]["securitySchemes"], {path: item["get"].get("security") for path, item in spec["paths"].items()}
 
     both(run)
+
+
+def host_app(lib):
+    app = lib.FastAPI() if lib is fastapi else lib.FastrAPI()
+    api = lib.FastAPI() if lib is fastapi else lib.FastrAPI()
+
+    def real():
+        return "real"
+
+    def fake():
+        return "fake"
+
+    @api.middleware("http")
+    async def tag(request, call_next):
+        response = await call_next(request)
+        response.headers["x-host-app"] = "api"
+        return response
+
+    @api.exception_handler(ValueError)
+    async def value_error(request, exc):
+        return lib.responses.JSONResponse({"handled": str(exc)}, status_code=409)
+
+    @api.get("/info")
+    def info(value=lib.Depends(real)):
+        return {"value": value}
+
+    @api.get("/boom")
+    def boom():
+        raise ValueError("api boom")
+
+    @api.get("/shared")
+    def api_shared():
+        return "api"
+
+    @app.get("/shared")
+    def shared():
+        return "parent"
+
+    api.dependency_overrides[real] = fake
+    app.host("api.example.com", api)
+    return app
+
+
+HOST_APP_REQUESTS = [
+    ("/info", "api.example.com"),
+    ("/info", "api.example.com:8000"),
+    ("/boom", "api.example.com"),
+    ("/shared", "api.example.com"),
+    ("/missing", "api.example.com"),
+    ("/info", "other.example.com"),
+    ("/shared", "other.example.com"),
+]
+
+
+def raw_get(port, path, host):
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(f"GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n".encode())
+        raw = b""
+        while chunk := sock.recv(65536):
+            raw += chunk
+    head, _, body = raw.partition(b"\r\n\r\n")
+    lines = head.decode().split("\r\n")
+    headers = {name.lower(): value.strip() for name, _, value in (line.partition(":") for line in lines[1:])}
+    return int(lines[0].split()[1]), json.loads(body), headers.get("x-host-app")
+
+
+def test_host_apps_are_isolated():
+    def run(lib):
+        client = TestClient(host_app(lib), raise_server_exceptions=False)
+        responses = [client.get(path, headers={"host": host}) for path, host in HOST_APP_REQUESTS]
+        return [(r.status_code, r.json(), r.headers.get("x-host-app")) for r in responses]
+
+    expected = run(fastapi)
+    assert run(fastrapi) == expected
+    live = LiveServer(host_app(fastrapi))
+    assert [raw_get(live.port, path, host) for path, host in HOST_APP_REQUESTS] == expected
