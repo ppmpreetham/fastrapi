@@ -120,6 +120,8 @@ pub struct ExecutionPlan {
     pub cache_response: bool,
     pub rate_limit_per_second: Option<NonZeroU32>,
     pub custom_handler: OnceLock<Py<PyAny>>,
+    /// Records FastAPI's telemetry operation spans, which only telemetry apps turn on.
+    pub operation_spans: bool,
 }
 
 #[expect(

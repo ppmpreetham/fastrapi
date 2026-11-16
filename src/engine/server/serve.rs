@@ -6,6 +6,10 @@ use super::lifecycle::{
     stop_background_asyncio_loop,
 };
 use super::routes::build_router;
+use super::telemetry::Telemetry;
+use fastrapi_core::router::FrozenRouter;
+use fastrapi_routing::route::RouteHandler;
+use std::sync::OnceLock;
 use fastrapi_core::reload::{ReloadConfig, resolve_reload_dirs, run_reload_supervisor};
 
 use crate::engine::config::FastrAPI;
@@ -74,6 +78,7 @@ pub struct AppState {
     pub metrics_enabled: bool,
     pub redirect_slashes: bool,
     pub app: Py<PyAny>,
+    pub router: OnceLock<&'static FrozenRouter<RouteHandler>>,
 }
 
 impl AppState {
@@ -94,6 +99,7 @@ impl AppState {
             metrics_enabled: app_config.prometheus_config.is_some(),
             redirect_slashes: app_config.redirect_slashes,
             app: app.clone_ref(py).into_any(),
+            router: OnceLock::new(),
         }
     }
 
@@ -133,6 +139,7 @@ pub(crate) struct PreparedApp {
     pub(crate) router: Router,
     pub(crate) event_loop: EventLoop,
     pub(crate) hooks: LifecycleHooks,
+    pub(crate) telemetry: Option<&'static Telemetry>,
 }
 
 pub(crate) fn prepare_app(py: Python<'_>, app: &Py<FastrAPI>) -> PyResult<PreparedApp> {
@@ -150,6 +157,7 @@ fn build_app(py: Python<'_>, app: &Py<FastrAPI>, event_loop: EventLoop) -> PyRes
     let app_config = app_bound.borrow();
     let app_state = AppState::of(py, event_loop, app, &app_config).leak();
     let hooks = lifecycle_hooks(py, &app_config)?;
+    let telemetry = Telemetry::new(py, app_config.telemetry.bind(py).as_any(), app_state);
     let router = build_router(
         py,
         app_state,
@@ -157,11 +165,13 @@ fn build_app(py: Python<'_>, app: &Py<FastrAPI>, event_loop: EventLoop) -> PyRes
         app_config.openapi_url.as_deref(),
         &app_config,
         custom_openapi,
+        telemetry.is_some_and(|telemetry| telemetry.operation_spans(py)),
     )?;
     Ok(PreparedApp {
         router,
         event_loop,
         hooks,
+        telemetry,
     })
 }
 
@@ -243,6 +253,7 @@ pub fn serve(
                 on_startup,
                 on_shutdown,
             },
+        telemetry,
     } = prepare_app(py, app)?;
     let app_config = app.bind(py).borrow();
     let docs_url_for_log = app_config.docs_url.clone();
@@ -253,8 +264,12 @@ pub fn serve(
     let app = app.clone_ref(py);
 
     let server_thread = spawn(move || -> PyResult<()> {
-        let entered_lifespan =
-            Python::attach(|py| run_startup_phase(py, &app, lifespan, on_startup, event_loop));
+        let entered_lifespan = Python::attach(|py| {
+            if let Some(telemetry) = telemetry {
+                telemetry.configure(py);
+            }
+            run_startup_phase(py, &app, lifespan, on_startup, event_loop)
+        });
 
         let entered_lifespan = match entered_lifespan {
             Ok(entered) => entered,
@@ -263,6 +278,10 @@ pub fn serve(
                 Python::attach(|py| stop_background_asyncio_loop(py, event_loop));
                 return Err(err);
             }
+        };
+        let router = match telemetry {
+            Some(telemetry) => Python::attach(|py| telemetry.instrument(py, router)),
+            None => router,
         };
         let addr = format!("{host}:{port}");
         let served: io::Result<()> = PYTHON_RUNTIME.block_on(async move {
@@ -297,6 +316,9 @@ pub fn serve(
         Python::attach(|py| {
             if let Err(err) = run_shutdown_phase(py, entered_lifespan, on_shutdown, event_loop) {
                 log_python_error("shutdown failed", &err);
+            }
+            if telemetry.is_some() {
+                Telemetry::flush(py);
             }
             stop_background_asyncio_loop(py, event_loop);
         });

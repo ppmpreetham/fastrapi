@@ -62,6 +62,7 @@ pub(crate) fn build_router(
     openapi_url: Option<&str>,
     app_config: &FastrAPI,
     custom_openapi: Option<JsonValue>,
+    operation_spans: bool,
 ) -> PyResult<Router> {
     let mut middlewares = app_config.middlewares.clone();
     merge_declared_middlewares(py, app_config, &mut middlewares);
@@ -119,6 +120,14 @@ pub(crate) fn build_router(
             ws.dependency_overrides = Some(overrides.clone_ref(py));
         }
     }
+    if operation_spans {
+        for route in &mut routes {
+            let mut handler = (*route.handler).clone();
+            handler.execution.operation_spans = true;
+            handler.execution.execution_mode = ExecutionMode::Managed;
+            route.handler = Arc::new(handler);
+        }
+    }
     let routes: &'static [RouteEntry] = Vec::leak(routes);
 
     let mut frozen_router_builder = FrozenRouterBuilder::new();
@@ -128,6 +137,7 @@ pub(crate) fn build_router(
     }
     let frozen_router: &'static FrozenRouter<RouteHandler> =
         Box::leak(Box::new(frozen_router_builder.build()));
+    _ = app_state.router.set(frozen_router);
     install_custom_handlers(py, routes, frozen_router, app_state)?;
 
     let host_apps = host_apps(py, app_state, app_config)?;
@@ -275,6 +285,7 @@ fn sub_app_router(
         config.openapi_url.as_deref(),
         &config,
         custom_openapi,
+        false,
     )
 }
 

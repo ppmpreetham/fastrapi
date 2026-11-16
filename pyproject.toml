@@ -35,12 +35,12 @@ dependencies = [
     "pydantic>=2.9.0",
 ]
 
-# If you have optional dependencies, uncomment and adjust this section
-# [project.optional-dependencies]
-# test = [
-#   "pytest",
-#   "pytest-cov"
-# ]
+[project.optional-dependencies]
+opentelemetry = [
+    "opentelemetry-api>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0",
+]
 
 [project.urls]
 homepage = "https://github.com/ppmpreetham/fastrapi"

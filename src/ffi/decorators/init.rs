@@ -659,6 +659,7 @@ impl PyAPIRouter {
                     cache_response: opts.cache_resp,
                     rate_limit_per_second: opts.rate_limit,
                     custom_handler: OnceLock::new(),
+                    operation_spans: false,
                 },
                 payload: PayloadSpec {
                     dependency_needs_request: false,

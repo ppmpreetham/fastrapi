@@ -13,7 +13,8 @@ use pyo3::types::PyList;
 pub(crate) struct PendingValidation(PyErr);
 
 impl PendingValidation {
-    /// Holds the rejection when it is a validation error on a route with dependencies.
+    /// Holds the rejection when it is a validation error on a route with dependencies, or on a
+    /// route whose telemetry reports the failure once the dependency span ends.
     pub(crate) fn hold(
         py: Python<'_>,
         handler: &RouteHandler,
@@ -21,7 +22,7 @@ impl PendingValidation {
     ) -> Result<Self, Rejection> {
         match rejection {
             Rejection::Python(err)
-                if !handler.payload.dependencies.is_empty()
+                if (!handler.payload.dependencies.is_empty() || handler.execution.operation_spans)
                     && is_request_validation_error(py, &err) =>
             {
                 Ok(Self(err))

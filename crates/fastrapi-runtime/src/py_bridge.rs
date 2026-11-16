@@ -61,6 +61,12 @@ impl EventLoop {
 pub struct RequestContext(Arc<Py<PyAny>>);
 
 impl RequestContext {
+    /// Uses an existing `contextvars.Context` for the request.
+    #[must_use]
+    pub fn from_context(context: Py<PyAny>) -> Self {
+        Self(Arc::new(context))
+    }
+
     /// Copies the context of the running Python code.
     pub fn capture(py: Python<'_>) -> PyResult<Self> {
         // SAFETY: the thread is attached; a null return sets a Python error.
@@ -177,6 +183,13 @@ pub fn enter_copy<'py>(
 }
 
 /// `enter_copy` with the request context of the running task.
+/// The `contextvars.Context` of the running request, which every Python call of the request copies.
+pub fn request_context(py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+    current_context_cell()
+        .map(|cell| resolve(py, &cell).map(|context| context.clone_ref(py)))
+        .transpose()
+}
+
 pub fn enter_request_copy(py: Python<'_>) -> PyResult<EnteredContext<'_>> {
     enter_copy(py, current_context_cell().as_ref())
 }

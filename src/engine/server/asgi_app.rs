@@ -1,7 +1,10 @@
 use super::lifecycle::{run_shutdown_phase, run_startup_phase};
 use super::asgi_websocket::AsgiSocket;
 use super::serve::{PreparedApp, prepare_app};
+use super::telemetry::Telemetry;
 use super::websocket::WebSocketOutcome;
+use axum::Router;
+use std::sync::OnceLock;
 use crate::engine::config::FastrAPI;
 use crate::engine::deferred::take_request_work;
 use axum::body::Body;
@@ -24,6 +27,19 @@ use tower::ServiceExt;
 pub(crate) struct AsgiApp {
     app: Py<FastrAPI>,
     prepared: PreparedApp,
+    router: OnceLock<Router>,
+}
+
+impl AsgiApp {
+    /// The router, with telemetry added on the first request when a provider is configured.
+    fn router(&self) -> Router {
+        self.router
+            .get_or_init(|| match self.prepared.telemetry {
+                Some(telemetry) => Python::attach(|py| telemetry.instrument(py, self.prepared.router.clone())),
+                None => self.prepared.router.clone(),
+            })
+            .clone()
+    }
 }
 
 fn asgi_app(slf: &Bound<'_, FastrAPI>) -> PyResult<Arc<AsgiApp>> {
@@ -32,7 +48,11 @@ fn asgi_app(slf: &Bound<'_, FastrAPI>) -> PyResult<Arc<AsgiApp>> {
     }
     let app = slf.clone().unbind();
     let prepared = prepare_app(slf.py(), &app)?;
-    let built = Arc::new(AsgiApp { app, prepared });
+    let built = Arc::new(AsgiApp {
+        app,
+        prepared,
+        router: OnceLock::new(),
+    });
     Ok(slf.borrow().asgi.get_or_init(|| built).clone())
 }
 
@@ -162,7 +182,7 @@ async fn http(
     send: Py<PyAny>,
 ) -> PyResult<()> {
     *request.body_mut() = Body::from(drain_receive(&locals, &receive).await?);
-    let mut response = match asgi.prepared.router.clone().oneshot(request).await {
+    let mut response = match asgi.router().oneshot(request).await {
         Ok(response) => response,
         Err(never) => match never {},
     };
@@ -197,7 +217,7 @@ async fn websocket(
 ) -> PyResult<()> {
     socket.receive().await?;
     request.extensions_mut().insert(socket.clone());
-    let mut response = match asgi.prepared.router.clone().oneshot(request).await {
+    let mut response = match asgi.router().oneshot(request).await {
         Ok(response) => response,
         Err(never) => match never {},
     };
@@ -223,6 +243,9 @@ async fn lifespan(
             "lifespan.startup" => {
                 let app = asgi.clone();
                 let started = run_python(move |py| {
+                    if let Some(telemetry) = app.prepared.telemetry {
+                        telemetry.configure(py);
+                    }
                     let hooks = &app.prepared.hooks;
                     run_startup_phase(
                         py,
@@ -268,6 +291,9 @@ async fn lifespan(
                 })
                 .await
                 .map_err(|panic| PyRuntimeError::new_err(panic.to_string()))?;
+                if asgi.prepared.telemetry.is_some() {
+                    Python::attach(Telemetry::flush);
+                }
                 return match stopped {
                     Ok(()) => reply(&locals, &send, "lifespan.shutdown.complete", None).await,
                     Err(err) => {

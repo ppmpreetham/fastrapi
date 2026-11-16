@@ -4,6 +4,7 @@
 use super::deferred::{Cleanup, finish_request, with_cleanup};
 use super::executor::{build_request_input_from_parts, kwargs_or_pending, request_object};
 use super::pending_validation::dependency_failure;
+use super::server::telemetry::Operation;
 use super::handler_errors::python_error_to_response_in;
 use axum::http::request::Parts;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
@@ -40,6 +41,7 @@ pub(crate) async fn run_managed_handler(
         &handler.payload.path_param_names,
         event_loop,
     );
+    let dependencies = Python::attach(|py| Operation::start(py, handler, "dependencies"));
     let setup = Python::attach(|py| -> Result<_, Response> {
         let (mut kwargs, pending) = kwargs_or_pending(py, handler, &input, payload.as_ref())?;
         let objects = (|| -> PyResult<_> {
@@ -83,9 +85,12 @@ pub(crate) async fn run_managed_handler(
         })();
         objects.map_err(|err| python_error_to_response_in(py, &err, Some(&input)))
     });
-    let (mut kwargs, request, metadata, plan, pending) = match setup {
+    let (kwargs, request, metadata, plan, pending) = match setup {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => {
+            dependencies.finish(None);
+            return response;
+        }
     };
 
     let mut stacks = ExitStacks::default();
@@ -100,39 +105,17 @@ pub(crate) async fn run_managed_handler(
             sync_to_threadpool,
         )
         .await;
-        let values = match (values, pending) {
-            (Ok(_), Some(pending)) => return Err(pending.into_error()),
-            (Ok(values), None) => values,
-            (Err(err), pending) => return Err(Python::attach(|py| dependency_failure(py, pending, err))),
+        let resolved = match (values, pending) {
+            (Ok(_), Some(pending)) => Err(pending.into_error()),
+            (Ok(values), None) => Ok(values),
+            (Err(err), pending) => Err(Python::attach(|py| dependency_failure(py, pending, err))),
         };
-        if !handler.execution.is_async && sync_to_threadpool {
-            return blocking::run_python(move |py| {
-                inject_dependencies(py, &mut kwargs, values)?;
-                kwargs
-                    .call(
-                        handler.execution.func.bind(py),
-                        handler.execution.call_layout.as_deref(),
-                    )
-                    .map(Bound::unbind)
-            })
-            .await
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        }
-        let called = Python::attach(|py| -> PyResult<_> {
-            inject_dependencies(py, &mut kwargs, values)?;
-            let func = handler.execution.func.bind(py);
-            let layout = handler.execution.call_layout.as_deref();
-            if handler.execution.is_async {
-                let coroutine = kwargs.call(func, layout)?;
-                return py_bridge::schedule_task(py, event_loop, coroutine).map(Err);
-            }
-            let _entered = py_bridge::enter_request_copy(py)?;
-            Ok(Ok(kwargs.call(func, layout)?.unbind()))
-        })?;
-        match called {
-            Ok(value) => Ok(value),
-            Err(future) => Ok(future.await?),
-        }
+        dependencies.finish(resolved.as_ref().err());
+        let values = resolved?;
+        let endpoint = Python::attach(|py| Operation::start(py, handler, "endpoint"));
+        let called = call_endpoint(event_loop, handler, kwargs, values, sync_to_threadpool).await;
+        endpoint.finish(called.as_ref().err());
+        called
     }
     .await;
     let outcome = match stacks.function.take() {
@@ -159,9 +142,12 @@ pub(crate) async fn run_managed_handler(
                 && !is_plain_value(value)
                 && value.hasattr(intern!(py, "status_code"))?
                 && value.hasattr(intern!(py, "raw_headers"))?;
-            let response =
-                convert_response_by_type(py, value, &handler.response, Some(input.headers))?;
-            Ok((response, explicit))
+            let serialization = (!explicit).then(|| Operation::start(py, handler, "serialization"));
+            let response = convert_response_by_type(py, value, &handler.response, Some(input.headers));
+            if let Some(serialization) = serialization {
+                serialization.finish(response.as_ref().err());
+            }
+            Ok((response?, explicit))
         });
         match stack {
             Some(stack) if converted.is_ok() => Ok(managed_response(
@@ -208,6 +194,43 @@ pub(crate) async fn run_managed_handler(
 }
 
 type ManagedOutcome = PyResult<(Response, bool)>;
+
+async fn call_endpoint(
+    event_loop: EventLoop,
+    handler: &'static RouteHandler,
+    mut kwargs: CallArgs,
+    values: dependencies::ResolvedDependencies,
+    sync_to_threadpool: bool,
+) -> PyResult<Py<PyAny>> {
+    if !handler.execution.is_async && sync_to_threadpool {
+        return blocking::run_python(move |py| {
+            inject_dependencies(py, &mut kwargs, values)?;
+            kwargs
+                .call(
+                    handler.execution.func.bind(py),
+                    handler.execution.call_layout.as_deref(),
+                )
+                .map(Bound::unbind)
+        })
+        .await
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    }
+    let called = Python::attach(|py| -> PyResult<_> {
+        inject_dependencies(py, &mut kwargs, values)?;
+        let func = handler.execution.func.bind(py);
+        let layout = handler.execution.call_layout.as_deref();
+        if handler.execution.is_async {
+            let coroutine = kwargs.call(func, layout)?;
+            return py_bridge::schedule_task(py, event_loop, coroutine).map(Err);
+        }
+        let _entered = py_bridge::enter_request_copy(py)?;
+        Ok(Ok(kwargs.call(func, layout)?.unbind()))
+    })?;
+    match called {
+        Ok(value) => Ok(value),
+        Err(future) => Ok(future.await?),
+    }
+}
 
 fn inject_dependencies(
     py: Python<'_>,

@@ -1177,7 +1177,7 @@ pub fn apply_request_data(
         return Ok(());
     }
     let body = || received_body(py, handler, payload, request_input.headers);
-    if handler.payload.dependencies.is_empty() {
+    if handler.payload.dependencies.is_empty() && !handler.execution.operation_spans {
         Err(errors.reject(request_input, body))
     } else {
         Err(Rejection::Python(errors.into_error(body)))

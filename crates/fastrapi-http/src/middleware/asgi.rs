@@ -377,7 +377,7 @@ async fn run_asgi_app(
     };
     let scope = Python::attach(|py| -> PyResult<_> {
         let locals = py_bridge::TaskLocals::new(event_loop.bind(py).clone());
-        let scope = build_scope(py, &parts, event_loop)?;
+        let scope = build_scope(py, &parts.method, &parts.uri, &parts.headers, event_loop)?;
         let handle = Py::new(
             py,
             PyDownstreamASGI {
@@ -411,7 +411,7 @@ pub async fn mounted_asgi(
         return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response();
     };
     let scope = Python::attach(|py| -> PyResult<_> {
-        let scope = build_scope(py, &parts, event_loop)?;
+        let scope = build_scope(py, &parts.method, &parts.uri, &parts.headers, event_loop)?;
         scope
             .bind(py)
             .set_item(intern!(py, "root_path"), &*prefix)?;
@@ -584,7 +584,14 @@ fn build_response(status: u16, headers: Vec<(Bytes, Bytes)>, body: Body) -> Resp
     builder.body(body).unwrap_or_else(|_| plain_server_error())
 }
 
-fn build_scope(py: Python<'_>, parts: &Parts, server: EventLoop) -> PyResult<Py<PyDict>> {
+/// Builds the ASGI HTTP scope of a request.
+pub fn build_scope(
+    py: Python<'_>,
+    method: &axum::http::Method,
+    uri: &axum::http::Uri,
+    headers: &axum::http::HeaderMap,
+    server: EventLoop,
+) -> PyResult<Py<PyDict>> {
     let scope = PyDict::new(py);
     scope.set_item(intern!(py, "type"), intern!(py, "http"))?;
     let asgi = PyDict::new(py);
@@ -592,29 +599,29 @@ fn build_scope(py: Python<'_>, parts: &Parts, server: EventLoop) -> PyResult<Py<
     asgi.set_item(intern!(py, "spec_version"), intern!(py, "2.3"))?;
     scope.set_item(intern!(py, "asgi"), asgi)?;
     scope.set_item(intern!(py, "http_version"), intern!(py, "1.1"))?;
-    scope.set_item(intern!(py, "method"), parts.method.as_str())?;
+    scope.set_item(intern!(py, "method"), method.as_str())?;
     scope.set_item(intern!(py, "scheme"), intern!(py, "http"))?;
     scope.set_item(
         intern!(py, "path"),
-        crate::request::decode_path(parts.uri.path()),
+        crate::request::decode_path(uri.path()),
     )?;
     scope.set_item(
         intern!(py, "raw_path"),
-        PyBytes::new(py, parts.uri.path().as_bytes()),
+        PyBytes::new(py, uri.path().as_bytes()),
     )?;
     scope.set_item(
         intern!(py, "query_string"),
-        PyBytes::new(py, parts.uri.query().unwrap_or("").as_bytes()),
+        PyBytes::new(py, uri.query().unwrap_or("").as_bytes()),
     )?;
     scope.set_item(intern!(py, "root_path"), "")?;
-    let headers = PyList::empty(py);
-    for (name, value) in &parts.headers {
-        headers.append((
+    let raw = PyList::empty(py);
+    for (name, value) in headers {
+        raw.append((
             PyBytes::new(py, name.as_str().as_bytes()),
             PyBytes::new(py, value.as_bytes()),
         ))?;
     }
-    scope.set_item(intern!(py, "headers"), headers)?;
+    scope.set_item(intern!(py, "headers"), raw)?;
     scope.set_item(intern!(py, "client"), py.None())?;
     scope.set_item(intern!(py, "server"), py.None())?;
     if let Some(app) = server.server().app() {
