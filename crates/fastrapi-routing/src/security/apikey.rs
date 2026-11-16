@@ -30,7 +30,7 @@ crate::define_api_key_security!(
     /// async def read_items(key: str = Depends(header_scheme)):
     ///     return {"key": key}
     /// ```
-    APIKeyHeader, "APIKeyHeader", header);
+    APIKeyHeader, "APIKeyHeader", header, Header);
 crate::define_api_key_security!(
     /// API key authentication using a query parameter.
     ///
@@ -60,7 +60,7 @@ crate::define_api_key_security!(
     /// async def read_items(api_key: str = Depends(query_scheme)):
     ///     return {"api_key": api_key}
     /// ```
-    APIKeyQuery, "APIKeyQuery", query);
+    APIKeyQuery, "APIKeyQuery", query, Query);
 crate::define_api_key_security!(
     /// API key authentication using a cookie.
     ///
@@ -90,11 +90,11 @@ crate::define_api_key_security!(
     /// async def read_items(session: str = Depends(cookie_scheme)):
     ///     return {"session": session}
     /// ```
-    APIKeyCookie, "APIKeyCookie", cookie);
+    APIKeyCookie, "APIKeyCookie", cookie, Cookie);
 
 #[macro_export]
 macro_rules! define_api_key_security {
-    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, $source:ident) => {
+    ($(#[$meta:meta])* $struct_name:ident, $py_name:literal, $source:ident, $variant:ident) => {
         $(#[$meta])*
         #[pyo3::prelude::pyclass(
             frozen,
@@ -142,7 +142,7 @@ macro_rules! define_api_key_security {
                 let this = slf.get();
                 let key = $crate::security::callable::source_value(
                     request,
-                    stringify!($source),
+                    &fastrapi_core::params::ParameterSource::$variant,
                     &this.name,
                 );
                 $crate::security::callable::check_api_key(slf.as_any(), this.auto_error, key)

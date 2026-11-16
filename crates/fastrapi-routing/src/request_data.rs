@@ -1086,9 +1086,7 @@ fn form_model_param<'py>(
         }),
         Some(ModelPresence::AnyKey) => fields.is_some_and(|fields| !fields.is_empty()),
     };
-    let raw = present
-        .then(|| form_model(py, model, fields))
-        .transpose()?;
+    let raw = present.then(|| form_model(py, model, fields)).transpose()?;
     resolve(py, param, raw, Loc::Source(&param.source), errors)
 }
 

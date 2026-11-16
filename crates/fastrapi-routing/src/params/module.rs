@@ -9,6 +9,7 @@ static PARAMS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 static ANALYZE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static ERRORS_WITH_LOC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static JSON_ERROR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static RESOLVED_SIGNATURE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 pub fn params_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     PARAMS
@@ -45,4 +46,33 @@ pub fn errors_with_loc(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
 
 pub fn json_error(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     helper(py, &JSON_ERROR, intern!(py, "json_error"))
+}
+
+/// The signature FastAPI analyzes: string annotations resolved and PEP 695 aliases unwrapped.
+pub fn resolved_signature<'py>(call: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = call.py();
+    helper(py, &RESOLVED_SIGNATURE, intern!(py, "resolved_signature"))?.call1((call,))
+}
+
+/// The kinds of callable FastAPI tells apart, seeing through `functools.partial` and `functools.wraps`.
+#[derive(Clone, Copy)]
+pub enum CallableKind {
+    Coroutine,
+    Generator,
+    AsyncGenerator,
+}
+
+impl CallableKind {
+    pub fn matches(self, call: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let py = call.py();
+        let check = match self {
+            Self::Coroutine => intern!(py, "is_coroutine_callable"),
+            Self::Generator => intern!(py, "is_gen_callable"),
+            Self::AsyncGenerator => intern!(py, "is_async_gen_callable"),
+        };
+        params_module(py)?
+            .getattr(check)?
+            .call1((call,))?
+            .is_truthy()
+    }
 }

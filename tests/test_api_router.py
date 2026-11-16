@@ -312,8 +312,8 @@ class TestLiveRouting:
         assert httpx.get(f"{base}/items/").json() == {"items": []}
 
     def test_path_join_handles_double_slash(self, live_app):
-        # router prefix ends with /, route starts with /
-        router = APIRouter(prefix="/api/")
+        # FastAPI rejects a trailing slash in the prefix, so the route is joined to "/api"
+        router = APIRouter(prefix="/api")
 
         @router.get("/x")
         def x():

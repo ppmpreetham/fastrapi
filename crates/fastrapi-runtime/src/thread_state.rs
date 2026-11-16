@@ -2,8 +2,8 @@
 
 #[cfg(Py_3_13)]
 mod imp {
-    use pyo3::prelude::*;
     use pyo3::ffi;
+    use pyo3::prelude::*;
     use std::cell::Cell;
     use std::ptr;
     use std::sync::OnceLock;
@@ -24,6 +24,11 @@ mod imp {
         if !WORKER.get() || !HELD.get().is_null() {
             return;
         }
+        // SAFETY: this runs on a runtime thread that holds no thread state yet (`HELD` is null)
+        // and is not attached (`PyGILState_Check` is 0), while the interpreter is not finalizing.
+        // `PyGILState_Ensure` creates the thread state and attaches; it is never released with
+        // `PyGILState_Release`, so the state lives as long as the thread. `PyEval_SaveThread`
+        // detaches and returns that state, which `HELD` keeps for `flush`.
         unsafe {
             if ffi::PyGILState_Check() != 0 || ffi::Py_IsFinalizing() != 0 {
                 return;
@@ -43,6 +48,10 @@ mod imp {
     pub fn flush() {
         let tstate = HELD.get();
         let Some(noop) = NOOP.get() else { return };
+        // SAFETY: `tstate` is the detached thread state `hold` saved on this same thread, and the
+        // thread is not attached (`PyGILState_Check` is 0), so restoring it is the only attach.
+        // `noop` is a live callable kept by `NOOP`; the call runs attached and its result or
+        // error is released before `PyEval_SaveThread` detaches again and saves the state back.
         unsafe {
             if tstate.is_null() || ffi::PyGILState_Check() != 0 || ffi::Py_IsFinalizing() != 0 {
                 return;

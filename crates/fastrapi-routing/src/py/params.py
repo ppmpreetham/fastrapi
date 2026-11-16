@@ -1,4 +1,5 @@
 import inspect
+import sys
 import typing
 import warnings
 from collections import deque
@@ -13,8 +14,14 @@ from typing import Annotated, Any, Union, get_args, get_origin
 from pydantic import AliasChoices, BaseModel, BeforeValidator, Field, Json, Tag, TypeAdapter
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined, ValidationError
+from typing_inspection.typing_objects import is_typealiastype
 
 from fastrapi.exceptions import FastAPIDeprecationWarning
+
+if sys.version_info >= (3, 13):
+    from inspect import iscoroutinefunction
+else:
+    from asyncio import iscoroutinefunction
 
 Undefined = PydanticUndefined
 RequiredParam = PydanticUndefined
@@ -190,11 +197,11 @@ class File(Form):
         super().__init__(default, media_type=media_type, **kwargs)
 
 
-def _marker_signature(default: Any = Undefined, after: str = "default_factory", **extra: Any) -> inspect.Signature:
+def _marker_signature(default: Any = Undefined, after: str = "annotation", **extra: Any) -> inspect.Signature:
     params = [
         param
         for param in inspect.signature(_init_field).parameters.values()
-        if param.name not in ("self", "annotation") and param.kind is not inspect.Parameter.VAR_KEYWORD
+        if param.name != "self" and param.kind is not inspect.Parameter.VAR_KEYWORD
     ]
     params[0] = params[0].replace(default=default)
     index = next(i for i, param in enumerate(params) if param.name == after) + 1
@@ -574,16 +581,13 @@ def _is_json(field_info: FieldInfo) -> bool:
     return any(type(item) is Json for item in field_info.metadata)
 
 
-TYPE_ALIAS = getattr(typing, "TypeAliasType", ())
-
-
 def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, upload: tuple) -> FieldSpec:
     annotation = Undefined if parameter.annotation is inspect.Parameter.empty else parameter.annotation
     value = Undefined if parameter.default is inspect.Parameter.empty else parameter.default
     field_info = None
     use_annotation = Any
     type_annotation = Any
-    if isinstance(annotation, TYPE_ALIAS):
+    if is_typealiastype(annotation):
         annotation = annotation.__value__
     if annotation is not Undefined:
         use_annotation = annotation
@@ -736,8 +740,6 @@ def _signature(call):
     try:
         return inspect.signature(call, eval_str=True)
     except NameError:
-        import sys
-
         if sys.version_info >= (3, 14):
             from annotationlib import Format
 
@@ -769,6 +771,57 @@ def get_typed_signature(call) -> inspect.Signature:
             for param in signature.parameters.values()
         ]
     )
+
+
+def resolved_signature(call) -> inspect.Signature:
+    """The typed signature of `call` with PEP 695 aliases unwrapped, as `analyze_param` sees its parameters."""
+    signature = get_typed_signature(call)
+    return signature.replace(
+        parameters=[
+            param.replace(annotation=param.annotation.__value__) if is_typealiastype(param.annotation) else param
+            for param in signature.parameters.values()
+        ]
+    )
+
+
+def _impartial(call):
+    while isinstance(call, partial):
+        call = call.func
+    return call
+
+
+def _unwrapped_call(call):
+    return inspect.unwrap(_impartial(call))
+
+
+def _is_async_routine(call) -> bool:
+    return inspect.isroutine(call) and iscoroutinefunction(call)
+
+
+def _classify_callable(call, check, direct_check=None) -> bool:
+    """FastAPI's callable classification: `call`, then its `__call__`, each seen through partials and wrappers."""
+    direct_check = direct_check or check
+    if direct_check(_impartial(call)) or direct_check(_unwrapped_call(call)):
+        return True
+    if inspect.isclass(_unwrapped_call(call)):
+        return False
+    for owner in (_impartial(call), _unwrapped_call(call)):
+        dunder_call = getattr(owner, "__call__", None)  # noqa: B004
+        if dunder_call is not None and (check(_impartial(dunder_call)) or check(_unwrapped_call(dunder_call))):
+            return True
+    return False
+
+
+def is_coroutine_callable(call) -> bool:
+    return _classify_callable(call, iscoroutinefunction, _is_async_routine)
+
+
+def is_gen_callable(call) -> bool:
+    return _classify_callable(call, inspect.isgeneratorfunction)
+
+
+def is_async_gen_callable(call) -> bool:
+    return _classify_callable(call, inspect.isasyncgenfunction)
 
 
 def get_typed_return_annotation(call) -> Any:

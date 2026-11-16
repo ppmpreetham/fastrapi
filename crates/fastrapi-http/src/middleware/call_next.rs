@@ -9,6 +9,7 @@ use crate::exceptions::{UnhandledError, plain_server_error, server_error_respons
 use crate::request::{PyRequest, PyScopeHeaders};
 use crate::request_input::AsgiMount;
 use crate::response_convert::convert_auto_response;
+use crate::stream::SlotLease;
 use axum::body::{Body, BodyDataStream};
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
@@ -151,16 +152,26 @@ impl PyBodyIterator {
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let slot = Arc::clone(&self.stream);
         py_bridge::future_into_py(py, async move {
-            let Some(mut stream) = slot.lock().take() else {
+            let Some(mut lease) = SlotLease::take(&slot) else {
                 return Err(PyStopAsyncIteration::new_err(()));
             };
-            match stream.next().await {
+            let next = match lease.value() {
+                Some(stream) => stream.next().await,
+                None => None,
+            };
+            match next {
                 Some(Ok(chunk)) => {
-                    *slot.lock() = Some(stream);
+                    drop(lease);
                     Ok(Python::attach(|py| PyBytes::new(py, &chunk).unbind()))
                 }
-                Some(Err(err)) => Err(PyRuntimeError::new_err(err.to_string())),
-                None => Err(PyStopAsyncIteration::new_err(())),
+                Some(Err(err)) => {
+                    lease.discard();
+                    Err(PyRuntimeError::new_err(err.to_string()))
+                }
+                None => {
+                    lease.discard();
+                    Err(PyStopAsyncIteration::new_err(()))
+                }
             }
         })
     }
@@ -329,7 +340,9 @@ fn drive(
                 py,
                 &mw,
                 method.as_str(),
-                mount.as_ref().map_or_else(|| uri.path(), |mount| &mount.path),
+                mount
+                    .as_ref()
+                    .map_or_else(|| uri.path(), |mount| &mount.path),
                 mount.as_ref().map(|mount| &*mount.root_path),
                 uri.query().unwrap_or(""),
                 headers,

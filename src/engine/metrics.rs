@@ -3,23 +3,30 @@
 
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use pyo3::prelude::*;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use crate::engine::config::{FastrAPI, PrometheusConfig};
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 
-static PROMETHEUS_HANDLE: OnceLock<Arc<PrometheusHandle>> = OnceLock::new();
+static PROMETHEUS_HANDLE: Mutex<Option<Arc<PrometheusHandle>>> = Mutex::new(None);
 
-pub fn prometheus_handle() -> Arc<PrometheusHandle> {
-    PROMETHEUS_HANDLE
-        .get_or_init(|| {
-            Arc::new(
-                PrometheusBuilder::new()
-                    .install_recorder()
-                    .expect("failed to install Prometheus recorder"),
-            )
-        })
-        .clone()
+/// Returns the handle of the global Prometheus recorder, installing it on the
+/// first call. It is called once per app at startup, never per request.
+pub(crate) fn prometheus_handle() -> PyResult<Arc<PrometheusHandle>> {
+    let mut handle = PROMETHEUS_HANDLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(handle) = handle.as_ref() {
+        return Ok(Arc::clone(handle));
+    }
+    let installed = Arc::new(PrometheusBuilder::new().install_recorder().map_err(|err| {
+        PyRuntimeError::new_err(format!("failed to install the Prometheus recorder: {err}"))
+    })?);
+    *handle = Some(Arc::clone(&installed));
+    drop(handle);
+    Ok(installed)
 }
 
 #[pyclass(

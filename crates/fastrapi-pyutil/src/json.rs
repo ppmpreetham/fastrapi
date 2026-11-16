@@ -7,6 +7,9 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response as AxumResponse};
 use bytes::{BufMut, BytesMut};
 use papaya::HashMap;
+use pyo3::exceptions::PyAttributeError;
+use pyo3::exceptions::PyRecursionError;
+use pyo3::exceptions::PyTypeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyMemoryView;
@@ -22,6 +25,7 @@ use std::cell::RefCell;
 use std::io::{self, Write};
 use std::str::from_utf8;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const KEY_CACHE_SLOTS: usize = 512;
 const KEY_CACHE_MAX_LEN: usize = 64;
@@ -142,13 +146,23 @@ pub fn write_pydantic_model_json_opts<W: Write>(
         |opts| value.call_method(intern!(py, "model_dump_json"), (), Some(opts)),
     );
 
-    let Ok(json) = json else {
-        return Ok(false);
+    let json = match json {
+        Ok(json) => json,
+        // A route hinted as a model can still return a plain value; that is a fast-path miss.
+        Err(err)
+            if err.is_instance_of::<PyAttributeError>(py)
+                && !value
+                    .hasattr(intern!(py, "model_dump_json"))
+                    .unwrap_or(false) =>
+        {
+            return Ok(false);
+        }
+        Err(err) => return Err(err),
     };
 
     if let Ok(s) = json.cast::<PyString>() {
         writer
-            .write_all(s.to_str().unwrap_or_default().as_bytes())
+            .write_all(json_text(s)?.as_bytes())
             .map_err(json_io_error)?;
         return Ok(true);
     }
@@ -173,8 +187,135 @@ pub fn write_dataclass_json<W: Write>(
     let Ok(asdict) = asdict.call1((value,)) else {
         return Ok(false);
     };
-    write_py_json(py, &asdict, writer)?;
+    write_py_json_at(py, &asdict, writer, 0)?;
     Ok(true)
+}
+
+/// The deepest nesting `write_py_json` and `py_any_to_json` follow before they stop.
+/// It keeps a cyclic value from overflowing the native stack.
+const MAX_JSON_DEPTH: usize = 256;
+
+#[cold]
+fn json_depth_error() -> PyErr {
+    PyRecursionError::new_err("maximum recursion depth exceeded while encoding a JSON object")
+}
+
+/// Writes a float the way Python's `float.__repr__` does, which is what `json.dumps` emits.
+/// Non-finite values raise the `ValueError` that `json.dumps(allow_nan=False)` raises.
+#[inline]
+pub fn write_json_float<W: Write>(writer: &mut W, value: f64) -> PyResult<()> {
+    if !value.is_finite() {
+        return Err(non_finite_float_error(value));
+    }
+    let mut buf = [0u8; 40];
+    let len = {
+        let mut cursor = io::Cursor::new(&mut buf[..]);
+        write!(cursor, "{value:?}").map_err(json_io_error)?;
+        cursor.position() as usize
+    };
+    let text = &buf[..len];
+    let Some(e) = text.iter().position(|&b| b == b'e') else {
+        return writer.write_all(text).map_err(json_io_error);
+    };
+    // Rust prints `1e16` and `1e-7`; Python prints `1e+16` and `1e-07`.
+    let (sign, digits) = match text[e + 1..].split_first() {
+        Some((b'-', digits)) => (b'-', digits),
+        _ => (b'+', &text[e + 1..]),
+    };
+    writer
+        .write_all(&text[..=e])
+        .and_then(|()| writer.write_all(&[sign]))
+        .and_then(|()| {
+            if digits.len() < 2 {
+                writer.write_all(b"0")
+            } else {
+                Ok(())
+            }
+        })
+        .and_then(|()| writer.write_all(digits))
+        .map_err(json_io_error)
+}
+
+#[cold]
+fn non_finite_float_error(value: f64) -> PyErr {
+    let repr = if value.is_nan() {
+        "nan"
+    } else if value > 0.0 {
+        "inf"
+    } else {
+        "-inf"
+    };
+    PyValueError::new_err(format!(
+        "Out of range float values are not JSON compliant: {repr}"
+    ))
+}
+
+fn float_text(value: f64) -> PyResult<String> {
+    let mut out = Vec::with_capacity(24);
+    write_json_float(&mut out, value)?;
+    Ok(String::from_utf8(out).unwrap_or_default())
+}
+
+/// The digits `json.dumps` writes for an int: `int.__repr__`, so subclasses cannot override it.
+fn int_text(py: Python<'_>, number: &Bound<'_, PyInt>) -> PyResult<String> {
+    if let Ok(small) = number.extract::<i64>() {
+        return Ok(itoa::Buffer::new().format(small).to_owned());
+    }
+    let repr = py
+        .get_type::<PyInt>()
+        .getattr(intern!(py, "__repr__"))?
+        .call1((number,))?;
+    Ok(json_text(repr.cast::<PyString>()?)?.into_owned())
+}
+
+/// The text of a dict key, as `jsonable_encoder` encodes the key and `json.dumps` then writes it.
+fn json_key_text(py: Python<'_>, key: &Bound<'_, PyAny>, depth: usize) -> PyResult<String> {
+    if depth > MAX_JSON_DEPTH {
+        return Err(json_depth_error());
+    }
+    match classify_py_value(py, key) {
+        PyJsonKind::Str(text) => Ok(json_text(text)?.into_owned()),
+        PyJsonKind::None => Ok("null".to_owned()),
+        PyJsonKind::Bool(flag) => Ok(if flag.is_true() { "true" } else { "false" }.to_owned()),
+        PyJsonKind::Int(number) => int_text(py, number),
+        PyJsonKind::Float(number) => float_text(number.value()),
+        PyJsonKind::Bytes(bytes) => py
+            .get_type::<PyBytes>()
+            .getattr(intern!(py, "decode"))?
+            .call1((bytes,))
+            .and_then(|text| Ok(json_text(text.cast::<PyString>()?)?.into_owned())),
+        PyJsonKind::Enum => json_key_text(py, &key.getattr(intern!(py, "value"))?, depth + 1),
+        PyJsonKind::Decimal => json_key_text(py, &decimal_number(py, key)?, depth + 1),
+        PyJsonKind::Timedelta => float_text(
+            key.call_method0(intern!(py, "total_seconds"))?
+                .extract::<f64>()?,
+        ),
+        PyJsonKind::HasIsoformat => {
+            let text = key.call_method0(intern!(py, "isoformat"))?;
+            Ok(json_text(text.cast::<PyString>()?)?.into_owned())
+        }
+        PyJsonKind::UuidOrDecimal
+        | PyJsonKind::Path
+        | PyJsonKind::IpAddress
+        | PyJsonKind::FallbackStr => json_text_of(key),
+        _ => Err(PyTypeError::new_err(format!(
+            "keys must be str, int, float, bool or None, not {}",
+            key.get_type().name()?
+        ))),
+    }
+}
+
+#[inline]
+fn write_json_key<W: Write>(
+    py: Python<'_>,
+    key: &Bound<'_, PyAny>,
+    writer: &mut W,
+    depth: usize,
+) -> PyResult<()> {
+    if let Ok(text) = key.cast_exact::<PyString>() {
+        return write_json_string(writer, &json_text(text)?);
+    }
+    write_json_string(writer, &json_key_text(py, key, depth)?)
 }
 
 #[inline]
@@ -302,13 +443,27 @@ where
     W: Write,
     I: IntoIterator<Item = Bound<'py, PyAny>>,
 {
+    write_json_array_at(py, writer, items, 0)
+}
+
+#[inline]
+fn write_json_array_at<'py, W, I>(
+    py: Python<'py>,
+    writer: &mut W,
+    items: I,
+    depth: usize,
+) -> PyResult<()>
+where
+    W: Write,
+    I: IntoIterator<Item = Bound<'py, PyAny>>,
+{
     writer.write_all(b"[").map_err(json_io_error)?;
     let mut iter = items.into_iter();
     if let Some(first_item) = iter.next() {
-        write_py_json(py, &first_item, writer)?;
+        write_py_json_at(py, &first_item, writer, depth + 1)?;
         iter.try_for_each(|item| {
             writer.write_all(b",").map_err(json_io_error)?;
-            write_py_json(py, &item, writer)
+            write_py_json_at(py, &item, writer, depth + 1)
         })?;
     }
 
@@ -366,6 +521,11 @@ enum ObjKind {
 static OBJ_KIND_CACHE: LazyLock<papaya::HashMap<usize, (Py<PyType>, ObjKind)>> =
     LazyLock::new(|| HashMap::with_capacity(256));
 
+/// The cache holds a strong reference to each type, so it stops growing at this size
+/// to keep classes made at runtime from piling up. Types past the limit are probed each time.
+const OBJ_KIND_CACHE_LIMIT: usize = 1024;
+static OBJ_KIND_CACHE_LEN: AtomicUsize = AtomicUsize::new(0);
+
 #[inline]
 fn classify_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
     let ty = value.get_type();
@@ -378,7 +538,14 @@ fn classify_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
     drop(guard);
 
     let kind = probe_object_kind(py, value);
-    OBJ_KIND_CACHE.pin().insert(type_ptr, (ty.unbind(), kind));
+    if OBJ_KIND_CACHE_LEN.load(Ordering::Relaxed) < OBJ_KIND_CACHE_LIMIT
+        && OBJ_KIND_CACHE
+            .pin()
+            .try_insert(type_ptr, (ty.unbind(), kind))
+            .is_ok()
+    {
+        OBJ_KIND_CACHE_LEN.fetch_add(1, Ordering::Relaxed);
+    }
     kind
 }
 
@@ -531,8 +698,12 @@ pub fn classify_py_value<'a, 'py>(
         ObjKind::Path => PyJsonKind::Path,
         ObjKind::IpAddress => PyJsonKind::IpAddress,
         ObjKind::Iterable => PyJsonKind::Iterable,
-        ObjKind::StrSubclass => value.cast::<PyString>().map_or(PyJsonKind::Object, PyJsonKind::Str),
-        ObjKind::IntSubclass => value.cast::<PyInt>().map_or(PyJsonKind::Object, PyJsonKind::Int),
+        ObjKind::StrSubclass => value
+            .cast::<PyString>()
+            .map_or(PyJsonKind::Object, PyJsonKind::Str),
+        ObjKind::IntSubclass => value
+            .cast::<PyInt>()
+            .map_or(PyJsonKind::Object, PyJsonKind::Int),
         ObjKind::FloatSubclass => value
             .cast::<PyFloat>()
             .map_or(PyJsonKind::Object, PyJsonKind::Float),
@@ -574,9 +745,7 @@ fn write_plain_json<W: Write>(
         if !number.value().is_finite() {
             return Ok(false);
         }
-        writer
-            .write_all(number.repr()?.to_str()?.as_bytes())
-            .map_err(json_io_error)?;
+        write_json_float(writer, number.value())?;
     } else if let Ok(dict) = value.cast_exact::<PyDict>() {
         writer.write_all(b"{").map_err(json_io_error)?;
         for (index, (key, item)) in dict.iter().enumerate() {
@@ -639,6 +808,18 @@ pub fn write_py_json<W: Write>(
     value: &Bound<'_, PyAny>,
     writer: &mut W,
 ) -> PyResult<()> {
+    write_py_json_at(py, value, writer, 0)
+}
+
+fn write_py_json_at<W: Write>(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    writer: &mut W,
+    depth: usize,
+) -> PyResult<()> {
+    if depth > MAX_JSON_DEPTH {
+        return Err(json_depth_error());
+    }
     match classify_py_value(py, value) {
         PyJsonKind::None => writer.write_all(b"null").map_err(json_io_error),
 
@@ -646,27 +827,27 @@ pub fn write_py_json<W: Write>(
             writer.write_all(b"{").map_err(json_io_error)?;
             let mut iter = dict.iter();
             if let Some((first_key, first_val)) = iter.next() {
-                write_json_string(writer, &py_dict_key_str(&first_key))?;
+                write_json_key(py, &first_key, writer, depth + 1)?;
                 writer.write_all(b":").map_err(json_io_error)?;
-                write_py_json(py, &first_val, writer)?;
+                write_py_json_at(py, &first_val, writer, depth + 1)?;
 
                 iter.try_for_each(|(key, val)| {
                     writer.write_all(b",").map_err(json_io_error)?;
-                    write_json_string(writer, &py_dict_key_str(&key))?;
+                    write_json_key(py, &key, writer, depth + 1)?;
                     writer.write_all(b":").map_err(json_io_error)?;
-                    write_py_json(py, &val, writer)
+                    write_py_json_at(py, &val, writer, depth + 1)
                 })?;
             }
             writer.write_all(b"}").map_err(json_io_error)
         }
 
-        PyJsonKind::List(list) => write_json_array(py, writer, list.iter()),
+        PyJsonKind::List(list) => write_json_array_at(py, writer, list.iter(), depth),
 
-        PyJsonKind::Tuple(tuple) => write_json_array(py, writer, tuple.iter()),
+        PyJsonKind::Tuple(tuple) => write_json_array_at(py, writer, tuple.iter(), depth),
 
-        PyJsonKind::Set(set) => write_json_array(py, writer, set.iter()),
+        PyJsonKind::Set(set) => write_json_array_at(py, writer, set.iter(), depth),
 
-        PyJsonKind::FrozenSet(fset) => write_json_array(py, writer, fset.iter()),
+        PyJsonKind::FrozenSet(fset) => write_json_array_at(py, writer, fset.iter(), depth),
 
         PyJsonKind::Str(s) => write_json_string(writer, &json_text(s)?),
 
@@ -683,20 +864,14 @@ pub fn write_py_json<W: Write>(
                 writer
                     .write_all(itoa::Buffer::new().format(v).as_bytes())
                     .map_err(json_io_error)
-            } else if let Ok(s) = json_text_of(value) {
-                writer.write_all(s.as_bytes()).map_err(json_io_error)
             } else {
-                writer.write_all(b"0").map_err(json_io_error)
+                writer
+                    .write_all(int_text(py, i)?.as_bytes())
+                    .map_err(json_io_error)
             }
         }
 
-        PyJsonKind::Float(f) => match f.extract::<f64>() {
-            Ok(v) if v.is_finite() => write!(writer, "{v:?}").map_err(json_io_error),
-            Ok(_) => Err(PyValueError::new_err(
-                "Out of range float values are not JSON compliant",
-            )),
-            Err(_) => writer.write_all(b"0.0").map_err(json_io_error),
-        },
+        PyJsonKind::Float(f) => write_json_float(writer, f.value()),
 
         PyJsonKind::Bytes(b) => write_json_bytes(writer, b.as_bytes()),
 
@@ -719,19 +894,16 @@ pub fn write_py_json<W: Write>(
                 return Ok(());
             }
 
-            if let Ok(dumped) = value.call_method(intern!(py, "model_dump"), (), by_alias(py)) {
-                return write_py_json(py, &dumped, writer);
-            }
-
-            writer.write_all(b"null").map_err(json_io_error)
+            // `model_dump_json` returned something other than text; dump to Python and encode that.
+            let dumped = value.call_method(intern!(py, "model_dump"), (), by_alias(py))?;
+            write_py_json_at(py, &dumped, writer, depth + 1)
         }
 
         PyJsonKind::Dataclass => {
-            if write_dataclass_json(py, value, writer)? {
-                return Ok(());
-            }
-
-            writer.write_all(b"null").map_err(json_io_error)
+            let Some(asdict) = dataclasses_asdict(py) else {
+                return writer.write_all(b"null").map_err(json_io_error);
+            };
+            write_py_json_at(py, &asdict.call1((value,))?, writer, depth + 1)
         }
 
         PyJsonKind::HasIsoformat => {
@@ -748,7 +920,7 @@ pub fn write_py_json<W: Write>(
             if let Ok(total) = value.call_method0(intern!(py, "total_seconds"))
                 && let Ok(f) = total.extract::<f64>()
             {
-                return write!(writer, "{f}").map_err(json_io_error);
+                return write_json_float(writer, f);
             }
 
             if let Ok(s) = json_text_of(value) {
@@ -762,11 +934,11 @@ pub fn write_py_json<W: Write>(
             let items = value
                 .try_iter()?
                 .collect::<PyResult<Vec<Bound<'_, PyAny>>>>()?;
-            write_json_array(py, writer, items)
+            write_json_array_at(py, writer, items, depth)
         }
 
         PyJsonKind::Object => match object_fields(py, value) {
-            Some(fields) => write_py_json(py, &fields, writer),
+            Some(fields) => write_py_json_at(py, &fields, writer, depth + 1),
             None => match json_text_of(value) {
                 Ok(s) => write_json_string(writer, &s),
                 Err(_) => writer.write_all(b"null").map_err(json_io_error),
@@ -774,7 +946,7 @@ pub fn write_py_json<W: Write>(
         },
 
         PyJsonKind::Decimal => match decimal_number(py, value) {
-            Ok(number) => write_py_json(py, &number, writer),
+            Ok(number) => write_py_json_at(py, &number, writer, depth + 1),
             Err(_) => writer.write_all(b"null").map_err(json_io_error),
         },
 
@@ -791,7 +963,7 @@ pub fn write_py_json<W: Write>(
 
         PyJsonKind::Enum => {
             if let Ok(inner) = value.getattr(intern!(py, "value")) {
-                write_py_json(py, &inner, writer)
+                write_py_json_at(py, &inner, writer, depth + 1)
             } else {
                 writer.write_all(b"null").map_err(json_io_error)
             }
@@ -933,11 +1105,15 @@ pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>, status: StatusCode
 #[inline]
 #[must_use]
 pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
+    py_dict_to_json_at(py, dict, 0)
+}
+
+fn py_dict_to_json_at(py: Python<'_>, dict: &Bound<'_, PyDict>, depth: usize) -> Value {
     let mut map = Object::new();
 
     dict.iter().for_each(|(key, value)| {
         let k = json_key_for(&key);
-        map.insert(k, py_any_to_json(py, &value));
+        map.insert(k, py_any_to_json_at(py, &value, depth + 1));
     });
 
     owned::Value::Object(Box::new(map))
@@ -946,38 +1122,54 @@ pub fn py_dict_to_json(py: Python<'_>, dict: &Bound<'_, PyDict>) -> Value {
 #[inline]
 #[must_use]
 pub fn py_list_to_json(py: Python<'_>, list: &Bound<'_, PyList>) -> Value {
-    let mut vec = Vec::with_capacity(list.len());
+    json_array_at(py, list.iter(), list.len(), 0)
+}
 
-    vec.extend(list.iter().map(|item| py_any_to_json(py, &item)));
-
+fn json_array_at<'py>(
+    py: Python<'py>,
+    items: impl Iterator<Item = Bound<'py, PyAny>>,
+    len: usize,
+    depth: usize,
+) -> Value {
+    let mut vec = Vec::with_capacity(len);
+    vec.extend(items.map(|item| py_any_to_json_at(py, &item, depth + 1)));
     Value::Array(Box::new(vec))
 }
 
+/// The key text `jsonable_encoder` plus `json.dumps` would write. A key they would reject
+/// falls back to its `str()` here, since this conversion cannot fail.
 #[inline]
 #[must_use]
 pub fn json_key_for(key: &Bound<'_, PyAny>) -> String {
-    py_dict_key_str(key).into_owned()
-}
-
-#[inline]
-fn py_dict_key_str<'k>(key: &'k Bound<'_, PyAny>) -> Cow<'k, str> {
-    if let Ok(s) = key.cast::<PyString>() {
-        return match s.to_str() {
-            Ok(s) => Cow::Borrowed(s),
-            Err(_) => Cow::Owned(String::new()),
-        };
+    if let Ok(text) = key.cast_exact::<PyString>()
+        && let Ok(text) = text.to_str()
+    {
+        return text.to_owned();
     }
-    key.str()
-        .map(|s| Cow::Owned(s.to_string_lossy().into_owned()))
-        .unwrap_or_default()
+    json_key_text(key.py(), key, 0).unwrap_or_else(|_| {
+        key.str()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    })
 }
 
+/// Converts a Python value into a JSON value. Values nested deeper than the depth limit
+/// (a cyclic container, for one) become `null`, since this conversion cannot fail.
 #[inline]
+#[must_use]
 pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
+    py_any_to_json_at(py, value, 0)
+}
+
+fn py_any_to_json_at(py: Python<'_>, value: &Bound<'_, PyAny>, depth: usize) -> Value {
+    if depth > MAX_JSON_DEPTH {
+        return simd_json::json!(null);
+    }
+    let next = depth + 1;
     match classify_py_value(py, value) {
         PyJsonKind::None => simd_json::json!(null),
-        PyJsonKind::Dict(dict) => py_dict_to_json(py, dict),
-        PyJsonKind::List(list) => py_list_to_json(py, list),
+        PyJsonKind::Dict(dict) => py_dict_to_json_at(py, dict, depth),
+        PyJsonKind::List(list) => json_array_at(py, list.iter(), list.len(), depth),
         PyJsonKind::Str(s) => simd_json::json!(lossy_text(s)),
         PyJsonKind::Bool(b) => simd_json::json!(b.is_true()),
         PyJsonKind::Int(i) => i.extract::<i64>().map_or_else(
@@ -996,21 +1188,9 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
             _ => simd_json::json!(null),
         },
 
-        PyJsonKind::Tuple(tuple) => {
-            let mut vec = Vec::with_capacity(tuple.len());
-            vec.extend(tuple.iter().map(|item| py_any_to_json(py, &item)));
-            Value::Array(Box::new(vec))
-        }
-        PyJsonKind::Set(set) => {
-            let mut vec = Vec::with_capacity(set.len());
-            vec.extend(set.iter().map(|item| py_any_to_json(py, &item)));
-            Value::Array(Box::new(vec))
-        }
-        PyJsonKind::FrozenSet(fset) => {
-            let mut vec = Vec::with_capacity(fset.len());
-            vec.extend(fset.iter().map(|item| py_any_to_json(py, &item)));
-            Value::Array(Box::new(vec))
-        }
+        PyJsonKind::Tuple(tuple) => json_array_at(py, tuple.iter(), tuple.len(), depth),
+        PyJsonKind::Set(set) => json_array_at(py, set.iter(), set.len(), depth),
+        PyJsonKind::FrozenSet(fset) => json_array_at(py, fset.iter(), fset.len(), depth),
 
         PyJsonKind::Bytes(b) => bytes_to_json(b.as_bytes()),
         PyJsonKind::ByteArray(b) => {
@@ -1027,25 +1207,27 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
         }
 
         PyJsonKind::PydanticModel => {
+            // JSON mode can reject a field that Python mode still dumps, so an error falls through.
             if let Ok(json) = value.call_method(intern!(py, "model_dump_json"), (), by_alias(py))
                 && let Ok(s) = json.cast::<PyString>()
             {
-                let mut json_buf = s.to_str().unwrap_or_default().as_bytes().to_vec();
-                if let Ok(parsed) = simd_json::to_owned_value(&mut json_buf) {
-                    return parsed;
-                }
+                let mut json_buf = lossy_text(s).into_bytes();
+                return simd_json::to_owned_value(&mut json_buf)
+                    .unwrap_or_else(|_| simd_json::json!(null));
             }
-            if let Ok(dumped) = value.call_method(intern!(py, "model_dump"), (), by_alias(py)) {
-                return py_any_to_json(py, &dumped);
-            }
-            simd_json::json!(null)
+            value
+                .call_method(intern!(py, "model_dump"), (), by_alias(py))
+                .map_or_else(
+                    |_| simd_json::json!(null),
+                    |dumped| py_any_to_json_at(py, &dumped, next),
+                )
         }
 
         PyJsonKind::Dataclass => {
             if let Some(asdict) = dataclasses_asdict(py)
                 && let Ok(d) = asdict.call1((value,))
             {
-                return py_any_to_json(py, &d);
+                return py_any_to_json_at(py, &d, next);
             }
             simd_json::json!(null)
         }
@@ -1077,7 +1259,7 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
             |iter| {
                 Value::Array(Box::new(
                     iter.filter_map(Result::ok)
-                        .map(|item| py_any_to_json(py, &item))
+                        .map(|item| py_any_to_json_at(py, &item, next))
                         .collect(),
                 ))
             },
@@ -1090,12 +1272,12 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
                     |s| simd_json::json!(lossy_text(&s)),
                 )
             },
-            |fields| py_any_to_json(py, &fields),
+            |fields| py_any_to_json_at(py, &fields, next),
         ),
 
         PyJsonKind::Decimal => decimal_number(py, value).map_or_else(
             |_| simd_json::json!(null),
-            |number| py_any_to_json(py, &number),
+            |number| py_any_to_json_at(py, &number, next),
         ),
 
         PyJsonKind::UuidOrDecimal
@@ -1108,7 +1290,7 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
 
         PyJsonKind::Enum => {
             if let Ok(inner) = value.getattr(intern!(py, "value")) {
-                py_any_to_json(py, &inner)
+                py_any_to_json_at(py, &inner, next)
             } else {
                 simd_json::json!(null)
             }

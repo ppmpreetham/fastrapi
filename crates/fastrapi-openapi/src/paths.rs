@@ -5,28 +5,29 @@ use super::document::{
     MediaType, Operation, Parameter, PathItem, RequestBody, Response, deep_merge_json,
 };
 use super::registry::{SchemaRegistry, substitute};
-use super::schema::{
-    apply_parameter_constraints, native_operation_id, python_type_to_openapi_type, schema_title,
-};
+use super::responses::ResponseClass;
+use super::responses::add_validation_error;
+use super::responses::success_content;
+use super::schema::{native_operation_id, schema_title};
 use super::spec::RouteCollector;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::params::ParameterSource;
 use fastrapi_core::path::strip_path_convertors;
 use fastrapi_core::security::SecurityKind;
-use fastrapi_http::response_type::ResponseType;
-use fastrapi_pyutil::json::{json_to_py_object, py_any_to_json};
+use fastrapi_pyutil::imports::TYPING;
+use fastrapi_pyutil::json::py_any_to_json;
 use fastrapi_routing::dependencies::InjectionType;
 use fastrapi_routing::route::{
     ModelPresence, ParamModel, ParsedParameter, RouteEntry, RouteHandler,
 };
+use indexmap::IndexMap;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use simd_json::json;
 use simd_json::owned::{Object, Value as JsonValue};
-use simd_json::prelude::{ValueAsMutObject, ValueAsObject, ValueAsScalar};
+use simd_json::prelude::{ValueAsMutObject, ValueAsScalar};
 use simd_json::serde::to_owned_value;
-use std::collections::HashMap;
 
 /// Makes the `OpenAPI` `securitySchemes` entry for a security scheme.
 fn scheme_to_openapi(
@@ -212,7 +213,8 @@ fn status_text(py: Python<'_>, code: &str) -> Option<String> {
 fn additional_responses(
     py: Python<'_>,
     responses: &Bound<'_, PyAny>,
-    existing: &HashMap<String, Response>,
+    existing: &IndexMap<String, Response>,
+    media_type: &str,
     unique_id: &str,
     registry: &mut SchemaRegistry,
 ) -> Option<JsonValue> {
@@ -249,7 +251,7 @@ fn additional_responses(
                 .or_insert_with(|| json!({}));
             if let Some(content) = content.as_object_mut() {
                 let media = content
-                    .entry("application/json".to_string())
+                    .entry(media_type.to_string())
                     .or_insert_with(|| json!({}));
                 if let Some(media) = media.as_object_mut()
                     && !media.contains_key("schema")
@@ -284,16 +286,14 @@ fn model_parameters(
         return Vec::new();
     };
     let optional = model.presence.is_some() && !param.required;
-    let Ok(fields) = model.annotation.bind(py).getattr(intern!(py, "model_fields")) else {
+    let Ok(fields) = model
+        .annotation
+        .bind(py)
+        .getattr(intern!(py, "model_fields"))
+    else {
         return Vec::new();
     };
     let Ok(fields) = fields.cast_into::<PyDict>() else {
-        return Vec::new();
-    };
-    let Ok(annotated) = py
-        .import(intern!(py, "typing"))
-        .and_then(|typing| typing.getattr(intern!(py, "Annotated")))
-    else {
         return Vec::new();
     };
     fields
@@ -309,9 +309,7 @@ fn model_parameters(
             };
             let alias = key.alias.bind(py).to_str().ok()?;
             let title = text(intern!(py, "title")).unwrap_or_else(|| schema_title(alias));
-            let annotation = annotated
-                .get_item((info.getattr(intern!(py, "annotation")).ok()?, &info))
-                .ok()?;
+            let annotation = annotated_field(&info)?;
             let required = info
                 .call_method0(intern!(py, "is_required"))
                 .and_then(|value| value.extract::<bool>())
@@ -335,8 +333,43 @@ fn model_parameters(
         .collect()
 }
 
+/// `Annotated[field_info.annotation, field_info]`, the type FastAPI's `ModelField` builds its
+/// schema from, so pydantic documents formats, constraints, defaults and extras.
+fn annotated_field<'py>(field_info: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
+    let py = field_info.py();
+    TYPING
+        .get(py)
+        .ok()?
+        .getattr(intern!(py, "Annotated"))
+        .ok()?
+        .get_item((
+            field_info.getattr(intern!(py, "annotation")).ok()?,
+            field_info,
+        ))
+        .ok()
+}
+
+/// The `example` and `examples` of a parameter or body: like FastAPI, `openapi_examples` wins.
+fn field_examples(
+    py: Python<'_>,
+    param: &ParsedParameter,
+) -> (Option<JsonValue>, Option<JsonValue>) {
+    let json = |value: Bound<'_, PyAny>| py_any_to_json(py, &value);
+    match marker_attr(py, param, intern!(py, "openapi_examples"))
+        .filter(|examples| examples.is_truthy().unwrap_or(false))
+    {
+        Some(examples) => (None, Some(json(examples))),
+        None => (
+            marker_attr(py, param, intern!(py, "example")).map(json),
+            None,
+        ),
+    }
+}
+
 fn marker_media_type(py: Python<'_>, param: &ParsedParameter) -> Option<String> {
-    marker_attr(py, param, intern!(py, "media_type"))?.extract().ok()
+    marker_attr(py, param, intern!(py, "media_type"))?
+        .extract()
+        .ok()
 }
 
 fn marker_class(py: Python<'_>, param: &ParsedParameter) -> Option<String> {
@@ -526,25 +559,6 @@ fn embedded_body_schema(
     schema
 }
 
-fn with_schema_extra(py: Python<'_>, mut schema: JsonValue, extra: &Bound<'_, PyAny>) -> JsonValue {
-    if let Ok(extra) = extra.cast::<PyDict>() {
-        if let (Some(object), Some(extra)) = (
-            schema.as_object_mut(),
-            py_any_to_json(py, extra).as_object(),
-        ) {
-            for (key, value) in extra {
-                object.insert(key.clone(), value.clone());
-            }
-        }
-        return schema;
-    }
-    let target = json_to_py_object(py, &schema);
-    if extra.call1((target.bind(py),)).is_err() {
-        return schema;
-    }
-    py_any_to_json(py, target.bind(py))
-}
-
 fn annotated_discriminator<'py>(
     py: Python<'py>,
     param: &ParsedParameter,
@@ -602,7 +616,7 @@ fn build_request_body(
     route: &RouteEntry,
     body_params: &[&ParsedParameter],
     unique_id: &str,
-    schemas: &mut HashMap<String, JsonValue>,
+    schemas: &mut IndexMap<String, JsonValue>,
     registry: &mut SchemaRegistry,
 ) -> Option<RequestBody> {
     if body_params.is_empty() || matches!(route.method, HttpMethod::OPTIONS | HttpMethod::TRACE) {
@@ -628,7 +642,10 @@ fn build_request_body(
         && has_form
         && (first.is_pydantic_model || form_model(first).is_some());
     let embed = body_params.len() > 1 || first.embed || (has_form && !single_model_form);
-    let mut form_models = body_params.iter().filter_map(|param| form_model(param)).peekable();
+    let mut form_models = body_params
+        .iter()
+        .filter_map(|param| form_model(param))
+        .peekable();
     let composed = form_models.peek().is_some()
         && (embed || form_models.any(|model| model.presence.is_some()));
 
@@ -646,7 +663,10 @@ fn build_request_body(
             .filter_map(|param| marker_media_type(py, param))
             .collect();
         let media_type = if has_file
-            || (has_form && media_types.iter().any(|media| media == "multipart/form-data"))
+            || (has_form
+                && media_types
+                    .iter()
+                    .any(|media| media == "multipart/form-data"))
         {
             "multipart/form-data".to_string()
         } else {
@@ -661,8 +681,8 @@ fn build_request_body(
             media_type,
         )
     } else {
-        let media_type = marker_media_type(py, first)
-            .unwrap_or_else(|| default_media_type.to_string());
+        let media_type =
+            marker_media_type(py, first).unwrap_or_else(|| default_media_type.to_string());
         (
             body_field_schema(py, first, registry),
             first.required || !first.has_default,
@@ -670,25 +690,41 @@ fn build_request_body(
         )
     };
 
-    let examples = (!embed)
-        .then(|| marker_attr(py, first, intern!(py, "openapi_examples")))
-        .flatten()
-        .map(|examples| py_any_to_json(py, &examples));
-    let mut content = HashMap::new();
-    content.insert(media_type, MediaType { schema, examples });
+    let (example, examples) = if embed {
+        (None, None)
+    } else {
+        field_examples(py, first)
+    };
+    let mut content = IndexMap::new();
+    content.insert(
+        media_type,
+        MediaType {
+            schema: Some(schema),
+            example,
+            examples,
+            ..MediaType::default()
+        },
+    );
     Some(RequestBody { content, required })
+}
+
+/// The application settings that the operations of one document share.
+#[derive(Clone, Copy)]
+pub struct PathSettings<'a> {
+    pub app_responses: Option<&'a Py<PyAny>>,
+    pub separate_input_output_schemas: bool,
+    pub generate_unique_id_function: Option<&'a Py<PyAny>>,
+    pub collect: RouteCollector,
 }
 
 pub fn build_paths_from_routes(
     py: Python<'_>,
     collected: &[RouteEntry],
-    schemas: &mut HashMap<String, JsonValue>,
-    app_responses: Option<&Py<PyAny>>,
-    separate_input_output_schemas: bool,
-    generate_unique_id_function: Option<&Py<PyAny>>,
-    security_schemes: &mut HashMap<String, JsonValue>,
-) -> HashMap<String, PathItem> {
-    let mut paths: HashMap<String, PathItem> = HashMap::new();
+    schemas: &mut IndexMap<String, JsonValue>,
+    security_schemes: &mut IndexMap<String, JsonValue>,
+    settings: PathSettings<'_>,
+) -> IndexMap<String, PathItem> {
+    let mut paths: IndexMap<String, PathItem> = IndexMap::new();
     let mut registry = SchemaRegistry::default();
 
     for route in collected {
@@ -716,11 +752,12 @@ pub fn build_paths_from_routes(
         let summary = route
             .summary
             .clone()
+            .filter(|summary| !summary.is_empty())
             .or_else(|| Some(schema_title(&route.name)));
         let unique_id_function = route
             .generate_unique_id_function
             .as_ref()
-            .or(generate_unique_id_function);
+            .or(settings.generate_unique_id_function);
         let operation_id = route.operation_id.clone().unwrap_or_else(|| {
             unique_id_function
                 .and_then(|function| {
@@ -753,33 +790,38 @@ pub fn build_paths_from_routes(
             deprecated: route.deprecated,
             parameters: None,
             request_body: None,
-            responses: HashMap::new(),
+            responses: IndexMap::new(),
             callbacks: None,
             security: None,
         };
 
         if !route.security.is_empty() {
-            let mut requirements: Vec<JsonValue> = Vec::new();
+            // Like FastAPI, the scopes of one scheme merge into a single requirement, and the
+            // last definition of a scheme name wins.
+            let mut requirements: IndexMap<&str, Vec<&str>> = IndexMap::new();
             for req in &route.security {
                 let compiled = req.scheme.as_ref();
-                security_schemes
-                    .entry(compiled.name.clone())
-                    .or_insert_with(|| {
-                        scheme_to_openapi(
-                            &compiled.kind,
-                            compiled.description.as_deref(),
-                            compiled.scopes.as_ref(),
-                        )
-                    });
-                let scope_list: Vec<JsonValue> = req.scopes.iter().map(|s| json!(s)).collect();
-                let mut requirement = Object::new();
-                requirement.insert(compiled.name.clone(), json!(scope_list));
-                let requirement = JsonValue::Object(Box::new(requirement));
-                if !requirements.contains(&requirement) {
-                    requirements.push(requirement);
+                security_schemes.insert(
+                    compiled.name.clone(),
+                    scheme_to_openapi(
+                        &compiled.kind,
+                        compiled.description.as_deref(),
+                        compiled.scopes.as_ref(),
+                    ),
+                );
+                let scopes = requirements.entry(compiled.name.as_str()).or_default();
+                for scope in req.scopes.iter() {
+                    if !scopes.contains(&scope.as_str()) {
+                        scopes.push(scope);
+                    }
                 }
             }
-            operation.security = Some(requirements);
+            operation.security = Some(
+                requirements
+                    .into_iter()
+                    .map(|(name, scopes)| json!({ name: scopes }))
+                    .collect(),
+            );
         }
 
         let mut seen_params = std::collections::HashSet::new();
@@ -809,6 +851,13 @@ pub fn build_paths_from_routes(
             | ParameterSource::BackgroundTasks
             | ParameterSource::SecurityScopes => 4,
         });
+        // FastAPI documents a 422 response only for routes that read request parameters or a body.
+        let validates_request = all_params.iter().any(|param| {
+            !matches!(
+                param.source,
+                ParameterSource::BackgroundTasks | ParameterSource::SecurityScopes
+            )
+        });
         let parameters: Vec<Parameter> = all_params
             .iter()
             .flat_map(|param| {
@@ -822,11 +871,12 @@ pub fn build_paths_from_routes(
                     | ParameterSource::SecurityScopes => return Vec::new(),
                 };
 
-                let marker = param.param_object.as_ref().map(|marker| marker.bind(py));
-
+                let Some(marker) = param.param_object.as_ref().map(|marker| marker.bind(py)) else {
+                    return Vec::new();
+                };
                 let include_in_schema = marker
-                    .and_then(|marker| marker.getattr(intern!(py, "include_in_schema")).ok())
-                    .and_then(|value| value.extract::<bool>().ok())
+                    .getattr(intern!(py, "include_in_schema"))
+                    .and_then(|value| value.extract::<bool>())
                     .unwrap_or(true);
                 if !include_in_schema {
                     return Vec::new();
@@ -835,71 +885,19 @@ pub fn build_paths_from_routes(
                     return model_parameters(py, param, location, &mut registry);
                 }
 
-                let mut schema = param.annotation.as_ref().map_or_else(
-                    || json!({"type": "string"}),
-                    |annotation| python_type_to_openapi_type(py, annotation.bind(py), schemas),
-                );
-
-                if let Some(examples) = marker
-                    .and_then(|marker| marker.getattr(intern!(py, "examples")).ok())
-                    .filter(|value| !value.is_none())
-                    && let Some(obj) = schema.as_object_mut()
-                {
-                    obj.insert("examples".to_string(), py_any_to_json(py, &examples));
-                }
-
-                let is_ref = schema
-                    .as_object()
-                    .is_some_and(|obj| obj.contains_key("$ref"));
-                if !is_ref && let Some(obj) = schema.as_object_mut() {
-                    if let Some(title) = marker
-                        .and_then(|marker| marker.getattr(intern!(py, "title")).ok())
-                        .and_then(|value| value.extract::<String>().ok())
-                    {
-                        obj.insert("title".to_string(), json!(title));
-                    } else if !obj.contains_key("title") {
-                        obj.insert(
-                            "title".to_string(),
-                            json!(schema_title(&param.external_name)),
-                        );
-                    }
-                    if let Some(default) = jsonable_default(py, param) {
-                        obj.insert("default".to_string(), default);
-                    }
-                }
-
-                let mut schema =
-                    apply_parameter_constraints(schema, marker, &param.constraints, param.is_list);
-
+                let title = marker_attr(py, param, intern!(py, "title"))
+                    .and_then(|title| title.extract::<String>().ok())
+                    .unwrap_or_else(|| schema_title(&param.external_name));
+                let schema = match annotated_field(marker) {
+                    Some(annotation) => registry.field(&annotation, "validation", Some(title)),
+                    None => json!({ "title": title }),
+                };
                 let deprecated = marker
-                    .and_then(|marker| marker.getattr(intern!(py, "deprecated")).ok())
-                    .filter(|value| !value.is_none())
-                    .and_then(|value| value.is_truthy().ok())
-                    .filter(|truthy| *truthy)
-                    .map(|_| true);
-                if !is_ref && let Some(obj) = schema.as_object_mut() {
-                    if let Some(description) = &param.description {
-                        obj.insert("description".to_string(), json!(description));
-                    }
-                    if deprecated.is_some() {
-                        obj.insert("deprecated".to_string(), json!(true));
-                    }
-                }
-                if !is_ref
-                    && let Some(extra) = marker
-                        .and_then(|marker| marker.getattr(intern!(py, "json_schema_extra")).ok())
-                        .filter(|extra| !extra.is_none())
-                {
-                    schema = with_schema_extra(py, schema, &extra);
-                }
-                let example = marker
-                    .and_then(|marker| marker.getattr(intern!(py, "example")).ok())
-                    .filter(|value| !value.is_none())
-                    .map(|value| py_any_to_json(py, &value));
-                let openapi_examples = marker
-                    .and_then(|marker| marker.getattr(intern!(py, "openapi_examples")).ok())
-                    .filter(|value| !value.is_none())
-                    .map(|value| py_any_to_json(py, &value));
+                    .getattr(intern!(py, "deprecated"))
+                    .and_then(|value| value.is_truthy())
+                    .is_ok_and(|truthy| truthy)
+                    .then_some(true);
+                let (example, examples) = field_examples(py, param);
 
                 vec![Parameter {
                     name: param.external_name.clone(),
@@ -909,7 +907,7 @@ pub fn build_paths_from_routes(
                     description: param.description.clone(),
                     deprecated,
                     example,
-                    examples: openapi_examples,
+                    examples,
                 }]
             })
             .collect();
@@ -941,108 +939,25 @@ pub fn build_paths_from_routes(
             .clone()
             .unwrap_or_else(|| "Successful Response".to_string());
 
-        let response_schema = handler
-            .response
-            .response_model
-            .as_ref()
-            .filter(|model| !model.bind(py).is_none())
-            .map_or_else(
-                || json!({}),
-                |model| {
-                    registry.field(
-                        model.bind(py),
-                        "serialization",
-                        Some(schema_title(&format!("Response_{operation_id}"))),
-                    )
-                },
-            );
-
+        let response_class = ResponseClass::of(py, handler.response.response_class.as_ref());
         let success_status = handler
             .response
             .default_status
-            .map_or(200, |status| status.as_u16());
-        let body_allowed = fastrapi_http::status::body_allowed(success_status);
-        let media_type = match handler.response.response_type {
-            ResponseType::Html => Some("text/html"),
-            ResponseType::PlainText => Some("text/plain"),
-            ResponseType::Redirect | ResponseType::File => None,
-            ResponseType::Json | ResponseType::Auto => Some("application/json"),
-        };
-        let response_schema = if media_type == Some("application/json") {
-            response_schema
-        } else {
-            json!({ "type": "string" })
-        };
+            .map_or(response_class.status, |status| status.as_u16());
+        let body_allowed = handler
+            .response
+            .default_status
+            .is_none_or(|status| fastrapi_http::status::body_allowed(status.as_u16()));
+        let content = body_allowed
+            .then(|| success_content(py, &handler, &response_class, &operation_id, &mut registry))
+            .flatten();
         operation.responses.insert(
             success_status.to_string(),
             Response {
                 description: response_desc,
-                content: media_type.filter(|_| body_allowed).map(|media_type| {
-                    let mut content = HashMap::new();
-                    content.insert(
-                        media_type.to_string(),
-                        MediaType {
-                            examples: None,
-                            schema: response_schema,
-                        },
-                    );
-                    content
-                }),
+                content,
             },
         );
-
-        if !handler.validation.param_validators.is_empty() || !all_params.is_empty() {
-            schemas
-                .entry("HTTPValidationError".to_string())
-                .or_insert_with(|| {
-                    json!({
-                        "properties": {
-                            "detail": {
-                                "items": { "$ref": "#/components/schemas/ValidationError" },
-                                "type": "array",
-                                "title": "Detail"
-                            }
-                        },
-                        "type": "object",
-                        "title": "HTTPValidationError"
-                    })
-                });
-            schemas.entry("ValidationError".to_string()).or_insert_with(|| {
-                json!({
-                    "properties": {
-                        "loc": {
-                            "items": { "anyOf": [ { "type": "string" }, { "type": "integer" } ] },
-                            "type": "array",
-                            "title": "Location"
-                        },
-                        "msg": { "type": "string", "title": "Message" },
-                        "type": { "type": "string", "title": "Error Type" },
-                        "input": { "title": "Input" },
-                        "ctx": { "type": "object", "title": "Context" }
-                    },
-                    "type": "object",
-                    "required": ["loc", "msg", "type"],
-                    "title": "ValidationError"
-                })
-            });
-            operation.responses.insert(
-                "422".to_string(),
-                Response {
-                    description: "Validation Error".to_string(),
-                    content: Some({
-                        let mut content = HashMap::new();
-                        content.insert(
-                            "application/json".to_string(),
-                            MediaType {
-                                examples: None,
-                                schema: json!({ "$ref": "#/components/schemas/HTTPValidationError" }),
-                            },
-                        );
-                        content
-                    }),
-                },
-            );
-        }
 
         let path_item = paths.entry(path).or_insert_with(|| PathItem {
             get: None,
@@ -1058,11 +973,7 @@ pub fn build_paths_from_routes(
 
         let mut operation_val = to_owned_value(&operation).unwrap_or_else(|_| json!({}));
 
-        if let Some(extra) = &route.openapi_extra {
-            deep_merge_json(&mut operation_val, extra.clone());
-        }
-
-        let combined_responses = match (app_responses, route.responses.as_ref()) {
+        let combined_responses = match (settings.app_responses, route.responses.as_ref()) {
             (None, None) => None,
             (Some(only), None) | (None, Some(only)) => Some(only.bind(py).clone()),
             (Some(app_level), Some(route_level)) => {
@@ -1081,6 +992,10 @@ pub fn build_paths_from_routes(
                 py,
                 &responses,
                 &operation.responses,
+                response_class
+                    .media_type
+                    .as_deref()
+                    .unwrap_or("application/json"),
                 &operation_id,
                 &mut registry,
             )
@@ -1090,14 +1005,43 @@ pub fn build_paths_from_routes(
             deep_merge_json(op_resp, processed);
         }
 
-        if let Some(callbacks_val) = &route.callbacks
+        if validates_request
+            && let Some(responses) = operation_val
+                .as_object_mut()
+                .and_then(|operation| operation.get_mut("responses"))
+                .and_then(ValueAsMutObject::as_object_mut)
+        {
+            add_validation_error(responses, schemas);
+        }
+
+        let own_callbacks = route.callback_routes.as_ref().and_then(|callbacks| {
+            let mut callback_schemas = IndexMap::new();
+            let document = callbacks_document(
+                py,
+                callbacks.bind(py),
+                settings.collect,
+                &mut callback_schemas,
+            );
+            for (name, schema) in callback_schemas {
+                schemas.entry(name).or_insert(schema);
+            }
+            document
+        });
+        let callbacks = match (route.callbacks.clone(), own_callbacks) {
+            (Some(mut inherited), Some(own)) => {
+                deep_merge_json(&mut inherited, own);
+                Some(inherited)
+            }
+            (inherited, own) => inherited.or(own),
+        };
+        if let Some(callbacks) = callbacks
             && let Some(op_obj) = operation_val.as_object_mut()
         {
-            if let Some(op_cb) = op_obj.get_mut("callbacks") {
-                deep_merge_json(op_cb, callbacks_val.clone());
-            } else {
-                op_obj.insert("callbacks".to_string(), callbacks_val.clone());
-            }
+            op_obj.insert("callbacks".to_string(), callbacks);
+        }
+
+        if let Some(extra) = &route.openapi_extra {
+            deep_merge_json(&mut operation_val, extra.clone());
         }
 
         match route.method {
@@ -1111,7 +1055,7 @@ pub fn build_paths_from_routes(
             HttpMethod::TRACE => path_item.trace = Some(operation_val),
         }
     }
-    let resolved = registry.resolve(py, separate_input_output_schemas, schemas);
+    let resolved = registry.resolve(py, settings.separate_input_output_schemas, schemas);
     for path_item in paths.values_mut() {
         for operation in [
             &mut path_item.get,
@@ -1165,9 +1109,25 @@ pub fn parse_callbacks_to_json(
     callbacks_bound: &Bound<'_, PyAny>,
     collect: RouteCollector,
 ) -> Option<JsonValue> {
+    callbacks_document(py, callbacks_bound, collect, &mut IndexMap::new())
+}
+
+/// The `callbacks` object of an operation. The schemas of the callback models go into `schemas`.
+/// Like FastAPI, the security schemes of callbacks are not documented.
+fn callbacks_document(
+    py: Python<'_>,
+    callbacks_bound: &Bound<'_, PyAny>,
+    collect: RouteCollector,
+    schemas: &mut IndexMap<String, JsonValue>,
+) -> Option<JsonValue> {
     let mut callbacks_map = Object::new();
-    let mut dummy_schemas = HashMap::new();
-    let mut dummy_security = HashMap::new();
+    let mut dummy_security = IndexMap::new();
+    let settings = PathSettings {
+        app_responses: None,
+        separate_input_output_schemas: false,
+        generate_unique_id_function: None,
+        collect,
+    };
 
     if let Ok(dict) = callbacks_bound.cast::<PyDict>() {
         for (k, v) in dict.iter() {
@@ -1180,11 +1140,9 @@ pub fn parse_callbacks_to_json(
                         let paths = build_paths_from_routes(
                             py,
                             &collected,
-                            &mut dummy_schemas,
-                            None,
-                            false,
-                            None,
+                            schemas,
                             &mut dummy_security,
+                            settings,
                         );
 
                         for (path, path_item) in paths {
@@ -1206,11 +1164,9 @@ pub fn parse_callbacks_to_json(
                 let paths = build_paths_from_routes(
                     py,
                     std::slice::from_ref(&entry),
-                    &mut dummy_schemas,
-                    None,
-                    false,
-                    None,
+                    schemas,
                     &mut dummy_security,
+                    settings,
                 );
                 for (path, path_item) in paths {
                     let value = to_owned_value(&path_item).unwrap_or_else(|_| json!({}));

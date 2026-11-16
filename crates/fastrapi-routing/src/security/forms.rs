@@ -220,7 +220,7 @@ fn password_form(request: &Bound<'_, PyRequest>, strict: bool) -> PyResult<Passw
 #[pymethods]
 impl OAuth2PasswordRequestForm {
     #[new]
-    #[pyo3(signature = (grant_type=None, username=None, password=None, scope=String::new(), client_id=None, client_secret=None))]
+    #[pyo3(signature = (*, grant_type=None, username=None, password=None, scope=String::new(), client_id=None, client_secret=None))]
     fn new(
         grant_type: Option<String>,
         username: Option<String>,
@@ -265,7 +265,7 @@ impl From<PasswordForm> for OAuth2PasswordRequestForm {
 #[pymethods]
 impl OAuth2PasswordRequestFormStrict {
     #[new]
-    #[pyo3(signature = (grant_type=None, username=None, password=None, scope=String::new(), client_id=None, client_secret=None))]
+    #[pyo3(signature = (*, grant_type=None, username=None, password=None, scope=String::new(), client_id=None, client_secret=None))]
     fn new(
         grant_type: Option<String>,
         username: Option<String>,
@@ -291,6 +291,9 @@ impl OAuth2PasswordRequestFormStrict {
 
     fn __call__(&self, request: &Bound<'_, PyRequest>) -> PyResult<Py<Self>> {
         let form = OAuth2PasswordRequestForm::from(password_form(request, true)?);
-        Py::new(request.py(), PyClassInitializer::from(form).add_subclass(Self))
+        Py::new(
+            request.py(),
+            PyClassInitializer::from(form).add_subclass(Self),
+        )
     }
 }

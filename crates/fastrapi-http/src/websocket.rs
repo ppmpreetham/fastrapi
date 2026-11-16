@@ -3,6 +3,7 @@
 
 use crate::request::PyHTTPConnection;
 use crate::response_convert::convert_auto_response;
+use crate::stream::SlotLease;
 use axum::body::Body;
 use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
@@ -99,21 +100,16 @@ fn parse_json_bytes(bytes: Bytes) -> PyResult<Py<PyAny>> {
 }
 
 async fn next_message(rx_arc: SharedRx) -> PyResult<WSMessage> {
-    let mut rx = {
-        let mut guard = rx_arc.lock();
-        guard.take().ok_or_else(|| {
-            PyRuntimeError::new_err("Concurrent receive operations are not supported")
-        })?
+    let Some(mut lease) = SlotLease::take(&rx_arc) else {
+        return Err(PyRuntimeError::new_err(
+            "Concurrent receive operations are not supported",
+        ));
     };
-
-    let received = rx.recv().await;
-
-    if let Some(mut guard) = rx_arc.try_lock() {
-        *guard = Some(rx);
-    } else {
-        tracing::error!("websocket receiver lock poisoned");
-    }
-
+    let received = match lease.value() {
+        Some(rx) => rx.recv().await,
+        None => None,
+    };
+    drop(lease);
     received.ok_or_else(disconnected)
 }
 

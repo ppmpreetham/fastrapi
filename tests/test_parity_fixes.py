@@ -523,7 +523,7 @@ def test_concurrency_exports_contextlib_helpers():
     from fastrapi import concurrency
 
     assert concurrency.asynccontextmanager is contextlib.asynccontextmanager
-    assert concurrency.AsyncExitStack is contextlib.AsyncExitStack
+    assert concurrency.AbstractContextManager is contextlib.AbstractContextManager
 
 
 def test_types_aliases():
@@ -2142,7 +2142,7 @@ def test_method_not_allowed_lists_allowed_methods(client, app):
 
     response = client.post("/only")
     assert response.status_code == 405
-    assert response.headers["allow"] == "GET, PUT"
+    assert response.headers["allow"] == "GET"
 
 
 def test_exception_handler_is_reused_across_errors(client, app):

@@ -13,9 +13,18 @@ pub struct ServerContext {
     pub(crate) bridge: Arc<pyaio_faq::Bridge>,
     app: OnceLock<Py<PyAny>>,
     exception_handlers: OnceLock<Py<PyDict>>,
-    status_handlers: OnceLock<bool>,
     lifespan_state: RwLock<Option<Py<PyAny>>>,
     parent: Option<&'static Self>,
+}
+
+impl std::fmt::Debug for ServerContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerContext")
+            .field("event_loop", &self.event_loop)
+            .field("app", &self.app.get())
+            .field("has_parent", &self.parent.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ServerContext {
@@ -29,7 +38,6 @@ impl ServerContext {
             bridge,
             app: OnceLock::new(),
             exception_handlers: OnceLock::new(),
-            status_handlers: OnceLock::new(),
             lifespan_state: RwLock::new(None),
             parent,
         }
@@ -43,22 +51,12 @@ impl ServerContext {
         self.app.get()
     }
 
-    pub fn set_exception_handlers(&self, py: Python<'_>, registry: Py<PyDict>) {
-        let has_status = registry
-            .bind(py)
-            .keys()
-            .iter()
-            .any(|key| key.is_instance_of::<pyo3::types::PyInt>());
-        _ = self.status_handlers.set(has_status);
+    pub fn set_exception_handlers(&self, registry: Py<PyDict>) {
         _ = self.exception_handlers.set(registry);
     }
 
     pub fn exception_handlers(&self) -> Option<&Py<PyDict>> {
         self.exception_handlers.get()
-    }
-
-    pub fn has_status_handlers(&self) -> bool {
-        self.status_handlers.get().copied().unwrap_or(false)
     }
 
     pub fn set_lifespan_state(&self, state: Py<PyAny>) {

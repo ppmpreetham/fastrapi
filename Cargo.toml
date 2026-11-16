@@ -39,6 +39,7 @@ smol_str = "0.3.7"
 futures-util = "0.3.32"
 hyper = "1.10.1"
 http-body = "1.0.1"
+http-body-util = "0.1.5"
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 # TODO: if using python package, make these features optional
 tower-http = { version = "0.6.8", features = [
@@ -67,6 +68,9 @@ fastwebsockets = { version = "0.10.0", features = ["upgrade", "with_axum", "unst
 bytes = "1.12.1"
 flate2 = "1.1.10"
 itoa = "1.0.18"
+indexmap = { version = "2.14.2", features = ["serde"] }
+libc = "0.2.189"
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
 regex = "1"
 uuid = "1"
 matchit = "0.9.2"
@@ -129,6 +133,12 @@ opt-level = 3
 [profile.release.build-override]
 opt-level = 3
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [package]
 name = "fastrapi"
 version.workspace = true
@@ -156,6 +166,7 @@ smallvec.workspace = true
 futures-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+http-body-util.workspace = true
 tower-http.workspace = true
 tower.workspace = true
 regex.workspace = true

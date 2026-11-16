@@ -361,7 +361,11 @@ fn build_http_exception(py: Python<'_>) -> PyResult<Py<PyType>> {
             },
         )?,
     )?;
-    starlette_subclass("HTTPException", STARLETTE_HTTP_EXCEPTION.get(py)?, &namespace)
+    starlette_subclass(
+        "HTTPException",
+        STARLETTE_HTTP_EXCEPTION.get(py)?,
+        &namespace,
+    )
 }
 
 fn starlette_subclass(

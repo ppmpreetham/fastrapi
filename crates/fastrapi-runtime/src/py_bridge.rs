@@ -16,7 +16,7 @@ use crate::server_state::ServerContext;
 use crate::tokio_runtime::PYTHON_RUNTIME;
 pub use pyo3_async_runtimes::{TaskLocals, into_future_with_locals};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct EventLoop(&'static ServerContext);
 
 impl EventLoop {
@@ -97,7 +97,10 @@ pub async fn scoped_request_loop<F: Future>(
     fut: F,
 ) -> F::Output {
     REQUEST_LOOP
-        .scope(event_loop, REQUEST_CONTEXT.scope(context_cell(context), fut))
+        .scope(
+            event_loop,
+            REQUEST_CONTEXT.scope(context_cell(context), fut),
+        )
         .await
 }
 
@@ -130,10 +133,17 @@ pub fn current_context_cell() -> Option<ContextCell> {
 
 /// Runs `job` on this thread as part of the request that owns `cell`.
 pub fn with_job_context<R>(cell: Option<ContextCell>, job: impl FnOnce() -> R) -> R {
-    let previous = JOB_CONTEXT.replace(cell);
-    let result = job();
-    JOB_CONTEXT.set(previous);
-    result
+    /// Puts the previous job context back even when `job` panics.
+    struct Restore(Option<ContextCell>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            JOB_CONTEXT.set(self.0.take());
+        }
+    }
+
+    let _restore = Restore(JOB_CONTEXT.replace(cell));
+    job()
 }
 
 fn new_context(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
@@ -251,6 +261,9 @@ pub fn schedule_task(
             move |py| Ok(awaitable.into_bound(py)),
             |obj| Ok(obj.unbind()),
         ),
-        None => bridge.call(move |py| Ok(awaitable.into_bound(py)), |obj| Ok(obj.unbind())),
+        None => bridge.call(
+            move |py| Ok(awaitable.into_bound(py)),
+            |obj| Ok(obj.unbind()),
+        ),
     })
 }

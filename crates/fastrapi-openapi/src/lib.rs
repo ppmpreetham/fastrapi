@@ -4,5 +4,6 @@
 pub mod document;
 pub mod paths;
 mod registry;
+mod responses;
 pub mod schema;
 pub mod spec;

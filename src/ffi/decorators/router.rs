@@ -2,9 +2,10 @@
 //! A router holds HTTP routes, WebSocket routes and included sub-routers.
 
 use fastrapi_core::method::HttpMethod;
+use fastrapi_http::exceptions::PyFastAPIError;
 use fastrapi_pyutil::subclass::NativeSubclass;
 use fastrapi_routing::route::{RouteEntry, WebSocketEntry};
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyAssertionError, PyDeprecationWarning, PyTypeError};
 use pyo3::types::{PyDict, PyList, PyType};
 
 use crate::engine::app::{CheckDir, frontend_mount};
@@ -13,6 +14,7 @@ use parking_lot::Mutex;
 use pyo3::Bound;
 use pyo3::prelude::{Py, PyAny, PyAnyMethods, PyErr, PyResult, Python, pyclass, pymethods};
 use pyo3::sync::PyOnceLock;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
@@ -81,6 +83,9 @@ pub struct PyAPIRouter {
     pub mounts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
     pub hosts: Arc<Mutex<Vec<(String, Py<PyAny>, Option<String>)>>>,
     pub frontends: Arc<Mutex<Vec<FrontendMount>>>,
+    /// FastAPI's routes that are tried after all the others.
+    #[pyo3(get, name = "_low_priority_routes")]
+    pub low_priority_routes: Py<PyList>,
     pub asgi: Arc<PyOnceLock<Py<PyAny>>>,
 }
 
@@ -121,7 +126,52 @@ impl PyAPIRouter {
 static PUBLIC_TYPE: NativeSubclass =
     NativeSubclass::new("starlette.routing", "Router", "fastrapi.routing");
 
+fn ensure_valid_prefix(prefix: &str) -> PyResult<()> {
+    if !prefix.is_empty() && !prefix.starts_with('/') {
+        return Err(PyAssertionError::new_err(
+            "A path prefix must start with '/'",
+        ));
+    }
+    if prefix.ends_with('/') {
+        return Err(PyAssertionError::new_err(
+            "A path prefix must not end with '/', as the routes will start with '/'",
+        ));
+    }
+    Ok(())
+}
+
 /// The `APIRouter` class users see, which is also a Starlette `Router`.
+type EventHandlers = Arc<Mutex<Vec<Py<PyAny>>>>;
+
+/// FastAPI asserts that the event type is `startup` or `shutdown`.
+fn register_event_handler(
+    startup: &EventHandlers,
+    shutdown: &EventHandlers,
+    event_type: &str,
+    func: Py<PyAny>,
+) -> PyResult<()> {
+    match event_type {
+        "startup" => startup.lock().push(func),
+        "shutdown" => shutdown.lock().push(func),
+        _ => return Err(PyAssertionError::new_err(())),
+    }
+    Ok(())
+}
+
+pub(crate) fn warn_on_event_deprecated(py: Python<'_>) -> PyResult<()> {
+    PyErr::warn(
+        py,
+        &py.get_type::<PyDeprecationWarning>(),
+        c"
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        ",
+        1,
+    )
+}
+
 pub(crate) fn api_router_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     PUBLIC_TYPE.get::<PyAPIRouter>(py)
 }
@@ -138,11 +188,12 @@ pub(crate) fn new_api_router<'py>(
 
 impl Default for PyAPIRouter {
     fn default() -> Self {
-        let (dependencies, responses, callbacks) = Python::attach(|py| {
+        let (dependencies, responses, callbacks, low_priority_routes) = Python::attach(|py| {
             (
                 PyList::empty(py).into_any().unbind(),
                 PyDict::new(py).into_any().unbind(),
                 PyList::empty(py).into_any().unbind(),
+                PyList::empty(py).unbind(),
             )
         });
         Self {
@@ -173,6 +224,7 @@ impl Default for PyAPIRouter {
             mounts: Arc::new(Mutex::new(Vec::new())),
             hosts: Arc::new(Mutex::new(Vec::new())),
             frontends: Arc::new(Mutex::new(Vec::new())),
+            low_priority_routes,
             asgi: Arc::new(PyOnceLock::new()),
         }
     }
@@ -262,10 +314,11 @@ impl PyAPIRouter {
         dependency_overrides_provider: Option<Py<PyAny>>,
         strict_content_type: Option<bool>,
     ) -> PyResult<Self> {
+        ensure_valid_prefix(&prefix)?;
         let tag_vec = tags
             .and_then(|obj| obj.try_iter().ok())
             .map(|iter| {
-                iter.filter_map(|item| item.ok()?.extract::<String>().ok())
+                iter.filter_map(|item| super::tag_name(&item.ok()?))
                     .collect()
             })
             .unwrap_or_default();
@@ -319,11 +372,7 @@ impl PyAPIRouter {
 
     #[pyo3(signature = (path, app, name=None))]
     fn mount(&self, path: String, app: Py<PyAny>, name: Option<String>) -> PyResult<()> {
-        if !path.starts_with('/') {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Mount path must start with '/'",
-            ));
-        }
+        super::ensure_routed_path(&path)?;
         self.ensure_mutable()?;
         self.mounts.lock().push((path, app, name));
         self.touch();
@@ -338,7 +387,7 @@ impl PyAPIRouter {
         &self,
         py: Python<'_>,
         path: String,
-        directory: String,
+        directory: PathBuf,
         fallback: Option<String>,
         check_dir: CheckDir,
     ) -> PyResult<()> {
@@ -360,6 +409,10 @@ impl PyAPIRouter {
         self.hosts.lock().push((host, app, name));
         self.touch();
         Ok(())
+    }
+
+    fn _mark_routes_changed(&self) {
+        self.touch();
     }
 
     #[getter]
@@ -388,6 +441,11 @@ impl PyAPIRouter {
             },
             |class| class.clone_ref(py),
         )
+    }
+
+    #[setter]
+    fn set_route_class(&mut self, route_class: Py<PyAny>) {
+        self.route_class = Some(route_class);
     }
 
     #[getter]
@@ -426,34 +484,23 @@ impl PyAPIRouter {
     }
 
     fn add_event_handler(&self, event_type: &str, func: Py<PyAny>) -> PyResult<()> {
-        match event_type {
-            "startup" => self.startup_handlers.lock().push(func),
-            "shutdown" => self.shutdown_handlers.lock().push(func),
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "event_type must be 'startup' or 'shutdown'",
-                ));
-            }
-        }
-        Ok(())
+        register_event_handler(
+            &self.startup_handlers,
+            &self.shutdown_handlers,
+            event_type,
+            func,
+        )
     }
 
-    fn on_event(&self, py: Python<'_>, event_type: &str) -> PyResult<Py<PyAny>> {
-        if !matches!(event_type, "startup" | "shutdown") {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "event_type must be 'startup' or 'shutdown'",
-            ));
-        }
-        let handlers = if event_type == "startup" {
-            Arc::clone(&self.startup_handlers)
-        } else {
-            Arc::clone(&self.shutdown_handlers)
-        };
+    fn on_event(&self, py: Python<'_>, event_type: String) -> PyResult<Py<PyAny>> {
+        warn_on_event_deprecated(py)?;
+        let startup = Arc::clone(&self.startup_handlers);
+        let shutdown = Arc::clone(&self.shutdown_handlers);
         let decorator = move |args: &Bound<'_, pyo3::types::PyTuple>,
                               _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let func = args.get_item(0)?.unbind();
-            handlers.lock().push(func.clone_ref(args.py()));
+            register_event_handler(&startup, &shutdown, &event_type, func.clone_ref(args.py()))?;
             Ok(func)
         };
         pyo3::types::PyCFunction::new_closure(py, Some(c"on_event"), None, decorator)
@@ -575,16 +622,39 @@ impl PyAPIRouter {
         callbacks: Option<&Bound<'_, PyAny>>,
         generate_unique_id_function: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
+        let py = router.py();
+        if std::ptr::eq(self, &raw const *router.borrow()) {
+            return Err(PyAssertionError::new_err(
+                "Cannot include the same APIRouter instance into itself. Did you mean to include a different router?",
+            ));
+        }
+        ensure_valid_prefix(prefix)?;
+        if prefix.is_empty()
+            && router.borrow().prefix.is_empty()
+            && let Some(route) = router
+                .borrow()
+                .route_entries
+                .lock()
+                .iter()
+                .find(|route| route.path.is_empty())
+        {
+            return Err(PyErr::from_type(
+                py.get_type::<PyFastAPIError>(),
+                format!(
+                    "Prefix and path cannot be both empty (path operation: {})",
+                    route.name
+                ),
+            ));
+        }
         self.ensure_mutable()?;
 
         let tag_vec: Vec<String> = tags
             .and_then(|t| t.try_iter().ok())
             .into_iter()
             .flatten()
-            .filter_map(|item| item.ok()?.extract::<String>().ok())
+            .filter_map(|item| super::tag_name(&item.ok()?))
             .collect();
 
-        let py = router.py();
         let dependencies_owned = dependencies.map(|d| d.clone().unbind());
         super::tree::validate_dependencies(py, dependencies_owned.as_ref())?;
         let included = router.borrow();

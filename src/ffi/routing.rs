@@ -613,8 +613,41 @@ impl PyRouteContext {
         self.original_route.clone()
     }
 
+    #[getter]
+    fn path(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.route_attribute(intern!(py, "path"))
+    }
+
+    #[getter]
+    fn path_format(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.route_attribute(intern!(py, "path_format"))
+    }
+
+    #[getter]
+    fn name(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.route_attribute(intern!(py, "name"))
+    }
+
+    #[getter]
+    fn methods(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.route_attribute(intern!(py, "methods"))
+    }
+
+    #[getter]
+    fn endpoint(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.route_attribute(intern!(py, "endpoint"))
+    }
+
     fn __getattr__(slf: &Bound<'_, Self>, name: &str) -> PyResult<Py<PyAny>> {
         Ok(slf.getattr("route")?.getattr(name)?.unbind())
+    }
+}
+
+impl PyRouteContext {
+    /// The route's attribute, or `None` when the route has none, as FastAPI's `RouteContext` properties.
+    fn route_attribute(&self, name: &Bound<'_, PyString>) -> PyResult<Option<Py<PyAny>>> {
+        let attribute = self.route.bind(name.py()).getattr_opt(name)?;
+        Ok(attribute.map(Bound::unbind))
     }
 }
 

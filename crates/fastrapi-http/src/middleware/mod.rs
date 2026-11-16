@@ -25,9 +25,7 @@ pub use call_next::PyDownstreamResponse;
 pub use cors::{CORSMiddleware, CorsPolicy, cors, parse_cors_params};
 pub use gzip::{GZipMiddleware, compress, parse_gzip_params};
 pub use httpsredirect::{HTTPSRedirectMiddleware, parse_https_redirect_params};
-pub use registry::{
-    DeclaredLayer, MIDDLEWARE_REGISTRY, MiddlewareBuilder, MiddlewareContainer, MiddlewareRegistry,
-};
+pub use registry::{DeclaredLayer, MiddlewareContainer};
 pub use session::{
     PySession, SessionHandle, SessionMiddleware, SessionPolicy, parse_session_params, session,
 };

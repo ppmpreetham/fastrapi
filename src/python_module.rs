@@ -184,6 +184,12 @@ mod fastrapi {
         fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
             register(m)?;
             let py = m.py();
+            m.add("ASGIApp", py.import("starlette.types")?.getattr("ASGIApp")?)?;
+            m.add_class::<crate::ffi::compat::DefaultPlaceholder>()?;
+            m.add_function(wrap_pyfunction!(
+                crate::ffi::compat::default_placeholder,
+                m
+            )?)?;
             m.add("APIRouter", crate::ffi::decorators::api_router_type(py)?)?;
             let routing = py.import("starlette.routing")?;
             for name in [
@@ -227,7 +233,10 @@ mod fastrapi {
         fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
             crate::ffi::compat::register_default_placeholder(m)?;
             let py = m.py();
-            m.add("UploadFile", fastrapi_http::upload_file::upload_file_type(py)?)?;
+            m.add(
+                "UploadFile",
+                fastrapi_http::upload_file::upload_file_type(py)?,
+            )?;
             let module = py.import("starlette.datastructures")?;
             for name in [
                 "Address",
@@ -250,6 +259,13 @@ mod fastrapi {
 
         #[pymodule_init]
         fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            m.add(
+                "P",
+                m.py()
+                    .import("typing")?
+                    .getattr("ParamSpec")?
+                    .call1(("P",))?,
+            )?;
             m.add(
                 "BackgroundTasks",
                 fastrapi_http::background::background_tasks_type(m.py())?,
@@ -359,11 +375,7 @@ mod fastrapi {
                 py.import("starlette.middleware.base")?
                     .getattr("BaseHTTPMiddleware")?,
             )?;
-            m.add(
-                "WSGIMiddleware",
-                py.import("starlette.middleware.wsgi")?
-                    .getattr("WSGIMiddleware")?,
-            )
+            crate::ffi::compat::add_lazy_attributes(m, &[crate::ffi::compat::WSGI_MIDDLEWARE])
         }
 
         #[pymodule]
@@ -403,12 +415,7 @@ mod fastrapi {
 
             #[pymodule_init]
             fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
-                m.add(
-                    "WSGIMiddleware",
-                    m.py()
-                        .import("starlette.middleware.wsgi")?
-                        .getattr("WSGIMiddleware")?,
-                )
+                crate::ffi::compat::add_lazy_attributes(m, &[crate::ffi::compat::WSGI_MIDDLEWARE])
             }
         }
     }
@@ -460,11 +467,17 @@ mod fastrapi {
             fastrapi_http::background::background_tasks_type(py)?,
         )?;
         m.add("APIRouter", crate::ffi::decorators::api_router_type(py)?)?;
-        m.add("UploadFile", fastrapi_http::upload_file::upload_file_type(py)?)?;
+        m.add(
+            "UploadFile",
+            fastrapi_http::upload_file::upload_file_type(py)?,
+        )?;
         m.setattr("__path__", PyList::empty(py))?;
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
         let app = py.get_type::<crate::engine::config::FastrAPI>();
-        app.setattr("__call__", crate::ffi::compat::py_helpers(py)?.getattr("asgi_call")?)?;
+        app.setattr(
+            "__call__",
+            crate::ffi::compat::py_helpers(py)?.getattr("asgi_call")?,
+        )?;
         m.add("FastAPI", &app)?;
         m.add("FastrAPI", app)?;
         m.add("Response", py.get_type::<PyResponse>())?;
@@ -498,18 +511,16 @@ mod fastrapi {
             py.import("starlette.middleware")?.getattr("Middleware")?,
         )?;
         m.add(
-            "WSGIMiddleware",
-            py.import("starlette.middleware.wsgi")?
-                .getattr("WSGIMiddleware")?,
-        )?;
-        m.add(
             "BaseHTTPMiddleware",
             py.import("starlette.middleware.base")?
                 .getattr("BaseHTTPMiddleware")?,
         )?;
-        m.add(
-            "TestClient",
-            py.import("starlette.testclient")?.getattr("TestClient")?,
+        crate::ffi::compat::add_lazy_attributes(
+            m,
+            &[
+                crate::ffi::compat::WSGI_MIDDLEWARE,
+                crate::ffi::compat::TEST_CLIENT,
+            ],
         )?;
 
         m.add("Jinja2Templates", py.get_type::<PyJinja2Templates>())?;
@@ -517,14 +528,17 @@ mod fastrapi {
         templating.add_class::<PyJinja2Templates>()?;
         m.add_submodule(&templating)?;
         let testclient = PyModule::new(py, "testclient")?;
-        testclient.add(
-            "TestClient",
-            py.import("starlette.testclient")?.getattr("TestClient")?,
-        )?;
+        crate::ffi::compat::add_lazy_attributes(&testclient, &[crate::ffi::compat::TEST_CLIENT])?;
         m.add_submodule(&testclient)?;
 
         let applications = PyModule::new(py, "applications")?;
         applications.add("FastAPI", py.get_type::<crate::engine::config::FastrAPI>())?;
+        applications.add(
+            "AppType",
+            py.import("typing")?
+                .getattr("TypeVar")?
+                .call1(("AppType",))?,
+        )?;
         m.add_submodule(&applications)?;
         let websockets = PyModule::new(py, "websockets")?;
         websockets.add("WebSocket", py.get_type::<PyWebSocket>())?;

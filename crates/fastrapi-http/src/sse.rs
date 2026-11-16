@@ -5,7 +5,6 @@
 use crate::response_api::init_headers;
 use crate::responses::{PyResponse, PyStreamingResponse};
 use bytes::Bytes;
-use std::fmt::Write as _;
 use fastrapi_pyutil::cached_py_import;
 use pyo3::Bound;
 use pyo3::exceptions::PyValueError;
@@ -14,6 +13,8 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     IntoPyDict, PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PySet, PyString, PyTuple, PyType,
 };
+use std::fmt::Write as _;
+use std::time::Duration;
 
 /// Streaming response with `text/event-stream` media type.
 ///
@@ -41,8 +42,7 @@ pub struct PyEventSourceResponse {
 #[pymethods]
 impl PyEventSourceResponse {
     #[new]
-    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None, ping=15.0, sep="
-".to_string()))]
+    #[pyo3(signature = (content, status_code=200, headers=None, media_type=None, background=None, ping=15.0, sep="\n".to_string()))]
     fn new(
         py: Python<'_>,
         content: Py<PyAny>,
@@ -359,34 +359,34 @@ impl PyServerSentEvent {
 #[pyo3(signature = (*, data_str=None, event=None, id=None, retry=None, comment=None))]
 #[must_use]
 pub fn format_sse_event_py(
-    data_str: Option<String>,
-    event: Option<String>,
-    id: Option<String>,
+    data_str: Option<&str>,
+    event: Option<&str>,
+    id: Option<&str>,
     retry: Option<i64>,
-    comment: Option<String>,
+    comment: Option<&str>,
 ) -> Vec<u8> {
-    let mut output = String::new();
-    for (prefix, value) in [
-        (": ", comment),
-        ("event: ", event),
-        ("data: ", data_str),
-        ("id: ", id),
-    ] {
-        if let Some(value) = value {
-            for line in value.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
-                output.push_str(prefix);
-                output.push_str(line);
-                output.push('\n');
-            }
+    format_sse_event(data_str, event, id, retry, comment, "\n").to_vec()
+}
+
+/// Splits on the SSE line terminators `\r\n`, `\r` and `\n`, keeping trailing empty lines,
+/// like FastAPI's `_split_sse_lines`.
+fn sse_lines(value: &str) -> impl Iterator<Item = &str> {
+    let mut rest = Some(value);
+    std::iter::from_fn(move || {
+        let current = rest?;
+        if let Some(end) = current.find(['\r', '\n']) {
+            let skip = if current[end..].starts_with("\r\n") {
+                2
+            } else {
+                1
+            };
+            rest = Some(&current[end + skip..]);
+            Some(&current[..end])
+        } else {
+            rest = None;
+            Some(current)
         }
-    }
-    if let Some(retry) = retry {
-        output.push_str("retry: ");
-        output.push_str(&retry.to_string());
-        output.push('\n');
-    }
-    output.push('\n');
-    output.into_bytes()
+    })
 }
 
 fn single_line_invalid(value: &str) -> bool {
@@ -401,7 +401,11 @@ fn push_json_float(out: &mut String, value: f64) {
         return;
     }
     if value == 0.0 {
-        out.push_str(if value.is_sign_negative() { "-0.0" } else { "0.0" });
+        out.push_str(if value.is_sign_negative() {
+            "-0.0"
+        } else {
+            "0.0"
+        });
         return;
     }
     let scientific = format!("{value:e}");
@@ -425,7 +429,10 @@ fn push_json_float(out: &mut String, value: f64) {
             }
         } else {
             out.push_str("0.");
-            out.extend(std::iter::repeat_n('0', exponent.unsigned_abs() as usize - 1));
+            out.extend(std::iter::repeat_n(
+                '0',
+                exponent.unsigned_abs() as usize - 1,
+            ));
             out.push_str(&digits);
         }
         return;
@@ -470,7 +477,11 @@ fn push_json_key(out: &mut String, key: &Bound<'_, PyAny>) -> PyResult<()> {
     if let Ok(text) = key.cast::<PyString>() {
         push_json_string(out, &text.to_cow()?);
     } else if let Ok(flag) = key.cast::<PyBool>() {
-        out.push_str(if flag.is_true() { "\"true\"" } else { "\"false\"" });
+        out.push_str(if flag.is_true() {
+            "\"true\""
+        } else {
+            "\"false\""
+        });
     } else if key.is_none() {
         out.push_str("\"null\"");
     } else if let Ok(number) = key.cast::<PyFloat>() {
@@ -555,10 +566,7 @@ pub fn format_sse_event(
 ) -> bytes::Bytes {
     let mut output = String::new();
     if let Some(comment) = comment {
-        for line in comment
-            .split('\n')
-            .map(|line| line.strip_suffix('\r').unwrap_or(line))
-        {
+        for line in sse_lines(comment) {
             output.push(':');
             output.push(' ');
             output.push_str(line);
@@ -571,10 +579,7 @@ pub fn format_sse_event(
         output.push_str(sep);
     }
     if let Some(data) = data {
-        for line in data
-            .split('\n')
-            .map(|line| line.strip_suffix('\r').unwrap_or(line))
-        {
+        for line in sse_lines(data) {
             output.push_str("data: ");
             output.push_str(line);
             output.push_str(sep);
@@ -638,61 +643,21 @@ pub fn register_sse_api(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+/// The keep-alive period and line separator of an SSE response.
+/// A ping that is not a positive finite number of seconds turns keep-alive pings off.
 #[must_use]
-pub fn sse_options(result: &Bound<'_, PyAny>) -> (Option<f64>, String) {
+pub fn sse_options(result: &Bound<'_, PyAny>) -> (Option<Duration>, String) {
     let ping = result
         .getattr(pyo3::intern!(result.py(), "ping"))
         .ok()
         .and_then(|value| value.extract::<Option<f64>>().ok())
-        .flatten();
+        .flatten()
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        .filter(|period| !period.is_zero());
     let sep = result
         .getattr(pyo3::intern!(result.py(), "sep"))
         .ok()
         .and_then(|value| value.extract::<String>().ok())
-        .unwrap_or_else(|| "\r\n".to_owned());
+        .unwrap_or_else(|| "\n".to_owned());
     (ping, sep)
-}
-
-#[must_use]
-pub fn sse_dict_fields<'py>(
-    value: &Bound<'py, PyAny>,
-) -> Option<(
-    Option<Bound<'py, PyAny>>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-    Option<String>,
-)> {
-    let item = value.cast::<PyDict>().ok()?;
-    let data = item
-        .get_item(pyo3::intern!(item.py(), "data"))
-        .ok()
-        .flatten();
-    let raw_data = item
-        .get_item(pyo3::intern!(item.py(), "raw_data"))
-        .ok()
-        .flatten()
-        .and_then(|value| value.extract().ok());
-    let event = item
-        .get_item(pyo3::intern!(item.py(), "event"))
-        .ok()
-        .flatten()
-        .and_then(|value| value.extract().ok());
-    let id = item
-        .get_item(pyo3::intern!(item.py(), "id"))
-        .ok()
-        .flatten()
-        .and_then(|value| value.extract().ok());
-    let retry = item
-        .get_item(pyo3::intern!(item.py(), "retry"))
-        .ok()
-        .flatten()
-        .and_then(|value| value.extract().ok());
-    let comment = item
-        .get_item(pyo3::intern!(item.py(), "comment"))
-        .ok()
-        .flatten()
-        .and_then(|value| value.extract().ok());
-    Some((data, raw_data, event, id, retry, comment))
 }

@@ -3,6 +3,7 @@
 
 use crate::engine::config::{FrontendMount, StaticMount};
 use crate::engine::exception_dispatch::{dispatch_http_error, resolve_pending_handler};
+use crate::engine::server::routes::request_scheme;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::OriginalUri;
@@ -18,7 +19,7 @@ use std::convert::Infallible;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
-use tokio::fs::symlink_metadata;
+use tokio::task::spawn_blocking;
 use tower::{ServiceExt, service_fn};
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -63,6 +64,7 @@ struct HandledRequest {
 
 struct StaticOrigin {
     uri: Uri,
+    scheme: &'static str,
     host: Option<HeaderValue>,
     handled: Option<HandledRequest>,
 }
@@ -74,6 +76,11 @@ impl StaticOrigin {
                 .extensions()
                 .get::<OriginalUri>()
                 .map_or_else(|| req.uri().clone(), |original| original.0.clone()),
+            scheme: if request_scheme(req) == "https" {
+                "https"
+            } else {
+                "http"
+            },
             host: req.headers().get(HOST).cloned(),
             handled: handlers.map(|server| HandledRequest {
                 method: req.method().clone(),
@@ -147,7 +154,7 @@ impl StaticOrigin {
             .query()
             .map_or_else(String::new, |query| format!("?{query}"));
         match self.host.as_ref().and_then(|host| host.to_str().ok()) {
-            Some(host) => format!("http://{host}{}/{query}", self.uri.path()),
+            Some(host) => format!("{}://{host}{}/{query}", self.scheme, self.uri.path()),
             None => format!("{}/{query}", self.uri.path()),
         }
     }
@@ -209,19 +216,20 @@ pub(crate) fn add_static_mount(
         return app.nest_service(&mount_path, service);
     }
 
-    let directory = Arc::new(PathBuf::from(mount.directory));
+    let root = Arc::new(StaticRoot::new(PathBuf::from(mount.directory)));
     let index = if mount.html {
         DirectoryIndex::IndexHtml
     } else {
         DirectoryIndex::None
     };
     let service = service_fn(move |req: Request| {
-        let directory = directory.clone();
+        let root = root.clone();
         let serve_dir = serve_dir.clone();
         let origin = StaticOrigin::of(&req, handlers);
         async move {
-            if static_request_hits_symlink(&directory, req.uri().path(), index).await {
-                return Ok::<_, Infallible>(StatusCode::FORBIDDEN.into_response());
+            if static_request_escapes(root, req.uri().path(), index).await {
+                let response = StatusCode::NOT_FOUND.into_response();
+                return Ok::<_, Infallible>(origin.finish(response).await);
             }
             let response = serve_dir.oneshot(req).await?.into_response();
             Ok(origin.finish(response).await)
@@ -231,11 +239,11 @@ pub(crate) fn add_static_mount(
     app.nest_service(&mount_path, service)
 }
 
-fn frontend_safe_path(directory: &str, request_path: &str) -> Option<PathBuf> {
+fn frontend_safe_path(directory: &Path, request_path: &str) -> Option<PathBuf> {
     let decoded = percent_encoding::percent_decode_str(request_path)
         .decode_utf8()
         .ok()?;
-    let mut file_path = PathBuf::from(directory);
+    let mut file_path = directory.to_path_buf();
 
     for component in Path::new(decoded.trim_start_matches('/')).components() {
         match component {
@@ -269,7 +277,7 @@ async fn frontend_fallback_path(
     fallback: &str,
     navigation: bool,
 ) -> Option<(PathBuf, StatusCode)> {
-    let directory = Path::new(&mount.directory);
+    let directory = mount.directory.as_path();
     let candidates: SmallVec<[(PathBuf, StatusCode); 2]> = if fallback == "auto" {
         smallvec::smallvec![
             (directory.join("404.html"), StatusCode::NOT_FOUND),
@@ -325,47 +333,62 @@ enum DirectoryIndex {
     IndexHtml,
 }
 
-async fn static_request_hits_symlink(
-    directory: &Path,
+/// The directory of a `StaticFiles(follow_symlink=False)` mount, resolved
+/// once at mount time like Starlette's `os.path.realpath(directory)`.
+struct StaticRoot {
+    directory: PathBuf,
+    resolved: Option<PathBuf>,
+}
+
+impl StaticRoot {
+    fn new(directory: PathBuf) -> Self {
+        let resolved = std::fs::canonicalize(&directory).ok();
+        Self {
+            directory,
+            resolved,
+        }
+    }
+}
+
+/// Whether the request resolves, through a symlink, to a path outside the
+/// mount directory. Like Starlette's `StaticFiles.lookup_path` without
+/// `follow_symlink`, such a path is not found. The check runs in a single
+/// blocking task.
+async fn static_request_escapes(
+    root: Arc<StaticRoot>,
     request_path: &str,
     index: DirectoryIndex,
 ) -> bool {
     let Ok(decoded) = percent_encoding::percent_decode_str(request_path).decode_utf8() else {
         return false;
     };
-    if symlink_metadata(directory)
-        .await
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        return true;
-    }
-
-    let mut file_path = directory.to_path_buf();
-
+    let mut relative = PathBuf::new();
     for component in Path::new(decoded.trim_start_matches('/')).components() {
         match component {
-            Component::Normal(part) => file_path.push(part),
+            Component::Normal(part) => relative.push(part),
             Component::CurDir => {}
             Component::Prefix(_) | Component::RootDir | Component::ParentDir => return false,
         }
-
-        if symlink_metadata(&file_path)
-            .await
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
+    }
+    spawn_blocking(move || {
+        let Some(resolved_root) = root
+            .resolved
+            .clone()
+            .or_else(|| std::fs::canonicalize(&root.directory).ok())
+        else {
+            return false;
+        };
+        let joined = root.directory.join(&relative);
+        let escapes = |path: &Path| {
+            std::fs::canonicalize(path).is_ok_and(|real| !real.starts_with(&resolved_root))
+        };
+        if escapes(&joined) {
             return true;
         }
-    }
-
-    if index == DirectoryIndex::IndexHtml
-        && let Ok(metadata) = fs::metadata(&file_path).await
-        && metadata.is_dir()
-    {
-        file_path.push("index.html");
-        return symlink_metadata(&file_path)
-            .await
-            .is_ok_and(|m| m.file_type().is_symlink());
-    }
-
-    false
+        index == DirectoryIndex::IndexHtml
+            && std::fs::metadata(&joined).is_ok_and(|metadata| metadata.is_dir())
+            && escapes(&joined.join("index.html"))
+    })
+    .await
+    .unwrap_or(false)
 }

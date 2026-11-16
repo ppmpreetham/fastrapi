@@ -2,15 +2,17 @@
 //! This module runs the server, waits for the shutdown signal and supports the reload mode.
 
 use super::lifecycle::{
-    log_python_error, run_shutdown_phase, run_startup_phase, start_background_asyncio_loop,
+    run_shutdown_phase, run_startup_phase, start_background_asyncio_loop,
     stop_background_asyncio_loop,
 };
 use super::routes::build_router;
 use super::telemetry::Telemetry;
+use crate::engine::exception_dispatch::RoutingErrorHandlers;
+use crate::engine::handler_errors::log_python_error;
+use fastrapi_core::reload::{ReloadConfig, resolve_reload_dirs, run_reload_supervisor};
 use fastrapi_core::router::FrozenRouter;
 use fastrapi_routing::route::RouteHandler;
 use std::sync::OnceLock;
-use fastrapi_core::reload::{ReloadConfig, resolve_reload_dirs, run_reload_supervisor};
 
 use crate::engine::config::FastrAPI;
 use axum::Router;
@@ -31,54 +33,67 @@ use std::thread::spawn;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-async fn wait_for_shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigint = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+/// Installs the shutdown signal handlers before the server starts, so a
+/// failure to install one is an error of `serve()` instead of a panic.
+#[cfg(unix)]
+fn shutdown_signal() -> io::Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::SignalKind;
+    use tokio::signal::unix::signal;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+    Ok(async move {
         tokio::select! {
             _ = sigint.recv() => {}
             _ = sigterm.recv() => {}
         }
-    }
-    #[cfg(windows)]
-    {
-        use tokio::signal::windows::{ctrl_break, ctrl_c};
-        let mut ctrl_c = ctrl_c().expect("Failed to install Ctrl+C handler");
-        let mut ctrl_break = ctrl_break().expect("Failed to install Ctrl+Break handler");
+        info!("Shutting down...");
+    })
+}
+
+#[cfg(windows)]
+fn shutdown_signal() -> io::Result<impl Future<Output = ()>> {
+    use tokio::signal::windows::ctrl_break;
+    use tokio::signal::windows::ctrl_c;
+    let mut ctrl_c = ctrl_c()?;
+    let mut ctrl_break = ctrl_break()?;
+    Ok(async move {
         tokio::select! {
             _ = ctrl_c.recv() => {}
             _ = ctrl_break.recv() => {}
         }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
-    }
+        info!("Shutting down...");
+    })
+}
 
-    info!("Shutting down...");
+#[cfg(not(any(unix, windows)))]
+#[expect(clippy::unnecessary_wraps, reason = "Matches the other platforms")]
+fn shutdown_signal() -> io::Result<impl Future<Output = ()>> {
+    Ok(async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            error!("Failed to listen for Ctrl+C: {err}");
+            std::future::pending::<()>().await;
+        }
+        info!("Shutting down...");
+    })
 }
 
 #[expect(
     clippy::struct_excessive_bools,
     reason = "The application state carries several independent server switches"
 )]
-pub struct AppState {
-    pub event_loop: EventLoop,
-    pub sync_to_threadpool: bool,
-    pub max_body_size: Option<usize>,
-    pub max_field_size: Option<usize>,
-    pub max_file_size: Option<usize>,
-    pub reject_unknown_multipart_fields: bool,
-    pub root_path: Box<str>,
-    pub metrics_enabled: bool,
-    pub redirect_slashes: bool,
-    pub app: Py<PyAny>,
-    pub router: OnceLock<&'static FrozenRouter<RouteHandler>>,
+pub(crate) struct AppState {
+    pub(crate) event_loop: EventLoop,
+    pub(crate) sync_to_threadpool: bool,
+    pub(crate) max_body_size: Option<usize>,
+    pub(crate) max_field_size: Option<usize>,
+    pub(crate) max_file_size: Option<usize>,
+    pub(crate) reject_unknown_multipart_fields: bool,
+    pub(crate) root_path: Box<str>,
+    pub(crate) metrics_enabled: bool,
+    pub(crate) redirect_slashes: bool,
+    pub(crate) app: Py<PyAny>,
+    pub(crate) router: OnceLock<&'static FrozenRouter<RouteHandler>>,
+    pub(crate) routing_handlers: OnceLock<RoutingErrorHandlers>,
 }
 
 impl AppState {
@@ -100,11 +115,12 @@ impl AppState {
             redirect_slashes: app_config.redirect_slashes,
             app: app.clone_ref(py).into_any(),
             router: OnceLock::new(),
+            routing_handlers: OnceLock::new(),
         }
     }
 
     #[must_use]
-    pub fn leak(self) -> &'static Self {
+    pub(crate) fn leak(self) -> &'static Self {
         Box::leak(Box::new(self))
     }
 }
@@ -228,7 +244,7 @@ fn lifecycle_hooks(py: Python<'_>, app_config: &FastrAPI) -> PyResult<LifecycleH
     })
 }
 
-pub fn serve(
+pub(crate) fn serve(
     py: Python<'_>,
     host: Option<String>,
     port: Option<u16>,
@@ -241,6 +257,7 @@ pub fn serve(
         .with_target(false)
         .try_init()
         .ok();
+    info!("running on FastRAPI v{}", env!("CARGO_PKG_VERSION"));
 
     let host: String = host.unwrap_or_else(|| "127.0.0.1".to_string());
     let port = port.unwrap_or(8000);
@@ -274,8 +291,10 @@ pub fn serve(
         let entered_lifespan = match entered_lifespan {
             Ok(entered) => entered,
             Err(err) => {
-                log_python_error("startup failed", &err);
-                Python::attach(|py| stop_background_asyncio_loop(py, event_loop));
+                Python::attach(|py| {
+                    log_python_error(py, "startup failed", &err);
+                    stop_background_asyncio_loop(py, event_loop);
+                });
                 return Err(err);
             }
         };
@@ -304,18 +323,15 @@ pub fn serve(
             }
 
             let service = router.into_make_service_with_connect_info::<PeerAddrs>();
-            if let Err(err) = axum::serve(listener, service)
-                .with_graceful_shutdown(wait_for_shutdown_signal())
+            axum::serve(listener, service)
+                .with_graceful_shutdown(shutdown_signal()?)
                 .await
-            {
-                error!("Server error: {}", err);
-            }
-            Ok(())
+                .inspect_err(|err| error!("Server error: {err}"))
         });
 
         Python::attach(|py| {
             if let Err(err) = run_shutdown_phase(py, entered_lifespan, on_shutdown, event_loop) {
-                log_python_error("shutdown failed", &err);
+                log_python_error(py, "shutdown failed", &err);
             }
             if telemetry.is_some() {
                 Telemetry::flush(py);
@@ -335,7 +351,7 @@ pub fn serve(
     })?
 }
 
-pub fn serve_with_reload(
+pub(crate) fn serve_with_reload(
     py: Python<'_>,
     reload_dirs: Option<Vec<String>>,
     reload_ignore_dirs: Option<Vec<String>>,

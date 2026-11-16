@@ -8,14 +8,14 @@ use fastrapi_core::rate_limit::is_rate_limited;
 
 use axum::extract::Request;
 use axum::http::StatusCode;
-use axum::http::header::HOST;
+use axum::http::header::{ALLOW, HOST};
 use axum::response::{IntoResponse, Response};
 use smallvec::SmallVec;
 
-use super::routes::{method_not_allowed_response, status_handler};
+use super::routes::method_not_allowed_response;
 use crate::engine::exception_dispatch::resolve_pending_handler;
 use crate::engine::executor::{run_py_handler, run_py_handler_no_request};
-use fastrapi_core::method::HttpMethod;
+use fastrapi_core::method::{HttpMethod, allow_header};
 use fastrapi_core::params::PathParamRange;
 use fastrapi_core::path::{host_without_port, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, RouteMatch, RoutePattern};
@@ -29,10 +29,6 @@ pub(crate) async fn dispatch_or_not_found(
     state: &'static AppState,
     req: Request,
 ) -> Result<Response, Request> {
-    let Ok(method) = HttpMethod::try_from(req.method()) else {
-        return Ok(StatusCode::METHOD_NOT_ALLOWED.into_response());
-    };
-
     let path_str = dispatch_path(state, req.uri().path());
 
     let request_host = if router.has_host_routes() {
@@ -43,11 +39,23 @@ pub(crate) async fn dispatch_or_not_found(
     } else {
         None
     };
-    let Some(route_match) = router.resolve(method, path_str, request_host) else {
+    // A method no route can declare (e.g. `PROPFIND`) matches no route, so it
+    // gets Starlette's partial-match answer: a 405 with `Allow` when the path
+    // exists, else the normal not-found handling.
+    let route_match = HttpMethod::try_from(req.method())
+        .ok()
+        .and_then(|method| router.resolve(method, path_str, request_host));
+    let Some(route_match) = route_match else {
         let allowed = router.allowed_methods(path_str, request_host);
         if allowed != 0 {
-            let handled = status_handler(state.event_loop, StatusCode::METHOD_NOT_ALLOWED, &req);
-            return Ok(method_not_allowed_response(handled, allowed).await);
+            let response = method_not_allowed_response(state, &req, allowed);
+            let mut response = resolve_pending_handler(response).await;
+            // Without it axum adds its own `Allow` (e.g. `GET,HEAD,HEAD`) to a handler response.
+            response
+                .headers_mut()
+                .entry(ALLOW)
+                .or_insert(allow_header(allowed));
+            return Ok(response);
         }
         return Err(req);
     };

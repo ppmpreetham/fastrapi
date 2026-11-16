@@ -10,6 +10,7 @@ fastrapi-http.workspace = true
 fastrapi-pyutil.workspace = true
 fastrapi-routing.workspace = true
 pyo3.workspace = true
+indexmap.workspace = true
 serde.workspace = true
 simd-json.workspace = true
 tracing.workspace = true

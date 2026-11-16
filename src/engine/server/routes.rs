@@ -5,34 +5,37 @@
 use super::custom_route::install_custom_handlers;
 use super::dispatch::dispatch_or_not_found;
 use super::files::{add_static_mount, serve_frontend_mounts};
-use super::lifecycle::log_python_error;
 use super::middleware_stack;
 use super::serve::AppState;
+use crate::engine::handler_errors::log_python_error;
 
 use crate::engine::config::FastrAPI;
 use ahash::AHashMap;
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::extract::{ConnectInfo, OriginalUri, Request};
+use axum::extract::{ConnectInfo, Extension, OriginalUri, Request};
 use axum::handler::Handler;
-use axum::http::header::{ALLOW, CONTENT_TYPE, HOST, LOCATION};
+use axum::http::header::{CONTENT_TYPE, HOST, LOCATION};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{MethodFilter, MethodRouter, any, get, on};
+use axum::routing::{MethodFilter, MethodRouter, get, on};
 use bytes::Bytes;
 use fastrapi_core::connection::PeerAddrs;
 use percent_encoding::{CONTROLS, utf8_percent_encode};
 use pyo3::intern;
 use pyo3::prelude::*;
-use simd_json::OwnedValue as JsonValue;
 use regex::{Captures, Regex, RegexBuilder};
+use simd_json::OwnedValue as JsonValue;
 use std::sync::Arc;
-use tower::ServiceExt;
+use std::sync::OnceLock;
 use std::time::Instant;
+use tower::ServiceExt;
+use tracing::error;
 
 use crate::engine::exception_dispatch::{
-    dispatch_status_handler, has_custom_handlers, resolve_pending_handler,
+    RoutingErrorHandlers, dispatch_status_handler, has_custom_handlers, invalidate_handler_cache,
+    resolve_pending_handler,
 };
 use crate::engine::executor::{
     render_no_request_json_response, render_no_request_response, run_py_handler_no_request,
@@ -46,12 +49,12 @@ use fastrapi_core::method::{HttpMethod, allow_header};
 use fastrapi_core::path::{host_without_port, strip_root_path};
 use fastrapi_core::router::{FrozenRouter, FrozenRouterBuilder, RoutePattern};
 use fastrapi_http::middleware::asgi::mounted_asgi;
-use fastrapi_http::middleware::{MIDDLEWARE_REGISTRY, MiddlewareContainer};
+use fastrapi_http::middleware::{DeclaredLayer, MiddlewareContainer};
 use fastrapi_http::request_input::{AsgiMount, HostPathParams, RequestInput};
 use fastrapi_http::response_type::ResponseType;
+use fastrapi_openapi::spec::with_root_path_server;
 use fastrapi_routing::route::{ExecutionMode, RouteEntry, RouteHandler, WebSocketEntry};
 use fastrapi_runtime::py_bridge::{self, EventLoop};
-use fastrapi_runtime::tokio_runtime::PYTHON_RUNTIME;
 use metrics::SharedString;
 use pyo3::types::{PyDict, PyTuple};
 
@@ -65,7 +68,7 @@ pub(crate) fn build_router(
     operation_spans: bool,
 ) -> PyResult<Router> {
     let mut middlewares = app_config.middlewares.clone();
-    merge_declared_middlewares(py, app_config, &mut middlewares);
+    merge_declared_middlewares(py, app_config, &mut middlewares)?;
 
     let base_router = app_config.router.bind(py);
     {
@@ -84,7 +87,11 @@ pub(crate) fn build_router(
         app_state
             .event_loop
             .server()
-            .set_exception_handlers(py, dict.clone().unbind());
+            .set_exception_handlers(dict.clone().unbind());
+        invalidate_handler_cache();
+        _ = app_state
+            .routing_handlers
+            .set(RoutingErrorHandlers::resolve(py, dict)?);
     }
 
     let base_ref = base_router.borrow();
@@ -130,10 +137,21 @@ pub(crate) fn build_router(
     }
     let routes: &'static [RouteEntry] = Vec::leak(routes);
 
+    let mut route_methods: AHashMap<RouteKey<'_>, u8> = AHashMap::new();
+    for route in routes {
+        *route_methods.entry(RouteKey::of(route)).or_default() |= route.method.bit();
+    }
     let mut frozen_router_builder = FrozenRouterBuilder::new();
     for route in routes {
         let host: Option<Box<str>> = route.host.as_deref().map(Into::into);
-        frozen_router_builder.add_route(route.method, &route.path, route.handler.clone(), host);
+        let allow = route_methods[&RouteKey::of(route)];
+        frozen_router_builder.add_route(
+            route.method,
+            &route.path,
+            route.handler.clone(),
+            host,
+            allow,
+        );
     }
     let frozen_router: &'static FrozenRouter<RouteHandler> =
         Box::leak(Box::new(frozen_router_builder.build()));
@@ -154,12 +172,26 @@ pub(crate) fn build_router(
     );
     let app = register_docs_endpoints(app, py, app_config, docs_url, openapi_url, custom_openapi)?;
     let app = nest_sub_apps(py, app, app_state, app_config)?;
-    Ok(middleware_stack::build_stack(
-        app,
-        app_config,
-        &middlewares,
-        app_state.event_loop,
-    ))
+    middleware_stack::build_stack(app, app_config, &middlewares, app_state.event_loop)
+}
+
+/// What the entries of one `APIRoute` share: fastrapi keeps an entry for each
+/// of its methods, all with the route's path, host and endpoint.
+#[derive(PartialEq, Eq, Hash)]
+struct RouteKey<'a> {
+    path: &'a str,
+    host: Option<&'a str>,
+    endpoint: *mut pyo3::ffi::PyObject,
+}
+
+impl<'a> RouteKey<'a> {
+    fn of(route: &'a RouteEntry) -> Self {
+        Self {
+            path: &route.path,
+            host: route.host.as_deref(),
+            endpoint: route.handler.execution.func.as_ptr(),
+        }
+    }
 }
 
 fn nest_sub_apps(
@@ -194,7 +226,6 @@ impl HostApp {
         let compiled = STARLETTE_COMPILE_PATH.get(py)?.call1((host,))?;
         let regex = compiled.get_item(0)?.getattr(intern!(py, "pattern"))?;
         let pattern = RegexBuilder::new(regex.extract::<&str>()?)
-            .case_insensitive(true)
             .build()
             .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
         let convertors = compiled.get_item(2)?.cast_into::<PyDict>()?;
@@ -212,8 +243,13 @@ impl HostApp {
         Python::attach(|py| {
             let params = PyDict::new(py);
             for (name, convertor) in convertors.bind(py) {
-                let value = captures.name(name.extract::<&str>()?).map_or("", |found| found.as_str());
-                params.set_item(&name, convertor.call_method1(intern!(py, "convert"), (value,))?)?;
+                let value = captures
+                    .name(name.extract::<&str>()?)
+                    .map_or("", |found| found.as_str());
+                params.set_item(
+                    &name,
+                    convertor.call_method1(intern!(py, "convert"), (value,))?,
+                )?;
             }
             Ok(Some(HostPathParams(params.unbind())))
         })
@@ -235,7 +271,10 @@ fn host_apps(
     Ok(Vec::leak(apps))
 }
 
-async fn serve_host_app(host_apps: &'static [HostApp], mut request: Request) -> Result<Response, Request> {
+async fn serve_host_app(
+    host_apps: &'static [HostApp],
+    mut request: Request,
+) -> Result<Response, Request> {
     if host_apps.is_empty() {
         return Err(request);
     }
@@ -243,13 +282,13 @@ async fn serve_host_app(host_apps: &'static [HostApp], mut request: Request) -> 
         .headers()
         .get(HOST)
         .and_then(|value| value.to_str().ok())
-        .map(|host| host_without_port(host).to_ascii_lowercase())
+        .map(host_without_port)
     else {
         return Err(request);
     };
     let Some((app, captures)) = host_apps
         .iter()
-        .find_map(|app| app.pattern.captures(&host).map(|captures| (app, captures)))
+        .find_map(|app| app.pattern.captures(host).map(|captures| (app, captures)))
     else {
         return Err(request);
     };
@@ -330,10 +369,9 @@ fn register_routes(
                 ExecutionMode::SyncNoArgs
             )
         {
-            let cached = precompute_const_response(py, &route.handler, app_state.event_loop)?;
             Some((
                 route.path.as_str(),
-                cached_method_router(route.method, cached),
+                cached_method_router(route.method, &route.handler, app_state.event_loop),
             ))
         } else {
             None
@@ -433,40 +471,30 @@ fn register_routes(
             )
         });
 
-    app = app.method_not_allowed_fallback(move |req: Request| async move {
+    // A route registered directly in axum answers only its own methods, so a
+    // request for another method on its path goes through the frozen router too.
+    let unmatched = move |req: Request| async move {
+        let req = match dispatch_or_not_found(frozen_router, app_state, req).await {
+            Ok(response) => return response,
+            Err(req) => req,
+        };
         let req = match serve_host_app(host_apps, req).await {
             Ok(response) => return response,
             Err(req) => req,
         };
-        let allow = allowed_methods_header(frozen_router, &app_state.root_path, &req);
-        let handled = status_handler(app_state.event_loop, StatusCode::METHOD_NOT_ALLOWED, &req);
-        method_not_allowed_response(handled, allow).await
-    });
-
-    app.fallback({
-        any(move |req: Request| async move {
-            match dispatch_or_not_found(frozen_router, app_state, req).await {
-                Ok(resp) => resp,
-                Err(req) => {
-                    let req = match serve_host_app(host_apps, req).await {
-                        Ok(response) => return response,
-                        Err(req) => req,
-                    };
-                    if let Some(redirect) = slash_redirect(frozen_router, app_state, &req) {
-                        return redirect;
-                    }
-                    let handler_resp =
-                        status_handler(app_state.event_loop, StatusCode::NOT_FOUND, &req);
-                    match handler_resp {
-                        Some(resp) => resolve_pending_handler(resp).await,
-                        None => serve_frontend_mounts(frontend_mounts, req)
-                            .await
-                            .unwrap_or_else(not_found_response),
-                    }
-                }
-            }
-        })
-    })
+        if let Some(redirect) = slash_redirect(frozen_router, app_state, &req) {
+            return redirect;
+        }
+        let handled = status_handler(app_state, StatusCode::NOT_FOUND, None, &req);
+        match handled {
+            Some(response) => resolve_pending_handler(response).await,
+            None => serve_frontend_mounts(frontend_mounts, req)
+                .await
+                .unwrap_or_else(not_found_response),
+        }
+    };
+    app.method_not_allowed_fallback(unmatched.clone())
+        .fallback(unmatched)
 }
 
 fn slash_redirect(
@@ -502,7 +530,7 @@ fn slash_redirect(
     Some((StatusCode::TEMPORARY_REDIRECT, [(LOCATION, location)]).into_response())
 }
 
-fn request_scheme(request: &Request) -> &str {
+pub(crate) fn request_scheme(request: &Request) -> &str {
     if let Some(scheme) = request.uri().scheme_str() {
         return scheme;
     }
@@ -535,46 +563,43 @@ fn not_found_response() -> Response {
     )
 }
 
-/// Returns the 405 Method Not Allowed response.
-fn allowed_methods_header(
-    router: &FrozenRouter<RouteHandler>,
-    root: &str,
-    request: &Request,
-) -> u8 {
-    let host = request
-        .headers()
-        .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .map(host_without_port);
-    let path = strip_root_path(root, request.uri().path()).unwrap_or_else(|| request.uri().path());
-    router.allowed_methods(path, host)
-}
-
-pub(crate) fn status_handler(
-    server: EventLoop,
+/// Runs the exception handler that the app resolved for its router's 404 or 405, if any.
+fn status_handler(
+    state: &AppState,
     status: StatusCode,
+    allow: Option<&HeaderValue>,
     request: &Request,
 ) -> Option<Response> {
+    let handler = state.routing_handlers.get()?.for_status(status)?;
     let input = RequestInput::new(
         request.method(),
         request.uri(),
         request.headers(),
         request.extensions(),
-        Some(server),
+        Some(state.event_loop),
     );
-    dispatch_status_handler(server, status.as_u16(), Some(&input))
+    dispatch_status_handler(state.event_loop, handler, status, allow, &input)
 }
 
-pub(crate) async fn method_not_allowed_response(handled: Option<Response>, allow: u8) -> Response {
-    let mut response = match handled {
-        Some(resp) => resolve_pending_handler(resp).await,
-        None => json_body(
-            StatusCode::METHOD_NOT_ALLOWED,
-            Bytes::from_static(br#"{"detail":"Method Not Allowed"}"#),
-        ),
-    };
-    response.headers_mut().insert(ALLOW, allow_header(allow));
-    response
+/// Returns the 405 response for a path whose first matching route has the methods in `allow`.
+/// Like Starlette, a custom handler gets the `Allow` header on its `HTTPException`
+/// and answers in place of the default response. The caller adds `Allow` to the final response.
+pub(crate) fn method_not_allowed_response(
+    state: &AppState,
+    request: &Request,
+    allow: u8,
+) -> Response {
+    let allow = allow_header(allow);
+    status_handler(state, StatusCode::METHOD_NOT_ALLOWED, Some(&allow), request).unwrap_or_else(
+        || {
+            (
+                StatusCode::METHOD_NOT_ALLOWED,
+                [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+                Bytes::from_static(br#"{"detail":"Method Not Allowed"}"#),
+            )
+                .into_response()
+        },
+    )
 }
 
 pub(crate) fn register_docs_endpoints(
@@ -586,7 +611,7 @@ pub(crate) fn register_docs_endpoints(
     custom_openapi: Option<JsonValue>,
 ) -> PyResult<Router> {
     let Some(openapi_url) = openapi_url else {
-        return Ok(register_metrics_endpoint(app, app_config));
+        return register_metrics_endpoint(app, app_config);
     };
     let openapi_json = match custom_openapi {
         Some(spec) => spec,
@@ -596,10 +621,17 @@ pub(crate) fn register_docs_endpoints(
         },
     };
     let openapi_body = serde_json::to_vec(&openapi_json).ok().map(Bytes::from);
+    let root_path_in_servers = app_config.root_path_in_servers;
     app = app.route(
         openapi_url,
-        get(move || {
-            let body = openapi_body.clone();
+        get(move |mount: Option<Extension<AsgiMount>>| {
+            let body = mount
+                .filter(|_| root_path_in_servers)
+                .and_then(|Extension(mount)| with_root_path_server(&openapi_json, &mount.root_path))
+                .map_or_else(
+                    || openapi_body.clone(),
+                    |document| serde_json::to_vec(&document).ok().map(Bytes::from),
+                );
             async move {
                 body.map_or_else(
                     || StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -636,7 +668,7 @@ pub(crate) fn register_docs_endpoints(
         };
         match docs::swagger_ui_page(py, &page) {
             Ok(html) => app = html_route(app, docs, html),
-            Err(err) => log_python_error("Swagger UI page setup failed", &err),
+            Err(err) => log_python_error(py, "Swagger UI page setup failed", &err),
         }
         if let Some(redirect) = &app_config.swagger_ui_oauth2_redirect_url {
             app = html_route(app, redirect, docs::OAUTH2_REDIRECT_HTML.to_owned());
@@ -661,7 +693,7 @@ pub(crate) fn register_docs_endpoints(
         app = html_route(app, elements, html);
     }
 
-    Ok(register_metrics_endpoint(app, app_config))
+    register_metrics_endpoint(app, app_config)
 }
 
 pub(crate) fn custom_openapi_spec(py: Python<'_>, app: &Bound<'_, PyAny>) -> Option<JsonValue> {
@@ -673,7 +705,7 @@ pub(crate) fn custom_openapi_spec(py: Python<'_>, app: &Bound<'_, PyAny>) -> Opt
     match openapi.call0() {
         Ok(schema) => Some(fastrapi_pyutil::json::py_any_to_json(py, &schema)),
         Err(err) => {
-            log_python_error("Custom openapi() failed", &err);
+            log_python_error(py, "Custom openapi() failed", &err);
             None
         }
     }
@@ -692,9 +724,9 @@ fn html_route(app: Router, path: &str, html: String) -> Router {
     )
 }
 
-fn register_metrics_endpoint(mut app: Router, app_config: &FastrAPI) -> Router {
+fn register_metrics_endpoint(mut app: Router, app_config: &FastrAPI) -> PyResult<Router> {
     if let Some(config) = &app_config.prometheus_config {
-        let handle = prometheus_handle();
+        let handle = prometheus_handle()?;
         app = app.route(
             &config.metrics_path,
             get(move || {
@@ -704,33 +736,29 @@ fn register_metrics_endpoint(mut app: Router, app_config: &FastrAPI) -> Router {
         );
     }
 
-    app
+    Ok(app)
 }
 
+/// Registers the `middleware=[...]` list of the app. Like Starlette's
+/// `build_middleware_stack`, a malformed entry raises instead of being skipped.
 fn merge_declared_middlewares(
     py: Python<'_>,
     app_config: &FastrAPI,
     container: &mut MiddlewareContainer,
-) {
+) -> PyResult<()> {
     let Some(middlewares) = &app_config.middleware else {
-        return;
-    };
-
-    let middlewares = middlewares.bind(py);
-    let Ok(iter) = middlewares.try_iter() else {
-        return;
+        return Ok(());
     };
 
     let registered = container.order.len();
-    iter.flatten().for_each(|item| {
-        if let Err(err) = apply_declared_middleware(py, &item, container) {
-            log_python_error("middleware setup failed", &err);
-        }
-    });
+    for item in middlewares.bind(py).try_iter()? {
+        apply_declared_middleware(py, &item?, container)?;
+    }
     let mut declared = container.order.split_off(registered);
     declared.reverse();
     declared.append(&mut container.order);
     container.order = declared;
+    Ok(())
 }
 
 pub(crate) fn apply_declared_middleware(
@@ -738,26 +766,17 @@ pub(crate) fn apply_declared_middleware(
     middleware_item: &Bound<'_, PyAny>,
     container: &mut MiddlewareContainer,
 ) -> PyResult<()> {
-    for builder in MIDDLEWARE_REGISTRY.builders() {
-        if builder.try_from_instance(middleware_item, container)? {
-            container.order.push(builder.layer());
-            return Ok(());
-        }
+    if let Some(layer) = DeclaredLayer::from_instance(middleware_item)? {
+        container.order.push(layer);
+        return Ok(());
     }
 
-    let Ok(cls) = middleware_item.getattr("cls") else {
-        return Ok(());
-    };
-    let Ok(kwargs_any) = middleware_item.getattr("kwargs") else {
-        return Ok(());
-    };
-    let Ok(kwargs) = kwargs_any.cast::<PyDict>() else {
-        return Ok(());
-    };
+    let cls = middleware_item.getattr(intern!(py, "cls"))?;
+    let kwargs_any = middleware_item.getattr(intern!(py, "kwargs"))?;
+    let kwargs = kwargs_any.cast::<PyDict>()?;
     let args = middleware_item
-        .getattr("args")
-        .and_then(|args| args.cast_into::<PyTuple>().map_err(Into::into))
-        .unwrap_or_else(|_| PyTuple::empty(py));
+        .getattr(intern!(py, "args"))?
+        .cast_into::<PyTuple>()?;
     container.register(&cls, &args, kwargs)
 }
 fn method_router<H, T>(method: HttpMethod, handler: H) -> MethodRouter
@@ -778,8 +797,46 @@ where
     on(filter, handler)
 }
 
-fn cached_method_router(method: HttpMethod, cached: &'static CachedResponse) -> MethodRouter {
-    method_router(method, move || async move { cached.to_response() })
+/// Serves a `cache_response` route. The response is rendered on the first
+/// request, so after the lifespan startup has run, and kept only when it is a
+/// 2xx: an error response is never cached and the handler runs again.
+fn cached_method_router(
+    method: HttpMethod,
+    handler: &'static RouteHandler,
+    server: EventLoop,
+) -> MethodRouter {
+    let cell: &'static OnceLock<CachedResponse> = Box::leak(Box::new(OnceLock::new()));
+    method_router(method, move || async move {
+        if let Some(cached) = cell.get() {
+            return cached.to_response();
+        }
+        render_cached_response(handler, server, cell).await
+    })
+}
+
+async fn render_cached_response(
+    handler: &RouteHandler,
+    server: EventLoop,
+    cell: &'static OnceLock<CachedResponse>,
+) -> Response {
+    let response = Python::attach(|py| render_no_request_response(py, handler, server));
+    if !response.status().is_success() {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let body = match to_bytes(body, usize::MAX).await {
+        Ok(body) => body,
+        Err(err) => {
+            error!("Failed to buffer the cached response: {err}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let cached = cell.get_or_init(|| CachedResponse {
+        status: parts.status,
+        headers: cached_headers(&parts.headers),
+        body,
+    });
+    cached.to_response()
 }
 
 fn no_request_method_router(
@@ -844,25 +901,6 @@ fn sync_no_request_method_router(
         })
         .await
     })
-}
-
-fn precompute_const_response(
-    py: Python<'_>,
-    handler: &RouteHandler,
-    server: EventLoop,
-) -> Option<&'static CachedResponse> {
-    let response = render_no_request_response(py, handler, server);
-    let status = response.status();
-    let headers = cached_headers(response.headers());
-    let body = PYTHON_RUNTIME
-        .block_on(to_bytes(response.into_body(), usize::MAX))
-        .ok()?;
-
-    Some(Box::leak(Box::new(CachedResponse {
-        status,
-        headers,
-        body,
-    })))
 }
 
 struct CachedResponse {

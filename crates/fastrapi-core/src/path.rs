@@ -20,6 +20,19 @@ pub fn extract_path_param_names(path: &str) -> Vec<String> {
         .collect()
 }
 
+/// The convertor of each path parameter in order, `str` when none is written (`{id:int}` gives `int`).
+pub fn extract_path_convertors(path: &str) -> Vec<String> {
+    PATH_PARAM
+        .captures_iter(path)
+        .map(|caps| {
+            caps[1]
+                .split_once(':')
+                .map_or("str", |(_, kind)| kind)
+                .to_owned()
+        })
+        .collect()
+}
+
 pub fn strip_path_convertors(path: &str) -> String {
     PATH_PARAM
         .replace_all(path, |caps: &Captures| {

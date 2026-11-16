@@ -2,19 +2,22 @@
 //! The class keeps the data of a file from a request.
 //! Its `read`, `write`, `seek`, and `close` methods are asynchronous in Python.
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use fastrapi_pyutil::subclass::NativeSubclass;
+use fastrapi_runtime::blocking::run_python;
 use fastrapi_runtime::py_bridge;
 use parking_lot::Mutex;
 use pyo3::Bound;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
 use std::cmp::min;
+use std::mem::take;
 use std::sync::Arc;
 
 fastrapi_pyutil::cached_py_import!(TEMPFILE_MODULE, "tempfile");
-fastrapi_pyutil::cached_py_import!(IO_MODULE, "io");
 fastrapi_pyutil::cached_py_import!(STARLETTE_DATASTRUCTURES, "starlette.datastructures");
 
 const SPOOL_MAX_MEM: usize = 1024 * 1024;
@@ -64,8 +67,11 @@ pub struct PyUploadFile {
     raw_headers: Arc<[(String, String)]>,
 }
 
-static PUBLIC_TYPE: NativeSubclass =
-    NativeSubclass::new("starlette.datastructures", "UploadFile", "fastrapi.datastructures");
+static PUBLIC_TYPE: NativeSubclass = NativeSubclass::new(
+    "starlette.datastructures",
+    "UploadFile",
+    "fastrapi.datastructures",
+);
 
 /// The `UploadFile` class users see, which is also a Starlette `UploadFile`.
 pub fn upload_file_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
@@ -89,49 +95,65 @@ impl PyUploadFile {
         upload_file_type(py)?.call1((parsed,))
     }
 
-    pub fn from_bytes(
-        py: Python<'_>,
+    /// The parsed content is already in memory, so it stays there; a `SpooledTemporaryFile`
+    /// is only made when Python asks for `.file` or a write grows the content past the spool limit.
+    pub const fn from_bytes(
+        _py: Python<'_>,
         filename: Option<String>,
         content_type: Option<String>,
         raw_headers: Arc<[(String, String)]>,
         file_content: Bytes,
     ) -> Self {
-        let size = file_content.len();
-        let (file_content, file_obj) = if size > SPOOL_MAX_MEM {
-            match spool_to_file(py, &file_content) {
-                Ok(file) => (Bytes::new(), Some(file)),
-                Err(err) => {
-                    err.print(py);
-                    (file_content, None)
-                }
-            }
-        } else {
-            (file_content, None)
-        };
-
         Self {
             filename,
             content_type,
-            size: Some(size as u64),
+            size: Some(file_content.len() as u64),
             file_content,
             cursor: 0,
-            file_obj,
+            file_obj: None,
             headers: None,
             raw_headers,
         }
     }
+
+    /// Writes `data` at the cursor like `BytesIO.write`: it overwrites, then extends,
+    /// and zero-fills a gap left by seeking past the end.
+    fn write_in_memory(&mut self, data: &[u8]) {
+        let mut buf = take(&mut self.file_content)
+            .try_into_mut()
+            .unwrap_or_else(|shared| BytesMut::from(shared.as_ref()));
+        let start = self.cursor;
+        if buf.len() < start {
+            buf.resize(start, 0);
+        }
+        let overlap = min(buf.len() - start, data.len());
+        buf[start..start + overlap].copy_from_slice(&data[..overlap]);
+        buf.extend_from_slice(&data[overlap..]);
+        self.cursor = start + data.len();
+        self.file_content = buf.freeze();
+    }
 }
 
-fn spool_to_file(py: Python<'_>, content: &[u8]) -> PyResult<Py<PyAny>> {
+/// A `SpooledTemporaryFile` with the same memory limit Starlette uses for uploads.
+fn spooled_file(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     let kwargs = PyDict::new(py);
     kwargs.set_item(pyo3::intern!(py, "max_size"), SPOOL_MAX_MEM)?;
-    let file = TEMPFILE_MODULE
+    TEMPFILE_MODULE
         .get(py)?
         .getattr(pyo3::intern!(py, "SpooledTemporaryFile"))?
-        .call((), Some(&kwargs))?;
-    file.call_method1(pyo3::intern!(py, "write"), (content,))?;
-    file.call_method1(pyo3::intern!(py, "seek"), (0,))?;
-    Ok(file.unbind())
+        .call((), Some(&kwargs))
+}
+
+/// Runs a call on a Python file object on the blocking pool, as Starlette's `run_in_threadpool` does.
+fn file_call<F>(py: Python<'_>, call: F) -> PyResult<Bound<'_, PyAny>>
+where
+    F: FnOnce(Python<'_>) -> PyResult<Py<PyAny>> + Send + 'static,
+{
+    py_bridge::future_into_py(py, async move {
+        run_python(call)
+            .await
+            .map_err(|panicked| PyRuntimeError::new_err(panicked.to_string()))?
+    })
 }
 
 #[pymethods]
@@ -185,10 +207,13 @@ impl PyUploadFile {
         if let Some(file) = &self.file_obj {
             return Ok(file.clone_ref(py));
         }
-        let file = IO_MODULE
-            .get(py)?
-            .getattr(pyo3::intern!(py, "BytesIO"))?
-            .call1((PyBytes::new(py, &self.file_content),))?;
+        let file = spooled_file(py)?;
+        if !self.file_content.is_empty() {
+            file.call_method1(
+                pyo3::intern!(py, "write"),
+                (PyBytes::new(py, &self.file_content),),
+            )?;
+        }
         file.call_method1(pyo3::intern!(py, "seek"), (self.cursor,))?;
         let file = file.unbind();
         self.file_content = Bytes::new();
@@ -248,23 +273,18 @@ impl PyUploadFile {
         let size = size.unwrap_or(-1);
         if let Some(file) = &self.file_obj {
             let file = file.clone_ref(py);
-            return py_bridge::future_into_py(py, async move {
-                Python::attach(|py| {
-                    file.bind(py)
-                        .call_method1(pyo3::intern!(py, "read"), (size,))
-                        .map(Bound::unbind)
-                })
+            return file_call(py, move |py| {
+                file.bind(py)
+                    .call_method1(pyo3::intern!(py, "read"), (size,))
+                    .map(Bound::unbind)
             });
         }
 
-        let start = self.cursor;
-        let end = if size < 0 {
-            self.file_content.len()
-        } else {
-            min(self.cursor + size as usize, self.file_content.len())
-        };
+        let len = self.file_content.len();
+        let start = min(self.cursor, len);
+        let end = usize::try_from(size).map_or(len, |size| min(start.saturating_add(size), len));
         let data = self.file_content.slice(start..end);
-        self.cursor = end;
+        self.cursor = self.cursor.max(end);
 
         py_bridge::future_into_py(py, async move {
             Python::attach(|py| Ok(PyBytes::new(py, &data).unbind()))
@@ -277,42 +297,31 @@ impl PyUploadFile {
     ///
     /// To be awaitable, compatible with async, this is run in threadpool.
     fn write<'py>(&mut self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
+        self.size = self.size.map(|size| size + data.len() as u64);
         if let Some(file) = &self.file_obj {
-            self.size = self.size.map(|size| size + data.len() as u64);
             let file = file.clone_ref(py);
-            return py_bridge::future_into_py(py, async move {
-                Python::attach(|py| {
-                    file.bind(py)
-                        .call_method1(pyo3::intern!(py, "write"), (data,))
-                        .map(|_| py.None())
-                })
+            return file_call(py, move |py| {
+                file.bind(py)
+                    .call_method1(pyo3::intern!(py, "write"), (PyBytes::new(py, &data),))
+                    .map(|_| py.None())
             });
         }
 
-        if self.file_content.len() + data.len() > SPOOL_MAX_MEM {
-            let mut buf = BytesMut::with_capacity(self.file_content.len() + data.len());
-            buf.put_slice(&self.file_content);
-            buf.put_slice(&data);
-            let combined = buf.freeze();
-            match spool_to_file(py, &combined) {
-                Ok(file) => {
-                    self.size = Some(combined.len() as u64);
-                    self.file_content = Bytes::new();
-                    self.file_obj = Some(file);
-                    return py_bridge::future_into_py(py, async move { Ok(()) });
-                }
-                Err(err) => {
-                    err.print(py);
-                }
-            }
+        if self.cursor.max(self.file_content.len()) + data.len() > SPOOL_MAX_MEM {
+            let file = spooled_file(py)?.unbind();
+            self.file_obj = Some(file.clone_ref(py));
+            let content = take(&mut self.file_content);
+            let cursor = self.cursor;
+            return file_call(py, move |py| {
+                let file = file.bind(py);
+                file.call_method1(pyo3::intern!(py, "write"), (PyBytes::new(py, &content),))?;
+                file.call_method1(pyo3::intern!(py, "seek"), (cursor,))?;
+                file.call_method1(pyo3::intern!(py, "write"), (PyBytes::new(py, &data),))?;
+                Ok(py.None())
+            });
         }
 
-        let mut buf = BytesMut::with_capacity(self.file_content.len() + data.len());
-        buf.put_slice(&self.file_content);
-        buf.put_slice(&data);
-        self.file_content = buf.freeze();
-        self.size = Some(self.file_content.len() as u64);
-
+        self.write_in_memory(&data);
         py_bridge::future_into_py(py, async move { Ok(()) })
     }
 
@@ -324,15 +333,20 @@ impl PyUploadFile {
     fn seek<'py>(&mut self, py: Python<'py>, offset: i64) -> PyResult<Bound<'py, PyAny>> {
         if let Some(file) = &self.file_obj {
             let file = file.clone_ref(py);
-            return py_bridge::future_into_py(py, async move {
-                Python::attach(|py| {
-                    file.bind(py)
-                        .call_method1(pyo3::intern!(py, "seek"), (offset,))
-                        .map(|_| py.None())
-                })
+            return file_call(py, move |py| {
+                file.bind(py)
+                    .call_method1(pyo3::intern!(py, "seek"), (offset,))
+                    .map(|_| py.None())
             });
         }
-        self.cursor = offset as usize;
+        let Ok(cursor) = usize::try_from(offset) else {
+            return py_bridge::future_into_py(py, async move {
+                Err::<(), _>(PyValueError::new_err(format!(
+                    "negative seek value {offset}"
+                )))
+            });
+        };
+        self.cursor = cursor;
         py_bridge::future_into_py(py, async move { Ok(()) })
     }
 
@@ -342,12 +356,10 @@ impl PyUploadFile {
     fn close<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if let Some(file) = &self.file_obj {
             let file = file.clone_ref(py);
-            return py_bridge::future_into_py(py, async move {
-                Python::attach(|py| {
-                    file.bind(py)
-                        .call_method0(pyo3::intern!(py, "close"))
-                        .map(|_| py.None())
-                })
+            return file_call(py, move |py| {
+                file.bind(py)
+                    .call_method0(pyo3::intern!(py, "close"))
+                    .map(|_| py.None())
             });
         }
         py_bridge::future_into_py(py, async move { Ok(()) })

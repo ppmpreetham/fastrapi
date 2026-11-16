@@ -2,7 +2,9 @@
 //! The functions find `Annotated` markers, the base type of an annotation, and the element type of a list.
 
 use crate::annotations::strip_optional;
+use crate::params::PyDepends;
 use fastrapi_core::params::ParameterSource;
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyString};
 
@@ -88,7 +90,11 @@ pub fn list_element_annotation<'py>(
 
 #[inline]
 pub(crate) fn is_dependency_marker(marker: &Bound<'_, PyAny>) -> bool {
-    marker.hasattr("dependency").unwrap_or(false) || marker.hasattr("scopes").unwrap_or(false)
+    let py = marker.py();
+    // FastAPI's own `Depends` is a different class, so it is recognised by its two fields.
+    marker.is_instance_of::<PyDepends>()
+        || (marker.hasattr(intern!(py, "dependency")).unwrap_or(false)
+            && marker.hasattr(intern!(py, "use_cache")).unwrap_or(false))
 }
 
 #[must_use]

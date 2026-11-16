@@ -75,7 +75,7 @@ pub fn get_openapi(
         separate_input_output_schemas,
         routes: &routes,
     };
-    let spec = build_openapi_spec(py, &document, collect_router_routes);
+    let spec = build_openapi_spec(py, &document, collect_router_routes)?;
     Ok(json_to_py_object(py, &spec))
 }
 

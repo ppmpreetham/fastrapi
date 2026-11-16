@@ -148,7 +148,11 @@ impl Task {
         Ok(Self {
             func: task.getattr(intern!(py, "func"))?.unbind(),
             args: task.getattr(intern!(py, "args"))?.extract()?,
-            kwargs: Some(task.getattr(intern!(py, "kwargs"))?.cast_into::<PyDict>()?.unbind()),
+            kwargs: Some(
+                task.getattr(intern!(py, "kwargs"))?
+                    .cast_into::<PyDict>()?
+                    .unbind(),
+            ),
             is_async: task.getattr(intern!(py, "is_async"))?.is_truthy()?,
         })
     }
@@ -207,9 +211,8 @@ impl PendingTasks {
     pub async fn run(self) {
         let Self { event_loop, tasks } = self;
         for task in tasks {
-            let scheduled = task.run(|awaitable| {
-                py_bridge::schedule_task(awaitable.py(), event_loop, awaitable)
-            });
+            let scheduled = task
+                .run(|awaitable| py_bridge::schedule_task(awaitable.py(), event_loop, awaitable));
             if let Err(err) = scheduled.await {
                 Python::attach(|py| err.print(py));
                 return;
@@ -218,8 +221,11 @@ impl PendingTasks {
     }
 }
 
-static PUBLIC_TYPE: NativeSubclass =
-    NativeSubclass::new("starlette.background", "BackgroundTasks", "fastrapi.background");
+static PUBLIC_TYPE: NativeSubclass = NativeSubclass::new(
+    "starlette.background",
+    "BackgroundTasks",
+    "fastrapi.background",
+);
 
 /// The `BackgroundTasks` class users see, which is also a Starlette `BackgroundTasks`.
 pub fn background_tasks_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {

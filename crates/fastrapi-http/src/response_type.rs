@@ -14,6 +14,9 @@ pub enum ResponseType {
     Redirect,
     File,
     Auto,
+    /// A `response_class` other than the five built-ins: a plain return value
+    /// becomes an instance of it, so its own `render` and `media_type` apply.
+    Custom,
 }
 
 #[derive(Clone)]

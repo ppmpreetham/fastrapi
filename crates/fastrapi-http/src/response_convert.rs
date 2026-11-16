@@ -6,17 +6,17 @@ use super::responses::{
     PyFileResponse, PyRedirectResponse, ResponseKind, extract_base_response_data, response_kind,
     response_status,
 };
-use crate::response_api::content_type;
 use crate::background::{
     BackgroundJob, BackgroundRun, OwnBackground, run_after_body, spawn_response_background_value,
 };
+use crate::exceptions::PyFastAPIError;
+use crate::exceptions::server_error_response;
+use crate::response_api::content_type;
 use crate::response_type::{ResponseFormatter, ResponseType};
-use crate::responses::{
-    PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyStreamingResponse,
-};
+use crate::responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyStreamingResponse};
 use crate::sse::PyEventSourceResponse;
-use crate::stream::StreamItems;
 use crate::sse::{event_fields, format_sse_event, json_dumps, sse_options};
+use crate::stream::StreamItems;
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
@@ -28,7 +28,10 @@ use fastrapi_pyutil::json::{
 };
 use fastrapi_runtime::blocking::run_python;
 use fastrapi_runtime::py_bridge;
+use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::server_state::{current_server, server_loop};
+use fastrapi_runtime::tokio_runtime::spawn;
+use pyo3::exceptions::PyValueError;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyStopIteration};
 use pyo3::prelude::*;
 use pyo3::types::{
@@ -37,7 +40,6 @@ use pyo3::types::{
 use pyo3::{Bound, Py, PyAny, intern};
 use pyo3_async_runtimes::TaskLocals;
 use std::collections::HashSet;
-use std::time::Duration;
 use tokio::time::timeout;
 use tracing::error;
 
@@ -47,27 +49,58 @@ pub fn apply_response_metadata(
     headers: Option<&Py<PyDict>>,
     media_type: Option<&str>,
 ) -> Response {
-    if let Some(headers) = headers
-        && let Ok(dict) = headers.bind(py).cast::<PyDict>()
-    {
-        let headers_iter = dict.iter().filter_map(|(k, v)| {
-            let ks = k.extract::<&str>().ok()?;
-            let vs = v.extract::<&str>().ok()?;
-            let hname = HeaderName::try_from(ks.as_bytes()).ok()?;
-            let hval = HeaderValue::try_from(vs.as_bytes()).ok()?;
-            Some((hname, hval))
-        });
-
-        res.headers_mut().extend(headers_iter);
+    // Like Starlette's `init_headers`: supplied headers replace the defaults,
+    // and a supplied `content-type` wins over `media_type`.
+    let mut supplied: Vec<HeaderName> = Vec::new();
+    if let Some(headers) = headers {
+        for (key, value) in headers.bind(py).iter() {
+            let parsed = key
+                .extract::<&str>()
+                .ok()
+                .zip(value.extract::<&str>().ok())
+                .and_then(|(key, value)| {
+                    Some((
+                        HeaderName::try_from(key).ok()?,
+                        HeaderValue::try_from(value).ok()?,
+                    ))
+                });
+            let Some((name, value)) = parsed else {
+                error!("the response has an invalid header");
+                return render_failed(py, &PyValueError::new_err("Invalid HTTP header value."));
+            };
+            if supplied.contains(&name) {
+                res.headers_mut().append(name, value);
+            } else {
+                res.headers_mut().insert(name.clone(), value);
+                supplied.push(name);
+            }
+        }
     }
 
     if let Some(media_type) = media_type
+        && !supplied.contains(&CONTENT_TYPE)
         && let Ok(hval) = HeaderValue::try_from(media_type)
     {
         res.headers_mut().insert(CONTENT_TYPE, hval);
     }
 
     res
+}
+
+/// A response that could not be rendered fails like an exception raised in the endpoint.
+fn render_failed(py: Python<'_>, err: &PyErr) -> Response {
+    error!("failed to render the response: {err}");
+    server_error_response(py, err, None)
+}
+
+/// Encodes response content the way Starlette's `Response.render` does.
+fn render_body(py: Python<'_>, content: &Bound<'_, PyAny>, charset: &str) -> PyResult<Bytes> {
+    let rendered = crate::response_api::render(py, content, "Response", charset)?;
+    if let Ok(bytes) = rendered.cast::<PyBytes>() {
+        return Ok(bytes_body(bytes));
+    }
+    let bytes = py.get_type::<PyBytes>().call1((rendered,))?;
+    Ok(bytes_body(bytes.cast::<PyBytes>()?))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -183,19 +216,59 @@ fn response_helper<'py>(
     })
 }
 
+fastrapi_pyutil::cached_py_import!(TYPE_ADAPTER, "pydantic", "TypeAdapter");
+fastrapi_pyutil::cached_py_import!(
+    SCHEMA_GENERATION_ERROR,
+    "pydantic.errors",
+    "PydanticSchemaGenerationError"
+);
+
+/// The `TypeAdapter` of a response model. Like FastAPI's `create_model_field`, a type
+/// pydantic can't build a schema for raises `FastAPIError`.
+pub fn response_type_adapter<'py>(model: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = model.py();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "_parent_depth"), 0)?;
+    TYPE_ADAPTER
+        .get(py)?
+        .call((model,), Some(&kwargs))
+        .map_err(|err| {
+            if !SCHEMA_GENERATION_ERROR
+                .get(py)
+                .is_ok_and(|class| err.is_instance(py, class))
+            {
+                return err;
+            }
+            let type_name = model.str().map_or_else(|_| "?".into(), |name| name.to_string());
+            PyErr::from_type(
+                py.get_type::<PyFastAPIError>(),
+                format!(
+                    "Invalid args for response field! Hint: check that {type_name} is a valid Pydantic field type. If you are using a return type annotation that is not a valid Pydantic field (e.g. Union[Response, dict, None]) you can disable generating the response model from the type annotation with the path operation decorator parameter response_model=None. Read more: https://fastapi.tiangolo.com/tutorial/response-model/"
+                ),
+            )
+        })
+}
+
 fn response_adapter<'a>(
     py: Python<'_>,
     formatter: &'a ResponseFormatter,
     model: &Py<PyAny>,
 ) -> PyResult<&'a Py<PyAny>> {
     formatter.response_adapter.get_or_try_init(py, || {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "_parent_depth"), 0)?;
-        py.import(intern!(py, "pydantic"))?
-            .getattr(intern!(py, "TypeAdapter"))?
-            .call((model.bind(py),), Some(&kwargs))
-            .map(Bound::unbind)
+        response_type_adapter(model.bind(py)).map(Bound::unbind)
     })
+}
+
+/// Builds the route's response model adapter when the route is defined, as FastAPI does.
+pub fn prepare_response_model(py: Python<'_>, formatter: &ResponseFormatter) -> PyResult<()> {
+    match formatter
+        .response_model
+        .as_ref()
+        .filter(|model| !model.bind(py).is_none())
+    {
+        Some(model) => response_adapter(py, formatter, model).map(drop),
+        None => Ok(()),
+    }
 }
 
 fn apply_response_helper<'py>(
@@ -324,17 +397,13 @@ fn convert_response_value(
     }
     if result.is_none() {
         let status = formatter.default_status.unwrap_or(StatusCode::OK);
-        return Ok(
-            if matches!(
-                formatter.response_type,
-                ResponseType::Json | ResponseType::Auto
-            ) && body_allowed(status)
-            {
-                null_json_response(status)
-            } else {
-                status.into_response()
-            },
-        );
+        match formatter.response_type {
+            ResponseType::Json | ResponseType::Auto if body_allowed(status) => {
+                return Ok(null_json_response(status));
+            }
+            ResponseType::Custom => {}
+            _ => return Ok(status.into_response()),
+        }
     }
 
     let default_status = formatter.default_status.unwrap_or(StatusCode::OK);
@@ -378,12 +447,15 @@ fn convert_response_value(
 
     let response = match formatter.response_type {
         ResponseType::PlainText => {
-            let body_bytes = final_result
-                .cast::<PyString>()
-                .map_err(PyErr::from)
-                .and_then(str_body)
-                .or_else(|_| final_result.str().and_then(|py_str| str_body(&py_str)))
-                .unwrap_or_else(|_| Bytes::new());
+            let body_bytes = if let Ok(bytes) = final_result.cast::<PyBytes>() {
+                bytes_body(bytes)
+            } else {
+                final_result
+                    .cast::<PyString>()
+                    .map_err(PyErr::from)
+                    .and_then(str_body)
+                    .or_else(|_| final_result.str().and_then(|py_str| str_body(&py_str)))?
+            };
 
             (
                 default_status,
@@ -436,6 +508,13 @@ fn convert_response_value(
 
         ResponseType::File => convert_file_response(py, final_result, request_headers),
 
+        ResponseType::Custom => match &formatter.response_class {
+            Some(class) => {
+                custom_class_response(py, class, final_result, formatter.default_status)?
+            }
+            None => py_to_response(py, final_result, default_status),
+        },
+
         ResponseType::Auto => {
             if final_result.is_instance_of::<PyJSONResponse>() || kind == ResponseKind::Json {
                 convert_json_response(py, final_result)
@@ -472,6 +551,22 @@ fn convert_response_value(
     Ok(Response::from_parts(parts, Body::empty()))
 }
 
+/// Builds the route's `response_class` from a plain return value, like FastAPI's
+/// `response_class(content, status_code=...)`.
+fn custom_class_response(
+    py: Python<'_>,
+    class: &Py<PyAny>,
+    content: &Bound<'_, PyAny>,
+    status: Option<StatusCode>,
+) -> PyResult<Response> {
+    let kwargs = PyDict::new(py);
+    if let Some(status) = status {
+        kwargs.set_item(intern!(py, "status_code"), status.as_u16())?;
+    }
+    let response = class.bind(py).call((content,), Some(&kwargs))?;
+    Ok(convert_auto_response(py, &response))
+}
+
 #[inline(always)]
 pub fn convert_html_response(py: Python, result: &Bound<PyAny>) -> Response {
     if let Some(response) = rendered_response(result) {
@@ -480,23 +575,21 @@ pub fn convert_html_response(py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp_bound) = result.cast::<PyHTMLResponse>() {
         let resp = resp_bound.borrow();
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
-        let res = (
-            status_code,
-            Html(
-                resp.content
-                    .bind(py)
-                    .extract::<String>()
-                    .unwrap_or_default(),
-            ),
-        )
-            .into_response();
+        let content = match render_body(py, resp.content.bind(py), &resp.charset) {
+            Ok(content) => content,
+            Err(err) => return render_failed(py, &err),
+        };
+        let res = (status_code, Html(content)).into_response();
         apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_deref())
     } else if response_kind(result) == ResponseKind::Html {
         let data = extract_base_response_data(result, StatusCode::OK);
-        let content = data
-            .content
-            .and_then(|content| content.extract::<String>().ok())
-            .unwrap_or_default();
+        let content = match data.content.map_or_else(
+            || Ok(Bytes::new()),
+            |content| render_body(py, &content, "utf-8"),
+        ) {
+            Ok(content) => content,
+            Err(err) => return render_failed(py, &err),
+        };
         let res = (data.status_code, Html(content)).into_response();
         apply_response_metadata(py, res, data.headers.as_ref(), data.media_type.as_deref())
     } else {
@@ -514,10 +607,7 @@ pub fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
         let resp = resp_bound.borrow();
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
         let res = py_json_response_with_status(py, status_code, resp.content.bind(py))
-            .unwrap_or_else(|err| {
-                err.print(py);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            });
+            .unwrap_or_else(|err| render_failed(py, &err));
         apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_deref())
     } else {
         if response_kind(result) != ResponseKind::Json {
@@ -528,10 +618,7 @@ pub fn convert_json_response(py: Python, result: &Bound<PyAny>) -> Response {
         let data = extract_base_response_data(result, StatusCode::OK);
         let res = match data.content {
             Some(ref content) => py_json_response_with_status(py, data.status_code, content)
-                .unwrap_or_else(|err| {
-                    err.print(py);
-                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                }),
+                .unwrap_or_else(|err| render_failed(py, &err)),
             None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
         apply_response_metadata(py, res, data.headers.as_ref(), data.media_type.as_deref())
@@ -546,25 +633,29 @@ pub fn convert_text_response(py: Python, result: &Bound<PyAny>) -> Response {
     if let Ok(resp_bound) = result.cast::<PyPlainTextResponse>() {
         let resp = resp_bound.borrow();
         let status_code = StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK);
+        let content = match render_body(py, resp.content.bind(py), &resp.charset) {
+            Ok(content) => content,
+            Err(err) => return render_failed(py, &err),
+        };
         let res = (
             status_code,
             [(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             )],
-            resp.content
-                .bind(py)
-                .extract::<String>()
-                .unwrap_or_default(),
+            content,
         )
             .into_response();
         apply_response_metadata(py, res, resp.headers.as_ref(), resp.media_type.as_deref())
     } else if response_kind(result) == ResponseKind::Text {
         let data = extract_base_response_data(result, StatusCode::OK);
-        let content = data
-            .content
-            .and_then(|content| content.extract::<String>().ok())
-            .unwrap_or_default();
+        let content = match data.content.map_or_else(
+            || Ok(Bytes::new()),
+            |content| render_body(py, &content, "utf-8"),
+        ) {
+            Ok(content) => content,
+            Err(err) => return render_failed(py, &err),
+        };
         let res = (
             data.status_code,
             [(
@@ -631,9 +722,10 @@ pub(crate) fn sse_event_chunk(
     };
     let data = match (raw_data, data) {
         (Some(raw), _) => Some(raw),
-        (None, Some(data)) if data.hasattr(intern!(py, "model_dump_json"))? => {
-            Some(data.call_method0(intern!(py, "model_dump_json"))?.extract::<String>()?)
-        }
+        (None, Some(data)) if data.hasattr(intern!(py, "model_dump_json"))? => Some(
+            data.call_method0(intern!(py, "model_dump_json"))?
+                .extract::<String>()?,
+        ),
         (None, Some(data)) => Some(json_dumps(&data)?),
         (None, None) => None,
     };
@@ -682,6 +774,40 @@ fn stream_chunk(py: Python<'_>, value: &Bound<'_, PyAny>, sse: bool, sep: &str) 
     Ok(bytes_body(encoded.cast::<PyBytes>()?))
 }
 
+/// Cleans up a streaming body when it ends or is dropped early by a client disconnect.
+/// Like Starlette's `StreamingResponse`, the background task still runs after a disconnect,
+/// but not after the stream raised. An unfinished async iterator is `aclose()`d.
+struct StreamGuard {
+    background: Option<Py<PyAny>>,
+    iterator: Option<Py<PyAny>>,
+    event_loop: EventLoop,
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        if let Some(background) = self.background.take() {
+            spawn_response_background_value(background);
+        }
+        let Some(iterator) = self.iterator.take() else {
+            return;
+        };
+        let event_loop = self.event_loop;
+        Python::attach(|py| {
+            let closing = iterator
+                .bind(py)
+                .call_method0(intern!(py, "aclose"))
+                .and_then(|closing| py_bridge::schedule_task(py, event_loop, closing));
+            if let Ok(closing) = closing {
+                // An `__anext__` still running makes `aclose()` raise; asyncio's
+                // async-generator finalizer closes it once that call finishes.
+                spawn(async move {
+                    _ = closing.await;
+                });
+            }
+        });
+    }
+}
+
 pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response {
     let background = result
         .getattr(intern!(py, "background"))
@@ -692,8 +818,11 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
         if let Ok(resp_bound) = result.cast::<PyStreamingResponse>() {
             let resp = resp_bound.borrow();
             let sse = result.is_instance_of::<PyEventSourceResponse>();
-            let (ping, sep) = if sse { sse_options(result) } else { (None, "
-".to_owned()) };
+            let (ping, sep) = if sse {
+                sse_options(result)
+            } else {
+                (None, "\n".to_owned())
+            };
             (
                 resp.content.clone_ref(py),
                 StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::OK),
@@ -711,17 +840,17 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
         ) {
             let data = extract_base_response_data(result, StatusCode::OK);
             let content = data.content.map_or_else(|| py.None(), Bound::unbind);
+            let (ping, sep) = sse_options(result);
             (
                 content,
                 data.status_code,
                 data.headers,
-                data
-                    .media_type
+                data.media_type
                     .as_deref()
                     .map(|media_type| content_type(media_type, "utf-8").into_owned()),
                 response_kind(result) == ResponseKind::Sse,
-                sse_options(result).0,
-                sse_options(result).1,
+                ping,
+                sep,
             )
         } else {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -731,11 +860,13 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
     let Some(request_loop) = request_loop else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let ping_chunk =
-        sse.then(|| format_sse_event(None, None, None, None, Some("ping"), &sep));
+    let ping_chunk = sse.then(|| format_sse_event(None, None, None, None, Some("ping"), &sep));
 
     let (content, items) = match content.bind(py).cast::<StreamItems>() {
-        Ok(items) => (items.get().content.clone_ref(py), Some(items.clone().unbind())),
+        Ok(items) => (
+            items.get().content.clone_ref(py),
+            Some(items.clone().unbind()),
+        ),
         Err(_) => (content, None),
     };
     let content = {
@@ -751,17 +882,23 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
         };
         iterator.map_or_else(|| bound.clone().unbind(), Bound::unbind)
     };
+    let is_async = content
+        .bind(py)
+        .hasattr(intern!(py, "__anext__"))
+        .unwrap_or(false);
+    let locals = TaskLocals::new(request_loop.bind(py).clone());
+    let mut guard = StreamGuard {
+        background,
+        iterator: is_async.then(|| content.clone_ref(py)),
+        event_loop: request_loop,
+    };
 
     let stream = async_stream::stream! {
-        let is_async = Python::attach(|py| {
-            content.bind(py).hasattr(intern!(py, "__anext__")).unwrap_or(false)
-        });
         loop {
             let next: PyResult<Option<Py<PyAny>>> = if is_async {
                 let pending = Python::attach(|py| -> PyResult<Option<_>> {
                     match content.bind(py).call_method0(intern!(py, "__anext__")) {
                         Ok(awaitable) => {
-                            let locals = TaskLocals::new(request_loop.bind(py).clone());
                             py_bridge::into_future_with_locals(&locals, awaitable).map(Some)
                         }
                         Err(error) if error.is_instance_of::<PyStopAsyncIteration>(py) => Ok(None),
@@ -770,8 +907,7 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
                 });
                 match pending {
                     Ok(Some(future)) => {
-                        let awaited = if let Some(ping) = ping {
-                            let period = Duration::from_secs_f64(ping);
+                        let awaited = if let Some(period) = ping {
                             let mut future = std::pin::pin!(future);
                             loop {
                                 if let Ok(result) = timeout(period, future.as_mut()).await {
@@ -818,7 +954,10 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
                     Some(items) => items.get().encode(py, value.bind(py), &sep),
                     None => stream_chunk(py, value.bind(py), sse, &sep),
                 }),
-                Ok(None) => break,
+                Ok(None) => {
+                    guard.iterator = None;
+                    break;
+                }
                 Err(error) => Err(error),
             };
             match chunk {
@@ -826,14 +965,13 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
                 Err(error) => {
                     error!("StreamingResponse failed");
                     Python::attach(|py| error.print(py));
+                    guard.background = None;
                     yield Err(std::io::Error::other("streaming response failed"));
                     break;
                 }
             }
         }
-        if let Some(background) = background {
-            spawn_response_background_value(background);
-        }
+        drop(guard);
     };
     let res = (status_code, Body::from_stream(stream)).into_response();
     let media_type = media_type
@@ -875,8 +1013,5 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
     }
 
     let status = response_status(result, StatusCode::OK);
-    py_json_response_with_status(py, status, result).unwrap_or_else(|err| {
-        err.print(py);
-        StatusCode::INTERNAL_SERVER_ERROR.into_response()
-    })
+    py_json_response_with_status(py, status, result).unwrap_or_else(|err| render_failed(py, &err))
 }

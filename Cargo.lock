@@ -508,6 +508,7 @@ dependencies = [
  "fastwebsockets",
  "form_urlencoded",
  "futures-util",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "matchit 0.9.2",
@@ -540,6 +541,7 @@ dependencies = [
  "axum",
  "bytes",
  "globset",
+ "libc",
  "matchit 0.9.2",
  "notify",
  "papaya",
@@ -550,6 +552,7 @@ dependencies = [
  "strum 0.28.0",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -596,6 +599,7 @@ dependencies = [
  "fastrapi-http",
  "fastrapi-pyutil",
  "fastrapi-routing",
+ "indexmap",
  "pyo3",
  "serde",
  "simd-json",
@@ -636,6 +640,7 @@ dependencies = [
  "simd-json",
  "smallvec",
  "smart-default",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -651,6 +656,7 @@ dependencies = [
  "pyo3-async-runtimes",
  "pyo3-build-config",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1076,6 +1082,8 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

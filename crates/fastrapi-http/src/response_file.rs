@@ -10,15 +10,18 @@ use futures_util::StreamExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{Bound, Py, PyAny, intern};
-use std::convert::Infallible;
+use std::collections::hash_map::RandomState;
 use std::fs;
 use std::fs::Metadata;
+use std::hash::BuildHasher;
+use std::io;
 use std::iter::once;
 use std::ops::RangeInclusive;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio_util::io::ReaderStream;
+use tracing::error;
 
 struct MimeTables {
     suffixes: std::collections::HashMap<String, String>,
@@ -38,7 +41,10 @@ fn mime_tables(py: Python<'_>) -> PyResult<&MimeTables> {
         Ok(MimeTables {
             suffixes: db.getattr(intern!(py, "suffix_map"))?.extract()?,
             encodings: db.getattr(intern!(py, "encodings_map"))?.extract()?,
-            types: db.getattr(intern!(py, "types_map"))?.get_item(1)?.extract()?,
+            types: db
+                .getattr(intern!(py, "types_map"))?
+                .get_item(1)?
+                .extract()?,
         })
     })
 }
@@ -49,9 +55,16 @@ const fn is_separator(byte: u8) -> bool {
 
 fn splitext(path: &str) -> (&str, &str) {
     let bytes = path.as_bytes();
-    let filename_start = bytes.iter().rposition(|&byte| is_separator(byte)).map_or(0, |index| index + 1);
+    let filename_start = bytes
+        .iter()
+        .rposition(|&byte| is_separator(byte))
+        .map_or(0, |index| index + 1);
     match path[filename_start..].rfind('.') {
-        Some(dot) if path[filename_start..filename_start + dot].bytes().any(|byte| byte != b'.') => {
+        Some(dot)
+            if path[filename_start..filename_start + dot]
+                .bytes()
+                .any(|byte| byte != b'.') =>
+        {
             path.split_at(filename_start + dot)
         }
         _ => (path, ""),
@@ -99,34 +112,11 @@ fn lookup(tables: &MimeTables, base: &str, ext: &str) -> Option<String> {
     tables.types.get(&ext.to_lowercase()).cloned()
 }
 
-pub(crate) fn guess_mime(path: &str) -> &'static str {
-    let ext = path.rsplit('.').next().unwrap_or("");
-    match ext {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "txt" | "md" => "text/plain; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "js" | "mjs" => "text/javascript; charset=utf-8",
-        "json" => "application/json",
-        "xml" => "application/xml",
-        "pdf" => "application/pdf",
-        "csv" => "text/csv",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "ttf" => "font/ttf",
-        "zip" => "application/zip",
-        "gz" => "application/gzip",
-        _ => "application/octet-stream",
-    }
+/// A random 26-hex-digit boundary, the size of Starlette's `token_hex(13)`.
+fn random_boundary() -> String {
+    let high = RandomState::new().hash_one(0_u8);
+    let low = RandomState::new().hash_one(1_u8) & 0xff_ffff_ffff;
+    format!("{high:016x}{low:010x}")
 }
 
 fn etag_for(metadata: &Metadata) -> Option<String> {
@@ -188,27 +178,51 @@ fn file_stream(
     content_type: String,
 ) -> Body {
     Body::from_stream(async_stream::stream! {
-        let Ok(mut file) = File::open(path).await else { return; };
+        // The headers are already sent, so a failure aborts the connection instead of
+        // ending a body shorter than its declared length.
+        let mut file = match File::open(&path).await {
+            Ok(file) => file,
+            Err(err) => {
+                error!("FileResponse could not open {path}: {err}");
+                yield Err(err);
+                return;
+            }
+        };
         for range in ranges {
             if let Some(boundary) = &boundary {
-                yield Ok::<bytes::Bytes, Infallible>(Bytes::from(format!("--{boundary}\r\nContent-Type: {content_type}\r\nContent-Range: bytes {}-{}\r\n\r\n", range.start(), range.end())));
+                yield Ok::<bytes::Bytes, io::Error>(Bytes::from(format!("--{boundary}\r\nContent-Type: {content_type}\r\nContent-Range: bytes {}-{}\r\n\r\n", range.start(), range.end())));
             }
-            if file.seek(SeekFrom::Start(*range.start())).await.is_err() { return; }
+            if let Err(err) = file.seek(SeekFrom::Start(*range.start())).await {
+                error!("FileResponse could not seek in {path}: {err}");
+                yield Err(err);
+                return;
+            }
             let length = range.end().saturating_sub(*range.start()).saturating_add(1);
             let mut sent = 0_u64;
             let mut chunks = ReaderStream::with_capacity((&mut file).take(length), 64 * 1024);
             while let Some(chunk) = chunks.next().await {
-                let Ok(chunk) = chunk else { return; };
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(err) => {
+                        error!("FileResponse could not read {path}: {err}");
+                        yield Err(err);
+                        return;
+                    }
+                };
                 sent += chunk.len() as u64;
-                yield Ok::<bytes::Bytes, Infallible>(chunk);
+                yield Ok(chunk);
             }
-            if sent < length { return; }
+            if sent < length {
+                error!("FileResponse: {path} became shorter while it was sent");
+                yield Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+                return;
+            }
             if boundary.is_some() {
-                yield Ok::<bytes::Bytes, Infallible>(Bytes::from_static(b"\r\n"));
+                yield Ok(Bytes::from_static(b"\r\n"));
             }
         }
         if let Some(boundary) = boundary {
-            yield Ok::<bytes::Bytes, Infallible>(Bytes::from(format!("--{boundary}--\r\n")));
+            yield Ok(Bytes::from(format!("--{boundary}--\r\n")));
         }
     })
 }
@@ -235,14 +249,15 @@ pub fn convert_file_response(
         .and_then(|value| value.extract::<u16>().ok())
         .and_then(|value| StatusCode::from_u16(value).ok())
         .unwrap_or(StatusCode::OK);
-    let Ok(metadata) = fs::metadata(&path) else {
+    let Ok(metadata) = py.detach(|| fs::metadata(&path)) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let length = metadata.len();
     let modified = metadata.modified().ok();
     let etag = etag_for(&metadata).unwrap_or_else(|| format!("\"{length:x}\""));
-    let headers = request_headers.cloned().unwrap_or_default();
-    if conditional_not_modified(&headers, &etag, modified) {
+    let empty = HeaderMap::new();
+    let headers = request_headers.unwrap_or(&empty);
+    if conditional_not_modified(headers, &etag, modified) {
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(header::ETAG, &etag)
@@ -250,7 +265,7 @@ pub fn convert_file_response(
             .unwrap_or_else(|_| StatusCode::NOT_MODIFIED.into_response());
     }
     let use_range =
-        headers.get(header::RANGE).is_some() && if_range_matches(&headers, &etag, modified);
+        headers.get(header::RANGE).is_some() && if_range_matches(headers, &etag, modified);
     let ranges = if use_range {
         let value = headers
             .get(header::RANGE)
@@ -274,10 +289,15 @@ pub fn convert_file_response(
     };
     let partial = use_range;
     let multi = ranges.len() > 1;
-    let boundary = multi.then(|| format!("fastrapi-{length:x}-{status}"));
-    let declared = get_str(intern!(py, "media_type"));
+    let boundary = multi.then(random_boundary);
+    let declared = get_str(intern!(py, "media_type")).or_else(|| {
+        let filename = get_str(intern!(py, "filename"));
+        guess_media_type(py, filename.as_deref().unwrap_or(&path))
+            .ok()
+            .flatten()
+    });
     let media_type = crate::response_api::content_type(
-        declared.as_deref().unwrap_or_else(|| guess_mime(&path)),
+        declared.as_deref().unwrap_or("application/octet-stream"),
         "utf-8",
     )
     .into_owned();

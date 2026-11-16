@@ -1,12 +1,12 @@
 use fastrapi_pyutil::json::py_any_to_json;
+use fastrapi_routing::route::SchemaAliases;
+use indexmap::IndexMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use simd_json::json;
+use simd_json::owned::Object;
 use simd_json::owned::Value as JsonValue;
 use simd_json::prelude::{ValueAsMutObject, ValueAsScalar, ValueObjectAccess};
-use fastrapi_routing::route::SchemaAliases;
-use simd_json::owned::Object;
-use std::collections::HashMap;
 
 const MARKER: &str = "$fastrapi_schema";
 const REF_TEMPLATE: &str = "#/components/schemas/{model}";
@@ -76,7 +76,7 @@ impl SchemaRegistry {
         &self,
         py: Python<'_>,
         separate_input_output_schemas: bool,
-        schemas: &mut HashMap<String, JsonValue>,
+        schemas: &mut IndexMap<String, JsonValue>,
     ) -> Vec<JsonValue> {
         let indices: Vec<usize> = (0..self.fields.len()).collect();
         let mut resolved = vec![json!({}); self.fields.len()];
@@ -110,7 +110,7 @@ impl SchemaRegistry {
         py: Python<'_>,
         indices: &[usize],
         separate_input_output_schemas: bool,
-        schemas: &mut HashMap<String, JsonValue>,
+        schemas: &mut IndexMap<String, JsonValue>,
     ) -> PyResult<Vec<(usize, JsonValue)>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("ref_template", REF_TEMPLATE)?;
@@ -174,7 +174,7 @@ impl SchemaRegistry {
 fn renamed_form_model(
     schema: JsonValue,
     aliases: &SchemaAliases,
-    schemas: &HashMap<String, JsonValue>,
+    schemas: &IndexMap<String, JsonValue>,
 ) -> JsonValue {
     let Some(mut renamed) = schema
         .get("$ref")
@@ -188,11 +188,21 @@ fn renamed_form_model(
     let Some(object) = renamed.as_object_mut() else {
         return schema;
     };
-    let names = |name: &str| aliases.iter().find(|(alias, _)| alias == name).map(|(_, names)| &**names);
+    let names = |name: &str| {
+        aliases
+            .iter()
+            .find(|(alias, _)| alias == name)
+            .map(|(_, names)| &**names)
+    };
     if let Some(JsonValue::Object(properties)) = object.remove("properties") {
         let properties: Object = properties
             .into_iter()
-            .map(|(name, value)| (names(&name).map_or_else(|| name.clone(), |names| names[0].clone()), value))
+            .map(|(name, value)| {
+                (
+                    names(&name).map_or_else(|| name.clone(), |names| names[0].clone()),
+                    value,
+                )
+            })
             .collect();
         object.insert("properties".to_string(), JsonValue::from(properties));
     }
@@ -202,7 +212,10 @@ fn renamed_form_model(
         for name in listed.iter().filter_map(ValueAsScalar::as_str) {
             match names(name) {
                 Some(names) if names.len() > 1 => {
-                    let any_of: Vec<JsonValue> = names.iter().map(|name| json!({ "required": [name] })).collect();
+                    let any_of: Vec<JsonValue> = names
+                        .iter()
+                        .map(|name| json!({ "required": [name] }))
+                        .collect();
                     choices.push(json!({ "anyOf": any_of }));
                 }
                 Some(names) => required.push(json!(names[0].as_str())),

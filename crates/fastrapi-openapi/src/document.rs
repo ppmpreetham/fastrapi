@@ -1,9 +1,9 @@
 //! The serde types of an OpenAPI 3.1 document.
 //! It also contains a function that merges two JSON values deeply.
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use simd_json::owned::Value as JsonValue;
-use std::collections::HashMap;
 
 pub fn deep_merge_json(target: &mut JsonValue, source: JsonValue) {
     match (target, source) {
@@ -25,7 +25,7 @@ pub fn deep_merge_json(target: &mut JsonValue, source: JsonValue) {
 pub struct OpenApiSpec {
     pub openapi: String,
     pub info: OpenApiInfo,
-    pub paths: HashMap<String, PathItem>,
+    pub paths: IndexMap<String, PathItem>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub servers: Option<Vec<JsonValue>>,
@@ -34,7 +34,7 @@ pub struct OpenApiSpec {
     pub tags: Option<Vec<JsonValue>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub webhooks: Option<HashMap<String, PathItem>>,
+    pub webhooks: Option<IndexMap<String, PathItem>>,
 
     #[serde(skip_serializing_if = "Option::is_none", rename = "externalDocs")]
     pub external_docs: Option<JsonValue>,
@@ -102,9 +102,9 @@ pub struct Operation {
     pub operation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_body: Option<RequestBody>,
-    pub responses: HashMap<String, Response>,
+    pub responses: IndexMap<String, Response>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub callbacks: Option<HashMap<String, JsonValue>>,
+    pub callbacks: Option<IndexMap<String, JsonValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security: Option<Vec<JsonValue>>,
 }
@@ -130,14 +130,19 @@ pub struct Parameter {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestBody {
-    pub content: HashMap<String, MediaType>,
+    pub content: IndexMap<String, MediaType>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MediaType {
-    pub schema: JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "itemSchema")]
+    pub item_schema: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub example: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<JsonValue>,
 }
@@ -146,15 +151,16 @@ pub struct MediaType {
 pub struct Response {
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<HashMap<String, MediaType>>,
+    pub content: Option<IndexMap<String, MediaType>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Components {
-    pub schemas: HashMap<String, JsonValue>,
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
+    pub schemas: IndexMap<String, JsonValue>,
 
-    #[serde(skip_serializing_if = "HashMap::is_empty", rename = "securitySchemes")]
-    pub security_schemes: HashMap<String, JsonValue>,
+    #[serde(skip_serializing_if = "IndexMap::is_empty", rename = "securitySchemes")]
+    pub security_schemes: IndexMap<String, JsonValue>,
 }
 
 impl Default for OpenApiSpec {
@@ -170,14 +176,14 @@ impl Default for OpenApiSpec {
                 contact: None,
                 license: None,
             },
-            paths: HashMap::new(),
+            paths: IndexMap::new(),
             servers: None,
             tags: None,
             webhooks: None,
             external_docs: None,
             components: Some(Components {
-                schemas: HashMap::new(),
-                security_schemes: HashMap::new(),
+                schemas: IndexMap::new(),
+                security_schemes: IndexMap::new(),
             }),
         }
     }

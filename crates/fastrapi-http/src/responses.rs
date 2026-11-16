@@ -2,6 +2,7 @@
 //! It also finds the kind of a response object and validates the response model.
 
 use crate::response_api::HeadersArg;
+use crate::response_api::RenderOverrides;
 use axum::http::StatusCode;
 use papaya::HashMap;
 use pyo3::prelude::*;
@@ -153,16 +154,19 @@ macro_rules! json_response_subclass {
         #[pymethods]
         impl $struct_name {
             #[new]
+            #[classmethod]
             #[pyo3(signature = (content=None, status_code=200, headers=None, media_type=None, background=None))]
             fn new(
-                py: Python<'_>,
+                cls: &Bound<'_, PyType>,
                 content: Option<Py<PyAny>>,
                 status_code: u16,
                 headers: Option<HeadersArg>,
                 media_type: Option<String>,
                 background: Option<Py<PyAny>>,
             ) -> PyResult<PyClassInitializer<Self>> {
-                let parts = crate::response_api::response_parts(py, $py_name, content, status_code, headers.map(|headers| headers.0), media_type, background)?;
+                let py = cls.py();
+                let overrides = RenderOverrides::of::<Self>(cls);
+                let parts = crate::response_api::response_parts(py, $py_name, overrides, content, status_code, headers.map(|headers| headers.0), media_type, background)?;
                 Ok(PyClassInitializer::from(PyResponse::empty(py)?)
                     .add_subclass(PyJSONResponse::from_response_parts(parts))
                     .add_subclass(Self))

@@ -43,10 +43,7 @@ impl PyJinja2Templates {
         if let Some(value) = env {
             kwargs_out.set_item(pyo3::intern!(py, "env"), value)?;
         }
-        let inner = match directory {
-            Some(value) => cls.call((value,), Some(&kwargs_out))?,
-            None => cls.call0()?,
-        };
+        let inner = cls.call((directory,), Some(&kwargs_out))?;
         Ok(Self {
             inner: inner.unbind(),
         })
@@ -91,7 +88,15 @@ impl PyJinja2Templates {
             .bind(py)
             .call_method1(
                 pyo3::intern!(py, "TemplateResponse"),
-                (request, name, context, status_code, headers, media_type, background),
+                (
+                    request,
+                    name,
+                    context,
+                    status_code,
+                    headers,
+                    media_type,
+                    background,
+                ),
             )?
             .unbind())
     }

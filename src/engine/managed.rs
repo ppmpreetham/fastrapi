@@ -3,9 +3,9 @@
 
 use super::deferred::{Cleanup, finish_request, with_cleanup};
 use super::executor::{build_request_input_from_parts, kwargs_or_pending, request_object};
+use super::handler_errors::python_error_to_response_in;
 use super::pending_validation::dependency_failure;
 use super::server::telemetry::Operation;
-use super::handler_errors::python_error_to_response_in;
 use axum::http::request::Parts;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
@@ -143,7 +143,8 @@ pub(crate) async fn run_managed_handler(
                 && value.hasattr(intern!(py, "status_code"))?
                 && value.hasattr(intern!(py, "raw_headers"))?;
             let serialization = (!explicit).then(|| Operation::start(py, handler, "serialization"));
-            let response = convert_response_by_type(py, value, &handler.response, Some(input.headers));
+            let response =
+                convert_response_by_type(py, value, &handler.response, Some(input.headers));
             if let Some(serialization) = serialization {
                 serialization.finish(response.as_ref().err());
             }

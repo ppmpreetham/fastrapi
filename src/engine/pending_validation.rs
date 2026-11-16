@@ -22,7 +22,8 @@ impl PendingValidation {
     ) -> Result<Self, Rejection> {
         match rejection {
             Rejection::Python(err)
-                if (!handler.payload.dependencies.is_empty() || handler.execution.operation_spans)
+                if (!handler.payload.dependencies.is_empty()
+                    || handler.execution.operation_spans)
                     && is_request_validation_error(py, &err) =>
             {
                 Ok(Self(err))
@@ -67,7 +68,11 @@ fn is_request_validation_error(py: Python<'_>, err: &PyErr) -> bool {
 fn combined_errors(py: Python<'_>, dependency: &PyErr, endpoint: &PyErr) -> PyResult<PyErr> {
     let errors = PyList::empty(py);
     for err in [dependency, endpoint] {
-        for item in err.value(py).call_method0(intern!(py, "errors"))?.try_iter()? {
+        for item in err
+            .value(py)
+            .call_method0(intern!(py, "errors"))?
+            .try_iter()?
+        {
             errors.append(item?)?;
         }
     }

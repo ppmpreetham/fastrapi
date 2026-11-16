@@ -9,17 +9,17 @@ use crate::route::ParsedParameter;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::responses::PyResponse;
 use fastrapi_pyutil::call::{CallArgs, CallLayout};
-use fastrapi_pyutil::errors::exc_info;
-use fastrapi_pyutil::imports::INSPECT;
 use fastrapi_runtime::py_bridge::EventLoop;
-use fastrapi_runtime::{blocking, py_bridge};
+use fastrapi_runtime::{blocking, py_bridge, server_state};
+use tokio::runtime::{Handle, RuntimeFlavor};
+use tokio::task::block_in_place;
 
 use crate::security::{OAuth2PasswordRequestForm, describe_scheme};
 use fastrapi_core::security::SecurityKind;
-use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyStopIteration};
+use pyo3::exceptions::{PyBaseException, PyRuntimeError, PyStopAsyncIteration, PyStopIteration};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyFunction, PyModule, PyString, PyTuple, PyType};
+use pyo3::types::{PyAny, PyCFunction, PyDict, PyFunction, PyString, PyTuple, PyType};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::mem::take;
@@ -31,6 +31,11 @@ fastrapi_pyutil::cached_py_import!(ASYNC_EXIT_STACK, "contextlib", "AsyncExitSta
 fastrapi_pyutil::cached_py_import!(CONTEXT_MANAGER, "contextlib", "contextmanager");
 fastrapi_pyutil::cached_py_import!(ASYNC_CONTEXT_MANAGER, "contextlib", "asynccontextmanager");
 fastrapi_pyutil::cached_py_import!(TO_THREAD, "asyncio", "to_thread");
+fastrapi_pyutil::cached_py_import!(
+    RUN_COROUTINE_THREADSAFE,
+    "asyncio",
+    "run_coroutine_threadsafe"
+);
 fastrapi_pyutil::cached_py_import!(PARTIAL, "functools", "partial");
 fastrapi_pyutil::cached_py_import!(STARLETTE_RESPONSE, "starlette.responses", "Response");
 
@@ -45,16 +50,33 @@ struct ParserKeys<'py> {
     scope: &'py Bound<'py, PyString>,
 }
 
+/// The `scope` of a `Depends` marker: when the teardown of a generator dependency runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DependencyScope {
+    Function,
+    Request,
+}
+
+impl DependencyScope {
+    fn of(value: &Bound<'_, PyAny>) -> Option<Self> {
+        match value.extract::<&str>().ok()? {
+            "function" => Some(Self::Function),
+            "request" => Some(Self::Request),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct MarkerOptions {
     use_cache: bool,
-    function_scope: bool,
+    scope: Option<DependencyScope>,
 }
 
 impl MarkerOptions {
     const ROOT: Self = Self {
         use_cache: true,
-        function_scope: false,
+        scope: None,
     };
 
     fn of(marker: &Bound<'_, PyAny>, keys: &ParserKeys<'_>) -> Self {
@@ -64,13 +86,41 @@ impl MarkerOptions {
                 .ok()
                 .and_then(|value| value.is_truthy().ok())
                 .unwrap_or(true),
-            function_scope: marker
+            scope: marker
                 .getattr(keys.scope)
                 .ok()
-                .and_then(|value| value.extract::<String>().ok())
-                .is_some_and(|scope| scope == "function"),
+                .and_then(|value| DependencyScope::of(&value)),
         }
     }
+}
+
+/// What FastAPI caches a dependency value by: the callable, its sorted scopes when it uses scopes, and its computed scope.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CacheKey {
+    call: u64,
+    scopes: Vec<String>,
+    scope: Option<DependencyScope>,
+}
+
+impl CacheKey {
+    fn new(call: u64, scopes: Option<&[String]>, scope: Option<DependencyScope>) -> Self {
+        let mut scopes = scopes.map(<[String]>::to_vec).unwrap_or_default();
+        scopes.sort_unstable();
+        scopes.dedup();
+        Self {
+            call,
+            scopes,
+            scope,
+        }
+    }
+}
+
+/// The dependencies already flattened, so that a cached dependency is parsed once.
+#[derive(Default)]
+struct Visited {
+    nodes: HashMap<CacheKey, usize>,
+    /// Whether a callable uses scopes through its signature, its sub-dependencies or by being a security scheme, as FastAPI's `_uses_scopes`.
+    uses_scopes: HashMap<u64, bool>,
 }
 
 impl<'py> ParserKeys<'py> {
@@ -103,7 +153,7 @@ pub enum InjectionType {
 )]
 #[derive(Clone, Debug)]
 pub struct DependencyNode {
-    pub func_id: u64,
+    pub cache_key: CacheKey,
     /// The dependency as the user declared it, used for caching, overrides and `OpenAPI`.
     pub func: Py<PyAny>,
     /// The callable the executor invokes, which is a security scheme's sync `_resolve`.
@@ -148,6 +198,7 @@ impl DependencyNode {
     }
 }
 
+#[derive(Debug)]
 pub struct TeardownTask {
     pub generator: Py<PyAny>,
     pub is_async: bool,
@@ -202,7 +253,7 @@ fn visit(
         }
         let root = output.len();
         replacement_root.index = root;
-        replacement_root.func_id = original.func_id;
+        replacement_root.cache_key = original.cache_key.clone();
         replacement_root.bindings.clone_from(&original.bindings);
         replacement_root.is_top_level = original.is_top_level;
         replacement_root.use_cache = original.use_cache;
@@ -443,91 +494,6 @@ pub async fn execute_request_dependencies(
     Ok(results)
 }
 
-fn get_signature<'py>(
-    py: Python<'py>,
-    func: &Bound<'py, PyAny>,
-    inspect: &Bound<'py, PyModule>,
-) -> PyResult<Bound<'py, PyAny>> {
-    if let Ok(signature) = func.getattr(intern!(py, "__signature__")) {
-        return Ok(signature);
-    }
-    inspect.call_method1(intern!(py, "signature"), (func,))
-}
-
-fn is_class(py: Python<'_>, inspect: &Bound<'_, PyModule>, func: &Bound<'_, PyAny>) -> bool {
-    inspect
-        .call_method1(intern!(py, "isclass"), (func,))
-        .and_then(|result| result.is_truthy())
-        .unwrap_or(false)
-}
-
-fn is_async_callable(
-    py: Python<'_>,
-    inspect: &Bound<'_, PyModule>,
-    func: &Bound<'_, PyAny>,
-) -> bool {
-    if let Ok(is_coroutine) = inspect.call_method1(intern!(py, "iscoroutinefunction"), (func,))
-        && is_coroutine.is_truthy().unwrap_or(false)
-    {
-        return true;
-    }
-    if is_class(py, inspect, func) {
-        return false;
-    }
-    if let Ok(call_method) = func.getattr(intern!(py, "__call__"))
-        && let Ok(is_coroutine) =
-            inspect.call_method1(intern!(py, "iscoroutinefunction"), (call_method,))
-        && is_coroutine.is_truthy().unwrap_or(false)
-    {
-        return true;
-    }
-    false
-}
-
-fn is_generator_callable(
-    py: Python<'_>,
-    inspect: &Bound<'_, PyModule>,
-    func: &Bound<'_, PyAny>,
-) -> bool {
-    if let Ok(is_gen) = inspect.call_method1(intern!(py, "isgeneratorfunction"), (func,))
-        && is_gen.is_truthy().unwrap_or(false)
-    {
-        return true;
-    }
-    if is_class(py, inspect, func) {
-        return false;
-    }
-    if let Ok(call_method) = func.getattr(intern!(py, "__call__"))
-        && let Ok(is_gen) = inspect.call_method1(intern!(py, "isgeneratorfunction"), (call_method,))
-        && is_gen.is_truthy().unwrap_or(false)
-    {
-        return true;
-    }
-    false
-}
-
-fn is_async_generator_callable(
-    py: Python<'_>,
-    inspect: &Bound<'_, PyModule>,
-    func: &Bound<'_, PyAny>,
-) -> bool {
-    if let Ok(is_gen) = inspect.call_method1(intern!(py, "isasyncgenfunction"), (func,))
-        && is_gen.is_truthy().unwrap_or(false)
-    {
-        return true;
-    }
-    if is_class(py, inspect, func) {
-        return false;
-    }
-    if let Ok(call_method) = func.getattr(intern!(py, "__call__"))
-        && let Ok(is_gen) = inspect.call_method1(intern!(py, "isasyncgenfunction"), (call_method,))
-        && is_gen.is_truthy().unwrap_or(false)
-    {
-        return true;
-    }
-    false
-}
-
 fn annotation_display_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Option<String> {
     annotation
         .getattr(intern!(py, "__name__"))
@@ -568,20 +534,19 @@ pub fn parse_dependencies(
     func: &Bound<PyAny>,
     path_param_names: &[String],
 ) -> PyResult<Vec<DependencyNode>> {
-    let inspect = INSPECT.get(py)?;
     let keys = ParserKeys::new(py);
     let mut flat_plan = Vec::new();
-    let mut visited = HashMap::new();
+    let mut visited = Visited::default();
 
     extract_and_flatten(
         py,
-        inspect,
         &keys,
         func,
         path_param_names,
-        true,
+        Depth::Endpoint,
         None,
-        Vec::new(),
+        &[],
+        &[],
         MarkerOptions::ROOT,
         &mut flat_plan,
         &mut visited,
@@ -636,10 +601,9 @@ pub fn parse_external_dependencies(
     markers: &[Py<PyAny>],
     path_param_names: &[String],
 ) -> PyResult<Vec<DependencyNode>> {
-    let inspect = INSPECT.get(py)?;
     let keys = ParserKeys::new(py);
     let mut flat_plan = Vec::new();
-    let mut visited = HashMap::new();
+    let mut visited = Visited::default();
 
     for marker in markers {
         let marker = marker.bind(py);
@@ -655,13 +619,13 @@ pub fn parse_external_dependencies(
             .unwrap_or_default();
         extract_and_flatten(
             py,
-            inspect,
             &keys,
             &callable,
             path_param_names,
-            true,
+            Depth::TopLevel,
             None,
-            scopes,
+            &[],
+            &scopes,
             MarkerOptions::of(marker, &keys),
             &mut flat_plan,
             &mut visited,
@@ -686,7 +650,11 @@ pub fn merge_dependencies(
         }
         let cached = node
             .use_cache
-            .then(|| merged.iter().position(|other| same_cache_key(other, &node)))
+            .then(|| {
+                merged
+                    .iter()
+                    .position(|other| other.cache_key == node.cache_key)
+            })
             .flatten();
         let position = if let Some(position) = cached {
             let target = &mut merged[position];
@@ -703,10 +671,6 @@ pub fn merge_dependencies(
     merged
 }
 
-fn same_cache_key(a: &DependencyNode, b: &DependencyNode) -> bool {
-    a.func_id == b.func_id && cache_scopes(&a.scopes) == cache_scopes(&b.scopes)
-}
-
 #[must_use]
 pub fn collect_dependency_markers(
     py: Python<'_>,
@@ -718,44 +682,85 @@ pub fn collect_dependency_markers(
         .unwrap_or_default()
 }
 
-type CacheKey = (u64, Vec<String>);
-
-fn cache_scopes(scopes: &[String]) -> Vec<String> {
-    let mut sorted = scopes.to_vec();
-    sorted.sort_unstable();
-    sorted.dedup();
-    sorted
+/// The scopes a `SecurityScopes` parameter receives: the parent scopes, then each own scope not already listed, as FastAPI's `_get_oauth_scopes`.
+fn oauth_scopes(parent_scopes: &[String], own_scopes: &[String]) -> Vec<String> {
+    let mut scopes = parent_scopes.to_vec();
+    for scope in own_scopes {
+        if !scopes.contains(scope) {
+            scopes.push(scope.clone());
+        }
+    }
+    scopes
 }
 
+/// Where a callable sits in the dependency tree of an endpoint.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Depth {
+    /// The endpoint itself, whose dependencies are top-level.
+    Endpoint,
+    /// A dependency the endpoint receives, or a dependency of the route.
+    TopLevel,
+    /// A sub-dependency of another dependency.
+    Nested,
+}
+
+impl Depth {
+    const fn child(self) -> Self {
+        match self {
+            Self::Endpoint => Self::TopLevel,
+            Self::TopLevel | Self::Nested => Self::Nested,
+        }
+    }
+}
+
+/// Flattens `func` and its sub-dependencies into `flat_plan`, and returns its index and whether it uses scopes.
 fn extract_and_flatten(
     py: Python,
-    inspect: &Bound<'_, PyModule>,
     keys: &ParserKeys<'_>,
     func: &Bound<PyAny>,
     path_param_names: &[String],
-    is_top_level: bool,
+    depth: Depth,
     parent_param_name: Option<&str>,
-    scopes: Vec<String>,
+    parent_scopes: &[String],
+    own_scopes: &[String],
     options: MarkerOptions,
     flat_plan: &mut Vec<DependencyNode>,
-    visited: &mut HashMap<CacheKey, usize>,
-) -> PyResult<usize> {
+    visited: &mut Visited,
+) -> PyResult<(usize, bool)> {
     let use_cache = options.use_cache;
+    let is_top_level = depth != Depth::Nested;
     let func_id = func.as_ptr() as u64;
-    let cache_key = (func_id, cache_scopes(&scopes));
+    let security_scopes = oauth_scopes(parent_scopes, own_scopes);
+    let is_async_generator = params::CallableKind::AsyncGenerator.matches(func)?;
+    let is_generator = !is_async_generator && params::CallableKind::Generator.matches(func)?;
+    let scope = options
+        .scope
+        .or_else(|| (is_generator || is_async_generator).then_some(DependencyScope::Request));
+    let cache_key = |uses_scopes: bool| {
+        CacheKey::new(
+            func_id,
+            uses_scopes.then_some(security_scopes.as_slice()),
+            scope,
+        )
+    };
 
-    if use_cache && let Some(&idx) = visited.get(&cache_key) {
-        if is_top_level {
-            let node = &mut flat_plan[idx];
-            node.is_top_level = true;
-            node.bindings
-                .extend(parent_param_name.map(|name| PyString::intern(py, name).unbind()));
+    if let Some(&calls_use_scopes) = visited.uses_scopes.get(&func_id) {
+        let uses_scopes = calls_use_scopes || !own_scopes.is_empty();
+        if use_cache && let Some(&idx) = visited.nodes.get(&cache_key(uses_scopes)) {
+            if is_top_level {
+                let node = &mut flat_plan[idx];
+                node.is_top_level = true;
+                node.bindings
+                    .extend(parent_param_name.map(|name| PyString::intern(py, name).unbind()));
+            }
+            return Ok((idx, uses_scopes));
         }
-        return Ok(idx);
     }
 
-    let signature = get_signature(py, func, inspect)?;
+    let current_scopes = [parent_scopes, own_scopes].concat();
+    let signature = params::resolved_signature(func)?;
     let parameters = signature.getattr(keys.parameters)?;
+    let mut sub_deps_use_scopes = false;
 
     let mut sub_deps: SmallVec<[(String, usize); 4]> = SmallVec::new();
     let items = parameters.call_method0(keys.items)?;
@@ -766,26 +771,19 @@ fn extract_and_flatten(
         let param_obj = pair.get_item(1)?;
         let param_name_str: &str = param_name.cast::<PyString>()?.to_str()?;
 
-        if param_name_str == "self" || param_name_str == "cls" || param_name_str == "return" {
+        if param_name_str == "return" {
             continue;
         }
 
         if let Ok(default) = param_obj.getattr(keys.default) {
-            let default_is_empty = params::is_inspect_empty(py, &default);
-            let marker: Option<Bound<'_, PyAny>> = if default_is_empty {
-                params::find_annotated_dependency_marker(&param_obj)
-            } else {
-                Some(default)
-            };
+            let marker = params::find_annotated_dependency_marker(&param_obj)
+                .or_else(|| (!params::is_inspect_empty(py, &default)).then_some(default));
 
             let Some(marker) = marker else {
                 continue;
             };
 
-            let is_depends = marker.hasattr(keys.dependency).unwrap_or(false);
-            let is_security = marker.hasattr(keys.scopes).unwrap_or(false);
-
-            if !is_depends && !is_security {
+            if !params::is_dependency_marker(&marker) {
                 continue;
             }
 
@@ -803,47 +801,49 @@ fn extract_and_flatten(
                 continue;
             };
 
-            let mut child_scopes = scopes.clone();
-            if is_security
-                && let Some(own) = marker
-                    .getattr(keys.scopes)
-                    .ok()
-                    .and_then(|value| extract_string_list(&value))
-            {
-                child_scopes.extend(own);
-            }
+            let child_own_scopes = marker
+                .getattr(keys.scopes)
+                .ok()
+                .and_then(|value| extract_string_list(&value))
+                .unwrap_or_default();
 
-            let target_index = extract_and_flatten(
+            let (target_index, child_uses_scopes) = extract_and_flatten(
                 py,
-                inspect,
                 keys,
                 &target_callable,
                 path_param_names,
-                is_top_level && parent_param_name.is_none(),
+                depth.child(),
                 Some(param_name_str),
-                child_scopes,
+                &current_scopes,
+                &child_own_scopes,
                 MarkerOptions::of(&marker, keys),
                 flat_plan,
                 visited,
             )?;
+            sub_deps_use_scopes |= child_uses_scopes;
 
             sub_deps.push((param_name_str.to_owned(), target_index));
         }
     }
 
     let (injection_plan, needs_request_object) =
-        build_injection_plan(py, func, path_param_names, &sub_deps, inspect, keys)?;
+        build_injection_plan(py, &parameters, path_param_names, &sub_deps, keys)?;
+    let calls_use_scopes = sub_deps_use_scopes
+        || injection_plan
+            .iter()
+            .any(|(_, injection)| matches!(injection, InjectionType::SecurityScopes))
+        || describe_scheme(py, func).is_some();
+    visited.uses_scopes.insert(func_id, calls_use_scopes);
+    let uses_scopes = calls_use_scopes || !own_scopes.is_empty();
     let injection_plan = injection_plan
         .into_iter()
         .map(|(name, injection)| (PyString::intern(py, &name).unbind(), injection))
         .collect();
-    let is_async = is_async_callable(py, inspect, func);
-    let is_generator = is_generator_callable(py, inspect, func);
-    let is_async_generator = is_async_generator_callable(py, inspect, func);
+    let is_async = params::CallableKind::Coroutine.matches(func)?;
 
     let node_index = flat_plan.len();
     flat_plan.push(DependencyNode {
-        func_id,
+        cache_key: cache_key(uses_scopes),
         func: func.as_unbound().clone(),
         call: func.as_unbound().clone(),
         is_async,
@@ -855,9 +855,9 @@ fn extract_and_flatten(
             .map(|name| PyString::intern(py, name).unbind())
             .into_iter()
             .collect(),
-        scopes: scopes.into(),
+        scopes: security_scopes.into(),
         use_cache,
-        function_scope: options.function_scope,
+        function_scope: options.scope == Some(DependencyScope::Function),
         is_top_level,
         injection_plan,
         needs_request_object,
@@ -865,24 +865,24 @@ fn extract_and_flatten(
         call_layout: None,
     });
 
-    visited.entry(cache_key).or_insert(node_index);
+    visited
+        .nodes
+        .entry(flat_plan[node_index].cache_key.clone())
+        .or_insert(node_index);
 
-    Ok(node_index)
+    Ok((node_index, uses_scopes))
 }
 
 fn build_injection_plan(
     py: Python,
-    func: &Bound<PyAny>,
+    parameters: &Bound<PyAny>,
     path_param_names: &[String],
     sub_deps: &[(String, usize)],
-    inspect: &Bound<'_, PyModule>,
     keys: &ParserKeys<'_>,
 ) -> PyResult<(Vec<(String, InjectionType)>, bool)> {
     let mut plan = Vec::new();
     let mut needs_request_object = false;
-    let signature = get_signature(py, func, inspect)?;
-    let parameters_any = signature.getattr(keys.parameters)?;
-    let parameters = parameters_any.call_method0(keys.items)?;
+    let parameters = parameters.call_method0(keys.items)?;
 
     for item in parameters.try_iter()? {
         let pair = item?.cast_into::<PyTuple>()?;
@@ -890,7 +890,7 @@ fn build_injection_plan(
         let name: String = key.extract()?;
         let param = pair.get_item(1)?;
 
-        if name == "self" || name == "cls" || name == "return" {
+        if name == "return" {
             continue;
         }
 
@@ -1051,21 +1051,35 @@ async fn execute_dependencies_inner(
                     .take_while(|node| node.is_sync_callable())
                     .count();
 
+            let batch = &flat_plan[idx..run_end];
             Python::attach(|py| -> PyResult<()> {
-                for node in &flat_plan[idx..run_end] {
-                    let (result, teardown) = execute_sync_node(
-                        py,
-                        node,
-                        &results_registry,
-                        request_input,
-                        request.as_ref(),
-                    )?;
-                    if let Some(teardown) = teardown {
-                        teardown_tasks.push(teardown);
+                let mut run = || -> PyResult<()> {
+                    for node in batch {
+                        let (result, teardown) = execute_sync_node(
+                            py,
+                            node,
+                            &results_registry,
+                            request_input,
+                            request.as_ref(),
+                        )?;
+                        if let Some(teardown) = teardown {
+                            teardown_tasks.push(teardown);
+                        }
+                        register_result(
+                            py,
+                            node,
+                            result,
+                            &mut results_registry,
+                            &mut final_results,
+                        );
                     }
-                    register_result(py, node, result, &mut results_registry, &mut final_results);
+                    Ok(())
+                };
+                if batch.iter().any(|node| runs_python_code(py, node)) {
+                    offload_sync(run)
+                } else {
+                    run()
                 }
-                Ok(())
             })?;
 
             idx = run_end;
@@ -1125,6 +1139,24 @@ async fn execute_dependencies_inner(
     }
 
     Ok(final_results)
+}
+
+/// Whether a sync dependency runs Python code that could block, rather than a native security
+/// scheme's `_resolve`.
+#[inline]
+fn runs_python_code(py: Python<'_>, node: &DependencyNode) -> bool {
+    !node.call.bind(py).is_instance_of::<PyCFunction>()
+}
+
+/// Runs sync dependency code off the async scheduler, as FastAPI runs a sync dependency of an
+/// async endpoint with `run_in_threadpool`: tokio hands this worker's other tasks to another
+/// thread while `run` blocks. Outside a multi-thread runtime it runs `run` in place.
+#[inline]
+pub fn offload_sync<R>(run: impl FnOnce() -> R) -> R {
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => block_in_place(run),
+        _ => run(),
+    }
 }
 
 #[inline]
@@ -1203,86 +1235,223 @@ fn call_dependency<'py>(
     args.call(func, dep.call_layout.as_deref())
 }
 
+/// Finishes the yield dependencies of a sync route and logs a teardown failure, for callers
+/// with no request left to fail. See `run_teardowns_sync`.
 #[inline(always)]
 pub fn execute_teardowns_sync(py: Python<'_>, teardowns: TeardownTasks, error: Option<&PyErr>) {
-    for task in teardowns.into_iter().rev() {
-        if task.is_async {
-            tracing::error!("Async generator dependency found in sync route!");
-        } else {
-            let _entered = py_bridge::enter_request_copy(py);
-            finish_sync_generator(py, task.generator.bind(py), error);
-        }
+    if teardowns.is_empty() {
+        return;
+    }
+    if let Err(raised) = run_teardowns_sync(py, teardowns, error) {
+        log_teardown_error(py, &raised);
     }
 }
 
+/// Finishes the yield dependencies in reverse order, as `ExitStack.__exit__` does in FastAPI:
+/// each one sees the exception in flight at its `yield`, a new exception raised by a teardown
+/// replaces it for the teardowns after it, and that new exception is returned. Re-raising the
+/// exception that was thrown in is not a new failure.
+pub fn run_teardowns_sync(
+    py: Python<'_>,
+    teardowns: TeardownTasks,
+    error: Option<&PyErr>,
+) -> PyResult<()> {
+    let mut raised: Option<PyErr> = None;
+    for task in teardowns.into_iter().rev() {
+        let in_flight = raised.as_ref().or(error);
+        let outcome = if task.is_async {
+            close_async_from_sync(py, task.generator.bind(py), in_flight)
+        } else {
+            py_bridge::enter_request_copy(py)
+                .and_then(|_entered| finish_sync_generator(py, task.generator.bind(py), in_flight))
+        };
+        if let Err(new) = outcome {
+            raised = Some(new);
+        }
+    }
+    raised.map_or(Ok(()), Err)
+}
+
+/// Finishes the yield dependencies of an async route or a websocket and logs a teardown failure,
+/// as uvicorn logs an exception that escapes the application. See `run_teardowns_async`.
 pub async fn execute_teardowns_async(
     event_loop: EventLoop,
     teardowns: TeardownTasks,
     error: Option<&PyErr>,
 ) {
+    if teardowns.is_empty() {
+        return;
+    }
+    if let Err(raised) = run_teardowns_async(event_loop, teardowns, error).await {
+        Python::attach(|py| log_teardown_error(py, &raised));
+    }
+}
+
+/// `run_teardowns_sync` for an async route: async generators are resumed on the event loop and
+/// sync ones on the blocking pool, as FastAPI runs them through `contextmanager_in_threadpool`.
+pub async fn run_teardowns_async(
+    event_loop: EventLoop,
+    teardowns: TeardownTasks,
+    error: Option<&PyErr>,
+) -> PyResult<()> {
+    let mut raised: Option<PyErr> = None;
     let mut sync_batch: Vec<Py<PyAny>> = Vec::new();
 
     for task in teardowns.into_iter().rev() {
         if task.is_async {
-            flush_sync_teardowns(&mut sync_batch, error).await;
-            let resume = Python::attach(|py| {
-                let coroutine = resume_generator(py, task.generator.bind(py), error, true)?;
-                py_bridge::schedule_task(py, event_loop, coroutine)
-            });
-            let finished = match resume {
-                Ok(fut) => fut.await,
-                Err(e) => Err(e),
-            };
-            Python::attach(|py| report_teardown::<PyStopAsyncIteration>(py, finished, error));
+            flush_sync_teardowns(&mut sync_batch, error, &mut raised).await;
+            if let Err(new) =
+                finish_async_generator(event_loop, task.generator, raised.as_ref().or(error)).await
+            {
+                raised = Some(new);
+            }
         } else {
             sync_batch.push(task.generator);
         }
     }
-    flush_sync_teardowns(&mut sync_batch, error).await;
+    flush_sync_teardowns(&mut sync_batch, error, &mut raised).await;
+    raised.map_or(Ok(()), Err)
 }
 
-async fn flush_sync_teardowns(batch: &mut Vec<Py<PyAny>>, error: Option<&PyErr>) {
+#[cold]
+fn log_teardown_error(py: Python<'_>, raised: &PyErr) {
+    tracing::error!("Exception in generator dependency teardown: {raised}");
+    raised.display(py);
+}
+
+async fn flush_sync_teardowns(
+    batch: &mut Vec<Py<PyAny>>,
+    error: Option<&PyErr>,
+    raised: &mut Option<PyErr>,
+) {
     if batch.is_empty() {
         return;
     }
     let generators = take(batch);
-    let error = error.map(|error| Python::attach(|py| error.clone_ref(py)));
-    _ = blocking::run_python(move |py| {
+    let in_flight = Python::attach(|py| raised.as_ref().or(error).map(|error| error.clone_ref(py)));
+    let outcome = blocking::run_python(move |py| {
+        let mut new_raised: Option<PyErr> = None;
         for generator in generators {
-            finish_sync_generator(py, generator.bind(py), error.as_ref());
+            let current = new_raised.as_ref().or(in_flight.as_ref());
+            if let Err(new) = finish_sync_generator(py, generator.bind(py), current) {
+                new_raised = Some(new);
+            }
         }
+        new_raised
     })
     .await;
-}
-
-fn finish_sync_generator(py: Python<'_>, generator: &Bound<'_, PyAny>, error: Option<&PyErr>) {
-    let finished = resume_generator(py, generator, error, false).map(Bound::unbind);
-    report_teardown::<PyStopIteration>(py, finished, error);
-}
-
-fn resume_generator<'py>(
-    py: Python<'py>,
-    generator: &Bound<'py, PyAny>,
-    error: Option<&PyErr>,
-    asynchronous: bool,
-) -> PyResult<Bound<'py, PyAny>> {
-    match (error, asynchronous) {
-        (Some(error), false) => generator.call_method1(intern!(py, "throw"), exc_info(py, error)),
-        (Some(error), true) => generator.call_method1(intern!(py, "athrow"), exc_info(py, error)),
-        (None, false) => generator.call_method0(intern!(py, "__next__")),
-        (None, true) => generator.call_method0(intern!(py, "__anext__")),
+    match outcome {
+        Ok(Some(new)) => *raised = Some(new),
+        Ok(None) => {}
+        Err(panicked) => *raised = Some(PyRuntimeError::new_err(panicked.to_string())),
     }
 }
 
-fn report_teardown<Done: pyo3::PyTypeInfo>(
+/// Resumes one sync generator at its `yield`, as `contextmanager.__exit__` does.
+fn finish_sync_generator(
+    py: Python<'_>,
+    generator: &Bound<'_, PyAny>,
+    error: Option<&PyErr>,
+) -> PyResult<()> {
+    let finished = match error {
+        Some(error) => generator.call_method1(intern!(py, "throw"), (thrown(py, error),)),
+        None => generator.call_method0(intern!(py, "__next__")),
+    };
+    match teardown_outcome::<PyStopIteration>(py, finished.map(Bound::unbind), error) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            // It yielded again; close it before reporting, as contextlib does.
+            let closed = generator.call_method0(intern!(py, "close"));
+            Err(closed.err().unwrap_or_else(|| didnt_stop(error, "throw()")))
+        }
+        Err(raised) => Err(raised),
+    }
+}
+
+/// Resumes one async generator at its `yield`, as `asynccontextmanager.__aexit__` does.
+async fn finish_async_generator(
+    event_loop: EventLoop,
+    generator: Py<PyAny>,
+    error: Option<&PyErr>,
+) -> PyResult<()> {
+    let resume = Python::attach(|py| {
+        let generator = generator.bind(py);
+        let coroutine = match error {
+            Some(error) => generator.call_method1(intern!(py, "athrow"), (thrown(py, error),)),
+            None => generator.call_method0(intern!(py, "__anext__")),
+        }?;
+        py_bridge::schedule_task(py, event_loop, coroutine)
+    });
+    let finished = match resume {
+        Ok(future) => future.await,
+        Err(raised) => Err(raised),
+    };
+    let stopped =
+        Python::attach(|py| teardown_outcome::<PyStopAsyncIteration>(py, finished, error))?;
+    if stopped {
+        return Ok(());
+    }
+    // It yielded again; close it before reporting, as contextlib does.
+    let close = Python::attach(|py| {
+        let coroutine = generator.bind(py).call_method0(intern!(py, "aclose"))?;
+        py_bridge::schedule_task(py, event_loop, coroutine)
+    });
+    let closed = match close {
+        Ok(future) => future.await.map(drop),
+        Err(raised) => Err(raised),
+    };
+    Err(closed
+        .err()
+        .unwrap_or_else(|| didnt_stop(error, "athrow()")))
+}
+
+/// A sync route cannot await an async generator's teardown, so it is handed to the server's
+/// event loop to finish there.
+fn close_async_from_sync(
+    py: Python<'_>,
+    generator: &Bound<'_, PyAny>,
+    error: Option<&PyErr>,
+) -> PyResult<()> {
+    let coroutine = match error {
+        Some(error) => generator.call_method1(intern!(py, "athrow"), (thrown(py, error),))?,
+        None => generator.call_method0(intern!(py, "aclose"))?,
+    };
+    let Some(event_loop) = server_state::current_server() else {
+        drop(coroutine.call_method0(intern!(py, "close")));
+        return Err(PyRuntimeError::new_err(
+            "async generator dependency could not be finished: no running event loop",
+        ));
+    };
+    RUN_COROUTINE_THREADSAFE
+        .get(py)?
+        .call1((coroutine, event_loop.bind(py)))
+        .map(drop)
+}
+
+/// The exception thrown into a generator, carrying its traceback.
+fn thrown<'py>(py: Python<'py>, error: &PyErr) -> Bound<'py, PyBaseException> {
+    error.clone_ref(py).into_value(py).into_bound(py)
+}
+
+#[cold]
+fn didnt_stop(error: Option<&PyErr>, after: &str) -> PyErr {
+    PyRuntimeError::new_err(match error {
+        Some(_) => format!("generator didn't stop after {after}"),
+        None => "generator didn't stop".to_owned(),
+    })
+}
+
+/// `Ok(true)` when the generator finished, `Ok(false)` when it yielded again, and the error when
+/// it raised something other than the exception that was thrown into it.
+fn teardown_outcome<Done: pyo3::PyTypeInfo>(
     py: Python<'_>,
     finished: PyResult<Py<PyAny>>,
     error: Option<&PyErr>,
-) {
+) -> PyResult<bool> {
     match finished {
-        Ok(_) => tracing::error!("Generator dependency yielded twice!"),
-        Err(raised) if raised.is_instance_of::<Done>(py) => {}
-        Err(raised) if error.is_some_and(|error| raised.value(py).is(error.value(py))) => {}
-        Err(raised) => tracing::error!("Error during generator dependency teardown: {raised}"),
+        Ok(_) => Ok(false),
+        Err(raised) if raised.is_instance_of::<Done>(py) => Ok(true),
+        Err(raised) if error.is_some_and(|error| raised.value(py).is(error.value(py))) => Ok(true),
+        Err(raised) => Err(raised),
     }
 }

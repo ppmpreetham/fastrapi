@@ -14,10 +14,12 @@ use pyo3::exceptions::{
     PyAssertionError, PyRuntimeError, PyStopAsyncIteration, PyStopIteration, PyValueError,
 };
 use pyo3::prelude::*;
+use pyo3::types::PyType;
 use pyo3::types::{PyBytes, PyDict, PyList, PyString};
-use pyo3::{Borrowed, intern};
+use pyo3::{Borrowed, PyTypeInfo, intern};
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 pub struct HeadersArg(pub Py<PyDict>);
 
@@ -39,6 +41,9 @@ impl FromPyObject<'_, '_> for HeadersArg {
 }
 
 fastrapi_pyutil::cached_py_import!(JSON_DUMPS, "json", "dumps");
+fastrapi_pyutil::cached_py_import!(METHOD_DESCRIPTOR, "types", "MethodDescriptorType");
+fastrapi_pyutil::cached_py_import!(GETSET_DESCRIPTOR, "types", "GetSetDescriptorType");
+fastrapi_pyutil::cached_py_import!(WRAPPER_DESCRIPTOR, "types", "WrapperDescriptorType");
 fastrapi_pyutil::cached_py_import!(
     MUTABLE_HEADERS,
     "starlette.datastructures",
@@ -53,11 +58,92 @@ pub struct ResponseParts {
     pub background: Option<Py<PyAny>>,
     pub raw_headers: Py<PyList>,
     pub body: Py<PyAny>,
+    pub charset: String,
+}
+
+/// What a Python subclass of a native response class overrides about rendering,
+/// recorded by `__init_subclass__` when the class is defined.
+#[derive(Clone, Default)]
+pub struct RenderOverrides {
+    /// The class defines its own `render`, which its `__init__` calls.
+    render: bool,
+    media_type: MediaTypeOverride,
+    charset: Option<String>,
+}
+
+/// The `media_type` of a response class.
+#[derive(Clone, Default)]
+enum MediaTypeOverride {
+    /// The native class's default.
+    #[default]
+    Inherited,
+    /// A value the class sets itself, which may be `None`.
+    Own(Option<String>),
+}
+
+static RENDER_OVERRIDES: LazyLock<papaya::HashMap<usize, (Py<PyType>, RenderOverrides)>> =
+    LazyLock::new(papaya::HashMap::new);
+
+impl RenderOverrides {
+    /// The overrides of `cls`, a class built on the native response class `T`.
+    /// The native classes themselves have none, so their construction never looks them up.
+    pub fn of<T: PyTypeInfo>(cls: &Bound<'_, PyType>) -> Self {
+        if cls.is(T::type_object(cls.py())) {
+            return Self::default();
+        }
+        let key = cls.as_ptr() as usize;
+        RENDER_OVERRIDES
+            .pin()
+            .get(&key)
+            .map(|(_, overrides)| overrides.clone())
+            .unwrap_or_default()
+    }
+
+    /// Records what `cls` overrides. A class that overrides `render` gets an `__init__`
+    /// that calls it, as Starlette's `Response.__init__` does, unless it defines its own.
+    pub fn register(cls: &Bound<'_, PyType>) -> PyResult<()> {
+        let py = cls.py();
+        let overrides = Self {
+            render: own_attribute(cls, intern!(py, "render"))?.is_some(),
+            media_type: match own_attribute(cls, intern!(py, "media_type"))? {
+                Some(media_type) => MediaTypeOverride::Own(media_type.extract()?),
+                None => MediaTypeOverride::Inherited,
+            },
+            charset: own_attribute(cls, intern!(py, "charset"))?
+                .map(|charset| charset.extract())
+                .transpose()?,
+        };
+        if overrides.render
+            && own_attribute(cls, intern!(py, "__init__"))?.is_none()
+            && let Some(init) = cls.getattr_opt(intern!(py, "_render_with_override"))?
+        {
+            cls.setattr(intern!(py, "__init__"), init)?;
+        }
+        RENDER_OVERRIDES
+            .pin()
+            .insert(cls.as_ptr() as usize, (cls.clone().unbind(), overrides));
+        Ok(())
+    }
+}
+
+/// The value of `name` on `cls` when a Python class sets it in place of the
+/// native class's descriptor.
+fn own_attribute<'py>(
+    cls: &Bound<'py, PyType>,
+    name: &Bound<'py, PyString>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = cls.py();
+    let value = cls.getattr(name)?;
+    let native = value.is_instance(METHOD_DESCRIPTOR.get(py)?)?
+        || value.is_instance(GETSET_DESCRIPTOR.get(py)?)?
+        || value.is_instance(WRAPPER_DESCRIPTOR.get(py)?)?;
+    Ok((!native).then_some(value))
 }
 
 pub fn response_parts(
     py: Python<'_>,
     class_name: &str,
+    overrides: RenderOverrides,
     content: Option<Py<PyAny>>,
     status_code: u16,
     headers: Option<Py<PyDict>>,
@@ -65,29 +151,31 @@ pub fn response_parts(
     background: Option<Py<PyAny>>,
 ) -> PyResult<ResponseParts> {
     let content = content.unwrap_or_else(|| py.None());
-    let media_type = media_type.or_else(|| {
-        match class_name {
+    let media_type = media_type.or_else(|| match overrides.media_type {
+        MediaTypeOverride::Own(media_type) => media_type,
+        MediaTypeOverride::Inherited => match class_name {
             "HTMLResponse" => Some("text/html"),
             "PlainTextResponse" => Some("text/plain"),
             "JSONResponse" | "ORJSONResponse" | "UJSONResponse" => Some("application/json"),
             _ => None,
         }
-        .map(str::to_owned)
+        .map(str::to_owned),
     });
-    let streaming = class_name == "StreamingResponse";
-    let body = if streaming {
-        py.None()
-    } else {
-        render(py, content.bind(py), class_name, "utf-8")?.unbind()
-    };
+    let charset = overrides.charset.unwrap_or_else(|| "utf-8".to_owned());
+    // A class's own `render` runs in its `__init__`, once the instance exists.
+    let rendered = class_name != "StreamingResponse" && !overrides.render;
+    let body = rendered
+        .then(|| render(py, content.bind(py), class_name, &charset))
+        .transpose()?;
     let raw_headers = init_headers(
         py,
         headers.as_ref().map(|headers| headers.bind(py).as_any()),
-        (!streaming).then(|| body.bind(py)),
+        body.as_ref(),
         status_code,
         media_type.as_deref(),
-        "utf-8",
+        &charset,
     )?;
+    let body = body.map_or_else(|| py.None(), Bound::unbind);
     Ok(ResponseParts {
         content,
         status_code,
@@ -96,6 +184,7 @@ pub fn response_parts(
         background,
         raw_headers,
         body,
+        charset,
     })
 }
 

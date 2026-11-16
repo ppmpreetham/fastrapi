@@ -16,6 +16,7 @@ use fastrapi_runtime::tokio_runtime::spawn;
 use futures_util::StreamExt;
 use futures_util::stream::unfold;
 use parking_lot::Mutex;
+use pyo3::exceptions::PyOSError;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -39,6 +40,7 @@ pub struct PyDownstreamASGI {
     next: Next,
     head: Parts,
     locals: py_bridge::TaskLocals,
+    max_body_size: usize,
 }
 
 #[pyclass(
@@ -58,6 +60,8 @@ pub struct PyScopeDownstream;
 pub struct PyAsgiReceive {
     body: Arc<Mutex<Option<bytes::Bytes>>>,
     finished: watch::Receiver<bool>,
+    /// Closes when the client disconnects, as `pump` then closes its receiving end.
+    responses: Sender<Py<PyAny>>,
 }
 
 #[pyclass(
@@ -100,6 +104,7 @@ impl PyScopeDownstream {
             next: borrowed.next.clone(),
             head,
             locals: borrowed.locals.clone(),
+            max_body_size: borrowed.max_body_size,
         };
         let receive = receive.clone().unbind();
         let send = send.clone().unbind();
@@ -118,9 +123,16 @@ async fn run_downstream(
     receive: Py<PyAny>,
     send: Py<PyAny>,
 ) -> PyResult<()> {
-    let PyDownstreamASGI { next, head, locals } = downstream;
+    let PyDownstreamASGI {
+        next,
+        head,
+        locals,
+        max_body_size,
+    } = downstream;
 
-    let body = drain_receive(&locals, &receive).await?;
+    let Some(body) = drain_receive(&locals, &receive, max_body_size).await? else {
+        return send_response(&locals, &send, payload_too_large()).await;
+    };
     let req = Request::from_parts(head, Body::from(body));
     let resp = next.run(req).await;
     send_response(&locals, &send, resp).await
@@ -138,11 +150,19 @@ pub async fn asgi_receive(
     fut.await
 }
 
+/// The response sent when a request body is larger than `max_body_size`.
+#[must_use]
+pub fn payload_too_large() -> Response {
+    (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response()
+}
+
 /// Calls the `receive` callable of the middleware and assembles the body again.
+/// It returns `None` as soon as the body grows past `limit`.
 pub async fn drain_receive(
     locals: &py_bridge::TaskLocals,
     receive: &Py<PyAny>,
-) -> PyResult<bytes::Bytes> {
+    limit: usize,
+) -> PyResult<Option<bytes::Bytes>> {
     let mut buf = BytesMut::new();
     loop {
         let msg = asgi_receive(locals, receive).await?;
@@ -151,12 +171,15 @@ pub async fn drain_receive(
         let Some(chunk) = chunk else {
             break;
         };
+        if chunk.len() > limit.saturating_sub(buf.len()) {
+            return Ok(None);
+        }
         buf.extend(chunk);
         if !more {
             break;
         }
     }
-    Ok(buf.freeze())
+    Ok(Some(buf.freeze()))
 }
 
 /// Reads (`body`, `more_body`) from an ASGI `http.request` message.
@@ -293,10 +316,14 @@ impl PyAsgiReceive {
     fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let body = self.body.clone();
         let mut finished = self.finished.clone();
+        let responses = self.responses.clone();
         py_bridge::future_into_py(py, async move {
             let body = body.lock().take();
             if body.is_none() {
-                _ = finished.wait_for(|finished| *finished).await;
+                tokio::select! {
+                    _ = finished.wait_for(|finished| *finished) => {}
+                    () = responses.closed() => {}
+                }
             }
             Python::attach(|py| {
                 let msg = PyDict::new(py);
@@ -331,9 +358,10 @@ impl PyAsgiSend {
         let finished = self.finished.clone();
         let message = message.clone().unbind();
         py_bridge::future_into_py(py, async move {
+            // Like uvicorn's `ClientDisconnected`, an `OSError` that Starlette turns into `ClientDisconnect`.
             tx.send(message)
                 .await
-                .map_err(|_| PyRuntimeError::new_err("asgi send channel closed"))?;
+                .map_err(|_| PyOSError::new_err("the client disconnected"))?;
             if completes {
                 finished.send_replace(true);
             }
@@ -373,7 +401,7 @@ async fn run_asgi_app(
 ) -> Response {
     let (parts, body) = req.into_parts();
     let Ok(body_bytes) = to_bytes(body, max_body_size).await else {
-        return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response();
+        return payload_too_large();
     };
     let scope = Python::attach(|py| -> PyResult<_> {
         let locals = py_bridge::TaskLocals::new(event_loop.bind(py).clone());
@@ -384,6 +412,7 @@ async fn run_asgi_app(
                 next,
                 head: parts,
                 locals,
+                max_body_size,
             },
         )?;
         scope
@@ -408,7 +437,7 @@ pub async fn mounted_asgi(
         parts.uri = uri;
     }
     let Ok(body_bytes) = to_bytes(body, max_body_size).await else {
-        return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response();
+        return payload_too_large();
     };
     let scope = Python::attach(|py| -> PyResult<_> {
         let scope = build_scope(py, &parts.method, &parts.uri, &parts.headers, event_loop)?;
@@ -448,6 +477,7 @@ async fn drive_asgi(
             PyAsgiReceive {
                 body: Arc::new(Mutex::new(Some(body_bytes))),
                 finished: finished_rx,
+                responses: send_tx.clone(),
             },
         )?
         .into_any();
@@ -489,14 +519,22 @@ async fn pump(
 ) {
     let mut head = Some(head_tx);
     let mut fut = pin!(fut);
+    let mut connected = true;
     let result = loop {
         tokio::select! {
-            Some(msg) = send_rx.recv() => forward(&mut head, &body_tx, msg).await,
+            Some(msg) = send_rx.recv(), if connected => {
+                if !forward(&mut head, &body_tx, msg).await {
+                    // The client is gone: the app's next `send` raises and `receive` returns
+                    // `http.disconnect`, while the app task is still awaited to its end.
+                    connected = false;
+                    send_rx.close();
+                }
+            }
             result = &mut fut => break result,
         }
     };
-    while let Ok(msg) = send_rx.try_recv() {
-        forward(&mut head, &body_tx, msg).await;
+    while connected && let Ok(msg) = send_rx.try_recv() {
+        connected = forward(&mut head, &body_tx, msg).await;
     }
     if let Err(err) = result {
         if let Some(head_tx) = head.take() {
@@ -508,21 +546,20 @@ async fn pump(
     }
 }
 
+/// Passes one message on; `false` means the client no longer receives the response.
 async fn forward(
     head: &mut Option<oneshot::Sender<PyResult<Head>>>,
     body_tx: &Sender<BodyChunk>,
     msg: Py<PyAny>,
-) {
+) -> bool {
     match Python::attach(|py| parse_response_message(py, msg.bind(py))) {
-        ResponseMessage::Start(status, headers) => {
-            if let Some(head_tx) = head.take() {
-                _ = head_tx.send(Ok((status, headers)));
-            }
-        }
+        ResponseMessage::Start(status, headers) => head
+            .take()
+            .is_none_or(|head_tx| head_tx.send(Ok((status, headers))).is_ok()),
         ResponseMessage::Body(chunk, _) if !chunk.is_empty() => {
-            _ = body_tx.send(Ok(chunk)).await;
+            body_tx.send(Ok(chunk)).await.is_ok()
         }
-        _ => {}
+        _ => true,
     }
 }
 
@@ -601,10 +638,7 @@ pub fn build_scope(
     scope.set_item(intern!(py, "http_version"), intern!(py, "1.1"))?;
     scope.set_item(intern!(py, "method"), method.as_str())?;
     scope.set_item(intern!(py, "scheme"), intern!(py, "http"))?;
-    scope.set_item(
-        intern!(py, "path"),
-        crate::request::decode_path(uri.path()),
-    )?;
+    scope.set_item(intern!(py, "path"), crate::request::decode_path(uri.path()))?;
     scope.set_item(
         intern!(py, "raw_path"),
         PyBytes::new(py, uri.path().as_bytes()),

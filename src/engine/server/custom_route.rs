@@ -1,4 +1,5 @@
 use super::dispatch::dispatch_or_not_found;
+use super::payload::body_read_error_response;
 use super::serve::AppState;
 use crate::engine::executor::build_request_input_from_parts;
 use crate::engine::handler_errors::python_error_to_response_in;
@@ -154,8 +155,9 @@ pub(crate) async fn run_custom_handler(
     param_ranges: SmallVec<[PathParamRange; 4]>,
 ) -> Response {
     let (parts, body) = request.into_parts();
-    let Ok(body) = to_bytes(body, state.max_body_size.unwrap_or(usize::MAX)).await else {
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    let body = match to_bytes(body, state.max_body_size.unwrap_or(usize::MAX)).await {
+        Ok(body) => body,
+        Err(err) => return body_read_error_response(&err),
     };
     let event_loop = state.event_loop;
     let input = build_request_input_from_parts(

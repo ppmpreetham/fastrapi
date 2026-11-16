@@ -12,7 +12,6 @@ use fastrapi_http::response_type::ResponseType;
 use fastrapi_http::responses::{
     PyFileResponse, PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyRedirectResponse,
 };
-use fastrapi_pyutil::imports::INSPECT;
 use fastrapi_pyutil::json::SerializationHint;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString, PyTuple};
@@ -115,7 +114,9 @@ fn code_avoids_loop(
     if depth == 0 {
         return Ok(true);
     }
-    let function_type = py.import(intern!(py, "types"))?.getattr(intern!(py, "FunctionType"))?;
+    let function_type = py
+        .import(intern!(py, "types"))?
+        .getattr(intern!(py, "FunctionType"))?;
     for name in &names {
         let Ok(target) = globals.get_item(name) else {
             continue;
@@ -133,7 +134,9 @@ fn code_avoids_loop(
 
 fn never_suspends(py: Python<'_>, func: &Bound<'_, PyAny>) -> bool {
     (|| -> PyResult<bool> {
-        let function_type = py.import(intern!(py, "types"))?.getattr(intern!(py, "FunctionType"))?;
+        let function_type = py
+            .import(intern!(py, "types"))?
+            .getattr(intern!(py, "FunctionType"))?;
         if !func.is_instance(&function_type)? {
             return Ok(false);
         }
@@ -152,36 +155,6 @@ fn is_request_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool 
     connection_kind(py, annotation) == Some(ConnectionKind::Request)
 }
 
-fn is_coroutine_callable(py: Python<'_>, func: &Bound<'_, PyAny>) -> bool {
-    if let Ok(code) = func.getattr("__code__") {
-        return code
-            .getattr("co_flags")
-            .and_then(|flags| flags.extract::<u32>())
-            .is_ok_and(|flags| (flags & 0x80) != 0);
-    }
-    let Ok(inspect) = py.import("inspect") else {
-        return false;
-    };
-    let is_coroutine = |target: &Bound<'_, PyAny>| {
-        inspect
-            .call_method1("iscoroutinefunction", (target,))
-            .and_then(|result| result.is_truthy())
-            .unwrap_or(false)
-    };
-    if is_coroutine(func) {
-        return true;
-    }
-    if inspect
-        .call_method1("isclass", (func,))
-        .and_then(|result| result.is_truthy())
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    func.getattr("__call__")
-        .is_ok_and(|call| is_coroutine(&call))
-}
-
 pub fn parse_route_metadata(
     py: Python,
     func: &Bound<PyAny>,
@@ -190,7 +163,7 @@ pub fn parse_route_metadata(
     let response_type = get_response_type(py, func);
     let serialization_hint = get_serialization_hint(py, func);
 
-    let is_async = is_coroutine_callable(py, func);
+    let is_async = params::CallableKind::Coroutine.matches(func)?;
     let inline_async = is_async && never_suspends(py, func);
 
     let path_param_names = fastrapi_core::path::extract_path_param_names(path);
@@ -208,8 +181,7 @@ pub fn parse_route_metadata(
     let mut response_param = None;
 
     {
-        let inspect = INSPECT.get(py)?;
-        let signature = inspect.call_method1("signature", (func,))?;
+        let signature = params::resolved_signature(func)?;
         let parameters = signature.getattr("parameters")?;
         let items = parameters.call_method0("items")?;
 
@@ -220,9 +192,7 @@ pub fn parse_route_metadata(
             let param_name: String = pair.get_item(0)?.cast::<PyString>()?.to_string();
             let param_obj = pair.get_item(1)?;
 
-            if matches!(param_name.as_str(), "self" | "cls" | "return")
-                || dep_param_names.contains(&param_name)
-            {
+            if param_name == "return" || dep_param_names.contains(&param_name) {
                 continue;
             }
 
@@ -332,7 +302,7 @@ pub fn parse_websocket_signature(
         .iter()
         .flat_map(|d| d.bindings.iter().map(|n| n.bind(py).to_string()))
         .collect();
-    let signature = INSPECT.get(py)?.call_method1("signature", (func,))?;
+    let signature = params::resolved_signature(func)?;
     let mut parameters = Vec::new();
     for item in signature
         .getattr("parameters")?

@@ -49,8 +49,16 @@ impl Pool {
             let spawned = std::thread::Builder::new()
                 .name("python-blocking".into())
                 .spawn(move || self.run());
-            if spawned.is_err() {
-                self.queue.lock().threads -= 1;
+            if let Err(err) = spawned {
+                let mut queue = self.queue.lock();
+                queue.threads -= 1;
+                if queue.threads == 0 {
+                    // No thread will ever run these jobs; dropping them fails each waiter.
+                    let stranded = std::mem::take(&mut queue.jobs);
+                    drop(queue);
+                    tracing::error!("Could not start a blocking pool thread: {err}");
+                    drop(stranded);
+                }
             }
         }
     }
@@ -84,8 +92,15 @@ impl Pool {
     }
 }
 
-/// The blocking task panicked.
+/// The blocking task panicked, or the pool could not run it.
 pub struct Panicked(Box<dyn Any + Send>);
+
+impl Panicked {
+    #[cold]
+    fn message(message: String) -> Self {
+        Self(Box::new(message))
+    }
+}
 
 impl fmt::Debug for Panicked {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -118,11 +133,18 @@ where
     POOL.submit(Box::new(move || {
         let result = catch_unwind(AssertUnwindSafe(|| {
             Python::attach(|py| {
-                let _entered = py_bridge::enter_copy(py, context.as_ref());
-                py_bridge::with_job_context(context, || task(py))
+                // User code must not run in the wrong context, so a failed enter fails the job.
+                let _entered = py_bridge::enter_copy(py, context.as_ref()).map_err(|err| {
+                    Panicked::message(format!("could not enter the request context: {err}"))
+                })?;
+                Ok(py_bridge::with_job_context(context, || task(py)))
             })
         }));
-        _ = tx.send(result.map_err(Panicked));
+        _ = tx.send(result.map_err(Panicked).and_then(|result| result));
     }));
-    rx.await.expect("blocking pool dropped a job")
+    rx.await.unwrap_or_else(|_| {
+        Err(Panicked::message(
+            "the blocking pool dropped the job".to_owned(),
+        ))
+    })
 }

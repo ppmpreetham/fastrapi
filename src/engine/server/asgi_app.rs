@@ -1,18 +1,17 @@
-use super::lifecycle::{run_shutdown_phase, run_startup_phase};
 use super::asgi_websocket::AsgiSocket;
+use super::lifecycle::{run_shutdown_phase, run_startup_phase, stop_background_asyncio_loop};
 use super::serve::{PreparedApp, prepare_app};
 use super::telemetry::Telemetry;
 use super::websocket::WebSocketOutcome;
-use axum::Router;
-use std::sync::OnceLock;
 use crate::engine::config::FastrAPI;
 use crate::engine::deferred::take_request_work;
+use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderName, HeaderValue, Request, Version};
 use fastrapi_http::background::AfterResponse;
 use fastrapi_http::exceptions::UnhandledError;
 use fastrapi_http::middleware::asgi::{
-    ResponseMessages, asgi_call, drain_receive, send_response, send_response_as,
+    ResponseMessages, asgi_call, drain_receive, payload_too_large, send_response, send_response_as,
 };
 use fastrapi_http::request_input::{AsgiMount, NamedClient};
 use fastrapi_runtime::blocking::run_python;
@@ -20,14 +19,29 @@ use fastrapi_runtime::py_bridge::{self, TaskLocals};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyString};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tower::ServiceExt;
+
+/// The ASGI app of a `FastrAPI` instance, built on its first ASGI call.
+///
+/// The cell sits behind an `Arc` so it can be initialized without holding a
+/// borrow of the app (`prepare_app` borrows it mutably), and a reset swaps in a
+/// fresh cell. `PyOnceLock` runs `prepare_app` once even when two threads make
+/// the first call at the same time, and detaches while it waits.
+pub(crate) type AsgiCell = Arc<PyOnceLock<Arc<AsgiApp>>>;
+
+pub(crate) fn new_asgi_cell() -> AsgiCell {
+    Arc::new(PyOnceLock::new())
+}
 
 pub(crate) struct AsgiApp {
     app: Py<FastrAPI>,
     prepared: PreparedApp,
     router: OnceLock<Router>,
+    max_body_size: usize,
 }
 
 impl AsgiApp {
@@ -35,25 +49,43 @@ impl AsgiApp {
     fn router(&self) -> Router {
         self.router
             .get_or_init(|| match self.prepared.telemetry {
-                Some(telemetry) => Python::attach(|py| telemetry.instrument(py, self.prepared.router.clone())),
+                Some(telemetry) => {
+                    Python::attach(|py| telemetry.instrument(py, self.prepared.router.clone()))
+                }
                 None => self.prepared.router.clone(),
             })
             .clone()
     }
 }
 
-fn asgi_app(slf: &Bound<'_, FastrAPI>) -> PyResult<Arc<AsgiApp>> {
-    if let Some(app) = slf.borrow().asgi.get() {
-        return Ok(app.clone());
+/// Stops the background asyncio loop of an app that a reset of the
+/// middleware stack (or the drop of the `FastrAPI` instance) discarded, once
+/// its last in-flight request has finished.
+impl Drop for AsgiApp {
+    fn drop(&mut self) {
+        let event_loop = self.prepared.event_loop;
+        _ = Python::try_attach(|py| stop_background_asyncio_loop(py, event_loop));
     }
-    let app = slf.clone().unbind();
-    let prepared = prepare_app(slf.py(), &app)?;
-    let built = Arc::new(AsgiApp {
-        app,
-        prepared,
-        router: OnceLock::new(),
-    });
-    Ok(slf.borrow().asgi.get_or_init(|| built).clone())
+}
+
+fn asgi_app(slf: &Bound<'_, FastrAPI>) -> PyResult<Arc<AsgiApp>> {
+    let py = slf.py();
+    let cell = Arc::clone(&slf.borrow().asgi);
+    if let Some(app) = cell.get(py) {
+        return Ok(Arc::clone(app));
+    }
+    cell.get_or_try_init(py, || {
+        let app = slf.clone().unbind();
+        let prepared = prepare_app(py, &app)?;
+        let max_body_size = slf.borrow().max_body_size.unwrap_or(usize::MAX);
+        Ok(Arc::new(AsgiApp {
+            app,
+            prepared,
+            router: OnceLock::new(),
+            max_body_size,
+        }))
+    })
+    .map(Arc::clone)
 }
 
 pub(crate) fn call<'py>(
@@ -85,7 +117,12 @@ pub(crate) fn call<'py>(
             py_bridge::future_into_py_with_locals(
                 py,
                 locals.clone(),
-                websocket(asgi, AsgiSocket::new(locals, receive, send), request, denials),
+                websocket(
+                    asgi,
+                    AsgiSocket::new(locals, receive, send),
+                    request,
+                    denials,
+                ),
             )
         }
         "lifespan" => py_bridge::future_into_py_with_locals(
@@ -181,7 +218,10 @@ async fn http(
     receive: Py<PyAny>,
     send: Py<PyAny>,
 ) -> PyResult<()> {
-    *request.body_mut() = Body::from(drain_receive(&locals, &receive).await?);
+    let Some(body) = drain_receive(&locals, &receive, asgi.max_body_size).await? else {
+        return send_response(&locals, &send, payload_too_large()).await;
+    };
+    *request.body_mut() = Body::from(body);
     let mut response = match asgi.router().oneshot(request).await {
         Ok(response) => response,
         Err(never) => match never {},
@@ -224,7 +264,13 @@ async fn websocket(
     match response.extensions_mut().remove::<WebSocketOutcome>() {
         Some(WebSocketOutcome::Handled) => Ok(()),
         Some(WebSocketOutcome::Denied) if denials => {
-            send_response_as(socket.locals(), socket.send_callable(), response, ResponseMessages::WebSocketDenial).await
+            send_response_as(
+                socket.locals(),
+                socket.send_callable(),
+                response,
+                ResponseMessages::WebSocketDenial,
+            )
+            .await
         }
         Some(WebSocketOutcome::Close(code, reason)) => socket.close(code, &reason).await,
         _ => socket.close(1000, "").await,

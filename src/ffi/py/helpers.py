@@ -1,6 +1,7 @@
 import abc
 import dataclasses
 import datetime
+import importlib
 import re
 from collections import defaultdict, deque
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -24,8 +25,35 @@ import anyio.to_thread
 from pydantic import AnyUrl, NameEmail, SecretBytes, SecretStr
 from pydantic import TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
+from pydantic.main import IncEx
 from pydantic_core import PydanticUndefined, Url
 from starlette.concurrency import run_in_threadpool
+
+
+def install_lazy_attributes(module, sources):
+    """Imports each attribute of `module` from its source module on first use.
+
+    Some Starlette modules warn when they are imported, so importing fastrapi must not import them.
+    """
+
+    def __getattr__(name):
+        try:
+            source = sources[name]
+        except KeyError:
+            raise AttributeError(f"module {module.__name__!r} has no attribute {name!r}") from None
+        value = getattr(importlib.import_module(source), name)
+        setattr(module, name, value)
+        return value
+
+    module.__getattr__ = __getattr__
+
+
+try:
+    from pydantic_extra_types.color import Color as PyExtraColor
+except ImportError:
+
+    class PyExtraColor:
+        pass
 
 
 def isoformat(o):

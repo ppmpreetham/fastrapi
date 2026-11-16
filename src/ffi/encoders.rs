@@ -2,6 +2,7 @@
 //! It contains `jsonable_encoder`, which converts Python objects into values that JSON can encode.
 
 use pyo3::exceptions::{PyAssertionError, PyValueError};
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
@@ -41,7 +42,10 @@ fn tables(py: Python<'_>) -> PyResult<&(Py<PyDict>, Py<PyDict>)> {
     TABLES.get_or_try_init(py, || {
         let helpers = super::compat::py_helpers(py)?;
         Ok((
-            helpers.getattr("ENCODERS_BY_TYPE")?.cast_into::<PyDict>()?.unbind(),
+            helpers
+                .getattr("ENCODERS_BY_TYPE")?
+                .cast_into::<PyDict>()?
+                .unbind(),
             helpers
                 .getattr("encoders_by_class_tuples")?
                 .cast_into::<PyDict>()?
@@ -96,7 +100,10 @@ fn encode_dict<'py>(
         {
             continue;
         }
-        encoded.set_item(encode(&key, None, None, opts)?, encode(&value, None, None, opts)?)?;
+        encoded.set_item(
+            encode(&key, None, None, opts)?,
+            encode(&value, None, None, opts)?,
+        )?;
     }
     Ok(encoded.into_any())
 }
@@ -108,6 +115,19 @@ fn is_sequence(py: Python<'_>, obj: &Bound<'_, PyAny>) -> bool {
         || obj.is_instance_of::<PyTuple>()
         || GENERATOR_TYPE.is_instance(py, obj)
         || DEQUE.is_instance(py, obj)
+}
+
+fn encode_sequence<'py>(
+    obj: &Bound<'py, PyAny>,
+    include: Option<&Bound<'py, PyAny>>,
+    exclude: Option<&Bound<'py, PyAny>>,
+    opts: Options<'_, 'py>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let encoded = PyList::empty(obj.py());
+    for item in obj.try_iter()? {
+        encoded.append(encode(&item?, include, exclude, opts)?)?;
+    }
+    Ok(encoded.into_any())
 }
 
 enum Fallback<'py> {
@@ -131,7 +151,10 @@ fn encode_fallback<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Fallback<'py>> {
         Err(dict_error) => VARS.get(py)?.call1((obj,)).map_err(|vars_error| {
             let errors = PyList::new(
                 py,
-                [dict_error.into_value(py), vars_error.clone_ref(py).into_value(py)],
+                [
+                    dict_error.into_value(py),
+                    vars_error.clone_ref(py).into_value(py),
+                ],
             );
             let error = match errors {
                 Ok(errors) => PyValueError::new_err((errors.unbind(),)),
@@ -168,16 +191,27 @@ fn encode<'py>(
     }
     let include = as_key_set(include)?;
     let exclude = as_key_set(exclude)?;
+    // An exact `dict` or `list` fails every check that FastAPI makes before its
+    // dict and sequence branches (`BaseModel`, `is_dataclass`, which looks up
+    // `__dataclass_fields__` on the type, `Enum`, `PurePath`, the scalars and
+    // `PydanticUndefinedType`), so it goes straight to its branch. Subclasses
+    // still take the full path below, in FastAPI's order.
+    if let Ok(dict) = obj.cast_exact::<PyDict>() {
+        return encode_dict(dict, include.as_ref(), exclude.as_ref(), opts);
+    }
+    if obj.is_exact_instance_of::<PyList>() || obj.is_exact_instance_of::<PyTuple>() {
+        return encode_sequence(obj, include.as_ref(), exclude.as_ref(), opts);
+    }
     if BASE_MODEL.is_instance(py, obj) {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("mode", "json")?;
-        kwargs.set_item("include", include.as_ref())?;
-        kwargs.set_item("exclude", exclude.as_ref())?;
-        kwargs.set_item("by_alias", opts.by_alias)?;
-        kwargs.set_item("exclude_unset", opts.exclude_unset)?;
-        kwargs.set_item("exclude_none", opts.exclude_none)?;
-        kwargs.set_item("exclude_defaults", opts.exclude_defaults)?;
-        let dumped = obj.call_method("model_dump", (), Some(&kwargs))?;
+        kwargs.set_item(intern!(py, "mode"), intern!(py, "json"))?;
+        kwargs.set_item(intern!(py, "include"), include.as_ref())?;
+        kwargs.set_item(intern!(py, "exclude"), exclude.as_ref())?;
+        kwargs.set_item(intern!(py, "by_alias"), opts.by_alias)?;
+        kwargs.set_item(intern!(py, "exclude_unset"), opts.exclude_unset)?;
+        kwargs.set_item(intern!(py, "exclude_none"), opts.exclude_none)?;
+        kwargs.set_item(intern!(py, "exclude_defaults"), opts.exclude_defaults)?;
+        let dumped = obj.call_method(intern!(py, "model_dump"), (), Some(&kwargs))?;
         let nested = Options {
             by_alias: true,
             exclude_unset: false,
@@ -194,7 +228,7 @@ fn encode<'py>(
         return encode(&data, include.as_ref(), exclude.as_ref(), opts);
     }
     if ENUM.is_instance(py, obj) {
-        return obj.getattr("value");
+        return obj.getattr(intern!(py, "value"));
     }
     if PURE_PATH.is_instance(py, obj) {
         return Ok(obj.str()?.into_any());
@@ -212,11 +246,7 @@ fn encode<'py>(
         return encode_dict(dict, include.as_ref(), exclude.as_ref(), opts);
     }
     if is_sequence(py, obj) {
-        let encoded = PyList::empty(py);
-        for item in obj.try_iter()? {
-            encoded.append(encode(&item?, include.as_ref(), exclude.as_ref(), opts)?)?;
-        }
-        return Ok(encoded.into_any());
+        return encode_sequence(obj, include.as_ref(), exclude.as_ref(), opts);
     }
     match encode_fallback(obj)? {
         Fallback::Encoded(value) => Ok(value),
@@ -239,7 +269,7 @@ fn encode<'py>(
     reason = "FastAPI's jsonable_encoder accepts multiple boolean filtering flags"
 )]
 #[pyfunction]
-#[pyo3(signature = (obj, *, include=None, exclude=None, by_alias=true, exclude_unset=false, exclude_defaults=false, exclude_none=false, custom_encoder=None, sqlalchemy_safe=true))]
+#[pyo3(signature = (obj, include=None, exclude=None, by_alias=true, exclude_unset=false, exclude_defaults=false, exclude_none=false, custom_encoder=None, sqlalchemy_safe=true))]
 fn jsonable_encoder<'py>(
     obj: &Bound<'py, PyAny>,
     include: Option<&Bound<'py, PyAny>>,
@@ -274,6 +304,8 @@ pub(crate) fn register_tables(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "generate_encoders_by_class_tuples",
         "isoformat",
         "decimal_encoder",
+        "PyExtraColor",
+        "IncEx",
     ] {
         module.add(name, helpers.getattr(name)?)?;
     }

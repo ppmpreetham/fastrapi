@@ -25,6 +25,7 @@ serde_json.workspace = true
 simd-json.workspace = true
 smallvec.workspace = true
 smart-default.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 

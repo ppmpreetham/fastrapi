@@ -63,11 +63,12 @@ fn python_error_response(
     {
         return response;
     }
-    log_python_error(py, err);
+    log_python_error(py, "Python handler error", err);
     server_error_response(py, err, server)
 }
 
-pub(crate) fn log_python_error(py: Python<'_>, err: &PyErr) {
+/// Logs a Python error once, through `tracing`, with its formatted traceback.
+pub(crate) fn log_python_error(py: Python<'_>, context: &str, err: &PyErr) {
     let rendered = (|| -> PyResult<String> {
         let traceback_bound = TRACEBACK_MODULE.get(py)?;
 
@@ -77,10 +78,10 @@ pub(crate) fn log_python_error(py: Python<'_>, err: &PyErr) {
     })();
 
     match rendered {
-        Ok(traceback) => error!(target: "fastrapi::python", "Python handler error:\n{}", traceback),
+        Ok(traceback) => error!(target: "fastrapi::python", "{context}:\n{traceback}"),
         Err(format_err) => error!(
             target: "fastrapi::python",
-            "Python handler error: {}; traceback formatting failed: {}", err, format_err
+            "{context}: {err}; traceback formatting failed: {format_err}"
         ),
     }
 }

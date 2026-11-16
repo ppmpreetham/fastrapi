@@ -111,7 +111,7 @@ fn security_tuple<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyTuple
 #[pymethods]
 impl PyDepends {
     #[new]
-    #[pyo3(signature = (dependency=None, *, use_cache=true, scope=None))]
+    #[pyo3(signature = (dependency=None, use_cache=true, scope=None))]
     #[must_use]
     pub const fn new(
         dependency: Option<Py<PyAny>>,
@@ -202,12 +202,12 @@ pub struct PySecurity {
 #[pymethods]
 impl PySecurity {
     #[new]
-    #[pyo3(signature = (dependency=None, *, scopes=None, use_cache=true, scope=None))]
+    #[pyo3(signature = (dependency=None, use_cache=true, scope=None, scopes=None))]
     fn new(
         dependency: Option<Py<PyAny>>,
-        scopes: Option<Py<PyAny>>,
         use_cache: bool,
         scope: Option<Py<PyAny>>,
+        scopes: Option<Py<PyAny>>,
     ) -> pyo3::PyClassInitializer<Self> {
         PyClassInitializer::from(PyDepends::new(dependency, use_cache, scope))
             .add_subclass(Self { scopes })

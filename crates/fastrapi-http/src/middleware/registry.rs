@@ -1,12 +1,12 @@
 //! This module contains the middleware registry.
-//! The registry maps each built-in middleware class name to a builder.
-//! A builder reads the configuration and records the layer that the application adds.
+//! It finds the built-in middleware that fastrapi runs natively, by class identity,
+//! and records each layer the application adds with its own configuration.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
+use fastrapi_pyutil::lazy::LazyPyAttr;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyTuple, PyType};
 
 use super::PyMiddleware;
 use super::cors::{CORSMiddleware, CorsPolicy, parse_cors_params};
@@ -15,24 +15,98 @@ use super::httpsredirect::{HTTPSRedirectMiddleware, parse_https_redirect_params}
 use super::session::{SessionMiddleware, parse_session_params};
 use super::trustedhost::{TrustedHostMiddleware, parse_trusted_host_params};
 
+/// A middleware layer, in the order the application declared it.
+/// A built-in layer keeps its own configuration, so adding one twice keeps both.
 #[derive(Clone)]
 pub enum DeclaredLayer {
-    Cors,
-    TrustedHost,
+    Cors(Arc<CorsPolicy>),
+    TrustedHost(TrustedHostMiddleware),
     HttpsRedirect,
-    GZip,
-    Session,
+    GZip(GZipMiddleware),
+    Session(SessionMiddleware),
     Custom(Arc<PyMiddleware>),
     Decorator(Arc<PyMiddleware>),
 }
 
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_CORS,
+    "starlette.middleware.cors",
+    "CORSMiddleware"
+);
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_TRUSTED_HOST,
+    "starlette.middleware.trustedhost",
+    "TrustedHostMiddleware"
+);
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_HTTPS_REDIRECT,
+    "starlette.middleware.httpsredirect",
+    "HTTPSRedirectMiddleware"
+);
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_GZIP,
+    "starlette.middleware.gzip",
+    "GZipMiddleware"
+);
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_SESSION,
+    "starlette.middleware.sessions",
+    "SessionMiddleware"
+);
+
+impl DeclaredLayer {
+    /// The native layer for a built-in middleware class and its keyword arguments.
+    /// The class is matched by identity: fastrapi's own class or the Starlette class it
+    /// replaces. Any other class, even one with the same name, is not built in.
+    fn native(class: &Bound<'_, PyAny>, kwargs: &Bound<'_, PyDict>) -> PyResult<Option<Self>> {
+        let py = class.py();
+        let is = |native: Bound<'_, PyType>, starlette: &LazyPyAttr| -> PyResult<bool> {
+            Ok(class.is(&native) || class.is(starlette.get(py)?))
+        };
+        let layer = if is(py.get_type::<CORSMiddleware>(), &STARLETTE_CORS)? {
+            Self::Cors(Arc::new(CorsPolicy::new(&parse_cors_params(kwargs)?)?))
+        } else if is(
+            py.get_type::<TrustedHostMiddleware>(),
+            &STARLETTE_TRUSTED_HOST,
+        )? {
+            Self::TrustedHost(parse_trusted_host_params(kwargs)?)
+        } else if is(
+            py.get_type::<HTTPSRedirectMiddleware>(),
+            &STARLETTE_HTTPS_REDIRECT,
+        )? {
+            parse_https_redirect_params(kwargs)?;
+            Self::HttpsRedirect
+        } else if is(py.get_type::<GZipMiddleware>(), &STARLETTE_GZIP)? {
+            Self::GZip(parse_gzip_params(kwargs)?)
+        } else if is(py.get_type::<SessionMiddleware>(), &STARLETTE_SESSION)? {
+            Self::Session(parse_session_params(kwargs)?)
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(layer))
+    }
+
+    /// The layer for a configured built-in middleware object, as in `middleware=[CORSMiddleware(...)]`.
+    pub fn from_instance(item: &Bound<'_, PyAny>) -> PyResult<Option<Self>> {
+        let layer = if let Ok(config) = item.cast::<CORSMiddleware>() {
+            Self::Cors(Arc::new(CorsPolicy::new(&config.borrow())?))
+        } else if let Ok(config) = item.cast::<TrustedHostMiddleware>() {
+            Self::TrustedHost(config.borrow().clone())
+        } else if item.is_instance_of::<HTTPSRedirectMiddleware>() {
+            Self::HttpsRedirect
+        } else if let Ok(config) = item.cast::<GZipMiddleware>() {
+            Self::GZip(config.borrow().clone())
+        } else if let Ok(config) = item.cast::<SessionMiddleware>() {
+            Self::Session(config.borrow().clone())
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(layer))
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct MiddlewareContainer {
-    pub cors: Option<Arc<CorsPolicy>>,
-    pub trusted_host: Option<TrustedHostMiddleware>,
-    pub https_redirect: Option<HTTPSRedirectMiddleware>,
-    pub gzip: Option<GZipMiddleware>,
-    pub session: Option<SessionMiddleware>,
     pub order: Vec<DeclaredLayer>,
 }
 
@@ -43,264 +117,14 @@ impl MiddlewareContainer {
         args: &Bound<'_, PyTuple>,
         kwargs: &Bound<'_, PyDict>,
     ) -> PyResult<()> {
-        let class_name = class.getattr(pyo3::intern!(class.py(), "__name__"))?;
-        let class_name = class_name.cast::<pyo3::types::PyString>()?.to_str()?;
-        if let Some(builder) = MIDDLEWARE_REGISTRY.get(class_name) {
-            builder.parse_kwargs(kwargs, self)?;
-            self.record_layer(class_name);
-            tracing::info!("Enabled {class_name}");
+        let layer = if let Some(layer) = DeclaredLayer::native(class, kwargs)? {
+            layer
         } else {
             let middleware = PyMiddleware::from_custom(class.py(), class, args, Some(kwargs))?;
             tracing::info!("Enabled custom {:?} middleware", middleware.kind);
-            self.order.push(DeclaredLayer::Custom(Arc::new(middleware)));
-        }
-        Ok(())
-    }
-
-    pub fn record_layer(&mut self, class_name: &str) {
-        if let Some(builder) = MIDDLEWARE_REGISTRY.get(class_name) {
-            self.order.push(builder.layer());
-        }
-    }
-}
-
-pub trait MiddlewareBuilder: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn layer(&self) -> DeclaredLayer;
-
-    fn try_from_instance(
-        &self,
-        item: &Bound<'_, PyAny>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<bool>;
-
-    fn parse_kwargs(
-        &self,
-        kwargs: &Bound<'_, PyDict>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<()>;
-}
-
-struct CorsMiddlewareBuilder;
-
-impl MiddlewareBuilder for CorsMiddlewareBuilder {
-    fn name(&self) -> &'static str {
-        "CORSMiddleware"
-    }
-
-    fn layer(&self) -> DeclaredLayer {
-        DeclaredLayer::Cors
-    }
-
-    fn try_from_instance(
-        &self,
-        item: &Bound<'_, PyAny>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<bool> {
-        if let Ok(config_bound) = item.cast::<CORSMiddleware>() {
-            container.cors = Some(Arc::new(CorsPolicy::new(&config_bound.borrow())?));
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn parse_kwargs(
-        &self,
-        kwargs: &Bound<'_, PyDict>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<()> {
-        container.cors = Some(Arc::new(CorsPolicy::new(&parse_cors_params(kwargs)?)?));
-        Ok(())
-    }
-}
-
-struct TrustedHostMiddlewareBuilder;
-
-impl MiddlewareBuilder for TrustedHostMiddlewareBuilder {
-    fn name(&self) -> &'static str {
-        "TrustedHostMiddleware"
-    }
-
-    fn layer(&self) -> DeclaredLayer {
-        DeclaredLayer::TrustedHost
-    }
-
-    fn try_from_instance(
-        &self,
-        item: &Bound<'_, PyAny>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<bool> {
-        if let Ok(config_bound) = item.cast::<TrustedHostMiddleware>() {
-            container.trusted_host = Some(config_bound.borrow().clone());
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn parse_kwargs(
-        &self,
-        kwargs: &Bound<'_, PyDict>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<()> {
-        container.trusted_host = Some(parse_trusted_host_params(kwargs)?);
-        Ok(())
-    }
-}
-
-struct HttpsRedirectMiddlewareBuilder;
-
-impl MiddlewareBuilder for HttpsRedirectMiddlewareBuilder {
-    fn name(&self) -> &'static str {
-        "HTTPSRedirectMiddleware"
-    }
-
-    fn layer(&self) -> DeclaredLayer {
-        DeclaredLayer::HttpsRedirect
-    }
-
-    fn try_from_instance(
-        &self,
-        item: &Bound<'_, PyAny>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<bool> {
-        if let Ok(config_bound) = item.cast::<HTTPSRedirectMiddleware>() {
-            container.https_redirect = Some(config_bound.borrow().clone());
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn parse_kwargs(
-        &self,
-        kwargs: &Bound<'_, PyDict>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<()> {
-        container.https_redirect = Some(parse_https_redirect_params(kwargs)?);
-        Ok(())
-    }
-}
-
-struct GZipMiddlewareBuilder;
-
-impl MiddlewareBuilder for GZipMiddlewareBuilder {
-    fn name(&self) -> &'static str {
-        "GZipMiddleware"
-    }
-
-    fn layer(&self) -> DeclaredLayer {
-        DeclaredLayer::GZip
-    }
-
-    fn try_from_instance(
-        &self,
-        item: &Bound<'_, PyAny>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<bool> {
-        if let Ok(config_bound) = item.cast::<GZipMiddleware>() {
-            container.gzip = Some(config_bound.borrow().clone());
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn parse_kwargs(
-        &self,
-        kwargs: &Bound<'_, PyDict>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<()> {
-        container.gzip = Some(parse_gzip_params(kwargs)?);
-        Ok(())
-    }
-}
-
-struct SessionMiddlewareBuilder;
-
-impl MiddlewareBuilder for SessionMiddlewareBuilder {
-    fn name(&self) -> &'static str {
-        "SessionMiddleware"
-    }
-
-    fn layer(&self) -> DeclaredLayer {
-        DeclaredLayer::Session
-    }
-
-    fn try_from_instance(
-        &self,
-        item: &Bound<'_, PyAny>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<bool> {
-        if let Ok(config_bound) = item.cast::<SessionMiddleware>() {
-            container.session = Some(config_bound.borrow().clone());
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn parse_kwargs(
-        &self,
-        kwargs: &Bound<'_, PyDict>,
-        container: &mut MiddlewareContainer,
-    ) -> PyResult<()> {
-        container.session = Some(parse_session_params(kwargs)?);
-        Ok(())
-    }
-}
-
-pub struct MiddlewareRegistry {
-    builders: Vec<Box<dyn MiddlewareBuilder>>,
-    name_map: HashMap<&'static str, usize>,
-}
-
-impl MiddlewareRegistry {
-    #[must_use]
-    pub fn new() -> Self {
-        let mut registry = Self {
-            builders: Vec::new(),
-            name_map: HashMap::new(),
+            DeclaredLayer::Custom(Arc::new(middleware))
         };
-        registry.register(Box::new(CorsMiddlewareBuilder));
-        registry.register(Box::new(TrustedHostMiddlewareBuilder));
-        registry.register(Box::new(HttpsRedirectMiddlewareBuilder));
-        registry.register(Box::new(GZipMiddlewareBuilder));
-        registry.register(Box::new(SessionMiddlewareBuilder));
-        registry
-    }
-
-    pub fn register(&mut self, builder: Box<dyn MiddlewareBuilder>) {
-        let name = builder.name();
-        let idx = self.builders.len();
-        self.builders.push(builder);
-        self.name_map.insert(name, idx);
-    }
-
-    #[must_use]
-    pub fn get(&self, name: &str) -> Option<&dyn MiddlewareBuilder> {
-        self.name_map
-            .get(name)
-            .map(|&idx| self.builders[idx].as_ref())
-    }
-
-    #[must_use]
-    pub fn builders(&self) -> &[Box<dyn MiddlewareBuilder>] {
-        &self.builders
-    }
-
-    #[must_use]
-    pub fn supported_names(&self) -> Vec<&'static str> {
-        self.builders.iter().map(|b| b.name()).collect()
+        self.order.push(layer);
+        Ok(())
     }
 }
-
-impl Default for MiddlewareRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub static MIDDLEWARE_REGISTRY: LazyLock<MiddlewareRegistry> =
-    LazyLock::new(MiddlewareRegistry::new);

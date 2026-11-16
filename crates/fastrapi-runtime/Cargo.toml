@@ -11,6 +11,7 @@ pyo3.workspace = true
 pyo3-async-runtimes.workspace = true
 pyaio_faq = { package = "pyaio", path = "../../../pyaio" }
 tokio.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

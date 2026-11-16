@@ -220,6 +220,11 @@ impl<'py> Converter<'py> {
                 )
             }
             "union" => {
+                // The kernel validates smart unions only, so pydantic validates the other modes.
+                let mode = dict.get_item(intern!(py, "mode")).ok()?;
+                if mode.is_some_and(|mode| mode.extract::<&str>().ok() != Some("smart")) {
+                    return None;
+                }
                 let choices = dict
                     .get_item(intern!(py, "choices"))
                     .ok()??

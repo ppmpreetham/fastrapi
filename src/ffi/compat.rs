@@ -7,6 +7,7 @@ use fastrapi_openapi::schema::native_operation_id;
 pub(crate) use fastrapi_pyutil::imports::python_source_module;
 use pyo3::Bound;
 use pyo3::prelude::*;
+use pyo3::types::IntoPyDict;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple, PyType};
 use std::collections::HashSet;
 
@@ -42,6 +43,23 @@ pub(crate) fn py_helpers(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
             .map(Bound::unbind)
         })
         .map(|module| module.bind(py).clone())
+}
+
+/// Starlette's `WSGIMiddleware`, whose module warns on import.
+pub(crate) const WSGI_MIDDLEWARE: (&str, &str) = ("WSGIMiddleware", "starlette.middleware.wsgi");
+/// Starlette's `TestClient`, whose module warns on import when only `httpx` is installed.
+pub(crate) const TEST_CLIENT: (&str, &str) = ("TestClient", "starlette.testclient");
+
+/// Adds the `(name, source module)` attributes to `module`, imported on first use.
+pub(crate) fn add_lazy_attributes(
+    module: &Bound<'_, PyModule>,
+    sources: &[(&str, &str)],
+) -> PyResult<()> {
+    let py = module.py();
+    py_helpers(py)?
+        .getattr("install_lazy_attributes")?
+        .call1((module, sources.iter().copied().into_py_dict(py)?))?;
+    Ok(())
 }
 
 pub(crate) fn register_security(parent: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -156,7 +174,7 @@ impl DefaultPlaceholder {
 }
 
 #[pyfunction(name = "Default")]
-const fn default_placeholder(value: Py<PyAny>) -> DefaultPlaceholder {
+pub(crate) const fn default_placeholder(value: Py<PyAny>) -> DefaultPlaceholder {
     DefaultPlaceholder::new(value)
 }
 
@@ -223,6 +241,17 @@ pub(crate) fn register_types(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     module.add("IncEx", py.import("pydantic.main")?.getattr("IncEx")?)?;
     module.add("UnionType", py.import("types")?.getattr("UnionType")?)?;
+    module.add("types", py.import("types")?)?;
+    for (source, name) in [
+        ("typing", "Any"),
+        ("typing", "TypeVar"),
+        ("typing", "Union"),
+        ("collections.abc", "Callable"),
+        ("enum", "Enum"),
+        ("pydantic", "BaseModel"),
+    ] {
+        module.add(name, py.import(source)?.getattr(name)?)?;
+    }
     let type_of = builtins.getattr("type")?;
     let model_or_enum = type_of
         .get_item(py.import("pydantic")?.getattr("BaseModel")?)?
@@ -263,6 +292,7 @@ pub(crate) fn register_dependencies(parent: &Bound<'_, PyModule>) -> PyResult<()
         "solve_dependencies",
         "request_params_to_args",
         "request_body_to_args",
+        "SolvedDependency",
     ] {
         utils.add(name, dependant.getattr(name)?)?;
     }
@@ -381,9 +411,14 @@ pub(crate) fn register_compat_modules(parent: &Bound<'_, PyModule>) -> PyResult<
         }
     }
     let contextlib = py.import("contextlib")?;
-    for name in ["asynccontextmanager", "AsyncExitStack"] {
+    for name in ["asynccontextmanager", "AbstractContextManager"] {
         concurrency.add(name, contextlib.getattr(name)?)?;
     }
+    concurrency.add("anyio", py.import("anyio")?)?;
+    concurrency.add(
+        "CapacityLimiter",
+        py.import("anyio")?.getattr("CapacityLimiter")?,
+    )?;
     let helpers = py_helpers(py)?;
     concurrency.add(
         "contextmanager_in_threadpool",

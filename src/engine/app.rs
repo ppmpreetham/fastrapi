@@ -4,6 +4,8 @@
 
 use super::config::{AsgiMount, FastrAPI, FrontendMount, HostMount, StaticMount, SubAppMount};
 use super::server::serve::{serve, serve_with_reload};
+use crate::engine::exception_dispatch::invalidate_handler_cache;
+use crate::engine::server::asgi_app::new_asgi_cell;
 use crate::ffi::decorators;
 use crate::ffi::decorators::{PyAPIRouter, collect_router_routes, new_api_router};
 use ahash::AHasher;
@@ -14,7 +16,7 @@ use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
 use fastrapi_pyutil::imports::STARLETTE_STATE;
 use fastrapi_runtime::tokio_runtime::set_threads;
 use parking_lot::Mutex;
-use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyAssertionError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyAny, PyCFunction, PyDict, PyList, PyTuple};
 use pyo3::{Bound, intern};
@@ -22,6 +24,7 @@ use std::env::var_os;
 use std::hash::Hasher;
 use std::num::NonZero;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
@@ -63,9 +66,7 @@ fn is_startup_event(event_type: &str) -> PyResult<bool> {
     match event_type {
         "startup" => Ok(true),
         "shutdown" => Ok(false),
-        _ => Err(PyValueError::new_err(
-            "event_type must be 'startup' or 'shutdown'",
-        )),
+        _ => Err(PyAssertionError::new_err(())),
     }
 }
 
@@ -211,7 +212,7 @@ impl FastrAPI {
 pub(crate) fn frontend_mount(
     py: Python<'_>,
     mut path: String,
-    directory: String,
+    directory: PathBuf,
     fallback: Option<String>,
     check_dir: CheckDir,
 ) -> PyResult<FrontendMount> {
@@ -220,24 +221,26 @@ pub(crate) fn frontend_mount(
     }
     let check_dir = check_dir.resolve(py, &directory)?;
     if check_dir {
-        let realpath = |path: &str| -> PyResult<String> {
+        let realpath = |path: &Path| -> PyResult<String> {
             py.import(intern!(py, "os.path"))?
                 .call_method1(intern!(py, "realpath"), (path,))?
                 .extract()
         };
-        if !Path::new(&directory).is_dir() {
+        if !directory.is_dir() {
             return Err(PyRuntimeError::new_err(format!(
-                "Frontend directory '{directory}' does not exist. Resolved absolute path: '{}'",
+                "Frontend directory '{}' does not exist. Resolved absolute path: '{}'",
+                directory.display(),
                 realpath(&directory)?
             )));
         }
         if let Some(file) = fallback
             .as_deref()
             .filter(|file| matches!(*file, "index.html" | "404.html"))
-            && !Path::new(&directory).join(file).is_file()
+            && !directory.join(file).is_file()
         {
             return Err(PyRuntimeError::new_err(format!(
-                "Frontend fallback file '{file}' does not exist in directory '{directory}'. Resolved absolute directory: '{}'",
+                "Frontend fallback file '{file}' does not exist in directory '{}'. Resolved absolute directory: '{}'",
+                directory.display(),
                 realpath(&directory)?
             )));
         }
@@ -262,7 +265,7 @@ pub(crate) enum CheckDir {
 }
 
 impl CheckDir {
-    fn resolve(self, py: Python<'_>, directory: &str) -> PyResult<bool> {
+    fn resolve(self, py: Python<'_>, directory: &Path) -> PyResult<bool> {
         let mode = match self {
             Self::Flag(flag) => return Ok(flag),
             Self::Other(value) => return value.bind(py).is_truthy(),
@@ -274,7 +277,7 @@ impl CheckDir {
         if std::env::var_os("FASTAPI_ENV").is_none_or(|env| env != "development") {
             return Ok(true);
         }
-        if !Path::new(directory).is_dir() {
+        if !directory.is_dir() {
             let realpath: String = py
                 .import(intern!(py, "os.path"))?
                 .call_method1(intern!(py, "realpath"), (directory,))?
@@ -283,7 +286,8 @@ impl CheckDir {
                 py,
                 &py.get_type::<pyo3::exceptions::PyUserWarning>(),
                 &std::ffi::CString::new(format!(
-                    "Frontend directory '{directory}' does not exist. Resolved absolute path: '{realpath}'"
+                    "Frontend directory '{}' does not exist. Resolved absolute path: '{realpath}'",
+                    directory.display()
                 ))?,
                 2,
             )?;
@@ -406,6 +410,19 @@ impl FastrAPI {
         telemetry: Option<Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         crate::ffi::decorators::tree::validate_dependencies(py, dependencies.as_ref())?;
+        if let Some(url) = openapi_url.as_deref().filter(|url| !url.is_empty()) {
+            if title.is_empty() {
+                return Err(PyAssertionError::new_err(
+                    "A title must be provided for OpenAPI, e.g.: 'My API'",
+                ));
+            }
+            if version.is_empty() {
+                return Err(PyAssertionError::new_err(
+                    "A version must be provided for OpenAPI, e.g.: '2.1.0'",
+                ));
+            }
+            crate::ffi::decorators::ensure_routed_path(url)?;
+        }
         if !root_path.is_empty() {
             PyErr::warn(
                 py,
@@ -427,7 +444,10 @@ impl FastrAPI {
         };
         let generate_unique_id_function = generate_unique_id_function;
         let router_options = PyDict::new(py);
-        router_options.set_item(intern!(py, "default_response_class"), explicit_default_response_class)?;
+        router_options.set_item(
+            intern!(py, "default_response_class"),
+            explicit_default_response_class,
+        )?;
         router_options.set_item(intern!(py, "strict_content_type"), strict_content_type)?;
         router_options.set_item(intern!(py, "deprecated"), deprecated)?;
         router_options.set_item(intern!(py, "include_in_schema"), include_in_schema)?;
@@ -527,7 +547,7 @@ impl FastrAPI {
             middlewares: MiddlewareContainer::default(),
             openapi_cache: Mutex::new(None),
             openapi_schema: Mutex::new(None),
-            asgi: std::sync::OnceLock::new(),
+            asgi: new_asgi_cell(),
             stack_override: None,
             docs_routes: pyo3::sync::PyOnceLock::new(),
             openapi_version: "3.1.0".to_string(),
@@ -543,7 +563,7 @@ impl FastrAPI {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        if self.asgi.get().is_some() || self.stack_override.is_some() {
+        if self.asgi.get(middleware_class.py()).is_some() || self.stack_override.is_some() {
             return Err(PyRuntimeError::new_err(
                 "Cannot add middleware after an application has started",
             ));
@@ -615,9 +635,7 @@ impl FastrAPI {
         app: &Bound<'_, PyAny>,
         name: Option<String>,
     ) -> PyResult<()> {
-        if !path.starts_with('/') {
-            return Err(PyValueError::new_err("Mount path must start with '/'"));
-        }
+        crate::ffi::decorators::ensure_routed_path(&path)?;
 
         let normalized_path = if path.len() > 1 {
             path.trim_end_matches('/').to_string()
@@ -671,8 +689,10 @@ impl FastrAPI {
     /// Read more about it in the
     /// [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/#alternative-events-deprecated).
     fn on_event(slf: Py<Self>, py: Python<'_>, event_type: &str) -> PyResult<Py<PyAny>> {
-        let startup = is_startup_event(event_type)?;
+        crate::ffi::decorators::warn_on_event_deprecated(py)?;
+        let event_type = event_type.to_owned();
         let decorator = move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| {
+            let startup = is_startup_event(&event_type)?;
             let func = args.get_item(0)?.unbind();
             Python::attach(|py| -> PyResult<Py<PyAny>> {
                 slf.borrow_mut(py)
@@ -728,6 +748,7 @@ impl FastrAPI {
             handlers
                 .bind(py)
                 .set_item(exc_class_or_status_code, handler)?;
+            invalidate_handler_cache();
         }
         Ok(())
     }
@@ -840,7 +861,7 @@ impl FastrAPI {
         &mut self,
         py: Python<'_>,
         path: String,
-        directory: String,
+        directory: PathBuf,
         fallback: Option<String>,
         check_dir: CheckDir,
     ) -> PyResult<()> {
@@ -922,9 +943,6 @@ impl FastrAPI {
         reload_tick: u64,
         reload_ignore_worker_failure: bool,
     ) -> PyResult<()> {
-        const VERSION: &str = env!("CARGO_PKG_VERSION");
-        println!("running on FastRAPI v{VERSION}");
-
         if let Some(threads) = threads {
             let threads = NonZero::new(threads)
                 .ok_or_else(|| PyValueError::new_err("threads must be at least 1"))?;
@@ -952,7 +970,7 @@ impl FastrAPI {
         if let Some(stack) = &app.stack_override {
             return Ok(Some(stack.clone_ref(slf.py())));
         }
-        if app.asgi.get().is_none() {
+        if app.asgi.get(slf.py()).is_none() {
             return Ok(None);
         }
         slf.getattr(intern!(slf.py(), "_asgi"))
@@ -962,7 +980,7 @@ impl FastrAPI {
     #[setter]
     fn set_middleware_stack(&mut self, stack: Option<Py<PyAny>>) {
         if stack.is_none() {
-            self.asgi = std::sync::OnceLock::new();
+            self.asgi = new_asgi_cell();
         }
         self.stack_override = stack;
     }
@@ -975,7 +993,7 @@ impl FastrAPI {
     }
 
     fn build_middleware_stack<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        slf.borrow_mut().asgi = std::sync::OnceLock::new();
+        slf.borrow_mut().asgi = new_asgi_cell();
         slf.getattr(intern!(slf.py(), "_asgi"))
     }
 
@@ -1160,6 +1178,7 @@ impl FastrAPI {
                 handlers
                     .bind(py)
                     .set_item(exc_class_or_status_code.clone_ref(py), func.clone_ref(py))?;
+                invalidate_handler_cache();
             }
             Ok(func)
         };
@@ -1169,6 +1188,7 @@ impl FastrAPI {
     fn fallback(&self, py: Python, handler: Py<PyAny>) -> PyResult<Py<PyAny>> {
         if let Some(handlers) = &self.exception_handlers {
             handlers.bind(py).set_item(404, handler.clone_ref(py))?;
+            invalidate_handler_cache();
         }
         Ok(handler)
     }
@@ -1360,6 +1380,6 @@ impl FastrAPI {
             separate_input_output_schemas: self.separate_input_output_schemas,
             routes,
         };
-        Ok(build_openapi_spec(py, &document, collect_router_routes))
+        build_openapi_spec(py, &document, collect_router_routes)
     }
 }

@@ -33,7 +33,9 @@ pub(crate) enum SocketPumpError {
     Python(#[from] PyErr),
 }
 
+use super::asgi_websocket::AsgiSocket;
 use crate::engine::exception_dispatch::find_handler;
+use axum::extract::{FromRequestParts, Request};
 use axum::http::StatusCode;
 use axum::http::header::HOST;
 use axum::http::request::Parts;
@@ -43,8 +45,6 @@ use fastrapi_http::exceptions::{
 };
 use fastrapi_http::request::PyHTTPConnection;
 use fastrapi_http::request_input::{AsgiMount, RequestInput};
-use super::asgi_websocket::AsgiSocket;
-use axum::extract::{FromRequestParts, Request};
 use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_http::websocket::{WSDecision, WSMessage};
 use fastrapi_pyutil::json::py_any_to_json;
@@ -54,19 +54,19 @@ use smallvec::SmallVec;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 #[derive(Clone)]
-pub struct WsRouteState {
-    pub handler: Arc<Py<PyAny>>,
-    pub websocket_arg: Option<Py<PyString>>,
-    pub app: Py<PyAny>,
-    pub params: Arc<[ParsedParameter]>,
-    pub deps: Arc<Vec<dependencies::DependencyNode>>,
-    pub param_segments: Arc<[usize]>,
-    pub segment_count: usize,
-    pub param_names: Arc<[Arc<str>]>,
-    pub event_loop: EventLoop,
-    pub dependency_overrides: Option<Py<PyAny>>,
-    pub override_cache: Arc<dependencies::OverrideCache>,
-    pub host: Option<Box<str>>,
+pub(crate) struct WsRouteState {
+    pub(crate) handler: Arc<Py<PyAny>>,
+    pub(crate) websocket_arg: Option<Py<PyString>>,
+    pub(crate) app: Py<PyAny>,
+    pub(crate) params: Arc<[ParsedParameter]>,
+    pub(crate) deps: Arc<Vec<dependencies::DependencyNode>>,
+    pub(crate) param_segments: Arc<[usize]>,
+    pub(crate) segment_count: usize,
+    pub(crate) param_names: Arc<[Arc<str>]>,
+    pub(crate) event_loop: EventLoop,
+    pub(crate) dependency_overrides: Option<Py<PyAny>>,
+    pub(crate) override_cache: Arc<dependencies::OverrideCache>,
+    pub(crate) host: Option<Box<str>>,
 }
 
 /// Where a WebSocket connection's messages travel: a native socket or ASGI callables.
@@ -109,7 +109,10 @@ pub(crate) trait SessionIo {
     ) -> impl Future<Output = Result<(), SocketPumpError>> + Send;
 
     /// Sends one message to the client.
-    fn send(&mut self, message: WSMessage) -> impl Future<Output = Result<(), SocketPumpError>> + Send;
+    fn send(
+        &mut self,
+        message: WSMessage,
+    ) -> impl Future<Output = Result<(), SocketPumpError>> + Send;
 }
 
 struct NativeSocket {
@@ -156,7 +159,10 @@ pub(crate) async fn ws_host_handler(
     }
 }
 
-pub(crate) async fn ws_handler(State(route): State<Arc<WsRouteState>>, request: Request) -> Response {
+pub(crate) async fn ws_handler(
+    State(route): State<Arc<WsRouteState>>,
+    request: Request,
+) -> Response {
     let (mut parts, _) = request.into_parts();
     let ws = match WsTransport::take(&mut parts).await {
         Ok(ws) => ws,
@@ -187,7 +193,7 @@ pub(crate) async fn ws_handler(State(route): State<Arc<WsRouteState>>, request: 
     };
     let py_ws_obj = match Python::attach(|py| {
         let connection = PyHTTPConnection::from_scope(
-            build_scope(py, &parts, &request_input, route.app.bind(py)).into_any(),
+            build_scope(py, &parts, &request_input, route.app.bind(py))?.into_any(),
             py.None(),
         );
         Py::new(
@@ -271,6 +277,8 @@ pub(crate) async fn ws_handler(State(route): State<Arc<WsRouteState>>, request: 
             (decision, HandlerRun::Running(python_handler_future))
         }
         Handshake::Decision(None) => {
+            // Cancel the handler before its dependencies are torn down under it.
+            drop(python_handler_future);
             execute_teardowns_async(route.event_loop, teardowns, None).await;
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
@@ -290,7 +298,10 @@ pub(crate) async fn ws_handler(State(route): State<Arc<WsRouteState>>, request: 
     match decision {
         WSDecision::Reject(code) => {
             execute_teardowns_async(route.event_loop, teardowns, None).await;
-            with_outcome(StatusCode::FORBIDDEN.into_response(), WebSocketOutcome::Close(code, String::new()))
+            with_outcome(
+                StatusCode::FORBIDDEN.into_response(),
+                WebSocketOutcome::Close(code, String::new()),
+            )
         }
         WSDecision::Deny(response) => {
             execute_teardowns_async(route.event_loop, teardowns, None).await;
@@ -308,6 +319,7 @@ pub(crate) async fn ws_handler(State(route): State<Arc<WsRouteState>>, request: 
             match ws {
                 WsTransport::Native(ws) => {
                     let Ok((mut response, fut)) = ws.upgrade() else {
+                        session.abandon().await;
                         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                     };
                     response.headers_mut().extend(headers);
@@ -417,7 +429,9 @@ async fn handle_error(
             .and_then(|registry| find_handler(py, registry.bind(py), &error));
         let Some(handler) = handler else {
             if let Some(response) = fastrapi_http::exceptions::http_exception_response(value) {
-                let _ = websocket.borrow(py).deny(py, response);
+                if let Err(err) = websocket.borrow(py).deny(py, response) {
+                    error!("WebSocket denial response failed: {err}");
+                }
                 return Err(HandlerOutcome::Handled);
             }
             if let Some((code, reason)) = websocket_exception_close(py, value) {
@@ -473,11 +487,13 @@ async fn handle_error(
 }
 
 fn deny_with(websocket: &Bound<'_, PyWebSocket>, response: &Bound<'_, PyAny>) {
-    if !response.is_none() {
-        let _ = websocket.call_method1(
+    if !response.is_none()
+        && let Err(err) = websocket.call_method1(
             pyo3::intern!(websocket.py(), "send_denial_response"),
             (response,),
-        );
+        )
+    {
+        error!("WebSocket denial response failed: {err}");
     }
 }
 
@@ -493,7 +509,10 @@ async fn rejected(
     }
     let outcome = handle_error(route, websocket, error).await;
     let forbidden = |code, reason| {
-        with_outcome(StatusCode::FORBIDDEN.into_response(), WebSocketOutcome::Close(code, reason))
+        with_outcome(
+            StatusCode::FORBIDDEN.into_response(),
+            WebSocketOutcome::Close(code, reason),
+        )
     };
     match decision_rx.try_recv() {
         Ok(WSDecision::Reject(code)) => forbidden(code, String::new()),
@@ -506,7 +525,10 @@ async fn rejected(
     }
 }
 
-async fn handle_connection(fut: upgrade::UpgradeFut, session: Session) -> Result<(), SocketPumpError> {
+async fn handle_connection(
+    fut: upgrade::UpgradeFut,
+    session: Session,
+) -> Result<(), SocketPumpError> {
     let (read_half, write_half) = fut.await?.split(tokio::io::split);
     session
         .run(NativeSocket {
@@ -517,6 +539,20 @@ async fn handle_connection(fut: upgrade::UpgradeFut, session: Session) -> Result
 }
 
 impl Session {
+    /// Gives up on a connection that never started: cancels the handler, then runs the
+    /// dependency cleanup.
+    async fn abandon(self) {
+        let Self {
+            handler_run,
+            teardowns,
+            route,
+            ..
+        } = self;
+        // Dropping a running handler's future cancels its Python task.
+        drop(handler_run);
+        execute_teardowns_async(route.event_loop, teardowns, None).await;
+    }
+
     /// Runs the handler and pumps messages until it returns or the client leaves,
     /// then closes the connection and runs the dependency cleanup.
     async fn run(self, mut io: impl SessionIo) -> Result<(), SocketPumpError> {
@@ -616,20 +652,20 @@ fn build_scope(
     parts: &Parts,
     input: &RequestInput<'_>,
     app: &Bound<'_, PyAny>,
-) -> Py<PyDict> {
+) -> PyResult<Py<PyDict>> {
     let scope = PyDict::new(py);
-    _ = scope.set_item(intern!(py, "type"), "websocket");
-    _ = scope.set_item(
-        intern!(py, "asgi"),
-        [("version", "3.0")].into_py_dict(py).ok(),
-    );
-    _ = scope.set_item(intern!(py, "http_version"), "1.1");
-    _ = scope.set_item(intern!(py, "scheme"), "ws");
+    scope.set_item(intern!(py, "type"), "websocket")?;
+    scope.set_item(intern!(py, "asgi"), [("version", "3.0")].into_py_dict(py)?)?;
+    scope.set_item(intern!(py, "http_version"), "1.1")?;
+    scope.set_item(intern!(py, "scheme"), "ws")?;
     let mount = parts.extensions.get::<AsgiMount>();
     let path = mount.map_or_else(|| parts.uri.path(), |mount| &*mount.path);
-    _ = scope.set_item(intern!(py, "root_path"), mount.map_or("", |mount| &*mount.root_path));
-    _ = scope.set_item(intern!(py, "path"), path);
-    _ = scope.set_item(intern!(py, "raw_path"), path.as_bytes());
+    scope.set_item(
+        intern!(py, "root_path"),
+        mount.map_or("", |mount| &*mount.root_path),
+    )?;
+    scope.set_item(intern!(py, "path"), path)?;
+    scope.set_item(intern!(py, "raw_path"), path.as_bytes())?;
     let subprotocols = parts
         .headers
         .get_all("sec-websocket-protocol")
@@ -639,32 +675,35 @@ fn build_scope(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
-    _ = scope.set_item(intern!(py, "subprotocols"), subprotocols);
+    scope.set_item(intern!(py, "subprotocols"), subprotocols)?;
     let extensions = PyDict::new(py);
-    _ = extensions.set_item(intern!(py, "websocket.http.response"), PyDict::new(py));
-    _ = scope.set_item(intern!(py, "extensions"), extensions);
-    _ = scope.set_item(
+    extensions.set_item(intern!(py, "websocket.http.response"), PyDict::new(py))?;
+    scope.set_item(intern!(py, "extensions"), extensions)?;
+    scope.set_item(
         "query_string",
         parts.uri.query().unwrap_or_default().as_bytes(),
-    );
+    )?;
     let headers = PyList::empty(py);
     for (name, value) in &parts.headers {
-        _ = headers.append((name.as_str().as_bytes(), value.as_bytes()));
+        headers.append((name.as_str().as_bytes(), value.as_bytes()))?;
     }
-    _ = scope.set_item(intern!(py, "headers"), headers);
+    scope.set_item(intern!(py, "headers"), headers)?;
     let path_params = PyDict::new(py);
     if let Some(params) = input.path_params.get() {
         for (name, value) in params {
-            _ = path_params.set_item(*name, *value);
+            path_params.set_item(*name, *value)?;
         }
     }
-    _ = scope.set_item(intern!(py, "path_params"), path_params);
-    _ = scope.set_item(intern!(py, "app"), app);
-    _ = scope.set_item(intern!(py, "client"), input.client());
+    scope.set_item(intern!(py, "path_params"), path_params)?;
+    scope.set_item(intern!(py, "app"), app)?;
+    scope.set_item(intern!(py, "client"), input.client())?;
     if let Some(local) = input.server_addr() {
-        _ = scope.set_item(intern!(py, "server"), (local.ip().to_string(), local.port()));
+        scope.set_item(
+            intern!(py, "server"),
+            (local.ip().to_string(), local.port()),
+        )?;
     }
-    scope.unbind()
+    Ok(scope.unbind())
 }
 
 type SocketReader = FragmentCollectorRead<ReadHalf<TokioIo<Upgraded>>>;

@@ -4,17 +4,72 @@
 
 use pyo3::exceptions::{PyAssertionError, PyRuntimeError};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyTuple};
 use std::path::Path;
 
-#[pyclass(frozen, name = "StaticFiles", get_all, from_py_object, eq)]
-#[derive(Clone, PartialEq, Eq)]
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_STATIC_FILES,
+    "starlette.staticfiles",
+    "StaticFiles"
+);
+
+#[pyclass(frozen, name = "StaticFiles", from_py_object, eq)]
 pub struct PyStaticFiles {
+    #[pyo3(get)]
     pub directory: String,
+    #[pyo3(get)]
     pub directories: Vec<String>,
+    #[pyo3(get)]
     pub html: bool,
+    #[pyo3(get)]
     pub check_dir: bool,
+    #[pyo3(get)]
     pub follow_symlink: bool,
+    /// The Starlette `StaticFiles` the methods are sent to, built on first use.
+    delegate: PyOnceLock<Py<PyAny>>,
+}
+
+impl Clone for PyStaticFiles {
+    fn clone(&self) -> Self {
+        Self {
+            directory: self.directory.clone(),
+            directories: self.directories.clone(),
+            html: self.html,
+            check_dir: self.check_dir,
+            follow_symlink: self.follow_symlink,
+            delegate: PyOnceLock::new(),
+        }
+    }
+}
+
+impl PartialEq for PyStaticFiles {
+    fn eq(&self, other: &Self) -> bool {
+        self.directory == other.directory
+            && self.directories == other.directories
+            && self.html == other.html
+            && self.check_dir == other.check_dir
+            && self.follow_symlink == other.follow_symlink
+    }
+}
+
+impl Eq for PyStaticFiles {}
+
+impl PyStaticFiles {
+    fn delegate<'py>(&self, py: Python<'py>) -> PyResult<&Bound<'py, PyAny>> {
+        self.delegate
+            .get_or_try_init(py, || {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item(pyo3::intern!(py, "directory"), &self.directory)?;
+                kwargs.set_item(pyo3::intern!(py, "html"), self.html)?;
+                kwargs.set_item(pyo3::intern!(py, "check_dir"), self.check_dir)?;
+                kwargs.set_item(pyo3::intern!(py, "follow_symlink"), self.follow_symlink)?;
+                let delegate = STARLETTE_STATIC_FILES.get(py)?.call((), Some(&kwargs))?;
+                delegate.setattr(pyo3::intern!(py, "all_directories"), &self.directories)?;
+                Ok(delegate.unbind())
+            })
+            .map(|delegate| delegate.bind(py))
+    }
 }
 
 #[pymethods]
@@ -45,21 +100,8 @@ impl PyStaticFiles {
             html,
             check_dir,
             follow_symlink,
+            delegate: PyOnceLock::new(),
         })
-    }
-
-    fn delegate<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let cls = py
-            .import("starlette.staticfiles")?
-            .getattr(pyo3::intern!(py, "StaticFiles"))?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(pyo3::intern!(py, "directory"), &self.directory)?;
-        kwargs.set_item(pyo3::intern!(py, "html"), self.html)?;
-        kwargs.set_item(pyo3::intern!(py, "check_dir"), self.check_dir)?;
-        kwargs.set_item(pyo3::intern!(py, "follow_symlink"), self.follow_symlink)?;
-        let delegate = cls.call((), Some(&kwargs))?;
-        delegate.setattr(pyo3::intern!(py, "all_directories"), &self.directories)?;
-        Ok(delegate)
     }
 
     fn __call__<'py>(

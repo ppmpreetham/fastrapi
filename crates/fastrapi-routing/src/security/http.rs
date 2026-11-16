@@ -325,10 +325,19 @@ http_challenge!(HTTPBearer, HTTPBasic, HTTPDigest);
     from_py_object,
     eq
 )]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HTTPAuthorizationCredentials {
     pub scheme: String,
     pub credentials: String,
+}
+
+impl std::fmt::Debug for HTTPAuthorizationCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HTTPAuthorizationCredentials")
+            .field("scheme", &self.scheme)
+            .field("credentials", &"<redacted>")
+            .finish()
+    }
 }
 
 #[pymethods]
@@ -356,10 +365,19 @@ impl HTTPAuthorizationCredentials {
     from_py_object,
     eq
 )]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HTTPBasicCredentials {
     pub username: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for HTTPBasicCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HTTPBasicCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 #[pymethods]

@@ -23,20 +23,34 @@ pub fn set_threads(threads: NonZero<usize>) -> Result<(), &'static str> {
     }
 }
 
-fn requested_threads() -> Option<usize> {
-    REQUESTED_THREADS.get().copied().or_else(|| {
-        std::env::var("FASTRAPI_WORKER_THREADS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
+/// `FASTRAPI_WORKER_THREADS`, read once; a value that is not a positive integer is ignored
+/// with a warning.
+fn env_threads() -> Option<usize> {
+    static ENV_THREADS: OnceLock<Option<usize>> = OnceLock::new();
+    *ENV_THREADS.get_or_init(|| {
+        let raw = std::env::var("FASTRAPI_WORKER_THREADS").ok()?;
+        let parsed = raw.trim().parse::<usize>().ok().filter(|&n| n > 0);
+        if parsed.is_none() {
+            tracing::warn!("Ignoring FASTRAPI_WORKER_THREADS={raw:?}: expected a positive integer");
+        }
+        parsed
     })
 }
 
+fn requested_threads() -> Option<usize> {
+    REQUESTED_THREADS.get().copied().or_else(env_threads)
+}
+
+fn cpus() -> usize {
+    available_parallelism().map_or(4, NonZero::get)
+}
+
+/// The tokio worker count and the size of the Python blocking pool.
 fn thread_counts() -> (usize, usize) {
     if let Some(n) = requested_threads() {
         (n, n)
     } else {
-        let cpus = available_parallelism().map_or(4, NonZero::get);
+        let cpus = cpus();
         (cpus, config().sync_threads.max(cpus))
     }
 }
@@ -48,11 +62,13 @@ pub(crate) fn blocking_threads() -> usize {
 
 pub static PYTHON_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     RUNTIME_BUILT.store(true, Ordering::Release);
-    let (workers, blocking) = thread_counts();
+    let (workers, _) = thread_counts();
 
+    // Python sync code runs on the pool in `blocking`, so tokio's own blocking pool (gzip,
+    // file I/O) keeps its default sizing whatever the Python thread count is.
     Builder::new_multi_thread()
         .worker_threads(workers)
-        .max_blocking_threads(blocking)
+        .max_blocking_threads(cpus() * 4)
         .thread_name("python-handler")
         .on_thread_unpark(crate::thread_state::mark_worker)
         .on_thread_park(crate::thread_state::flush)
@@ -77,8 +93,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let sync_threads = requested_threads()
-            .unwrap_or_else(|| available_parallelism().map_or(4, NonZero::get) * 4);
+        let sync_threads = requested_threads().unwrap_or_else(|| cpus() * 4);
         Self { sync_threads }
     }
 }

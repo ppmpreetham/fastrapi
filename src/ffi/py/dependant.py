@@ -41,8 +41,31 @@ class Dependant:
         return scopes
 
     @property
+    def uses_scopes(self):
+        from fastrapi.params import _unwrapped_call
+        from fastrapi.security.base import SecurityBase
+
+        return bool(
+            self.own_oauth_scopes
+            or self.security_scopes_param_name is not None
+            or isinstance(_unwrapped_call(self.call), SecurityBase)
+            or any(sub.uses_scopes for sub in self.dependencies)
+        )
+
+    @property
+    def computed_scope(self):
+        from fastrapi.params import is_async_gen_callable, is_gen_callable
+
+        if self.scope:
+            return self.scope
+        if is_gen_callable(self.call) or is_async_gen_callable(self.call):
+            return "request"
+        return None
+
+    @property
     def cache_key(self):
-        return (self.call, tuple(sorted(set(self.oauth_scopes))))
+        scopes = tuple(sorted(set(self.oauth_scopes))) if self.uses_scopes else ()
+        return (self.call, scopes, self.computed_scope or "")
 
 
 @dataclasses.dataclass
@@ -289,14 +312,16 @@ def _sync_resolve(call):
 
 
 async def _call_dependency(call, values, stack):
+    from fastrapi.params import is_async_gen_callable, is_coroutine_callable, is_gen_callable
+
     call = _sync_resolve(call)
-    if inspect.isasyncgenfunction(call):
+    if is_async_gen_callable(call):
         return await stack.enter_async_context(asynccontextmanager(call)(**values))
-    if inspect.isgeneratorfunction(call):
+    if is_gen_callable(call):
         from fastrapi._helpers import contextmanager_in_threadpool
 
         return await stack.enter_async_context(contextmanager_in_threadpool(contextmanager(call)(**values)))
-    if inspect.iscoroutinefunction(call) or inspect.iscoroutinefunction(getattr(call, "__call__", None)):
+    if is_coroutine_callable(call):
         return await call(**values)
     return await run_in_threadpool(call, **values)
 
@@ -454,8 +479,10 @@ def get_request_handler(
     from fastrapi.exceptions import RequestValidationError
     from fastrapi.responses import JSONResponse
 
+    from fastrapi.params import is_coroutine_callable
+
     response_class = getattr(response_class, "value", response_class) or JSONResponse
-    is_coroutine = inspect.iscoroutinefunction(dependant.call)
+    is_coroutine = is_coroutine_callable(dependant.call)
 
     async def app(request):
         body = PydanticUndefined

@@ -15,7 +15,8 @@ use fastrapi_core::params::PathParamRange;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_routing::dependencies::{
-    self, TeardownTasks, execute_teardowns_async, execute_teardowns_sync, split_function_scope,
+    self, TeardownTasks, execute_teardowns_async, execute_teardowns_sync, run_teardowns_async,
+    run_teardowns_sync, split_function_scope,
 };
 use fastrapi_routing::request_data::Rejection;
 use fastrapi_routing::route::{ExecutionMode, RouteHandler};
@@ -198,7 +199,11 @@ fn resolve_sync_deps(
     };
     if let Some(pending) = pending {
         execute_teardowns_sync(py, teardowns, Some(pending.error()));
-        return Err(python_error_to_response_in(py, pending.error(), Some(request_input)));
+        return Err(python_error_to_response_in(
+            py,
+            pending.error(),
+            Some(request_input),
+        ));
     }
 
     dep_results.into_iter().try_for_each(|(name, value)| {
@@ -314,6 +319,11 @@ fn step_coroutine<'py>(py: Python<'py>, coroutine: &Bound<'py, PyAny>) -> Step<'
         Ok(entered) => entered,
         Err(err) => return Step::Raise(err),
     };
+    // SAFETY: the thread is attached (`py`), and `coroutine` is a live object borrowed for the
+    // call. `PyIter_Send` sets `out` to a new reference on RETURN and NEXT and leaves an error set
+    // on ERROR; RETURN's reference moves into a `Bound`, NEXT's is released at once, and ERROR's
+    // error is fetched, so every reference is owned exactly once. `Py_None` is a borrowed
+    // immortal object.
     unsafe {
         let mut out: *mut ffi::PyObject = std::ptr::null_mut();
         let status = ffi::PyIter_Send(coroutine.as_ptr(), ffi::Py_None(), &raw mut out);
@@ -497,11 +507,17 @@ fn run_sync_gil_section(
     match response {
         Ok(response) => {
             let (function, request) = split_function_scope(teardowns);
-            execute_teardowns_sync(py, function, None);
+            // An exception raised after `yield` fails the request, as FastAPI's exit stack does.
+            if let Err(err) = run_teardowns_sync(py, function, None) {
+                execute_teardowns_sync(py, request, Some(&err));
+                return Err(python_error_to_response_in(py, &err, Some(request_input)));
+            }
             Ok((response, request))
         }
         Err(err) => {
-            execute_teardowns_sync(py, teardowns, Some(&err));
+            let err = run_teardowns_sync(py, teardowns, Some(&err))
+                .err()
+                .unwrap_or(err);
             Err(python_error_to_response_in(py, &err, Some(request_input)))
         }
     }
@@ -845,7 +861,13 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
     match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
         Ok(response) => {
             let (function, request) = split_function_scope(teardowns);
-            execute_teardowns_async(event_loop, function, None).await;
+            // An exception raised after `yield` fails the request, as FastAPI's exit stack does.
+            if let Err(err) = run_teardowns_async(event_loop, function, None).await {
+                execute_teardowns_async(event_loop, request, Some(&err)).await;
+                return Python::attach(|py| {
+                    python_error_to_response_in(py, &err, Some(&request_input))
+                });
+            }
             let cleanup = (!request.is_empty()).then(|| Cleanup::Async(request, event_loop));
             finish_request(event_loop, &request_input, response, cleanup)
         }
@@ -871,7 +893,7 @@ fn hold_thread_state(handler: &RouteHandler, sync_to_threadpool: bool) {
     }
 }
 
-pub async fn run_py_handler(
+pub(crate) async fn run_py_handler(
     event_loop: EventLoop,
     sync_to_threadpool: bool,
     handler: &'static RouteHandler,
@@ -950,7 +972,7 @@ pub async fn run_py_handler(
 }
 
 #[inline(always)]
-pub async fn run_py_handler_no_request(
+pub(crate) async fn run_py_handler_no_request(
     event_loop: EventLoop,
     sync_to_threadpool: bool,
     handler: &'static RouteHandler,

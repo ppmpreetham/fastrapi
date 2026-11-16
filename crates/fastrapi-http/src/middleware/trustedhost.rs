@@ -1,6 +1,7 @@
 //! This module contains the `TrustedHostMiddleware` class.
 //! It reads the list of permitted host names from Python keyword arguments.
 
+use pyo3::exceptions::PyAssertionError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use smart_default::SmartDefault;
@@ -27,13 +28,28 @@ impl TrustedHostMiddleware {
         app: Option<&Bound<'_, PyAny>>,
         allowed_hosts: Option<Vec<String>>,
         www_redirect: bool,
-    ) -> Self {
-        Self {
-            app: AsgiApp::new(app),
-            allowed_hosts: allowed_hosts.unwrap_or_else(|| vec!["*".to_string()]),
-            www_redirect,
+    ) -> PyResult<Self> {
+        let allowed_hosts = allowed_hosts.unwrap_or_else(|| vec!["*".to_string()]);
+        if allowed_hosts
+            .iter()
+            .any(|pattern| is_invalid_wildcard(pattern))
+        {
+            return Err(PyAssertionError::new_err(
+                "Domain wildcard patterns must be like '*.example.com'.",
+            ));
         }
+        Ok(Self {
+            app: AsgiApp::new(app),
+            allowed_hosts,
+            www_redirect,
+        })
     }
+}
+
+/// Starlette allows `*` only as the whole pattern or as the `*.` prefix.
+fn is_invalid_wildcard(pattern: &str) -> bool {
+    pattern.chars().skip(1).any(|c| c == '*')
+        || (pattern.starts_with('*') && pattern != "*" && !pattern.starts_with("*."))
 }
 
 asgi_middleware!(

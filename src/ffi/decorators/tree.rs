@@ -3,6 +3,7 @@
 
 use crate::ffi::decorators::PyAPIRouter;
 use fastrapi_core::path::{extract_path_param_names, join_path};
+use fastrapi_http::response_type::ResponseType;
 use fastrapi_openapi::document::deep_merge_json;
 use fastrapi_openapi::paths::parse_callbacks_to_json;
 use fastrapi_routing::analysis::get_response_type_from_class;
@@ -17,6 +18,7 @@ use pyo3::types::PyDict;
 use simd_json::OwnedValue as JsonValue;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::mem::take;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -168,6 +170,17 @@ impl PyAPIRouter {
         Ok(flat)
     }
 
+    /// The routes in `_low_priority_routes`, as entries of this router.
+    fn low_priority_entries(&self, py: Python<'_>) -> PyResult<Vec<RouteEntry>> {
+        let routes = self.low_priority_routes.bind(py);
+        if routes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let router = Self::default();
+        crate::ffi::openapi::add_route_objects(py, &router, routes.as_any())?;
+        Ok(take(&mut *router.route_entries.lock()))
+    }
+
     pub fn snapshot(&self, py: Python<'_>) -> PyResult<(Vec<RouteEntry>, Vec<WebSocketEntry>)> {
         flatten_router(py, self, false)
     }
@@ -196,14 +209,21 @@ fn with_strict_content_type(handler: &Arc<RouteHandler>, strict: bool) -> Arc<Ro
     Arc::new(updated)
 }
 
+/// How a route renders plain return values with `class` as its `response_class`.
+pub(crate) fn response_class_type(py: Python<'_>, class: &Bound<'_, PyAny>) -> ResponseType {
+    match get_response_type_from_class(py, class) {
+        ResponseType::Auto => ResponseType::Custom,
+        builtin => builtin,
+    }
+}
+
 fn with_response_class(
     py: Python<'_>,
     handler: &Arc<RouteHandler>,
     class: &Py<pyo3::PyAny>,
 ) -> Arc<RouteHandler> {
-    let response_type = get_response_type_from_class(py, class.bind(py));
     let mut updated = (**handler).clone();
-    updated.response.response_type = response_type;
+    updated.response.response_type = response_class_type(py, class.bind(py));
     updated.response.response_class = Some(class.clone_ref(py));
     Arc::new(updated)
 }
@@ -234,6 +254,7 @@ pub fn flatten_router(
     freeze: bool,
 ) -> PyResult<(Vec<RouteEntry>, Vec<WebSocketEntry>)> {
     let mut routes = Vec::new();
+    let mut low_priority_routes = Vec::new();
     let mut ws_routes = Vec::new();
 
     let mut stack = Vec::with_capacity(16);
@@ -270,10 +291,7 @@ pub fn flatten_router(
         });
 
         let mut chain_deps = level.dependencies;
-        chain_deps.extend(collect_dependency_markers(
-            py,
-            router.dependencies.as_ref(),
-        ));
+        chain_deps.extend(collect_dependency_markers(py, router.dependencies.as_ref()));
 
         let mut chain_cache: HashMap<Vec<String>, Vec<DependencyNode>> = HashMap::new();
         let chain_security = if chain_deps.is_empty() {
@@ -286,7 +304,12 @@ pub fn flatten_router(
         };
         let route_entries = router.route_entries.lock().clone();
         routes.reserve(route_entries.len());
-        for mut entry in route_entries {
+        let low_priority_entries = router.low_priority_entries(py)?;
+        let entries = route_entries
+            .into_iter()
+            .map(|entry| (entry, false))
+            .chain(low_priority_entries.into_iter().map(|entry| (entry, true)));
+        for (mut entry, low_priority) in entries {
             entry.tags = entry
                 .tags
                 .into_iter()
@@ -331,7 +354,11 @@ pub fn flatten_router(
                 security.append(&mut entry.security);
                 entry.security = security;
             }
-            routes.push(entry);
+            if low_priority {
+                low_priority_routes.push(entry);
+            } else {
+                routes.push(entry);
+            }
         }
 
         let ws_entries = router.websocket_entries.lock().clone();
@@ -404,6 +431,8 @@ pub fn flatten_router(
         }
     }
 
+    // Like FastAPI's `_low_priority_routes`, they are tried after every other route.
+    routes.append(&mut low_priority_routes);
     Ok((routes, ws_routes))
 }
 

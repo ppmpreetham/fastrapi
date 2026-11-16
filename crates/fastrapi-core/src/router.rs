@@ -7,6 +7,7 @@ use ahash::AHashMap;
 use matchit::Router;
 use std::array::from_fn;
 use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use std::mem::take;
 use std::sync::Arc;
 use strum::IntoEnumIterator;
@@ -66,11 +67,55 @@ pub struct RouteTarget<H> {
     pub pattern: Box<str>,
     pub convertors: Box<[(String, PathConvertor)]>,
     pub host: Option<Box<str>>,
+    /// The methods of the route this target belongs to, as [`HttpMethod::bit`] flags.
+    /// They make the `Allow` header of a 405, like Starlette's `Route.handle`.
+    pub allow: u8,
+    /// The position of the route in registration order, as Starlette tries routes in order.
+    order: usize,
+    /// A later route registered for the same method and path, tried when this one's host or
+    /// convertors do not match, as Starlette tries routes in registration order.
+    next: Option<Box<Self>>,
+}
+
+impl<H> std::fmt::Debug for RouteTarget<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RouteTarget")
+            .field("pattern", &self.pattern)
+            .field("convertors", &self.convertors)
+            .field("host", &self.host)
+            .field("allow", &self.allow)
+            .field("next", &self.next)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<H> RouteTarget<H> {
+    /// Adds `target` after the last route in this chain, so the first registered route wins.
+    fn push(&mut self, target: Self) {
+        let mut slot = &mut self.next;
+        while let Some(next) = slot {
+            slot = &mut next.next;
+        }
+        *slot = Some(Box::new(target));
+    }
+
+    fn chain(&self) -> impl Iterator<Item = &Self> {
+        std::iter::successors(Some(self), |target| target.next.as_deref())
+    }
 }
 
 pub enum RouteMatch<'r, 'p, H> {
     Static(&'r RouteTarget<H>),
     Params(&'r RouteTarget<H>, matchit::Params<'r, 'p>),
+}
+
+impl<'r, H> RouteMatch<'r, '_, H> {
+    #[must_use]
+    pub const fn target(&self) -> &'r RouteTarget<H> {
+        match self {
+            Self::Static(target) | Self::Params(target, _) => target,
+        }
+    }
 }
 
 #[expect(
@@ -81,6 +126,16 @@ pub struct FrozenRouter<H> {
     static_routes: [AHashMap<Box<str>, RouteTarget<H>>; HTTP_METHOD_COUNT],
     param_routes: [Option<matchit::Router<RouteTarget<H>>>; HTTP_METHOD_COUNT],
     has_host_routes: bool,
+}
+
+impl<H> std::fmt::Debug for FrozenRouter<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let static_routes: usize = self.static_routes.iter().map(|routes| routes.len()).sum();
+        f.debug_struct("FrozenRouter")
+            .field("static_routes", &static_routes)
+            .field("has_host_routes", &self.has_host_routes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<H> FrozenRouter<H> {
@@ -104,24 +159,29 @@ impl<H> FrozenRouter<H> {
                 .as_deref()
                 .is_none_or(|pattern| host.is_some_and(|h| h == pattern))
         };
-        if let Some(target) = self.static_routes[idx]
-            .get(path)
-            .filter(|target| host_allowed(target))
-        {
-            return Some(RouteMatch::Static(target));
+        if let Some(target) = self.static_routes[idx].get(path) {
+            if host_allowed(target) {
+                return Some(RouteMatch::Static(target));
+            }
+            if let Some(target) = target.chain().skip(1).find(|target| host_allowed(target)) {
+                return Some(RouteMatch::Static(target));
+            }
         }
         let matched = self.param_routes[idx].as_ref()?.at(path).ok()?;
-        let target = matched.value;
-        if !convertors_match(&target.convertors, &matched.params) || !host_allowed(target) {
-            return None;
-        }
+        let target = matched.value.chain().find(|target| {
+            convertors_match(&target.convertors, &matched.params) && host_allowed(target)
+        })?;
         Some(RouteMatch::Params(target, matched.params))
     }
 
+    /// The methods of the first registered route that matches `path`, or 0 when none does.
+    /// Like Starlette's partial match, only that route's methods go in the `Allow` header.
     pub fn allowed_methods(&self, path: &str, host: Option<&str>) -> u8 {
         HttpMethod::iter()
-            .filter(|method| self.resolve(*method, path, host).is_some())
-            .fold(0, |mask, method| mask | method.bit())
+            .filter_map(|method| self.resolve(method, path, host))
+            .map(|route_match| route_match.target())
+            .min_by_key(|target| target.order)
+            .map_or(0, |target| target.allow)
     }
 }
 
@@ -129,6 +189,7 @@ pub struct FrozenRouterBuilder<H> {
     static_routes: [AHashMap<Box<str>, RouteTarget<H>>; HTTP_METHOD_COUNT],
     param_entries: [Vec<(String, RouteTarget<H>)>; HTTP_METHOD_COUNT],
     has_host_routes: bool,
+    route_count: usize,
 }
 
 impl<H> FrozenRouterBuilder<H> {
@@ -138,15 +199,19 @@ impl<H> FrozenRouterBuilder<H> {
             static_routes: from_fn(|_| AHashMap::new()),
             param_entries: from_fn(|_| Vec::new()),
             has_host_routes: false,
+            route_count: 0,
         }
     }
 
+    /// Adds a route for `method`. `allow` holds the bits of every method of the
+    /// route, so a 405 on its path lists them.
     pub fn add_route(
         &mut self,
         method: HttpMethod,
         path: &str,
         handler: Arc<H>,
         host: Option<Box<str>>,
+        allow: u8,
     ) {
         let idx = method as usize;
         let (normalized, has_params, convertors) = normalize_register(path);
@@ -157,12 +222,21 @@ impl<H> FrozenRouterBuilder<H> {
             pattern: normalized.as_ref().into(),
             convertors: convertors.into(),
             host,
+            allow,
+            order: self.route_count,
+            next: None,
         };
+        self.route_count += 1;
 
         if has_params {
             self.param_entries[idx].push((normalized.into_owned(), target));
         } else {
-            self.static_routes[idx].insert(normalized.into_owned().into_boxed_str(), target);
+            match self.static_routes[idx].entry(normalized.into_owned().into_boxed_str()) {
+                Entry::Occupied(mut first) => first.get_mut().push(target),
+                Entry::Vacant(slot) => {
+                    slot.insert(target);
+                }
+            }
         }
     }
 
@@ -174,8 +248,16 @@ impl<H> FrozenRouterBuilder<H> {
             if entries.is_empty() {
                 return None;
             }
-            let mut router = Router::new();
+            // Routes with the same pattern share one matchit entry, in registration order.
+            let mut grouped: Vec<(String, RouteTarget<H>)> = Vec::with_capacity(entries.len());
             for (path, target) in entries {
+                match grouped.iter_mut().find(|(existing, _)| *existing == path) {
+                    Some((_, first)) => first.push(target),
+                    None => grouped.push((path, target)),
+                }
+            }
+            let mut router = Router::new();
+            for (path, target) in grouped {
                 if let Err(e) = router.insert(&path, target) {
                     tracing::warn!("Failed to insert parameterized route '{path}': {e}");
                 }

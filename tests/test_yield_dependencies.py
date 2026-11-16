@@ -123,6 +123,7 @@ def test_mixed_yield_dependencies():
     response = _get(app, "/mixed")
     assert response.status_code == 200
     assert response.json() == {"s": "sync_val", "a": "async_val"}
+    _wait_for(events, "sync closed")
 
     # FastrAPI executes dependencies left to right, but teardowns should be reversed (LIFO)
     assert events == [

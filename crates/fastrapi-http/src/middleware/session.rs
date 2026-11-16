@@ -11,6 +11,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use fastrapi_pyutil::json::{json_value_to_py, write_py_json};
 use hmac::{Hmac, Mac};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use sha1::{Digest, Sha1};
@@ -208,7 +209,7 @@ impl SessionMiddleware {
     #[new]
     #[pyo3(signature = (
         app=None,
-        secret_key=String::new(),
+        secret_key=None,
         session_cookie="session".to_string(),
         max_age=Some(1_209_600),
         path="/".to_string(),
@@ -223,7 +224,7 @@ impl SessionMiddleware {
     )]
     fn new(
         app: Option<&Bound<'_, PyAny>>,
-        secret_key: String,
+        secret_key: Option<String>,
         session_cookie: String,
         max_age: Option<i64>,
         path: String,
@@ -231,8 +232,13 @@ impl SessionMiddleware {
         https_only: bool,
         domain: Option<String>,
         partitioned: bool,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        let secret_key = secret_key.ok_or_else(|| {
+            PyTypeError::new_err(
+                "SessionMiddleware.__init__() missing 1 required positional argument: 'secret_key'",
+            )
+        })?;
+        let config = Self {
             app: AsgiApp::new(app),
             secret_key,
             session_cookie,
@@ -242,7 +248,43 @@ impl SessionMiddleware {
             https_only,
             domain,
             partitioned,
+        };
+        // Starlette builds a bad `Set-Cookie` on every response; fail once, at startup, instead.
+        let (attributes, cleared) = config.cookie_headers();
+        for header in [format!("{}=x{attributes}", config.session_cookie), cleared] {
+            HeaderValue::from_str(&header).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "SessionMiddleware settings make an invalid Set-Cookie header: {header:?}"
+                ))
+            })?;
         }
+        Ok(config)
+    }
+}
+
+impl SessionMiddleware {
+    /// The `Set-Cookie` attributes that follow the cookie value, and the whole header that clears it.
+    fn cookie_headers(&self) -> (String, String) {
+        let mut flags = format!("httponly; samesite={}", self.same_site);
+        if self.https_only {
+            flags.push_str("; secure");
+        }
+        if let Some(domain) = &self.domain {
+            flags.push_str("; domain=");
+            flags.push_str(domain);
+        }
+        if self.partitioned {
+            flags.push_str("; partitioned");
+        }
+        let max_age = self
+            .max_age
+            .filter(|&max_age| max_age != 0)
+            .map_or_else(String::new, |max_age| format!("Max-Age={max_age}; "));
+        let cleared = format!(
+            "{}=null; path={}; expires=Thu, 01 Jan 1970 00:00:00 GMT; {flags}",
+            self.session_cookie, self.path
+        );
+        (format!("; path={}; {max_age}{flags}", self.path), cleared)
     }
 }
 
@@ -337,36 +379,24 @@ pub struct SessionPolicy {
     cookie: String,
     max_age: Option<i64>,
     attributes: String,
-    cleared: HeaderValue,
+    cleared: Option<HeaderValue>,
+}
+
+fn invalid_cookie() -> PyErr {
+    PyValueError::new_err("the session cookie is not a valid Set-Cookie header")
 }
 
 impl SessionPolicy {
+    /// `SessionMiddleware` checks at construction that these headers are valid.
     #[must_use]
     pub fn new(config: &SessionMiddleware) -> Self {
-        let mut flags = format!("httponly; samesite={}", config.same_site);
-        if config.https_only {
-            flags.push_str("; secure");
-        }
-        if let Some(domain) = &config.domain {
-            flags.push_str("; domain=");
-            flags.push_str(domain);
-        }
-        if config.partitioned {
-            flags.push_str("; partitioned");
-        }
-        let max_age = config
-            .max_age
-            .map_or_else(String::new, |max_age| format!("Max-Age={max_age}; "));
-        let cleared = format!(
-            "{}=null; path={}; expires=Thu, 01 Jan 1970 00:00:00 GMT; {flags}",
-            config.session_cookie, config.path
-        );
+        let (attributes, cleared) = config.cookie_headers();
         Self {
             signer: TimestampSigner::new(&config.secret_key),
             cookie: config.session_cookie.clone(),
             max_age: config.max_age,
-            attributes: format!("; path={}; {max_age}{flags}", config.path),
-            cleared: HeaderValue::from_str(&cleared).unwrap_or(HeaderValue::from_static("")),
+            attributes,
+            cleared: HeaderValue::from_str(&cleared).ok(),
         }
     }
 
@@ -399,9 +429,14 @@ impl SessionPolicy {
                 let mut json = Vec::new();
                 write_py_json(py, session.as_any(), &mut json)?;
                 let signed = self.signer.sign(&STANDARD.encode(json), unix_now());
-                HeaderValue::from_str(&format!("{}={signed}{}", self.cookie, self.attributes)).ok()
+                Some(
+                    HeaderValue::from_str(&format!("{}={signed}{}", self.cookie, self.attributes))
+                        .map_err(|_| invalid_cookie())?,
+                )
+            } else if slot.initial.is_some() {
+                Some(self.cleared.clone().ok_or_else(invalid_cookie)?)
             } else {
-                slot.initial.is_some().then(|| self.cleared.clone())
+                None
             };
             if let Some(cookie) = cookie {
                 headers.append(SET_COOKIE, cookie);

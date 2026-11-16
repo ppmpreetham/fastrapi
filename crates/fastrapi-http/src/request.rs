@@ -32,6 +32,10 @@ fastrapi_pyutil::cached_py_import!(
 );
 fastrapi_pyutil::cached_py_import!(JSON_MODULE, "json");
 fastrapi_pyutil::cached_py_import!(ADDRESS, "starlette.datastructures", "Address");
+fastrapi_pyutil::cached_py_import!(STARLETTE_REQUEST, "starlette.requests", "Request");
+
+/// Upper bound on the up-front body allocation; a client-supplied `Content-Length` must not size it.
+const MAX_INITIAL_BODY_CAPACITY: usize = 64 * 1024;
 
 #[pyclass(
     frozen,
@@ -878,7 +882,9 @@ impl PyRequest {
         py_bridge::future_into_py_with_locals(py, locals.clone(), async move {
             let body: Bytes = body_cell
                 .get_or_try_init(|| async {
-                    let mut full_body = content_length.map_or_else(Vec::new, Vec::with_capacity);
+                    let mut full_body = content_length.map_or_else(Vec::new, |len| {
+                        Vec::with_capacity(len.min(MAX_INITIAL_BODY_CAPACITY))
+                    });
 
                     loop {
                         let fut = Python::attach(|py| -> PyResult<_> {
@@ -1069,7 +1075,10 @@ impl PyRequest {
         })
     }
 
-    #[pyo3(signature = (*, max_files=1000.0, max_fields=1000.0, max_part_size=1024 * 1024))]
+    #[pyo3(
+        signature = (*, max_files=1000.0, max_fields=1000.0, max_part_size=1024 * 1024),
+        text_signature = "($self, *, max_files=1000, max_fields=1000, max_part_size=1048576)"
+    )]
     fn form<'py>(
         self_: &Bound<'py, Self>,
         py: Python<'py>,
@@ -1137,9 +1146,7 @@ impl PyRequest {
 
     fn stream<'py>(self_: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let conn = self_.as_super();
-        let request = py
-            .import("starlette.requests")?
-            .getattr(pyo3::intern!(py, "Request"))?;
+        let request = STARLETTE_REQUEST.get(py)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(
             pyo3::intern!(py, "receive"),
@@ -1159,9 +1166,7 @@ impl PyRequest {
         path: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let conn = self_.as_super();
-        let request = py
-            .import("starlette.requests")?
-            .getattr(pyo3::intern!(py, "Request"))?;
+        let request = STARLETTE_REQUEST.get(py)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(
             pyo3::intern!(py, "receive"),

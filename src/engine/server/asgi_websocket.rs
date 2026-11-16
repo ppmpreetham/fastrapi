@@ -59,7 +59,10 @@ impl AsgiSocket {
                 .and_then(|value| value.to_str().ok());
             message.set_item(intern!(py, "subprotocol"), subprotocol)?;
             let raw = PyList::empty(py);
-            for (name, value) in headers.iter().filter(|(name, _)| **name != SEC_WEBSOCKET_PROTOCOL) {
+            for (name, value) in headers
+                .iter()
+                .filter(|(name, _)| **name != SEC_WEBSOCKET_PROTOCOL)
+            {
                 raw.append((
                     PyBytes::new(py, name.as_str().as_bytes()),
                     PyBytes::new(py, value.as_bytes()),
@@ -81,7 +84,10 @@ impl AsgiSocket {
         Ok(self.send_message(message).await?)
     }
 
-    async fn read_loop(&self, tx_to_python: mpsc::Sender<WSMessage>) -> Result<(), SocketPumpError> {
+    async fn read_loop(
+        &self,
+        tx_to_python: mpsc::Sender<WSMessage>,
+    ) -> Result<(), SocketPumpError> {
         loop {
             let received = self.receive().await?;
             let message = Python::attach(|py| incoming(received.bind(py)))?;
@@ -92,7 +98,10 @@ impl AsgiSocket {
         }
     }
 
-    async fn write_loop(&self, rx_from_python: &mut mpsc::Receiver<WSMessage>) -> Result<(), SocketPumpError> {
+    async fn write_loop(
+        &self,
+        rx_from_python: &mut mpsc::Receiver<WSMessage>,
+    ) -> Result<(), SocketPumpError> {
         while let Some(message) = rx_from_python.recv().await {
             let closed = matches!(message, WSMessage::Close(..));
             self.deliver(message).await?;
@@ -138,7 +147,10 @@ fn outgoing(py: Python<'_>, message: WSMessage) -> PyResult<Py<PyAny>> {
     match message {
         WSMessage::Text(text) => {
             let sent = self::message(py, "websocket.send")?;
-            sent.set_item(intern!(py, "text"), PyString::new(py, &String::from_utf8_lossy(&text)))?;
+            sent.set_item(
+                intern!(py, "text"),
+                PyString::new(py, &String::from_utf8_lossy(&text)),
+            )?;
             Ok(sent.into_any().unbind())
         }
         WSMessage::Binary(data) => {
@@ -158,12 +170,14 @@ fn incoming<'py>(received: &Bound<'py, PyAny>) -> PyResult<WSMessage> {
     let kind: String = received.get_item(intern!(py, "type"))?.extract()?;
     if kind == "websocket.disconnect" {
         let code = field(intern!(py, "code")).map_or(Ok(1005), |code| code.extract())?;
-        let reason = field(intern!(py, "reason")).map_or(Ok(String::new()), |reason| reason.extract())?;
+        let reason =
+            field(intern!(py, "reason")).map_or(Ok(String::new()), |reason| reason.extract())?;
         return Ok(WSMessage::Close(code, reason));
     }
     if let Some(text) = field(intern!(py, "text")) {
         return Ok(WSMessage::Text(Bytes::from(text.extract::<String>()?)));
     }
-    let data = field(intern!(py, "bytes")).map_or(Ok(Vec::new()), |data| data.extract::<Vec<u8>>())?;
+    let data =
+        field(intern!(py, "bytes")).map_or(Ok(Vec::new()), |data| data.extract::<Vec<u8>>())?;
     Ok(WSMessage::Binary(Bytes::from(data)))
 }

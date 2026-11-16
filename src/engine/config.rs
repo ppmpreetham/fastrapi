@@ -4,6 +4,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use smart_default::SmartDefault;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::ffi::decorators::PyAPIRouter;
@@ -48,7 +49,7 @@ pub struct StaticMount {
 #[derive(SmartDefault, Clone, Debug, PartialEq, Eq)]
 pub struct FrontendMount {
     pub path: String,
-    pub directory: String,
+    pub directory: PathBuf,
     #[default(Some("auto".to_string()))]
     pub fallback: Option<String>,
     #[default(true)]
@@ -205,7 +206,7 @@ pub struct FastrAPI {
     pub(crate) middlewares: MiddlewareContainer,
     pub(crate) openapi_cache: parking_lot::Mutex<Option<OpenApiCacheEntry>>,
     pub(crate) openapi_schema: parking_lot::Mutex<Option<Py<PyAny>>>,
-    pub(crate) asgi: std::sync::OnceLock<std::sync::Arc<crate::engine::server::asgi_app::AsgiApp>>,
+    pub(crate) asgi: crate::engine::server::asgi_app::AsgiCell,
     pub(crate) stack_override: Option<Py<PyAny>>,
     pub(crate) docs_routes: pyo3::sync::PyOnceLock<Py<PyList>>,
 }

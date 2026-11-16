@@ -18,7 +18,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::engine::config::FastrAPI;
 use crate::engine::server::routes::{
@@ -26,8 +26,9 @@ use crate::engine::server::routes::{
 };
 use fastrapi_http::middleware::PyMiddlewareKind;
 use fastrapi_http::middleware::{
-    DeclaredLayer, MiddlewareContainer, PreparedMiddlewares, PyMiddleware, SessionPolicy, asgi,
-    compress, cors, execute_py_middlewares, session,
+    CorsPolicy, DeclaredLayer, GZipMiddleware, MiddlewareContainer, PreparedMiddlewares,
+    PyMiddleware, SessionMiddleware, SessionPolicy, TrustedHostMiddleware, asgi, compress, cors,
+    execute_py_middlewares, session,
 };
 use std::time;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -37,16 +38,12 @@ pub(crate) fn build_stack(
     app_config: &FastrAPI,
     container: &MiddlewareContainer,
     event_loop: EventLoop,
-) -> Router {
+) -> PyResult<Router> {
     let max_body_size = app_config.max_body_size.unwrap_or(usize::MAX);
     let threadpool = app_config.sync_to_threadpool;
-    let app = if container.order.is_empty() {
-        apply_legacy(app, container)
-    } else {
-        apply_declared(app, container, event_loop, max_body_size, threadpool)
-    };
+    let app = apply_declared(app, container, event_loop, max_body_size, threadpool)?;
 
-    apply_config_layers(app, app_config)
+    Ok(apply_config_layers(app, app_config))
 }
 
 fn apply_declared(
@@ -55,17 +52,17 @@ fn apply_declared(
     event_loop: EventLoop,
     max_body_size: usize,
     threadpool: bool,
-) -> Router {
+) -> PyResult<Router> {
     for layer in &container.order {
         app = match layer {
-            DeclaredLayer::Session => session_layer(app, container),
-            DeclaredLayer::GZip => gzip_layer(app, container),
-            DeclaredLayer::Cors => cors_layer(app, container),
-            DeclaredLayer::TrustedHost => trusted_host_layer(app, container),
+            DeclaredLayer::Session(config) => session_layer(app, config),
+            DeclaredLayer::GZip(config) => gzip_layer(app, config),
+            DeclaredLayer::Cors(policy) => cors_layer(app, policy),
+            DeclaredLayer::TrustedHost(config) => trusted_host_layer(app, config),
             DeclaredLayer::HttpsRedirect => https_redirect_layer(app),
             DeclaredLayer::Custom(mw) => {
                 if mw.kind == PyMiddlewareKind::Asgi {
-                    asgi_layer(app, mw, event_loop, max_body_size)
+                    asgi_layer(app, mw, event_loop, max_body_size)?
                 } else {
                     custom_layer(app, mw.clone(), event_loop, threadpool)
                 }
@@ -73,36 +70,7 @@ fn apply_declared(
             DeclaredLayer::Decorator(mw) => decorator_layer(app, mw, event_loop, threadpool),
         };
     }
-    app
-}
-
-fn apply_legacy(mut app: Router, container: &MiddlewareContainer) -> Router {
-    if container.session.is_some() {
-        info!("🔑 Layer: Sessions");
-        app = session_layer(app, container);
-    }
-
-    if let Some(config) = &container.gzip {
-        info!("🗜️ Layer: GZip (min: {} bytes)", config.minimum_size);
-        app = gzip_layer(app, container);
-    }
-
-    if let Some(_config) = &container.https_redirect {
-        info!("🔗 Layer: HTTPSRedirect");
-        app = https_redirect_layer(app);
-    }
-
-    if container.trusted_host.is_some() {
-        info!("🛡️ Layer: TrustedHost");
-        app = trusted_host_layer(app, container);
-    }
-
-    if container.cors.is_some() {
-        info!("Layer: CORS");
-        app = cors_layer(app, container);
-    }
-
-    app
+    Ok(app)
 }
 
 fn apply_config_layers(mut app: Router, app_config: &FastrAPI) -> Router {
@@ -149,33 +117,27 @@ fn apply_config_layers(mut app: Router, app_config: &FastrAPI) -> Router {
     app
 }
 
-fn session_layer(app: Router, container: &MiddlewareContainer) -> Router {
-    match &container.session {
-        Some(config) => app.layer(axum_middleware::from_fn_with_state(
-            Arc::new(SessionPolicy::new(config)),
-            session,
-        )),
-        None => app,
-    }
+fn session_layer(app: Router, config: &SessionMiddleware) -> Router {
+    app.layer(axum_middleware::from_fn_with_state(
+        Arc::new(SessionPolicy::new(config)),
+        session,
+    ))
 }
 
-fn gzip_layer(app: Router, container: &MiddlewareContainer) -> Router {
-    match &container.gzip {
-        Some(config) => app.layer(axum_middleware::from_fn_with_state(
-            Arc::new(config.clone()),
-            compress,
-        )),
-        None => app,
-    }
+fn gzip_layer(app: Router, config: &GZipMiddleware) -> Router {
+    app.layer(axum_middleware::from_fn_with_state(
+        Arc::new(config.clone()),
+        compress,
+    ))
 }
 
-fn cors_layer(app: Router, container: &MiddlewareContainer) -> Router {
-    match &container.cors {
-        Some(policy) => Router::new()
-            .fallback_service(app)
-            .layer(axum_middleware::from_fn_with_state(Arc::clone(policy), cors)),
-        None => app,
-    }
+fn cors_layer(app: Router, policy: &Arc<CorsPolicy>) -> Router {
+    Router::new()
+        .fallback_service(app)
+        .layer(axum_middleware::from_fn_with_state(
+            Arc::clone(policy),
+            cors,
+        ))
 }
 
 fn host_matches(allowed: &[String], host: &str) -> bool {
@@ -205,11 +167,7 @@ fn redirect_to(req: &Request, scheme: Scheme, netloc: &str) -> Response {
     }
 }
 
-fn trusted_host_layer(app: Router, container: &MiddlewareContainer) -> Router {
-    let Some(config) = &container.trusted_host else {
-        return app;
-    };
-
+fn trusted_host_layer(app: Router, config: &TrustedHostMiddleware) -> Router {
     if config.allowed_hosts.iter().any(|host| host == "*") {
         return app;
     }
@@ -294,7 +252,7 @@ fn asgi_layer(
     mw: &PyMiddleware,
     event_loop: EventLoop,
     max_body_size: usize,
-) -> Router {
+) -> PyResult<Router> {
     let instance = Python::attach(|py| -> PyResult<Py<PyAny>> {
         let downstream = Py::new(py, asgi::PyScopeDownstream)?.into_any();
         let cls = mw.func.bind(py);
@@ -303,26 +261,14 @@ fn asgi_layer(
         let args = PyTuple::new(py, args)?;
         cls.call(args, mw.init_kwargs.as_ref().map(|kwargs| kwargs.bind(py)))
             .map(Bound::unbind)
-    });
+    })?;
 
-    match instance {
-        Ok(instance) => {
-            info!("Applying raw ASGI middleware");
-            let instance = Arc::new(instance);
-            app.layer(axum_middleware::from_fn(move |req, next| {
-                let instance = instance.clone();
-                let event_loop = event_loop;
-                async move {
-                    asgi::run_asgi_request(instance, req, next, event_loop, max_body_size).await
-                }
-            }))
-        }
-        Err(err) => {
-            Python::attach(|py| err.print(py));
-            error!("Failed to instantiate ASGI middleware, skipping it");
-            app
-        }
-    }
+    info!("Applying raw ASGI middleware");
+    let instance = Arc::new(instance);
+    Ok(app.layer(axum_middleware::from_fn(move |req, next| {
+        let instance = instance.clone();
+        async move { asgi::run_asgi_request(instance, req, next, event_loop, max_body_size).await }
+    })))
 }
 
 fn custom_layer(

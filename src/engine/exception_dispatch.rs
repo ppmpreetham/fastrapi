@@ -2,15 +2,19 @@
 //! The functions find the handler for an exception, a validation error or a status code.
 //! They call the handler and convert its result into an HTTP response.
 
+use axum::http::header::ALLOW;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use pyo3::types::PyType;
 use pyo3::{Py, intern};
 
 use ahash::AHashMap;
 use fastrapi_http::exceptions::{
-    http_exception_type, http_status_code, is_default_handler, is_http_exception,
-    plain_server_error, request_validation_error_type, websocket_validation_error_type,
+    http_status_code, is_default_handler, is_http_exception, plain_server_error,
+    request_validation_error_type, websocket_validation_error_type,
 };
 use fastrapi_http::request::{create_py_request, create_stub_request};
 use fastrapi_http::request_input::RequestInput;
@@ -24,6 +28,13 @@ type HandlerSlot = (Py<PyAny>, usize, Option<Py<PyAny>>);
 
 static HANDLER_CACHE: LazyLock<Mutex<AHashMap<(usize, usize), HandlerSlot>>> =
     LazyLock::new(|| Mutex::new(AHashMap::new()));
+
+/// Forgets every cached handler lookup. It runs when a handler is registered
+/// or replaced and when a server installs its registry, never per request, so
+/// a replaced handler or a reused registry address can't serve a stale entry.
+pub(crate) fn invalidate_handler_cache() {
+    HANDLER_CACHE.lock().clear();
+}
 
 /// The result of an `async` exception handler that is still running.
 ///
@@ -187,7 +198,7 @@ pub(crate) fn find_handler<'py>(
 fn lookup_handler<'py>(
     py: Python<'py>,
     registry: &Bound<'py, PyDict>,
-    ty: &Bound<'py, pyo3::types::PyType>,
+    ty: &Bound<'py, PyType>,
 ) -> Option<Bound<'py, PyAny>> {
     let Ok(mro) = ty.getattr(intern!(py, "__mro__")) else {
         return None;
@@ -219,20 +230,71 @@ fn build_request_arg(py: Python<'_>, request_input: Option<&RequestInput<'_>>) -
         .unwrap_or_else(|| py.None())
 }
 
+/// The exception handlers that answer the router's own 404 and 405, resolved once
+/// from the app's registry the way Starlette's `ExceptionMiddleware` picks one for
+/// the `HTTPException` its router raises: the handler for the status code, else
+/// the first one on the exception's MRO. `None` keeps the default response.
+pub(crate) struct RoutingErrorHandlers {
+    not_found: Option<Py<PyAny>>,
+    method_not_allowed: Option<Py<PyAny>>,
+}
+
+impl RoutingErrorHandlers {
+    pub(crate) fn resolve(py: Python<'_>, registry: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let exception = STARLETTE_HTTP_EXCEPTION.get(py)?.cast::<PyType>()?;
+        let handler = |status: StatusCode| -> PyResult<Option<Py<PyAny>>> {
+            let handler = match registry.get_item(status.as_u16())? {
+                Some(handler) => (!is_default_handler(&handler)).then_some(handler),
+                None => lookup_handler(py, registry, exception),
+            };
+            Ok(handler.map(Bound::unbind))
+        };
+        Ok(Self {
+            not_found: handler(StatusCode::NOT_FOUND)?,
+            method_not_allowed: handler(StatusCode::METHOD_NOT_ALLOWED)?,
+        })
+    }
+
+    pub(crate) fn for_status(&self, status: StatusCode) -> Option<&Py<PyAny>> {
+        match status {
+            StatusCode::NOT_FOUND => self.not_found.as_ref(),
+            StatusCode::METHOD_NOT_ALLOWED => self.method_not_allowed.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// Calls `handler` with the `HTTPException` that Starlette's router raises for `status`,
+/// carrying the `Allow` header of a 405.
 pub(crate) fn dispatch_status_handler(
     server: EventLoop,
-    status: u16,
-    request_input: Option<&RequestInput<'_>>,
+    handler: &Py<PyAny>,
+    status: StatusCode,
+    allow: Option<&HeaderValue>,
+    request_input: &RequestInput<'_>,
 ) -> Option<Response> {
-    let context = server.server();
-    if !context.has_status_handlers() {
-        return None;
-    }
-    let registry = context.exception_handlers()?;
     Python::attach(|py| {
-        let handler = registry.bind(py).get_item(status).ok().flatten()?;
-        let exc = http_exception_type(py).ok()?.call1((status,)).ok()?;
-        match handler.call1((build_request_arg(py, request_input), exc)) {
+        let headers = allow
+            .map(|allow| -> PyResult<_> {
+                let headers = PyDict::new(py);
+                let allow = allow
+                    .to_str()
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                headers.set_item(ALLOW.as_str(), allow)?;
+                Ok(headers)
+            })
+            .transpose();
+        let exc = headers.and_then(|headers| {
+            STARLETTE_HTTP_EXCEPTION
+                .get(py)?
+                .call1((status.as_u16(), py.None(), headers))
+        });
+        let result = exc.and_then(|exc| {
+            handler
+                .bind(py)
+                .call1((build_request_arg(py, Some(request_input)), exc))
+        });
+        match result {
             Ok(result) => handler_response(py, server, result)
                 .map(|result| result.into_response(plain_server_error())),
             Err(err) => {

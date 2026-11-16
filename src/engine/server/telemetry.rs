@@ -5,11 +5,11 @@
 
 use super::dispatch::dispatch_path;
 use super::serve::AppState;
+use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::header::{HOST, UPGRADE};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::Response;
-use axum::Router;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::path::{host_without_port, strip_path_convertors};
 use fastrapi_core::router::RouteMatch;
@@ -30,7 +30,11 @@ pub(crate) struct Telemetry {
 
 impl Telemetry {
     /// Returns `None` when telemetry is switched off or OpenTelemetry is not installed.
-    pub(crate) fn new(py: Python<'_>, config: &Bound<'_, PyAny>, state: &'static AppState) -> Option<&'static Self> {
+    pub(crate) fn new(
+        py: Python<'_>,
+        config: &Bound<'_, PyAny>,
+        state: &'static AppState,
+    ) -> Option<&'static Self> {
         let wanted = ["tracing", "metrics", "logs"].into_iter().any(|signal| {
             config
                 .get_item(signal)
@@ -42,7 +46,11 @@ impl Telemetry {
         }
         let native = py
             .import(intern!(py, "fastrapi.telemetry"))
-            .and_then(|module| module.getattr(intern!(py, "NativeTelemetry"))?.call1((config,)))
+            .and_then(|module| {
+                module
+                    .getattr(intern!(py, "NativeTelemetry"))?
+                    .call1((config,))
+            })
             .ok()?;
         Some(Box::leak(Box::new(Self {
             native: native.unbind(),
@@ -67,7 +75,12 @@ impl Telemetry {
         };
         let config = self.native.getattr(py, intern!(py, "config")).ok();
         let wanted = config
-            .and_then(|config| config.bind(py).get_item(intern!(py, "operation_spans")).ok())
+            .and_then(|config| {
+                config
+                    .bind(py)
+                    .get_item(intern!(py, "operation_spans"))
+                    .ok()
+            })
             .and_then(|value| value.is_truthy().ok())
             .unwrap_or(false);
         wanted && enabled(intern!(py, "enabled"))
@@ -97,7 +110,12 @@ impl Telemetry {
         }
     }
 
-    fn start(&self, py: Python<'_>, request: &Request, route: Option<String>) -> PyResult<Option<Exchange>> {
+    fn start(
+        &self,
+        py: Python<'_>,
+        request: &Request,
+        route: Option<String>,
+    ) -> PyResult<Option<Exchange>> {
         let scope = build_scope(
             py,
             request.method(),
@@ -110,7 +128,9 @@ impl Telemetry {
             scope.set_item(intern!(py, "type"), intern!(py, "websocket"))?;
             scope.set_item(intern!(py, "scheme"), intern!(py, "ws"))?;
         }
-        let exchange = self.native.call_method1(py, intern!(py, "start"), (scope, route))?;
+        let exchange = self
+            .native
+            .call_method1(py, intern!(py, "start"), (scope, route))?;
         if exchange.is_none(py) {
             return Ok(None);
         }
@@ -126,7 +146,14 @@ impl Telemetry {
         let method = HttpMethod::try_from(request.method()).ok()?;
         let host = router
             .has_host_routes()
-            .then(|| request.headers().get(HOST)?.to_str().ok().map(host_without_port))
+            .then(|| {
+                request
+                    .headers()
+                    .get(HOST)?
+                    .to_str()
+                    .ok()
+                    .map(host_without_port)
+            })
             .flatten();
         let path = dispatch_path(self.state, request.uri().path());
         let target = match router.resolve(method, path, host)? {
@@ -152,14 +179,20 @@ impl Operation {
             .execution
             .operation_spans
             .then(|| Self::open(py, name, handler.execution.func.bind(py)))
-            .and_then(|opened| opened.unwrap_or_else(|err| {
-                err.print(py);
-                None
-            }));
+            .and_then(|opened| {
+                opened.unwrap_or_else(|err| {
+                    err.print(py);
+                    None
+                })
+            });
         Self { name, open }
     }
 
-    fn open(py: Python<'_>, name: &'static str, function: &Bound<'_, PyAny>) -> PyResult<Option<(Py<PyAny>, Py<PyAny>)>> {
+    fn open(
+        py: Python<'_>,
+        name: &'static str,
+        function: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<(Py<PyAny>, Py<PyAny>)>> {
         let Some(context) = request_context(py)? else {
             return Ok(None);
         };
@@ -205,7 +238,11 @@ impl AfterResponse for Finished {
     }
 }
 
-async fn observe(State(telemetry): State<&'static Telemetry>, mut request: Request, next: Next) -> Response {
+async fn observe(
+    State(telemetry): State<&'static Telemetry>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     let route = telemetry.route(&request);
     let started = Python::attach(|py| {
         telemetry.start(py, &request, route).unwrap_or_else(|err| {

@@ -2,14 +2,15 @@
 //! This module also starts and stops the background asyncio event loop.
 
 use crate::engine::config::FastrAPI;
+use crate::engine::handler_errors::log_python_error;
 use fastrapi_runtime::py_bridge::{EventLoop, schedule_task};
 use fastrapi_runtime::tokio_runtime::PYTHON_RUNTIME;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use std::thread::Builder;
-use tracing::error;
 
 fastrapi_pyutil::cached_py_import!(ASYNCIO_MODULE, "asyncio");
+fastrapi_pyutil::cached_py_import!(IS_ASYNC_CALLABLE, "starlette._utils", "is_async_callable");
 
 pub(crate) struct EnteredLifespan {
     manager: Py<PyAny>,
@@ -39,7 +40,7 @@ fn spawn_loop_thread(py: Python<'_>, event_loop: &Py<PyAny>) -> PyResult<()> {
                 _ = asyncio.call_method1("set_event_loop", (&event_loop,));
             }
             if let Err(err) = event_loop.call_method0("run_forever") {
-                log_python_error("python async loop stopped with error", &err);
+                log_python_error(py, "python async loop stopped with error", &err);
             }
             _ = event_loop.call_method0("close");
         });
@@ -129,12 +130,11 @@ pub(crate) fn run_lifecycle_handler(
 ) -> PyResult<()> {
     let handler_bound = handler.bind(py);
 
-    let is_async: bool = py
-        .import("inspect")?
-        .call_method1("iscoroutinefunction", (handler_bound,))?
-        .is_truthy()?;
-
-    if is_async {
+    if IS_ASYNC_CALLABLE
+        .get(py)?
+        .call1((handler_bound,))?
+        .is_truthy()?
+    {
         let coroutine = handler_bound.call0()?;
         run_awaitable_in_loop(py, event_loop, coroutine)?;
     } else {
@@ -152,6 +152,12 @@ pub(crate) fn enter_lifespan(
 ) -> PyResult<EnteredLifespan> {
     let manager = lifespan_factory(py, lifespan.bind(py))?.call1((app.clone_ref(py),))?;
     let is_async = manager.hasattr("__aenter__")?;
+    if !is_async && !manager.hasattr("__enter__")? {
+        return Err(PyTypeError::new_err(format!(
+            "'{}' object does not support the asynchronous context manager protocol",
+            manager.get_type().name()?
+        )));
+    }
     let state = if is_async {
         let awaitable = manager.call_method0("__aenter__")?;
         run_awaitable_in_loop(py, event_loop, awaitable)?
@@ -213,9 +219,4 @@ pub(crate) fn run_awaitable_in_loop(
 ) -> PyResult<Py<PyAny>> {
     let future = schedule_task(py, event_loop, awaitable)?;
     py.detach(|| PYTHON_RUNTIME.block_on(future))
-}
-
-pub(crate) fn log_python_error(context: &str, err: &PyErr) {
-    error!("{}: {}", context, err);
-    Python::attach(|py| err.print(py));
 }

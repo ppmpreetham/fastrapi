@@ -4,9 +4,11 @@
 use crate::responses::PyStreamingResponse;
 use crate::sse::{format_sse_event, json_dumps};
 use bytes::Bytes;
+use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
-use pyo3::{intern, Bound};
+use pyo3::{Bound, intern};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StreamMode {
@@ -65,11 +67,16 @@ pub fn stream_factory(
 
 #[pymethods]
 impl StreamFactory {
-    fn __call__<'py>(&self, py: Python<'py>, generator: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    fn __call__<'py>(
+        &self,
+        py: Python<'py>,
+        generator: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let response_class = || {
-            self.response_class
-                .as_ref()
-                .map_or_else(|| py.get_type::<PyStreamingResponse>().into_any(), |class| class.bind(py).clone())
+            self.response_class.as_ref().map_or_else(
+                || py.get_type::<PyStreamingResponse>().into_any(),
+                |class| class.bind(py).clone(),
+            )
         };
         if self.mode == StreamMode::Raw {
             return response_class().call1((generator,));
@@ -86,7 +93,9 @@ impl StreamFactory {
         let kwargs = PyDict::new(py);
         if self.mode == StreamMode::Jsonl {
             kwargs.set_item(intern!(py, "media_type"), "application/jsonl")?;
-            return py.get_type::<PyStreamingResponse>().call((items,), Some(&kwargs));
+            return py
+                .get_type::<PyStreamingResponse>()
+                .call((items,), Some(&kwargs));
         }
         let headers = PyDict::new(py);
         headers.set_item("cache-control", "no-cache")?;
@@ -105,10 +114,11 @@ impl StreamItems {
     ) -> PyResult<Bound<'py, PyBytes>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "from_attributes"), true)?;
-        let validated = match adapter.call_method(intern!(py, "validate_python"), (item,), Some(&kwargs)) {
-            Ok(validated) => validated,
-            Err(_) => crate::response_convert::validate_stream_item(py, adapter, item)?,
-        };
+        let validated =
+            match adapter.call_method(intern!(py, "validate_python"), (item,), Some(&kwargs)) {
+                Ok(validated) => validated,
+                Err(_) => crate::response_convert::validate_stream_item(py, adapter, item)?,
+            };
         adapter
             .call_method(
                 intern!(py, "dump_json"),
@@ -134,10 +144,48 @@ impl StreamItems {
             return Ok(format_sse_event(Some(&data), None, None, None, None, sep));
         }
         let mut line = match &self.adapter {
-            Some(adapter) => self.dump_json(py, adapter.bind(py), item)?.as_bytes().to_vec(),
+            Some(adapter) => self
+                .dump_json(py, adapter.bind(py), item)?
+                .as_bytes()
+                .to_vec(),
             None => json_dumps(item)?.into_bytes(),
         };
         line.push(b'\n');
         Ok(Bytes::from(line))
+    }
+}
+
+/// A value taken out of a shared slot for one `await`. Dropping the lease puts the value back,
+/// so a cancelled `await` (such as `asyncio.wait_for` timing out) does not lose it.
+pub(crate) struct SlotLease<T> {
+    slot: Arc<Mutex<Option<T>>>,
+    value: Option<T>,
+}
+
+impl<T> SlotLease<T> {
+    /// `None` when the slot is empty, because another call holds the value or it is used up.
+    pub(crate) fn take(slot: &Arc<Mutex<Option<T>>>) -> Option<Self> {
+        let value = slot.lock().take()?;
+        Some(Self {
+            slot: Arc::clone(slot),
+            value: Some(value),
+        })
+    }
+
+    pub(crate) const fn value(&mut self) -> Option<&mut T> {
+        self.value.as_mut()
+    }
+
+    /// Drops the value instead of putting it back.
+    pub(crate) fn discard(mut self) {
+        self.value = None;
+    }
+}
+
+impl<T> Drop for SlotLease<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            *self.slot.lock() = Some(value);
+        }
     }
 }

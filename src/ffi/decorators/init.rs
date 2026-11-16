@@ -6,14 +6,15 @@ use super::router::PyAPIRouter;
 use ahash::AHashSet;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_core::params::ParameterSource;
-use fastrapi_core::path::extract_path_param_names;
+use fastrapi_core::path::{extract_path_convertors, extract_path_param_names};
+use fastrapi_http::response_convert::prepare_response_model;
+use fastrapi_http::response_convert::response_type_adapter;
 use fastrapi_http::response_type::ResponseFormatter;
 use fastrapi_openapi::paths::{endpoint_description, parse_callbacks_to_json};
 use fastrapi_pyutil::call::CallLayout;
 use fastrapi_pyutil::json::{SerializationHint, json_to_py_object, py_any_to_json};
 use fastrapi_routing::analysis::{
-    ParsedRouteMetadata, get_response_type_from_class, parse_route_metadata,
-    parse_websocket_signature,
+    ParsedRouteMetadata, parse_route_metadata, parse_websocket_signature,
 };
 use fastrapi_routing::dependencies::{
     DependencyNode, OverrideCache, collect_dependency_markers, merge_dependencies,
@@ -26,6 +27,7 @@ use fastrapi_routing::route::{
 use fastrapi_routing::security::describe_scheme;
 use hyper::StatusCode;
 use pyo3::Bound;
+use pyo3::exceptions::PyAssertionError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict, PyTuple};
@@ -132,6 +134,25 @@ fn generator_stream_factory(
     .map(Some)
 }
 
+/// Checks `responses=` as FastAPI does when a route is defined: every entry is a dict,
+/// and its `model` is a type pydantic can build a field for.
+fn check_additional_responses(py: Python<'_>, responses: Option<&Py<PyAny>>) -> PyResult<()> {
+    let Some(responses) = responses else {
+        return Ok(());
+    };
+    for (_, response) in responses.bind(py).cast::<PyDict>()?.iter() {
+        let response = response
+            .cast_into::<PyDict>()
+            .map_err(|_| PyAssertionError::new_err("An additional response must be a dict"))?;
+        if let Some(model) = response.get_item("model")?
+            && model.is_truthy()?
+        {
+            response_type_adapter(&model)?;
+        }
+    }
+    Ok(())
+}
+
 fn inferred_response_model(py: Python<'_>, func: &Bound<'_, PyAny>) -> Option<Py<PyAny>> {
     let typing = py.import("typing").ok()?;
     let kwargs = PyDict::new(py);
@@ -212,6 +233,50 @@ fn inferred_response_model(py: Python<'_>, func: &Bound<'_, PyAny>) -> Option<Py
         }
     }
     Some(annotation.unbind())
+}
+
+/// The name of a tag: a `str`, or the value of an `Enum` member, as FastAPI's `tags: list[str | Enum]` allows.
+pub(crate) fn tag_name(tag: &Bound<'_, PyAny>) -> Option<String> {
+    tag.extract()
+        .ok()
+        .or_else(|| tag.getattr("value").ok()?.extract().ok())
+}
+
+/// Starlette asserts that every routed path starts with `/`.
+pub(crate) fn ensure_routed_path(path: &str) -> PyResult<()> {
+    if !path.starts_with('/') {
+        return Err(PyAssertionError::new_err(
+            "Routed paths must start with '/'",
+        ));
+    }
+    ensure_path_template(path)
+}
+
+/// Starlette's `compile_path` rejects an unknown convertor and a parameter name that appears twice.
+pub(crate) fn ensure_path_template(path: &str) -> PyResult<()> {
+    if let Some(kind) = extract_path_convertors(path)
+        .iter()
+        .find(|kind| !matches!(kind.as_str(), "str" | "path" | "int" | "float" | "uuid"))
+    {
+        return Err(PyAssertionError::new_err(format!(
+            "Unknown path convertor '{kind}'"
+        )));
+    }
+    let names = extract_path_param_names(path);
+    let mut repeated: Vec<&str> = (0..names.len())
+        .filter(|&i| names[..i].contains(&names[i]))
+        .map(|i| names[i].as_str())
+        .collect();
+    repeated.sort_unstable();
+    repeated.dedup();
+    if repeated.is_empty() {
+        return Ok(());
+    }
+    let ending = if repeated.len() > 1 { "s" } else { "" };
+    Err(PyValueError::new_err(format!(
+        "Duplicated param name{ending} {} at path {path}",
+        repeated.join(", ")
+    )))
 }
 
 pub(crate) const ADD_API_ROUTE_OPTIONS: [&str; 26] = [
@@ -373,15 +438,15 @@ impl RouteOptions {
             && let Ok(iter) = tags_ref.try_iter()
         {
             for item in iter.flatten() {
-                if let Ok(tag_slice) = item.extract::<&str>()
-                    && !merged_tags.iter().any(|t| t == tag_slice)
+                if let Some(tag) = tag_name(&item)
+                    && !merged_tags.contains(&tag)
                 {
-                    merged_tags.push(tag_slice.to_owned());
+                    merged_tags.push(tag);
                 }
             }
         }
 
-        let resolved_deprecated = deprecated.or(parent_deprecated);
+        let resolved_deprecated = deprecated.filter(|&flag| flag).or(parent_deprecated);
 
         Ok(Self {
             name,
@@ -540,6 +605,7 @@ impl PyAPIRouter {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         self.ensure_mutable()?;
+        ensure_path_template(&path)?;
 
         let router_tags = self.tags.clone();
         let merged_kwargs;
@@ -624,11 +690,11 @@ impl PyAPIRouter {
                 opts.dump_options.as_ref(),
             )?;
 
-            let final_response_type = if let Some(cls) = &effective_response_class {
-                get_response_type_from_class(py, cls.bind(py))
-            } else {
-                metadata.response_type
-            };
+            let final_response_type = effective_response_class
+                .as_ref()
+                .map_or(metadata.response_type, |class| {
+                    super::tree::response_class_type(py, class.bind(py))
+                });
 
             let path_param_names: Vec<Arc<str>> = extract_path_param_names(&path_for_closure)
                 .into_iter()
@@ -640,6 +706,16 @@ impl PyAPIRouter {
                 .as_ref()
                 .map(|model| model.clone_ref(py))
                 .or_else(|| inferred_response_model(py, &func));
+            if let Some(status) = opts.default_status
+                && !opts.bypass_serialization
+                && response_model.is_some()
+                && !fastrapi_http::status::body_allowed(status.as_u16())
+            {
+                return Err(PyAssertionError::new_err(format!(
+                    "Status code {} must not have a response body",
+                    status.as_u16()
+                )));
+            }
             let serialization_hint = if opts.bypass_serialization {
                 SerializationHint::Unknown
             } else if response_model.is_some() {
@@ -702,6 +778,8 @@ impl PyAPIRouter {
 
             handler.payload.refresh_dependency_flags();
             handler.assign_execution_mode();
+            prepare_response_model(py, &handler.response)?;
+            check_additional_responses(py, opts.responses.as_ref())?;
 
             let route_name = opts.name.clone().unwrap_or_else(|| func_name(&func));
             let route_instance = router_route_class

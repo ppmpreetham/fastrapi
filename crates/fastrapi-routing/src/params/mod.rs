@@ -9,8 +9,9 @@ mod parse;
 mod utils;
 
 pub use depends::{PyDepends, PySecurity};
-pub use module::{errors_with_loc, json_error, params_module};
+pub use module::{CallableKind, errors_with_loc, json_error, params_module, resolved_signature};
 pub use parse::parse_parameter_spec;
+pub(crate) use utils::is_dependency_marker;
 pub use utils::{
     base_annotation, find_annotated_dependency_marker, is_inspect_empty, list_element_annotation,
 };
