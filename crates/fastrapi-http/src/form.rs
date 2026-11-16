@@ -167,17 +167,15 @@ impl FormEntry {
                 headers,
                 content,
             } => {
-                let file = Py::new(
+                let file = PyUploadFile::from_bytes(
                     py,
-                    PyUploadFile::from_bytes(
-                        py,
-                        Some(filename),
-                        content_type,
-                        headers.into(),
-                        content,
-                    ),
-                )?;
-                (name, file.into_any())
+                    Some(filename),
+                    content_type,
+                    headers.into(),
+                    content,
+                )
+                .into_python(py)?;
+                (name, file.unbind())
             }
         })
     }

@@ -9,6 +9,7 @@ import time
 from typing import Annotated, Literal
 
 import fastapi
+import fastapi.datastructures
 import fastapi.routing
 import fastapi.security
 import pytest
@@ -17,6 +18,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 import fastrapi
+import fastrapi.datastructures
 import fastrapi.routing
 import fastrapi.security
 from test_security_ws_parity import LiveServer
@@ -741,6 +743,38 @@ def test_api_router_subclasses_starlette_router():
             isinstance(app.router, starlette.routing.Router),
             issubclass(lib.routing.APIRouter, starlette.routing.Router),
             lib.APIRouter is lib.routing.APIRouter,
+        )
+
+    both(run)
+
+
+def test_upload_file_subclasses_starlette_upload_file():
+    import io
+
+    import starlette.datastructures
+
+    def run(lib):
+        app = new_app(lib)
+
+        @app.post("/upload")
+        async def upload(file: lib.UploadFile, files: list[lib.UploadFile]):
+            return [
+                isinstance(file, starlette.datastructures.UploadFile),
+                file.filename,
+                (await file.read()).decode(),
+                [isinstance(item, starlette.datastructures.UploadFile) for item in files],
+            ]
+
+        built = lib.UploadFile(io.BytesIO(b"hi"), filename="a.txt")
+        response = TestClient(app).post(
+            "/upload",
+            files=[("file", ("a.txt", b"one")), ("files", ("b.txt", b"two")), ("files", ("c.txt", b"three"))],
+        )
+        return (
+            response.json(),
+            isinstance(built, starlette.datastructures.UploadFile),
+            issubclass(lib.UploadFile, starlette.datastructures.UploadFile),
+            lib.UploadFile is lib.datastructures.UploadFile,
         )
 
     both(run)

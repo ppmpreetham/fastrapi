@@ -3,7 +3,9 @@
 //! Its `read`, `write`, `seek`, and `close` methods are asynchronous in Python.
 
 use bytes::{BufMut, Bytes, BytesMut};
+use fastrapi_pyutil::subclass::NativeSubclass;
 use fastrapi_runtime::py_bridge;
+use parking_lot::Mutex;
 use pyo3::Bound;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -47,7 +49,7 @@ const SPOOL_MAX_MEM: usize = 1024 * 1024;
 /// async def create_upload_file(file: UploadFile):
 ///     return {"filename": file.filename}
 /// ```
-#[pyclass(name = "UploadFile", module = "fastrapi.datastructures")]
+#[pyclass(name = "UploadFile", module = "fastrapi.datastructures", subclass)]
 pub struct PyUploadFile {
     #[pyo3(get, set)]
     pub filename: Option<String>,
@@ -62,7 +64,31 @@ pub struct PyUploadFile {
     raw_headers: Arc<[(String, String)]>,
 }
 
+static PUBLIC_TYPE: NativeSubclass =
+    NativeSubclass::new("starlette.datastructures", "UploadFile", "fastrapi.datastructures");
+
+/// The `UploadFile` class users see, which is also a Starlette `UploadFile`.
+pub fn upload_file_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    PUBLIC_TYPE.get::<PyUploadFile>(py)
+}
+
+/// Carries an upload built in Rust into the public class's constructor.
+#[pyclass(frozen)]
+struct ParsedUpload(Mutex<Option<PyUploadFile>>);
+
+impl ParsedUpload {
+    fn take(file: &Bound<'_, PyAny>) -> Option<PyUploadFile> {
+        file.cast::<Self>().ok()?.get().0.lock().take()
+    }
+}
+
 impl PyUploadFile {
+    /// Creates the public `UploadFile` object for this upload.
+    pub fn into_python(self, py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+        let parsed = Bound::new(py, ParsedUpload(Mutex::new(Some(self))))?;
+        upload_file_type(py)?.call1((parsed,))
+    }
+
     pub fn from_bytes(
         py: Python<'_>,
         filename: Option<String>,
@@ -131,6 +157,9 @@ impl PyUploadFile {
         headers: Option<Py<PyAny>>,
         content_type: Option<String>,
     ) -> PyResult<Self> {
+        if let Some(upload) = ParsedUpload::take(file.bind(py)) {
+            return Ok(upload);
+        }
         let content_type = match (content_type, &headers) {
             (Some(content_type), _) => Some(content_type),
             (None, Some(headers)) => headers

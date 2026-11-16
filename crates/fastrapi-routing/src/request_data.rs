@@ -737,17 +737,14 @@ fn form_field_to_py<'py>(
     match field {
         BodyField::Text(raw) => Ok(PyString::new(py, raw).into_any()),
         BodyField::File(file) if read_bytes => Ok(PyBytes::new(py, &file.content).into_any()),
-        BodyField::File(file) => Bound::new(
+        BodyField::File(file) => PyUploadFile::from_bytes(
             py,
-            PyUploadFile::from_bytes(
-                py,
-                file.filename.clone(),
-                file.content_type.clone(),
-                file.headers.clone(),
-                file.content.clone(),
-            ),
+            file.filename.clone(),
+            file.content_type.clone(),
+            file.headers.clone(),
+            file.content.clone(),
         )
-        .map(Bound::into_any),
+        .into_python(py),
     }
 }
 

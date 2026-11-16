@@ -68,9 +68,6 @@ mod fastrapi {
     use fastrapi_http::request::PyRequest as Request;
 
     #[pymodule_export]
-    use fastrapi_http::upload_file::PyUploadFile as UploadFile;
-
-    #[pymodule_export]
     use fastrapi_http::websocket::PyWebSocket as WebSocket;
 
     #[pymodule_export]
@@ -224,14 +221,13 @@ mod fastrapi {
         #[pymodule_export]
         use fastrapi_http::form_data::PyFormData as FormData;
         #[pymodule_export]
-        use fastrapi_http::upload_file::PyUploadFile as UploadFile;
-        #[pymodule_export]
         use fastrapi_http::url::PyURL as URL;
 
         #[pymodule_init]
         fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
             crate::ffi::compat::register_default_placeholder(m)?;
             let py = m.py();
+            m.add("UploadFile", fastrapi_http::upload_file::upload_file_type(py)?)?;
             let module = py.import("starlette.datastructures")?;
             for name in [
                 "Address",
@@ -464,6 +460,7 @@ mod fastrapi {
             fastrapi_http::background::background_tasks_type(py)?,
         )?;
         m.add("APIRouter", crate::ffi::decorators::api_router_type(py)?)?;
+        m.add("UploadFile", fastrapi_http::upload_file::upload_file_type(py)?)?;
         m.setattr("__path__", PyList::empty(py))?;
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
         let app = py.get_type::<crate::engine::config::FastrAPI>();
