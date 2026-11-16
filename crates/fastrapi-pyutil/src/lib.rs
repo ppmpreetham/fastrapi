@@ -7,3 +7,4 @@ pub mod errors;
 pub mod imports;
 pub mod json;
 pub mod lazy;
+pub mod subclass;
