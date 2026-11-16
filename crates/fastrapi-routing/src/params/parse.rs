@@ -95,6 +95,18 @@ fn param_model(spec: &Bound<'_, PyAny>) -> PyResult<Option<Arc<ParamModel>>> {
         keys,
         presence,
         union: spec.getattr(intern!(py, "model_union"))?.extract()?,
+        schema_aliases: optional(spec, intern!(py, "model_schema_aliases"))?
+            .map(|aliases| {
+                aliases
+                    .extract::<Vec<(String, Vec<String>)>>()
+                    .map(|aliases| {
+                        aliases
+                            .into_iter()
+                            .map(|(name, names)| (name, names.into_boxed_slice()))
+                            .collect()
+                    })
+            })
+            .transpose()?,
     })))
 }
 

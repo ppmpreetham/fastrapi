@@ -14,7 +14,7 @@ import fastapi.routing
 import fastapi.security
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 from starlette.background import BackgroundTask
 
 import fastrapi
@@ -820,6 +820,58 @@ HOST_PATTERN_REQUESTS = [
 def test_host_patterns(path, host):
     def run(lib):
         response = TestClient(host_pattern_app(lib)).get(path, headers={"host": host})
+        return response.status_code, response.json()
+
+    both(run)
+
+
+class Login(BaseModel):
+    user_name: str = Field(validation_alias=AliasChoices("userName", "user"))
+    secret: str = Field(validation_alias="pw")
+    note: str = Field("x", alias="memo")
+    plain: int = 1
+
+
+class AliasExtra(BaseModel):
+    tag: str
+
+
+def form_alias_app(lib):
+    app = lib.FastAPI() if lib is fastapi else lib.FastrAPI()
+
+    @app.post("/single")
+    def single(data: Annotated[Login, lib.Form()]):
+        return data
+
+    @app.post("/optional")
+    def optional(data: Annotated[Login | None, lib.Form()] = None):
+        return data
+
+    @app.post("/combined")
+    def combined(data: Annotated[Login, lib.Form()], extra: Annotated[AliasExtra, lib.Form()]):
+        return data
+
+    return app
+
+
+FORM_ALIAS_CASES = [
+    ("/single", {"userName": "a", "pw": "p"}),
+    ("/single", {"user": "b", "pw": "p", "memo": "m"}),
+    ("/single", {"user_name": "c", "pw": "p"}),
+    ("/optional", {"user": "d", "pw": "p"}),
+    ("/optional", {}),
+    ("/combined", {"user": "e", "pw": "p", "tag": "t"}),
+]
+
+
+def test_form_model_alias_schemas():
+    both(lambda lib: form_alias_app(lib).openapi())
+
+
+@pytest.mark.parametrize(("path", "data"), FORM_ALIAS_CASES)
+def test_form_model_alias_requests(path, data):
+    def run(lib):
+        response = TestClient(form_alias_app(lib)).post(path, data=data)
         return response.status_code, response.json()
 
     both(run)

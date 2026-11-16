@@ -43,12 +43,16 @@ pub enum ModelPresence {
     AnyKey,
 }
 
+/// Schema property names a form model renames to its request names in `OpenAPI`.
+pub type SchemaAliases = Box<[(String, Box<[String]>)]>;
+
 #[derive(Debug)]
 pub struct ParamModel {
     pub annotation: Py<PyAny>,
     pub keys: Box<[ModelKey]>,
     pub presence: Option<ModelPresence>,
     pub union: bool,
+    pub schema_aliases: Option<SchemaAliases>,
 }
 
 #[expect(

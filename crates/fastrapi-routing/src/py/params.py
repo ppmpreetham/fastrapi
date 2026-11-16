@@ -379,6 +379,35 @@ def validation_alias(field_info: FieldInfo, name: str) -> str:
     return field_info.alias if field_info.alias is not None else name
 
 
+def param_aliases(info: FieldInfo, name: str, config: Mapping[str, Any], convert_underscores: bool = False) -> list[tuple[str, str]]:
+    alias = validation_alias(info, name)
+    request_alias = alias.replace("_", "-") if convert_underscores and alias == name else alias
+    choices = info.validation_alias
+    aliases = [(alias, request_alias)]
+    if isinstance(choices, AliasChoices):
+        if not all(isinstance(choice, str) for choice in choices.choices):
+            return aliases
+        aliases = [(choice, choice) for choice in choices.choices]
+    if config.get("validate_by_alias") is False or config.get("validate_by_name", config.get("populate_by_name", False)):
+        request_name = name.replace("_", "-") if convert_underscores else name
+        if config.get("validate_by_alias") is False:
+            return [(name, request_name)]
+        if name not in [alias for alias, _ in aliases]:
+            aliases.append((name, request_name))
+    return aliases
+
+
+def form_schema_aliases(model: type[BaseModel]) -> list[tuple[str, list[str]]] | None:
+    aliases = []
+    for name, info in model.model_fields.items():
+        choices = info.validation_alias
+        schema_name = choices.choices[0] if isinstance(choices, AliasChoices) else validation_alias(info, name)
+        names = [alias for alias, _ in param_aliases(info, name, model.model_config)]
+        if isinstance(schema_name, str) and (names[0] != schema_name or (len(names) > 1 and info.is_required())):
+            aliases.append((schema_name, names))
+    return aliases or None
+
+
 def alias_choices(field_info: FieldInfo) -> list[str] | None:
     alias = field_info.validation_alias
     if isinstance(field_info, Path) or not isinstance(alias, AliasChoices):
@@ -495,6 +524,7 @@ class FieldSpec:
         "model_class",
         "model_presence",
         "model_union",
+        "model_schema_aliases",
         "alias_choices",
         "loc_renames",
         "fast",
@@ -514,15 +544,16 @@ class FieldSpec:
 
 
 def _model_keys(model: type[BaseModel], source: str, convert_underscores: bool) -> list[ModelKey]:
-    keys = []
-    by_alias = model.model_config.get("validate_by_alias") is not False
-    for name, info in model.model_fields.items():
-        alias = validation_alias(info, name) if by_alias else name
-        lookup = alias
-        if source == "header" and getattr(info, "convert_underscores", convert_underscores) and alias == name:
-            lookup = alias.replace("_", "-")
-        keys.append(ModelKey(lookup, alias, info))
-    return keys
+    return [
+        ModelKey(lookup, alias, info)
+        for name, info in model.model_fields.items()
+        for alias, lookup in param_aliases(
+            info,
+            name,
+            model.model_config,
+            source == "header" and getattr(info, "convert_underscores", convert_underscores),
+        )
+    ]
 
 
 def _merged_model_keys(models: list[type[BaseModel]], source: str, convert_underscores: bool) -> list[ModelKey]:
@@ -633,6 +664,7 @@ def analyze(param_name: str, parameter: inspect.Parameter, is_path_param: bool, 
     spec.model = bool(models)
     spec.model_union = bool(union_models)
     spec.model_class = Union[tuple(union_models)] if union_models else model
+    spec.model_schema_aliases = form_schema_aliases(model) if model is not None and isinstance(field_info, Form) else None
     spec.model_presence = model_presence(field_info, models)
     spec.model_keys = (
         _merged_model_keys(models, spec.source, getattr(field_info, "convert_underscores", True))

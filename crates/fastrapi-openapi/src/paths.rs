@@ -464,14 +464,15 @@ fn push_form_model_conditions(
         .and_then(|title| title.extract::<String>().ok())
         .unwrap_or_else(|| schema_title(&param.name));
     let annotation = model.annotation.bind(py);
+    let aliases = model.schema_aliases.as_ref();
     let Some(presence) = model.presence else {
-        conditions.push(registry.field(annotation, "validation", Some(title)));
+        conditions.push(registry.form_model(annotation, Some(title), aliases));
         return;
     };
     let schema = if model.union {
         registry.field(annotation, "validation", Some(title))
     } else {
-        json!({ "anyOf": [registry.field(annotation, "validation", None)], "title": title })
+        json!({ "anyOf": [registry.form_model(annotation, None, aliases)], "title": title })
     };
     let absent = absent_form_model(model, presence);
     if is_required(param) {

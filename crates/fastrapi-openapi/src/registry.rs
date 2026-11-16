@@ -4,6 +4,8 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use simd_json::json;
 use simd_json::owned::Value as JsonValue;
 use simd_json::prelude::{ValueAsMutObject, ValueAsScalar, ValueObjectAccess};
+use fastrapi_routing::route::SchemaAliases;
+use simd_json::owned::Object;
 use std::collections::HashMap;
 
 const MARKER: &str = "$fastrapi_schema";
@@ -14,6 +16,7 @@ struct Field {
     mode: &'static str,
     title: Option<String>,
     default: Option<JsonValue>,
+    form_aliases: Option<SchemaAliases>,
 }
 
 #[derive(Default)]
@@ -38,13 +41,34 @@ impl SchemaRegistry {
         title: Option<String>,
         default: Option<JsonValue>,
     ) -> JsonValue {
-        let index = self.fields.len();
-        self.fields.push(Field {
+        self.push(Field {
             annotation: annotation.clone().unbind(),
             mode,
             title,
             default,
-        });
+            form_aliases: None,
+        })
+    }
+
+    /// A form model's schema, renamed to its request names like FastAPI's `_get_form_model_schema`.
+    pub(crate) fn form_model(
+        &mut self,
+        annotation: &Bound<'_, PyAny>,
+        title: Option<String>,
+        aliases: Option<&SchemaAliases>,
+    ) -> JsonValue {
+        self.push(Field {
+            annotation: annotation.clone().unbind(),
+            mode: "validation",
+            title,
+            default: None,
+            form_aliases: aliases.cloned(),
+        })
+    }
+
+    fn push(&mut self, field: Field) -> JsonValue {
+        let index = self.fields.len();
+        self.fields.push(field);
         json!({ MARKER: index })
     }
 
@@ -138,10 +162,64 @@ impl SchemaRegistry {
                     object.insert("default".to_string(), default.clone());
                 }
             }
+            if let Some(aliases) = &field.form_aliases {
+                schema = renamed_form_model(schema, aliases, schemas);
+            }
             values.push((index, schema));
         }
         Ok(values)
     }
+}
+
+fn renamed_form_model(
+    schema: JsonValue,
+    aliases: &SchemaAliases,
+    schemas: &HashMap<String, JsonValue>,
+) -> JsonValue {
+    let Some(mut renamed) = schema
+        .get("$ref")
+        .and_then(ValueAsScalar::as_str)
+        .and_then(|reference| reference.strip_prefix("#/components/schemas/"))
+        .and_then(|name| schemas.get(name))
+        .cloned()
+    else {
+        return schema;
+    };
+    let Some(object) = renamed.as_object_mut() else {
+        return schema;
+    };
+    let names = |name: &str| aliases.iter().find(|(alias, _)| alias == name).map(|(_, names)| &**names);
+    if let Some(JsonValue::Object(properties)) = object.remove("properties") {
+        let properties: Object = properties
+            .into_iter()
+            .map(|(name, value)| (names(&name).map_or_else(|| name.clone(), |names| names[0].clone()), value))
+            .collect();
+        object.insert("properties".to_string(), JsonValue::from(properties));
+    }
+    let mut required = Vec::new();
+    let mut choices = Vec::new();
+    if let Some(JsonValue::Array(listed)) = object.remove("required") {
+        for name in listed.iter().filter_map(ValueAsScalar::as_str) {
+            match names(name) {
+                Some(names) if names.len() > 1 => {
+                    let any_of: Vec<JsonValue> = names.iter().map(|name| json!({ "required": [name] })).collect();
+                    choices.push(json!({ "anyOf": any_of }));
+                }
+                Some(names) => required.push(json!(names[0].as_str())),
+                None => required.push(json!(name)),
+            }
+        }
+    }
+    object.insert("required".to_string(), JsonValue::Array(Box::new(required)));
+    if !choices.is_empty() {
+        match object.get_mut("allOf") {
+            Some(JsonValue::Array(all_of)) => all_of.extend(choices),
+            _ => {
+                object.insert("allOf".to_string(), JsonValue::Array(Box::new(choices)));
+            }
+        }
+    }
+    renamed
 }
 
 fn trim_description(definition: &mut JsonValue) {
