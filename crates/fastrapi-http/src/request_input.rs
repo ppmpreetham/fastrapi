@@ -9,11 +9,12 @@ use axum::http::{Extensions, HeaderMap, HeaderName};
 use cookie::Cookie;
 use fastrapi_core::connection::PeerAddrs;
 use fastrapi_runtime::py_bridge::EventLoop;
+use parking_lot::Mutex;
 use pyo3::prelude::*;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::net::SocketAddr;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Debug)]
 pub struct NamedClient(pub Box<str>, pub u16);
@@ -28,6 +29,22 @@ pub struct AsgiMount {
 
 pub type PathParams<'a> = OnceLock<SmallVec<[(&'a str, &'a str); 8]>>;
 pub type QueryParams<'a> = OnceLock<SmallVec<[(Cow<'a, str>, Cow<'a, str>); 8]>>;
+
+/// Holds the error of a request made by a custom route class's original handler,
+/// so that the handler raises it in Python instead of answering with an error response.
+#[derive(Clone, Default)]
+pub struct RaisedError(Arc<Mutex<Option<PyErr>>>);
+
+impl RaisedError {
+    pub fn capture(&self, py: Python<'_>, err: &PyErr) {
+        *self.0.lock() = Some(err.clone_ref(py));
+    }
+
+    #[must_use]
+    pub fn take(&self) -> Option<PyErr> {
+        self.0.lock().take()
+    }
+}
 
 pub struct RequestInput<'a> {
     pub method: &'a str,
@@ -74,6 +91,11 @@ impl<'a> RequestInput<'a> {
         self.extensions
             .get::<ConnectInfo<PeerAddrs>>()
             .map(|ConnectInfo(peer)| (Cow::Owned(peer.remote.ip().to_string()), peer.remote.port()))
+    }
+
+    #[must_use]
+    pub fn raised_error(&self) -> Option<&RaisedError> {
+        self.extensions.get::<RaisedError>()
     }
 
     #[must_use]

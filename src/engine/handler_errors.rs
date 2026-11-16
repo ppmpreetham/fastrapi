@@ -1,7 +1,8 @@
 //! The conversion of Python errors from route handlers into HTTP responses.
 //! This module also writes Python errors to the log.
 
-use axum::response::Response;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use fastrapi_http::exceptions::{
     http_exception_response, server_error_response, validation_error_response,
 };
@@ -48,6 +49,10 @@ fn python_error_response(
     request_input: Option<&RequestInput<'_>>,
     server: Option<EventLoop>,
 ) -> Response {
+    if let Some(raised) = request_input.and_then(RequestInput::raised_error) {
+        raised.capture(py, err);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     if let Some(response) = dispatch_exception_handler(py, err, request_input, server) {
         return response;
     }

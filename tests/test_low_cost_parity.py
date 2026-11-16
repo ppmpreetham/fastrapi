@@ -8,12 +8,14 @@ import time
 from typing import Annotated, Literal
 
 import fastapi
+import fastapi.routing
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 import fastrapi
+import fastrapi.routing
 from test_security_ws_parity import LiveServer
 
 
@@ -481,3 +483,67 @@ def test_mounted_app_sees_parent_lifespan_state():
 
     assert run(fastrapi) == run(fastapi)
     assert LiveServer(build(fastrapi)).http("GET", "/sub/state") == (200, "parent")
+
+
+def catching_route_app(lib):
+    class CatchingRoute(lib.routing.APIRoute):
+        def get_route_handler(self):
+            original = super().get_route_handler()
+
+            async def handler(request):
+                try:
+                    response = await original(request)
+                except lib.exceptions.RequestValidationError as exc:
+                    body = await request.body()
+                    return lib.responses.JSONResponse({"validation": exc.errors(), "body": body.decode()}, status_code=418)
+                except lib.HTTPException as exc:
+                    return lib.responses.JSONResponse({"http": exc.detail}, status_code=exc.status_code + 1)
+                response.headers["x-wrapped"] = "yes"
+                return response
+
+            return handler
+
+    app = lib.FastAPI() if lib is fastapi else lib.FastrAPI()
+    router = lib.APIRouter(route_class=CatchingRoute)
+
+    @router.post("/items")
+    def create(count: int = lib.Body(embed=True)):
+        return {"count": count}
+
+    @router.get("/missing")
+    def missing(q: int):
+        return q
+
+    @router.get("/teapot")
+    def teapot():
+        raise lib.HTTPException(400, "bad")
+
+    @router.get("/boom")
+    def boom():
+        raise ValueError("boom")
+
+    app.include_router(router)
+    return app
+
+
+CATCHING_ROUTE_REQUESTS = [
+    ("POST", "/items", {"count": 3}),
+    ("POST", "/items", {"count": "x"}),
+    ("GET", "/missing", None),
+    ("GET", "/missing?q=2", None),
+    ("GET", "/teapot", None),
+    ("GET", "/boom", None),
+]
+
+
+@pytest.mark.parametrize(("method", "path", "body"), CATCHING_ROUTE_REQUESTS)
+def test_route_class_handler_sees_raised_errors(method, path, body):
+    def run(lib):
+        response = TestClient(catching_route_app(lib), raise_server_exceptions=False).request(method, path, json=body)
+        try:
+            content = response.json()
+        except ValueError:
+            content = response.text
+        return response.status_code, content, response.headers.get("x-wrapped")
+
+    both(run)

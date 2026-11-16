@@ -11,6 +11,7 @@ use bytes::Bytes;
 use fastrapi_core::params::PathParamRange;
 use fastrapi_core::router::FrozenRouter;
 use fastrapi_http::request::create_py_request;
+use fastrapi_http::request_input::RaisedError;
 use fastrapi_http::response_convert::convert_auto_response;
 use fastrapi_http::responses::PyResponse;
 use fastrapi_routing::route::{RouteEntry, RouteHandler};
@@ -34,7 +35,7 @@ fn invalid(err: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
-fn axum_request(request: &Bound<'_, PyAny>, body: Bytes) -> PyResult<Request> {
+fn axum_request(request: &Bound<'_, PyAny>, body: Bytes, raised: RaisedError) -> PyResult<Request> {
     let py = request.py();
     let scope = request.getattr(intern!(py, "scope"))?;
     let method: String = scope.get_item(intern!(py, "method"))?.extract()?;
@@ -51,7 +52,8 @@ fn axum_request(request: &Bound<'_, PyAny>, body: Bytes) -> PyResult<Request> {
     let mut builder = Request::builder()
         .method(method.as_str())
         .uri(target)
-        .extension(BypassCustomHandler);
+        .extension(BypassCustomHandler)
+        .extension(raised);
     for pair in scope.get_item(intern!(py, "headers"))?.try_iter()? {
         let (name, value): (Vec<u8>, Vec<u8>) = pair?.extract()?;
         builder = builder.header(
@@ -96,14 +98,18 @@ impl PyOriginalHandler {
         let (router, state) = (self.router, self.state);
         py_bridge::future_into_py_with_locals(py, locals, async move {
             let body = body.await?;
+            let raised = RaisedError::default();
             let request = Python::attach(|py| {
                 let body = Bytes::from(body.bind(py).extract::<Vec<u8>>()?);
-                axum_request(request.bind(py), body)
+                axum_request(request.bind(py), body, raised.clone())
             })?;
             let response = match dispatch_or_not_found(router, state, request).await {
                 Ok(response) => response,
                 Err(_) => StatusCode::NOT_FOUND.into_response(),
             };
+            if let Some(err) = raised.take() {
+                return Err(err);
+            }
             python_response(response).await
         })
     }

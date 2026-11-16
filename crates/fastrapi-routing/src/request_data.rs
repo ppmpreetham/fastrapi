@@ -202,7 +202,7 @@ impl<'py> Errors<'py> {
         input: &RequestInput<'_>,
         body: impl FnOnce() -> PyResult<Option<Bound<'py, PyAny>>>,
     ) -> Rejection {
-        if has_validation_handler(self.py, input) {
+        if input.raised_error().is_some() || has_validation_handler(self.py, input) {
             return Rejection::Python(self.into_error(body));
         }
         match self.json() {
