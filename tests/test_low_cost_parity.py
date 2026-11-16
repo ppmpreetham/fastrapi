@@ -16,6 +16,8 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import AliasChoices, BaseModel, Field
 from starlette.background import BackgroundTask
+from starlette.testclient import WebSocketDenialResponse
+from starlette.websockets import WebSocketDisconnect
 
 import fastrapi
 import fastrapi.datastructures
@@ -873,5 +875,75 @@ def test_form_model_alias_requests(path, data):
     def run(lib):
         response = TestClient(form_alias_app(lib)).post(path, data=data)
         return response.status_code, response.json()
+
+    both(run)
+
+
+def asgi_websocket_app(lib):
+    app = lib.FastAPI() if lib is fastapi else lib.FastrAPI()
+
+    def token(token: str | None = lib.Query(None)):
+        if token == "bad":
+            raise lib.HTTPException(401, "no")
+        return token
+
+    @app.websocket("/echo/{room}")
+    async def echo(websocket: lib.WebSocket, room: str, n: int = 1, user=lib.Depends(token)):
+        await websocket.accept(subprotocol="chat" if "chat" in websocket.scope["subprotocols"] else None)
+        text = await websocket.receive_text()
+        await websocket.send_text(f"{room}:{n}:{user}:{text}")
+        data = await websocket.receive_bytes()
+        await websocket.send_bytes(data[::-1])
+        await websocket.send_json({"path": websocket.url.path, "params": dict(websocket.path_params)})
+        await websocket.close(code=1001, reason="bye")
+
+    @app.websocket("/reject")
+    async def reject(websocket: lib.WebSocket):
+        await websocket.close(code=4001)
+
+    @app.websocket("/needs/{n}")
+    async def needs(websocket: lib.WebSocket, n: int):
+        await websocket.accept()
+
+    @app.websocket("/boom")
+    async def boom(websocket: lib.WebSocket):
+        await websocket.accept()
+        raise lib.WebSocketException(code=4002, reason="nope")
+
+    return app
+
+
+def websocket_session(client, path, subprotocols=None):
+    try:
+        with client.websocket_connect(path, subprotocols=subprotocols) as ws:
+            out = [ws.accepted_subprotocol]
+            if path.startswith("/echo") or path.startswith("/sub/echo"):
+                ws.send_text("hi")
+                out.append(ws.receive_text())
+                ws.send_bytes(b"abc")
+                out.append(ws.receive_bytes())
+                out.append(ws.receive_json())
+            out.append(ws.receive())
+            return out
+    except WebSocketDenialResponse as exc:
+        return ("denied", exc.status_code, exc.json())
+    except WebSocketDisconnect as exc:
+        reason = json.loads(exc.reason) if isinstance(exc.reason, str) and exc.reason.startswith("[") else exc.reason
+        return ("disconnect", exc.code, reason)
+
+
+ASGI_WEBSOCKET_PATHS = [("/echo/lobby?n=3&token=t", ["chat"]), ("/echo/lobby", None), ("/echo/lobby?token=bad", None), ("/reject", None), ("/needs/x", None), ("/boom", None), ("/missing", None)]
+
+
+@pytest.mark.parametrize(("path", "subprotocols"), ASGI_WEBSOCKET_PATHS)
+@pytest.mark.parametrize("prefix", ["", "/sub"])
+def test_websockets_through_the_asgi_entry_point(path, subprotocols, prefix):
+    def run(lib):
+        app = asgi_websocket_app(lib)
+        if prefix:
+            outer = fastapi.FastAPI()
+            outer.mount(prefix, app)
+            app = outer
+        return websocket_session(TestClient(app), prefix + path, subprotocols)
 
     both(run)

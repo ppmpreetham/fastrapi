@@ -2,10 +2,9 @@
 //! It accepts WebSocket connections, matches the path parameters and moves messages between the socket and the Python handler.
 
 use crate::engine::executor::{build_request_input_from_parts, schedule_python_coroutine};
-use axum::extract::{ConnectInfo, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use fastrapi_core::connection::PeerAddrs;
 use fastrapi_core::params::PathParamRange;
 use fastrapi_routing::dependencies::{self, execute_teardowns_async};
 use fastrapi_routing::request_data::{Errors, request_param_value};
@@ -27,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::error;
 
 #[derive(Debug, thiserror::Error)]
-enum SocketPumpError {
+pub(crate) enum SocketPumpError {
     #[error("WebSocket Error: {0}")]
     WebSocket(#[from] fastwebsockets::WebSocketError),
     #[error("Python Error: {0}")]
@@ -43,7 +42,9 @@ use fastrapi_http::exceptions::{
     PyWebSocketDisconnect, request_validation_error_type, websocket_validation_error,
 };
 use fastrapi_http::request::PyHTTPConnection;
-use fastrapi_http::request_input::RequestInput;
+use fastrapi_http::request_input::{AsgiMount, RequestInput};
+use super::asgi_websocket::AsgiSocket;
+use axum::extract::{FromRequestParts, Request};
 use fastrapi_http::websocket::PyWebSocket;
 use fastrapi_http::websocket::{WSDecision, WSMessage};
 use fastrapi_pyutil::json::py_any_to_json;
@@ -68,13 +69,78 @@ pub struct WsRouteState {
     pub host: Option<Box<str>>,
 }
 
-pub async fn ws_host_handler(
-    ws: upgrade::IncomingUpgrade,
+/// Where a WebSocket connection's messages travel: a native socket or ASGI callables.
+pub(crate) enum WsTransport {
+    Native(upgrade::IncomingUpgrade),
+    Asgi(AsgiSocket),
+}
+
+impl WsTransport {
+    async fn take(parts: &mut Parts) -> Result<Self, StatusCode> {
+        if let Some(socket) = parts.extensions.remove::<AsgiSocket>() {
+            return Ok(Self::Asgi(socket));
+        }
+        upgrade::IncomingUpgrade::from_request_parts(parts, &())
+            .await
+            .map(Self::Native)
+    }
+}
+
+/// How the ASGI entry point finishes a WebSocket request after the handler returns.
+#[derive(Clone)]
+pub(crate) enum WebSocketOutcome {
+    Handled,
+    Close(u16, String),
+    Denied,
+}
+
+fn with_outcome(mut response: Response, outcome: WebSocketOutcome) -> Response {
+    response.extensions_mut().insert(outcome);
+    response
+}
+
+/// Sends messages to a WebSocket client and pumps them between the client and the handler.
+pub(crate) trait SessionIo {
+    /// Moves messages both ways until either side closes.
+    fn pump(
+        &mut self,
+        tx_to_python: mpsc::Sender<WSMessage>,
+        rx_from_python: &mut mpsc::Receiver<WSMessage>,
+    ) -> impl Future<Output = Result<(), SocketPumpError>> + Send;
+
+    /// Sends one message to the client.
+    fn send(&mut self, message: WSMessage) -> impl Future<Output = Result<(), SocketPumpError>> + Send;
+}
+
+struct NativeSocket {
+    reader: Option<SocketReader>,
+    writer: SocketWriter,
+}
+
+impl SessionIo for NativeSocket {
+    async fn pump(
+        &mut self,
+        tx_to_python: mpsc::Sender<WSMessage>,
+        rx_from_python: &mut mpsc::Receiver<WSMessage>,
+    ) -> Result<(), SocketPumpError> {
+        match self.reader.take() {
+            Some(reader) => socket_pump(reader, &self.writer, tx_to_python, rx_from_python).await,
+            None => Ok(()),
+        }
+    }
+
+    async fn send(&mut self, message: WSMessage) -> Result<(), SocketPumpError> {
+        let (frame, _) = message_frame(message);
+        Ok(self.writer.lock().await.write_frame(frame).await?)
+    }
+}
+
+pub(crate) async fn ws_host_handler(
     State(routes): State<Arc<[Arc<WsRouteState>]>>,
-    parts: Parts,
+    request: Request,
 ) -> Response {
-    let host = parts
-        .headers
+    let host = request
+        .headers()
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .map(host_without_port);
@@ -85,16 +151,17 @@ pub async fn ws_host_handler(
             .is_none_or(|expected| host == Some(expected))
     });
     match route {
-        Some(route) => ws_handler(ws, State(route.clone()), parts).await,
+        Some(route) => ws_handler(State(route.clone()), request).await,
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-pub async fn ws_handler(
-    ws: upgrade::IncomingUpgrade,
-    State(route): State<Arc<WsRouteState>>,
-    parts: Parts,
-) -> Response {
+pub(crate) async fn ws_handler(State(route): State<Arc<WsRouteState>>, request: Request) -> Response {
+    let (mut parts, _) = request.into_parts();
+    let ws = match WsTransport::take(&mut parts).await {
+        Ok(ws) => ws,
+        Err(status) => return status.into_response(),
+    };
     let (tx_to_rust, rx_from_python) = mpsc::channel::<WSMessage>(1024);
     let (tx_to_python, rx_from_rust) = mpsc::channel::<WSMessage>(1024);
     let (decision_tx, mut decision_rx) = oneshot::channel();
@@ -221,38 +288,59 @@ pub async fn ws_handler(
     };
 
     match decision {
-        WSDecision::Reject(_) => {
+        WSDecision::Reject(code) => {
             execute_teardowns_async(route.event_loop, teardowns, None).await;
-            StatusCode::FORBIDDEN.into_response()
+            with_outcome(StatusCode::FORBIDDEN.into_response(), WebSocketOutcome::Close(code, String::new()))
         }
         WSDecision::Deny(response) => {
             execute_teardowns_async(route.event_loop, teardowns, None).await;
-            response
+            with_outcome(response, WebSocketOutcome::Denied)
         }
         WSDecision::Accept(headers) => {
-            let Ok((mut response, fut)) = ws.upgrade() else {
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            let session = Session {
+                websocket: py_ws_obj,
+                handler_run,
+                teardowns,
+                route: Arc::clone(&route),
+                tx_to_python,
+                rx_from_python,
             };
-            response.headers_mut().extend(headers);
-            let connection_route = route.clone();
-            spawn(async move {
-                if let Err(error) = handle_connection(
-                    fut,
-                    py_ws_obj,
-                    handler_run,
-                    teardowns,
-                    connection_route,
-                    tx_to_python,
-                    rx_from_python,
-                )
-                .await
-                {
-                    error!("WebSocket error: {error}");
+            match ws {
+                WsTransport::Native(ws) => {
+                    let Ok((mut response, fut)) = ws.upgrade() else {
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    };
+                    response.headers_mut().extend(headers);
+                    spawn(async move {
+                        if let Err(error) = handle_connection(fut, session).await {
+                            error!("WebSocket error: {error}");
+                        }
+                    });
+                    response.into_response()
                 }
-            });
-            response.into_response()
+                WsTransport::Asgi(socket) => {
+                    if let Err(error) = socket.accept(&headers).await {
+                        error!("WebSocket accept error: {error}");
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                    if let Err(error) = session.run(socket).await {
+                        error!("WebSocket error: {error}");
+                    }
+                    with_outcome(StatusCode::OK.into_response(), WebSocketOutcome::Handled)
+                }
+            }
         }
     }
+}
+
+/// An accepted connection: the handler, its dependency cleanup and the message channels.
+struct Session {
+    websocket: Py<PyWebSocket>,
+    handler_run: HandlerRun,
+    teardowns: dependencies::TeardownTasks,
+    route: Arc<WsRouteState>,
+    tx_to_python: mpsc::Sender<WSMessage>,
+    rx_from_python: mpsc::Receiver<WSMessage>,
 }
 
 enum Handshake {
@@ -404,66 +492,79 @@ async fn rejected(
         execute_teardowns_async(route.event_loop, teardowns, Some(&error)).await;
     }
     let outcome = handle_error(route, websocket, error).await;
+    let forbidden = |code, reason| {
+        with_outcome(StatusCode::FORBIDDEN.into_response(), WebSocketOutcome::Close(code, reason))
+    };
     match decision_rx.try_recv() {
-        Ok(WSDecision::Reject(_)) => StatusCode::FORBIDDEN.into_response(),
-        Ok(WSDecision::Deny(response)) => response,
+        Ok(WSDecision::Reject(code)) => forbidden(code, String::new()),
+        Ok(WSDecision::Deny(response)) => with_outcome(response, WebSocketOutcome::Denied),
         Ok(WSDecision::Accept(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Err(_) => match outcome {
-            HandlerOutcome::Close(..) => StatusCode::FORBIDDEN.into_response(),
+            HandlerOutcome::Close(code, reason) => forbidden(code, reason),
             _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         },
     }
 }
 
-async fn handle_connection(
-    fut: upgrade::UpgradeFut,
-    py_ws_obj: Py<PyWebSocket>,
-    handler_run: HandlerRun,
-    mut teardowns: dependencies::TeardownTasks,
-    route: Arc<WsRouteState>,
-    tx_to_python: mpsc::Sender<WSMessage>,
-    mut rx_from_python: mpsc::Receiver<WSMessage>,
-) -> Result<(), SocketPumpError> {
-    let ws_stream = fut.await?;
-    let (read_half, write_half) = ws_stream.split(tokio::io::split);
-    let reader = FragmentCollectorRead::new(read_half);
-    let writer = tokio::sync::Mutex::new(write_half);
-    let handler_result = match handler_run {
-        HandlerRun::Finished(result) => Some(result),
-        HandlerRun::Running(future) => tokio::select! {
-            result = future => Some(result),
-            result = socket_pump(reader, &writer, tx_to_python, &mut rx_from_python) => {
-                if let Err(error) = result {
-                    error!("Socket pump error: {error}");
+async fn handle_connection(fut: upgrade::UpgradeFut, session: Session) -> Result<(), SocketPumpError> {
+    let (read_half, write_half) = fut.await?.split(tokio::io::split);
+    session
+        .run(NativeSocket {
+            reader: Some(FragmentCollectorRead::new(read_half)),
+            writer: tokio::sync::Mutex::new(write_half),
+        })
+        .await
+}
+
+impl Session {
+    /// Runs the handler and pumps messages until it returns or the client leaves,
+    /// then closes the connection and runs the dependency cleanup.
+    async fn run(self, mut io: impl SessionIo) -> Result<(), SocketPumpError> {
+        let Self {
+            websocket,
+            handler_run,
+            mut teardowns,
+            route,
+            tx_to_python,
+            mut rx_from_python,
+        } = self;
+        let handler_result = match handler_run {
+            HandlerRun::Finished(result) => Some(result),
+            HandlerRun::Running(future) => tokio::select! {
+                result = future => Some(result),
+                result = io.pump(tx_to_python, &mut rx_from_python) => {
+                    if let Err(error) = result {
+                        error!("Socket pump error: {error}");
+                    }
+                    None
                 }
-                None
-            }
-        },
-    };
-    if let Some(result) = handler_result {
-        if let Err(error) = &result {
-            execute_teardowns_async(route.event_loop, take(&mut teardowns), Some(error)).await;
-        }
-        let close = match result {
-            Ok(_) => Some((1000, String::new())),
-            Err(error) => match handle_error(&route, &py_ws_obj, error).await {
-                HandlerOutcome::Disconnected => None,
-                HandlerOutcome::Handled => Some((1000, String::new())),
-                HandlerOutcome::Close(code, reason) => Some((code, reason)),
-                HandlerOutcome::Unhandled => Some((1011, String::new())),
             },
         };
-        if let Err(error) = flush_and_close(&writer, &mut rx_from_python, close).await {
-            error!("WebSocket close error: {error}");
+        if let Some(result) = handler_result {
+            if let Err(error) = &result {
+                execute_teardowns_async(route.event_loop, take(&mut teardowns), Some(error)).await;
+            }
+            let close = match result {
+                Ok(_) => Some((1000, String::new())),
+                Err(error) => match handle_error(&route, &websocket, error).await {
+                    HandlerOutcome::Disconnected => None,
+                    HandlerOutcome::Handled => Some((1000, String::new())),
+                    HandlerOutcome::Close(code, reason) => Some((code, reason)),
+                    HandlerOutcome::Unhandled => Some((1011, String::new())),
+                },
+            };
+            if let Err(error) = flush_and_close(&mut io, &mut rx_from_python, close).await {
+                error!("WebSocket close error: {error}");
+            }
         }
+        Python::attach(|py| {
+            if let Ok(websocket) = websocket.try_borrow(py) {
+                websocket.is_connected.store(false, Ordering::Release);
+            }
+        });
+        execute_teardowns_async(route.event_loop, teardowns, None).await;
+        Ok(())
     }
-    Python::attach(|py| {
-        if let Ok(websocket) = py_ws_obj.try_borrow(py) {
-            websocket.is_connected.store(false, Ordering::Release);
-        }
-    });
-    execute_teardowns_async(route.event_loop, teardowns, None).await;
-    Ok(())
 }
 
 #[must_use]
@@ -524,9 +625,11 @@ fn build_scope(
     );
     _ = scope.set_item(intern!(py, "http_version"), "1.1");
     _ = scope.set_item(intern!(py, "scheme"), "ws");
-    _ = scope.set_item(intern!(py, "root_path"), "");
-    _ = scope.set_item(intern!(py, "path"), parts.uri.path());
-    _ = scope.set_item(intern!(py, "raw_path"), parts.uri.path().as_bytes());
+    let mount = parts.extensions.get::<AsgiMount>();
+    let path = mount.map_or_else(|| parts.uri.path(), |mount| &*mount.path);
+    _ = scope.set_item(intern!(py, "root_path"), mount.map_or("", |mount| &*mount.root_path));
+    _ = scope.set_item(intern!(py, "path"), path);
+    _ = scope.set_item(intern!(py, "raw_path"), path.as_bytes());
     let subprotocols = parts
         .headers
         .get_all("sec-websocket-protocol")
@@ -557,19 +660,9 @@ fn build_scope(
     }
     _ = scope.set_item(intern!(py, "path_params"), path_params);
     _ = scope.set_item(intern!(py, "app"), app);
-    if let Some(ConnectInfo(peer)) = parts.extensions.get::<ConnectInfo<PeerAddrs>>() {
-        _ = scope.set_item(
-            intern!(py, "client"),
-            (peer.remote.ip().to_string(), peer.remote.port()),
-        );
-        if let Some(local) = peer.local {
-            _ = scope.set_item(
-                intern!(py, "server"),
-                (local.ip().to_string(), local.port()),
-            );
-        }
-    } else {
-        _ = scope.set_item(intern!(py, "client"), py.None());
+    _ = scope.set_item(intern!(py, "client"), input.client());
+    if let Some(local) = input.server_addr() {
+        _ = scope.set_item(intern!(py, "server"), (local.ip().to_string(), local.port()));
     }
     scope.unbind()
 }
@@ -673,23 +766,19 @@ fn message_frame(message: WSMessage) -> (Frame<'static>, bool) {
 }
 
 async fn flush_and_close(
-    writer: &SocketWriter,
+    io: &mut impl SessionIo,
     rx_from_python: &mut mpsc::Receiver<WSMessage>,
     close: Option<(u16, String)>,
 ) -> Result<(), SocketPumpError> {
     while let Ok(message) = rx_from_python.try_recv() {
-        let (frame, is_close) = message_frame(message);
-        writer.lock().await.write_frame(frame).await?;
+        let is_close = matches!(message, WSMessage::Close(..));
+        io.send(message).await?;
         if is_close {
             return Ok(());
         }
     }
     if let Some((code, reason)) = close {
-        writer
-            .lock()
-            .await
-            .write_frame(Frame::close(code, close_reason(&reason)))
-            .await?;
+        io.send(WSMessage::Close(code, reason)).await?;
     }
     Ok(())
 }

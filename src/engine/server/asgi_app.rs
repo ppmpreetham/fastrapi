@@ -1,12 +1,16 @@
 use super::lifecycle::{run_shutdown_phase, run_startup_phase};
+use super::asgi_websocket::AsgiSocket;
 use super::serve::{PreparedApp, prepare_app};
+use super::websocket::WebSocketOutcome;
 use crate::engine::config::FastrAPI;
 use crate::engine::deferred::take_request_work;
 use axum::body::Body;
 use axum::http::{HeaderName, HeaderValue, Request, Version};
 use fastrapi_http::background::AfterResponse;
 use fastrapi_http::exceptions::UnhandledError;
-use fastrapi_http::middleware::asgi::{asgi_call, drain_receive, send_response};
+use fastrapi_http::middleware::asgi::{
+    ResponseMessages, asgi_call, drain_receive, send_response, send_response_as,
+};
 use fastrapi_http::request_input::{AsgiMount, NamedClient};
 use fastrapi_runtime::blocking::run_python;
 use fastrapi_runtime::py_bridge::{self, TaskLocals};
@@ -53,6 +57,15 @@ pub(crate) fn call<'py>(
                 py,
                 locals.clone(),
                 http(asgi, locals, request, receive, send),
+            )
+        }
+        "websocket" => {
+            let request = http_request(scope)?;
+            let denials = supports_denial_response(scope)?;
+            py_bridge::future_into_py_with_locals(
+                py,
+                locals.clone(),
+                websocket(asgi, AsgiSocket::new(locals, receive, send), request, denials),
             )
         }
         "lifespan" => py_bridge::future_into_py_with_locals(
@@ -162,6 +175,40 @@ async fn http(
     unhandled.map_or(Ok(()), |UnhandledError(err)| {
         Err(Python::attach(|py| err.clone_ref(py)))
     })
+}
+
+fn supports_denial_response(scope: &Bound<'_, PyDict>) -> PyResult<bool> {
+    let py = scope.py();
+    Ok(scope
+        .get_item(intern!(py, "extensions"))?
+        .and_then(|extensions| extensions.cast_into::<PyDict>().ok())
+        .is_some_and(|extensions| {
+            extensions
+                .contains(intern!(py, "websocket.http.response"))
+                .unwrap_or(false)
+        }))
+}
+
+async fn websocket(
+    asgi: Arc<AsgiApp>,
+    socket: AsgiSocket,
+    mut request: Request<Body>,
+    denials: bool,
+) -> PyResult<()> {
+    socket.receive().await?;
+    request.extensions_mut().insert(socket.clone());
+    let mut response = match asgi.prepared.router.clone().oneshot(request).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    };
+    match response.extensions_mut().remove::<WebSocketOutcome>() {
+        Some(WebSocketOutcome::Handled) => Ok(()),
+        Some(WebSocketOutcome::Denied) if denials => {
+            send_response_as(socket.locals(), socket.send_callable(), response, ResponseMessages::WebSocketDenial).await
+        }
+        Some(WebSocketOutcome::Close(code, reason)) => socket.close(code, &reason).await,
+        _ => socket.close(1000, "").await,
+    }
 }
 
 async fn lifespan(

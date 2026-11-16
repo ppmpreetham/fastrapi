@@ -126,6 +126,18 @@ async fn run_downstream(
     send_response(&locals, &send, resp).await
 }
 
+/// Awaits one message from an ASGI `receive` callable.
+pub async fn asgi_receive(
+    locals: &py_bridge::TaskLocals,
+    receive: &Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let fut = Python::attach(|py| -> PyResult<_> {
+        let awaitable = receive.bind(py).call0()?;
+        py_bridge::into_future_with_locals(locals, awaitable)
+    })?;
+    fut.await
+}
+
 /// Calls the `receive` callable of the middleware and assembles the body again.
 pub async fn drain_receive(
     locals: &py_bridge::TaskLocals,
@@ -133,13 +145,7 @@ pub async fn drain_receive(
 ) -> PyResult<bytes::Bytes> {
     let mut buf = BytesMut::new();
     loop {
-        let msg: Py<PyAny> = {
-            let fut = Python::attach(|py| -> PyResult<_> {
-                let awaitable = receive.bind(py).call0()?;
-                py_bridge::into_future_with_locals(locals, awaitable)
-            })?;
-            fut.await?
-        };
+        let msg = asgi_receive(locals, receive).await?;
 
         let (chunk, more) = Python::attach(|py| parse_request_message(py, msg.bind(py)));
         let Some(chunk) = chunk else {
@@ -190,16 +196,51 @@ fn python_bytes(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<bytes::Bytes> 
     Some(fastrapi_pyutil::body::bytes_body(bytes))
 }
 
+/// The ASGI message types a response is sent with.
+#[derive(Clone, Copy)]
+pub enum ResponseMessages {
+    /// `http.response.start` and `http.response.body`.
+    Http,
+    /// `websocket.http.response.start` and `websocket.http.response.body`, which deny a handshake.
+    WebSocketDenial,
+}
+
+impl ResponseMessages {
+    const fn start(self) -> &'static str {
+        match self {
+            Self::Http => "http.response.start",
+            Self::WebSocketDenial => "websocket.http.response.start",
+        }
+    }
+
+    const fn body(self) -> &'static str {
+        match self {
+            Self::Http => "http.response.body",
+            Self::WebSocketDenial => "websocket.http.response.body",
+        }
+    }
+}
+
 /// Sends `http.response.start`, then one `http.response.body` message per body frame.
 pub async fn send_response(
     locals: &py_bridge::TaskLocals,
     send: &Py<PyAny>,
     resp: Response,
 ) -> PyResult<()> {
+    send_response_as(locals, send, resp, ResponseMessages::Http).await
+}
+
+/// Sends the response with the given kind of ASGI messages.
+pub async fn send_response_as(
+    locals: &py_bridge::TaskLocals,
+    send: &Py<PyAny>,
+    resp: Response,
+    messages: ResponseMessages,
+) -> PyResult<()> {
     let (parts, body) = resp.into_parts();
     let start = Python::attach(|py| -> PyResult<Py<PyAny>> {
         let msg = PyDict::new(py);
-        msg.set_item(intern!(py, "type"), intern!(py, "http.response.start"))?;
+        msg.set_item(intern!(py, "type"), messages.start())?;
         msg.set_item(intern!(py, "status"), parts.status.as_u16())?;
         let headers = PyList::empty(py);
         for (name, value) in &parts.headers {
@@ -217,16 +258,16 @@ pub async fn send_response(
     while let Some(chunk) = frames.next().await {
         let chunk = chunk.map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
         if !chunk.is_empty() {
-            asgi_call(locals, send, body_message(&chunk, true)?).await?;
+            asgi_call(locals, send, body_message(messages, &chunk, true)?).await?;
         }
     }
-    asgi_call(locals, send, body_message(&[], false)?).await
+    asgi_call(locals, send, body_message(messages, &[], false)?).await
 }
 
-fn body_message(chunk: &[u8], more_body: bool) -> PyResult<Py<PyAny>> {
+fn body_message(messages: ResponseMessages, chunk: &[u8], more_body: bool) -> PyResult<Py<PyAny>> {
     Python::attach(|py| {
         let msg = PyDict::new(py);
-        msg.set_item(intern!(py, "type"), intern!(py, "http.response.body"))?;
+        msg.set_item(intern!(py, "type"), messages.body())?;
         msg.set_item(intern!(py, "body"), PyBytes::new(py, chunk))?;
         msg.set_item(intern!(py, "more_body"), more_body)?;
         Ok(msg.unbind().into_any())
