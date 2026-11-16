@@ -9,5 +9,5 @@ pub(crate) use init::add_api_route_kwargs;
 pub use tree::flatten_router;
 mod router;
 
-pub(crate) use router::collect_router_routes;
+pub(crate) use router::{api_router_type, collect_router_routes, new_api_router};
 pub use router::{PyAPIRouter, SubRouterMount};

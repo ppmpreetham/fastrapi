@@ -2,6 +2,7 @@
 //! A router holds HTTP routes, WebSocket routes and included sub-routers.
 
 use fastrapi_core::method::HttpMethod;
+use fastrapi_pyutil::subclass::NativeSubclass;
 use fastrapi_routing::route::{RouteEntry, WebSocketEntry};
 use pyo3::exceptions::PyTypeError;
 use pyo3::types::{PyDict, PyList, PyType};
@@ -38,7 +39,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 ///
 /// app.include_router(router)
 /// ```
-#[pyclass(name = "APIRouter", skip_from_py_object)]
+#[pyclass(name = "APIRouter", subclass, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyAPIRouter {
     #[pyo3(get)]
@@ -115,6 +116,24 @@ impl PyAPIRouter {
             None => self,
         }
     }
+}
+
+static PUBLIC_TYPE: NativeSubclass =
+    NativeSubclass::new("starlette.routing", "Router", "fastrapi.routing");
+
+/// The `APIRouter` class users see, which is also a Starlette `Router`.
+pub(crate) fn api_router_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    PUBLIC_TYPE.get::<PyAPIRouter>(py)
+}
+
+/// Creates a public `APIRouter` with the constructor's keyword arguments.
+pub(crate) fn new_api_router<'py>(
+    py: Python<'py>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyAPIRouter>> {
+    Ok(api_router_type(py)?
+        .call((), kwargs)?
+        .cast_into::<PyAPIRouter>()?)
 }
 
 impl Default for PyAPIRouter {

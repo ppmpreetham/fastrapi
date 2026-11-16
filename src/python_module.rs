@@ -62,9 +62,6 @@ mod fastrapi {
     use crate::engine::config::FastrAPI;
 
     #[pymodule_export]
-    use crate::ffi::decorators::PyAPIRouter as APIRouter;
-
-    #[pymodule_export]
     use fastrapi_http::request::PyHTTPConnection as HTTPConnection;
 
     #[pymodule_export]
@@ -179,9 +176,6 @@ mod fastrapi {
     mod routing {
         use pyo3::prelude::*;
 
-        #[pymodule_export]
-        use crate::ffi::decorators::PyAPIRouter as APIRouter;
-
         use crate::ffi::routing::register;
         #[pymodule_export]
         use crate::ffi::routing::{
@@ -193,6 +187,7 @@ mod fastrapi {
         fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
             register(m)?;
             let py = m.py();
+            m.add("APIRouter", crate::ffi::decorators::api_router_type(py)?)?;
             let routing = py.import("starlette.routing")?;
             for name in [
                 "BaseRoute",
@@ -468,6 +463,7 @@ mod fastrapi {
             "BackgroundTasks",
             fastrapi_http::background::background_tasks_type(py)?,
         )?;
+        m.add("APIRouter", crate::ffi::decorators::api_router_type(py)?)?;
         m.setattr("__path__", PyList::empty(py))?;
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
         let app = py.get_type::<crate::engine::config::FastrAPI>();

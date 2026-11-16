@@ -728,3 +728,19 @@ def test_background_tasks_subclass_starlette():
         )
 
     both(run)
+
+
+def test_api_router_subclasses_starlette_router():
+    import starlette.routing
+
+    def run(lib):
+        app = new_app(lib)
+        router = lib.APIRouter(prefix="/items")
+        return (
+            isinstance(router, starlette.routing.Router),
+            isinstance(app.router, starlette.routing.Router),
+            issubclass(lib.routing.APIRouter, starlette.routing.Router),
+            lib.APIRouter is lib.routing.APIRouter,
+        )
+
+    both(run)

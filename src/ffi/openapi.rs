@@ -6,7 +6,7 @@
 //! Thus the output is the same as the served `/openapi.json`, and only one implementation exists.
 
 use crate::ffi::compat::{DefaultPlaceholder, python_source_module, register_openapi_helpers};
-use crate::ffi::decorators::{PyAPIRouter, collect_router_routes};
+use crate::ffi::decorators::{PyAPIRouter, collect_router_routes, new_api_router};
 use crate::ffi::routing::PyRouteEntry;
 use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
 use fastrapi_pyutil::json::json_to_py_object;
@@ -108,7 +108,7 @@ fn router_from_routes<'py>(
     py: Python<'py>,
     routes: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAPIRouter>> {
-    let router = Bound::new(py, PyAPIRouter::default())?;
+    let router = new_api_router(py, None)?;
     add_route_objects(py, &router.borrow(), routes)?;
     Ok(router)
 }

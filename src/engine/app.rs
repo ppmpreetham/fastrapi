@@ -5,7 +5,7 @@
 use super::config::{AsgiMount, FastrAPI, FrontendMount, HostMount, StaticMount, SubAppMount};
 use super::server::serve::{serve, serve_with_reload};
 use crate::ffi::decorators;
-use crate::ffi::decorators::{PyAPIRouter, collect_router_routes};
+use crate::ffi::decorators::{PyAPIRouter, collect_router_routes, new_api_router};
 use ahash::AHasher;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_http::middleware::{DeclaredLayer, MiddlewareContainer, PyMiddleware};
@@ -426,17 +426,13 @@ impl FastrAPI {
                 .map(Bound::unbind)?,
         };
         let generate_unique_id_function = generate_unique_id_function;
-        let base_router = Py::new(
-            py,
-            PyAPIRouter {
-                default_response_class: explicit_default_response_class,
-                strict_content_type,
-                deprecated,
-                include_in_schema,
-                ..PyAPIRouter::default()
-            }
-            .with_callbacks(callbacks.as_ref().map(|callbacks| callbacks.clone_ref(py))),
-        )?;
+        let router_options = PyDict::new(py);
+        router_options.set_item(intern!(py, "default_response_class"), explicit_default_response_class)?;
+        router_options.set_item(intern!(py, "strict_content_type"), strict_content_type)?;
+        router_options.set_item(intern!(py, "deprecated"), deprecated)?;
+        router_options.set_item(intern!(py, "include_in_schema"), include_in_schema)?;
+        router_options.set_item(intern!(py, "callbacks"), callbacks.as_ref())?;
+        let base_router = new_api_router(py, Some(&router_options))?.unbind();
         if let Some(routes) = &routes {
             crate::ffi::openapi::add_route_objects(py, &base_router.borrow(py), routes.bind(py))?;
         }
@@ -504,7 +500,7 @@ impl FastrAPI {
             callbacks,
             webhooks: match webhooks {
                 Some(webhooks) => Some(webhooks),
-                None => Some(Py::new(py, PyAPIRouter::default())?.into_any()),
+                None => Some(new_api_router(py, None)?.into_any().unbind()),
             },
             deprecated,
             include_in_schema,
