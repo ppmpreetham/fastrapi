@@ -699,3 +699,32 @@ def test_host_apps_are_isolated():
     assert run(fastrapi) == expected
     live = LiveServer(host_app(fastrapi))
     assert [raw_get(live.port, path, host) for path, host in HOST_APP_REQUESTS] == expected
+
+
+def test_background_tasks_subclass_starlette():
+    import starlette.background
+
+    def run(lib):
+        app = new_app(lib)
+        events = []
+
+        @app.get("/tasks")
+        def tasks_route(tasks: lib.BackgroundTasks):
+            tasks.add_task(events.append, "ran")
+            return [
+                isinstance(tasks, starlette.background.BackgroundTasks),
+                isinstance(tasks, starlette.background.BackgroundTask),
+                isinstance(tasks, lib.BackgroundTasks),
+            ]
+
+        prefilled = lib.BackgroundTasks(tasks=[starlette.background.BackgroundTask(events.append, "pre")])
+        body = TestClient(app).get("/tasks").json()
+        time.sleep(0.1)
+        return (
+            body,
+            issubclass(lib.BackgroundTasks, starlette.background.BackgroundTasks),
+            [task.args for task in prefilled.tasks],
+            events,
+        )
+
+    both(run)

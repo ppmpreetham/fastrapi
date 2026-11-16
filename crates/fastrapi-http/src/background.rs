@@ -14,7 +14,8 @@ use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PyTuple};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyAny, PyDict, PyList, PyTuple, PyType};
 use std::mem::take;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -48,7 +49,7 @@ fastrapi_pyutil::cached_py_import!(IS_ASYNC_CALLABLE, "starlette._utils", "is_as
 ///     background_tasks.add_task(write_notification, email, message="some notification")
 ///     return {"message": "Notification sent in the background"}
 /// ```
-#[pyclass(name = "BackgroundTasks", skip_from_py_object)]
+#[pyclass(name = "BackgroundTasks", subclass, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyBackgroundTasks {
     tasks: Arc<Mutex<Vec<Task>>>,
@@ -215,6 +216,32 @@ impl PendingTasks {
             }
         }
     }
+}
+
+static PUBLIC_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+/// The `BackgroundTasks` class users see: the Rust class that is also a subclass of
+/// Starlette's `BackgroundTasks`, like FastAPI's.
+pub fn background_tasks_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    PUBLIC_TYPE
+        .get_or_try_init(py, || {
+            let starlette = py
+                .import(intern!(py, "starlette.background"))?
+                .getattr(intern!(py, "BackgroundTasks"))?;
+            let native = py.get_type::<PyBackgroundTasks>();
+            let namespace = PyDict::new(py);
+            namespace.set_item("__module__", "fastrapi.background")?;
+            namespace.set_item("__doc__", native.getattr(intern!(py, "__doc__"))?)?;
+            namespace.set_item(
+                "__init__",
+                py.get_type::<PyAny>().getattr(intern!(py, "__init__"))?,
+            )?;
+            let class = py
+                .get_type::<PyType>()
+                .call1(("BackgroundTasks", (native, starlette), namespace))?;
+            Ok::<_, PyErr>(class.cast_into::<PyType>()?.unbind())
+        })
+        .map(|class| class.bind(py))
 }
 
 impl PyBackgroundTasks {

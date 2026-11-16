@@ -2,7 +2,7 @@
 //! It gives the path parameters, query parameters, cookies, and headers.
 //! It parses the query parameters and cookies only when the code reads them.
 
-use crate::background::PyBackgroundTasks;
+use crate::background::{PyBackgroundTasks, background_tasks_type};
 use axum::extract::ConnectInfo;
 use axum::http::header::COOKIE;
 use axum::http::{Extensions, HeaderMap, HeaderName};
@@ -109,7 +109,10 @@ impl<'a> RequestInput<'a> {
         if let Some(tasks) = self.background.get() {
             return Ok(tasks.clone_ref(py));
         }
-        let created = Py::new(py, PyBackgroundTasks::new())?;
+        let created = background_tasks_type(py)?
+            .call0()?
+            .cast_into::<PyBackgroundTasks>()?
+            .unbind();
         Ok(self.background.get_or_init(|| created).clone_ref(py))
     }
 

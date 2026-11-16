@@ -71,9 +71,6 @@ mod fastrapi {
     use fastrapi_http::request::PyRequest as Request;
 
     #[pymodule_export]
-    use fastrapi_http::background::PyBackgroundTasks as BackgroundTasks;
-
-    #[pymodule_export]
     use fastrapi_http::upload_file::PyUploadFile as UploadFile;
 
     #[pymodule_export]
@@ -258,8 +255,15 @@ mod fastrapi {
 
     #[pymodule]
     mod background {
-        #[pymodule_export]
-        use fastrapi_http::background::PyBackgroundTasks as BackgroundTasks;
+        use pyo3::prelude::*;
+
+        #[pymodule_init]
+        fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            m.add(
+                "BackgroundTasks",
+                fastrapi_http::background::background_tasks_type(m.py())?,
+            )
+        }
     }
 
     #[pymodule]
@@ -460,6 +464,10 @@ mod fastrapi {
 
         let py = m.py();
         m.setattr("__package__", "fastrapi")?;
+        m.add(
+            "BackgroundTasks",
+            fastrapi_http::background::background_tasks_type(py)?,
+        )?;
         m.setattr("__path__", PyList::empty(py))?;
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
         let app = py.get_type::<crate::engine::config::FastrAPI>();
