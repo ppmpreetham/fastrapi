@@ -4,7 +4,7 @@
 
 use super::document::MediaType;
 use super::registry::SchemaRegistry;
-use super::schema::schema_title;
+use super::schema::{BARE_BUILTIN_RETURNS, schema_title};
 use fastrapi_http::responses::PyHTMLResponse;
 use fastrapi_http::responses::PyJSONResponse;
 use fastrapi_http::responses::PyPlainTextResponse;
@@ -22,6 +22,9 @@ use simd_json::owned::Object;
 use simd_json::owned::Value as JsonValue;
 
 const JSON_MEDIA_TYPE: &str = "application/json";
+
+/// The components that FastAPI's 422 response refers to.
+pub(crate) const VALIDATION_ERROR_SCHEMAS: [&str; 2] = ["HTTPValidationError", "ValidationError"];
 
 /// The responses that make FastAPI skip its own 422 response.
 const VALIDATION_ERROR_COVERED_BY: [&str; 3] = ["422", "4XX", "default"];
@@ -146,21 +149,20 @@ pub(crate) fn success_content(
     } else {
         let media_type = response_class.media_type.clone()?;
         let schema = if response_class.json {
-            handler
+            let model = handler
                 .response
                 .response_model
                 .as_ref()
-                .filter(|model| !model.bind(py).is_none())
-                .map_or_else(
-                    || json!({}),
-                    |model| {
-                        registry.field(
-                            model.bind(py),
-                            "serialization",
-                            Some(schema_title(&format!("Response_{operation_id}"))),
-                        )
-                    },
-                )
+                .filter(|model| !model.bind(py).is_none());
+            match model {
+                Some(model) => registry.field(
+                    model.bind(py),
+                    "serialization",
+                    Some(schema_title(&format!("Response_{operation_id}"))),
+                ),
+                None => builtin_return_schema(py, handler, operation_id, registry)
+                    .unwrap_or_else(|| json!({})),
+            }
         } else {
             json!({ "type": "string" })
         };
@@ -171,6 +173,37 @@ pub(crate) fn success_content(
         (media_type, media)
     };
     Some(IndexMap::from([(media_type, media)]))
+}
+
+/// The schema of a bare builtin return annotation such as `-> dict`.
+fn builtin_return_schema(
+    py: Python<'_>,
+    handler: &RouteHandler,
+    operation_id: &str,
+    registry: &mut SchemaRegistry,
+) -> Option<JsonValue> {
+    let annotation = params_module(py)
+        .ok()?
+        .call_method1(
+            intern!(py, "get_typed_return_annotation"),
+            (handler.execution.func.bind(py),),
+        )
+        .ok()?;
+    let builtins = py.import(intern!(py, "builtins")).ok()?;
+    BARE_BUILTIN_RETURNS
+        .iter()
+        .any(|name| {
+            builtins
+                .getattr(*name)
+                .is_ok_and(|builtin| annotation.is(&builtin))
+        })
+        .then(|| {
+            registry.field(
+                &annotation,
+                "serialization",
+                Some(schema_title(&format!("Response_{operation_id}"))),
+            )
+        })
 }
 
 /// The schema of the items a generator endpoint yields, from its return annotation.

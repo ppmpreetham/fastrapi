@@ -11,6 +11,11 @@ use simd_json::prelude::{
     ValueObjectAccess,
 };
 
+/// Bare builtin return annotations (`-> dict`): FastAPI documents them as the response schema but fastrapi never validates responses against them.
+pub const BARE_BUILTIN_RETURNS: [&str; 10] = [
+    "dict", "list", "str", "int", "float", "bool", "bytes", "object", "tuple", "set",
+];
+
 #[must_use]
 pub fn extract_pydantic_schema(py: Python, model: &Bound<PyAny>, mode: &str) -> Option<JsonValue> {
     if let Ok(schema_method) = model.getattr("model_json_schema") {

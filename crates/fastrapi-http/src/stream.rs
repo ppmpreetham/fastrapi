@@ -23,6 +23,7 @@ pub struct StreamFactory {
     adapter: Option<Py<PyAny>>,
     response_class: Option<Py<PyAny>>,
     options: Option<Py<PyDict>>,
+    status_code: Option<u16>,
 }
 
 #[pyclass(frozen, name = "_StreamItems", module = "fastrapi.responses")]
@@ -39,6 +40,7 @@ pub fn stream_factory(
     item_type: Option<&Bound<'_, PyAny>>,
     response_class: Option<&Bound<'_, PyAny>>,
     options: Option<&Bound<'_, PyDict>>,
+    status_code: Option<u16>,
 ) -> PyResult<Py<PyAny>> {
     let mode = match mode {
         "jsonl" => StreamMode::Jsonl,
@@ -61,6 +63,7 @@ pub fn stream_factory(
         adapter,
         response_class: response_class.map(|class| class.clone().unbind()),
         options,
+        status_code,
     };
     Ok(Bound::new(py, factory)?.into_any().unbind())
 }
@@ -91,6 +94,9 @@ impl StreamFactory {
             },
         )?;
         let kwargs = PyDict::new(py);
+        if let Some(status_code) = self.status_code {
+            kwargs.set_item(intern!(py, "status_code"), status_code)?;
+        }
         if self.mode == StreamMode::Jsonl {
             kwargs.set_item(intern!(py, "media_type"), "application/jsonl")?;
             return py

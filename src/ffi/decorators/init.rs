@@ -76,6 +76,7 @@ fn generator_stream_factory(
     func: &Bound<'_, PyAny>,
     response_class: Option<&Py<PyAny>>,
     dump_options: Option<&Py<PyDict>>,
+    status_code: Option<u16>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let inspect = py.import("inspect")?;
     let is_generator = inspect
@@ -130,6 +131,7 @@ fn generator_stream_factory(
         item_type.as_ref(),
         response_class.map(|class| class.bind(py)),
         dump_options.map(|options| options.bind(py)),
+        status_code,
     )
     .map(Some)
 }
@@ -178,9 +180,7 @@ fn inferred_response_model(py: Python<'_>, func: &Bound<'_, PyAny>) -> Option<Py
     if annotation.is(&none_type) {
         return None;
     }
-    for name in [
-        "dict", "list", "str", "int", "float", "bool", "bytes", "object", "tuple", "set",
-    ] {
+    for name in fastrapi_openapi::schema::BARE_BUILTIN_RETURNS {
         if annotation.is(&builtins.getattr(name).ok()?) {
             return None;
         }
@@ -308,6 +308,22 @@ pub(crate) const ADD_API_ROUTE_OPTIONS: [&str; 26] = [
     "rate_limit",
 ];
 
+/// Raises the `TypeError` Python gives when a route decorator such as `FastAPI.get` receives an option it does not have.
+pub(crate) fn ensure_route_options(
+    callable: &str,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    for key in kwargs.into_iter().flat_map(PyDictMethods::keys) {
+        let name: String = key.extract()?;
+        if !ADD_API_ROUTE_OPTIONS.contains(&name.as_str()) {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "{callable}() got an unexpected keyword argument '{name}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn add_api_route_kwargs<'py>(
     py: Python<'py>,
     kwargs: Option<&Bound<'py, PyDict>>,
@@ -316,13 +332,9 @@ pub(crate) fn add_api_route_kwargs<'py>(
     let Some(kwargs) = kwargs else {
         return Ok(route_kwargs);
     };
+    ensure_route_options("add_api_route", Some(kwargs))?;
     for (key, value) in kwargs.iter() {
         let name: String = key.extract()?;
-        if !ADD_API_ROUTE_OPTIONS.contains(&name.as_str()) {
-            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                "add_api_route() got an unexpected keyword argument '{name}'"
-            )));
-        }
         if !value.is_none() || name == "response_model" {
             route_kwargs.set_item(key, value)?;
         }
@@ -688,6 +700,7 @@ impl PyAPIRouter {
                 &func,
                 effective_response_class.as_ref(),
                 opts.dump_options.as_ref(),
+                opts.default_status.map(|status| status.as_u16()),
             )?;
 
             let final_response_type = effective_response_class

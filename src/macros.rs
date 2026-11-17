@@ -6,6 +6,7 @@
 macro_rules! generate_http_methods {
     (
         $struct_name:ident,
+        class_name: $class_name:literal,
         $get_router:ident,
         route_arg: $route_arg:ident,
         websocket_arg: $websocket_arg:ident,
@@ -22,40 +23,48 @@ macro_rules! generate_http_methods {
             $(#[$get_doc])*
             #[pyo3(signature = (path, **kwargs), text_signature = "(self, path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=True, response_model_exclude_unset=False, response_model_exclude_defaults=False, response_model_exclude_none=False, include_in_schema=True, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=False, rate_limit=None)")]
             fn get(&self, py: pyo3::prelude::Python<'_>, path: String, kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
+                $crate::ffi::decorators::ensure_route_options(concat!($class_name, ".get"), kwargs)?;
                 self.$get_router(py).create_method_decorator_kw(py, ::fastrapi_core::method::HttpMethod::GET, path, kwargs)
             }
             $(#[$post_doc])*
             #[pyo3(signature = (path, **kwargs), text_signature = "(self, path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=True, response_model_exclude_unset=False, response_model_exclude_defaults=False, response_model_exclude_none=False, include_in_schema=True, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=False, rate_limit=None)")]
             fn post(&self, py: pyo3::prelude::Python<'_>, path: String, kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
+                $crate::ffi::decorators::ensure_route_options(concat!($class_name, ".post"), kwargs)?;
                 self.$get_router(py).create_method_decorator_kw(py, ::fastrapi_core::method::HttpMethod::POST, path, kwargs)
             }
             $(#[$put_doc])*
             #[pyo3(signature = (path, **kwargs), text_signature = "(self, path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=True, response_model_exclude_unset=False, response_model_exclude_defaults=False, response_model_exclude_none=False, include_in_schema=True, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=False, rate_limit=None)")]
             fn put(&self, py: pyo3::prelude::Python<'_>, path: String, kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
+                $crate::ffi::decorators::ensure_route_options(concat!($class_name, ".put"), kwargs)?;
                 self.$get_router(py).create_method_decorator_kw(py, ::fastrapi_core::method::HttpMethod::PUT, path, kwargs)
             }
             $(#[$delete_doc])*
             #[pyo3(signature = (path, **kwargs), text_signature = "(self, path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=True, response_model_exclude_unset=False, response_model_exclude_defaults=False, response_model_exclude_none=False, include_in_schema=True, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=False, rate_limit=None)")]
             fn delete(&self, py: pyo3::prelude::Python<'_>, path: String, kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
+                $crate::ffi::decorators::ensure_route_options(concat!($class_name, ".delete"), kwargs)?;
                 self.$get_router(py).create_method_decorator_kw(py, ::fastrapi_core::method::HttpMethod::DELETE, path, kwargs)
             }
             $(#[$patch_doc])*
             #[pyo3(signature = (path, **kwargs), text_signature = "(self, path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=True, response_model_exclude_unset=False, response_model_exclude_defaults=False, response_model_exclude_none=False, include_in_schema=True, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=False, rate_limit=None)")]
             fn patch(&self, py: pyo3::prelude::Python<'_>, path: String, kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
+                $crate::ffi::decorators::ensure_route_options(concat!($class_name, ".patch"), kwargs)?;
                 self.$get_router(py).create_method_decorator_kw(py, ::fastrapi_core::method::HttpMethod::PATCH, path, kwargs)
             }
             $(#[$options_doc])*
             #[pyo3(signature = (path, **kwargs), text_signature = "(self, path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=True, response_model_exclude_unset=False, response_model_exclude_defaults=False, response_model_exclude_none=False, include_in_schema=True, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=False, rate_limit=None)")]
             fn options(&self, py: pyo3::prelude::Python<'_>, path: String, kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
+                $crate::ffi::decorators::ensure_route_options(concat!($class_name, ".options"), kwargs)?;
                 self.$get_router(py).create_method_decorator_kw(py, ::fastrapi_core::method::HttpMethod::OPTIONS, path, kwargs)
             }
             $(#[$head_doc])*
             #[pyo3(signature = (path, **kwargs), text_signature = "(self, path, *, response_model=None, status_code=None, tags=None, dependencies=None, summary=None, description=None, response_description=None, responses=None, deprecated=None, operation_id=None, response_model_include=None, response_model_exclude=None, response_model_by_alias=True, response_model_exclude_unset=False, response_model_exclude_defaults=False, response_model_exclude_none=False, include_in_schema=True, response_class=None, name=None, callbacks=None, openapi_extra=None, generate_unique_id_function=None, cache_resp=False, rate_limit=None)")]
             fn head(&self, py: pyo3::prelude::Python<'_>, path: String, kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
+                $crate::ffi::decorators::ensure_route_options(concat!($class_name, ".head"), kwargs)?;
                 self.$get_router(py).create_method_decorator_kw(py, ::fastrapi_core::method::HttpMethod::HEAD, path, kwargs)
             }
             #[pyo3(signature = (path, **kwargs))]
             fn trace(&self, py: pyo3::prelude::Python<'_>, path: String, kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::prelude::PyResult<pyo3::prelude::Py<pyo3::prelude::PyAny>> {
+                $crate::ffi::decorators::ensure_route_options(concat!($class_name, ".trace"), kwargs)?;
                 self.$get_router(py).create_method_decorator_kw(py, ::fastrapi_core::method::HttpMethod::TRACE, path, kwargs)
             }
             #[pyo3(signature = (path, $route_arg, methods=None, name=None, include_in_schema=true))]

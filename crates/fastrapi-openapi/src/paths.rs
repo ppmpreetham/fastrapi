@@ -6,8 +6,8 @@ use super::document::{
 };
 use super::registry::{SchemaRegistry, substitute};
 use super::responses::ResponseClass;
-use super::responses::add_validation_error;
 use super::responses::success_content;
+use super::responses::{VALIDATION_ERROR_SCHEMAS, add_validation_error};
 use super::schema::{native_operation_id, schema_title};
 use super::spec::RouteCollector;
 use fastrapi_core::method::HttpMethod;
@@ -28,6 +28,7 @@ use simd_json::json;
 use simd_json::owned::{Object, Value as JsonValue};
 use simd_json::prelude::{ValueAsMutObject, ValueAsScalar};
 use simd_json::serde::to_owned_value;
+use std::collections::HashSet;
 
 /// Makes the `OpenAPI` `securitySchemes` entry for a security scheme.
 fn scheme_to_openapi(
@@ -708,6 +709,47 @@ fn build_request_body(
     Some(RequestBody { content, required })
 }
 
+/// The operation ids of a document. Like FastAPI's `operation_ids`, a repeated id is reported
+/// with a warning that names the endpoint.
+#[derive(Default)]
+pub struct OperationIds {
+    seen: HashSet<String>,
+    duplicates: Vec<(String, Py<PyAny>)>,
+}
+
+impl OperationIds {
+    fn record(&mut self, py: Python<'_>, operation_id: &str, endpoint: &Py<PyAny>) {
+        if !self.seen.insert(operation_id.to_owned()) {
+            self.duplicates
+                .push((operation_id.to_owned(), endpoint.clone_ref(py)));
+        }
+    }
+
+    /// Emits the `UserWarning` FastAPI gives for each repeated operation id.
+    pub fn warn(&self, py: Python<'_>) -> PyResult<()> {
+        for (operation_id, endpoint) in &self.duplicates {
+            let endpoint = endpoint.bind(py);
+            let name = endpoint
+                .getattr(intern!(py, "__name__"))
+                .map_or_else(|_| "<unnamed_endpoint>".to_owned(), |name| name.to_string());
+            let mut message = format!("Duplicate Operation ID {operation_id} for function {name}");
+            if let Ok(globals) = endpoint.getattr(intern!(py, "__globals__"))
+                && let Ok(file) = globals.call_method1(intern!(py, "get"), ("__file__",))
+                && file.is_truthy()?
+            {
+                message = format!("{message} at {file}");
+            }
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                &std::ffi::CString::new(message)?,
+                1,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// The application settings that the operations of one document share.
 #[derive(Clone, Copy)]
 pub struct PathSettings<'a> {
@@ -722,6 +764,7 @@ pub fn build_paths_from_routes(
     collected: &[RouteEntry],
     schemas: &mut IndexMap<String, JsonValue>,
     security_schemes: &mut IndexMap<String, JsonValue>,
+    operation_ids: &mut OperationIds,
     settings: PathSettings<'_>,
 ) -> IndexMap<String, PathItem> {
     let mut paths: IndexMap<String, PathItem> = IndexMap::new();
@@ -777,6 +820,8 @@ pub fn build_paths_from_routes(
                     )
                 })
         });
+
+        operation_ids.record(py, &operation_id, &handler.execution.func);
 
         let mut operation = Operation {
             summary,
@@ -914,16 +959,22 @@ pub fn build_paths_from_routes(
 
         operation.parameters = (!parameters.is_empty()).then_some(parameters);
 
+        // Like FastAPI, the endpoint's own body fields come before those of its dependencies.
         let body_params: Vec<&ParsedParameter> = handler
             .payload
-            .dependencies
+            .parsed_params
             .iter()
-            .flat_map(|node| node.injection_plan.iter())
-            .filter_map(|(_, injection)| match injection {
-                InjectionType::Parameter(param) => Some(param.as_ref()),
-                _ => None,
-            })
-            .chain(handler.payload.parsed_params.iter())
+            .chain(
+                handler
+                    .payload
+                    .dependencies
+                    .iter()
+                    .flat_map(|node| node.injection_plan.iter())
+                    .filter_map(|(_, injection)| match injection {
+                        InjectionType::Parameter(param) => Some(param.as_ref()),
+                        _ => None,
+                    }),
+            )
             .filter(|param| param.source == ParameterSource::Body)
             .collect();
         operation.request_body = build_request_body(
@@ -1022,7 +1073,11 @@ pub fn build_paths_from_routes(
                 settings.collect,
                 &mut callback_schemas,
             );
-            for (name, schema) in callback_schemas {
+            // Like FastAPI, a callback's own 422 adds no components.
+            for (name, schema) in callback_schemas
+                .into_iter()
+                .filter(|(name, _)| !VALIDATION_ERROR_SCHEMAS.contains(&name.as_str()))
+            {
                 schemas.entry(name).or_insert(schema);
             }
             document
@@ -1142,6 +1197,7 @@ fn callbacks_document(
                             &collected,
                             schemas,
                             &mut dummy_security,
+                            &mut OperationIds::default(),
                             settings,
                         );
 
@@ -1166,6 +1222,7 @@ fn callbacks_document(
                     std::slice::from_ref(&entry),
                     schemas,
                     &mut dummy_security,
+                    &mut OperationIds::default(),
                     settings,
                 );
                 for (path, path_item) in paths {

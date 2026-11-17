@@ -2,8 +2,8 @@
 //! `AppDocument` contains the application settings, and `build_openapi_spec` converts them into a JSON value.
 
 use super::document::OpenApiSpec;
-use super::paths::PathSettings;
 use super::paths::build_paths_from_routes;
+use super::paths::{OperationIds, PathSettings};
 use super::schema::py_dicts_to_json_vec;
 use fastrapi_pyutil::json::{json_to_py_object, py_dict_to_json};
 use fastrapi_routing::route::RouteEntry;
@@ -99,11 +99,13 @@ pub fn build_openapi_spec(
         generate_unique_id_function: app.generate_unique_id_function,
         collect,
     };
+    let mut operation_ids = OperationIds::default();
     spec.paths = build_paths_from_routes(
         py,
         app.routes,
         &mut schemas,
         &mut security_schemes,
+        &mut operation_ids,
         settings,
     );
 
@@ -115,6 +117,7 @@ pub fn build_openapi_spec(
             &wh_collected,
             &mut schemas,
             &mut security_schemes,
+            &mut operation_ids,
             PathSettings {
                 app_responses: None,
                 ..settings
@@ -122,6 +125,7 @@ pub fn build_openapi_spec(
         );
         spec.webhooks = (!wh_paths.is_empty()).then_some(wh_paths);
     }
+    operation_ids.warn(py)?;
 
     // FastAPI lists component schemas sorted by name.
     schemas.sort_unstable_keys();

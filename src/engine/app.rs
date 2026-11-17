@@ -18,7 +18,7 @@ use fastrapi_runtime::tokio_runtime::set_threads;
 use parking_lot::Mutex;
 use pyo3::exceptions::{PyAssertionError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyAny, PyCFunction, PyDict, PyList, PyTuple};
+use pyo3::types::{IntoPyDict, PyAny, PyCFunction, PyDict, PyList, PyMapping, PyTuple};
 use pyo3::{Bound, intern};
 use std::env::var_os;
 use std::hash::Hasher;
@@ -70,7 +70,7 @@ fn is_startup_event(event_type: &str) -> PyResult<bool> {
     }
 }
 
-fn telemetry_config(py: Python<'_>, overrides: Option<Bound<'_, PyDict>>) -> PyResult<Py<PyDict>> {
+fn telemetry_config(py: Python<'_>, overrides: Option<Bound<'_, PyAny>>) -> PyResult<Py<PyDict>> {
     let auto_configure = std::env::var("FASTAPI_OTEL_AUTO_CONFIGURE")
         .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
     let none = py.None();
@@ -93,7 +93,13 @@ fn telemetry_config(py: Python<'_>, overrides: Option<Bound<'_, PyDict>>) -> PyR
     ]
     .into_py_dict(py)?;
     if let Some(overrides) = overrides {
-        config.update(overrides.as_mapping())?;
+        let Ok(mapping) = overrides.cast::<PyMapping>() else {
+            return Err(PyTypeError::new_err(format!(
+                "'{}' object is not a mapping",
+                overrides.get_type().name()?
+            )));
+        };
+        config.update(mapping)?;
     }
     Ok(config.unbind())
 }
@@ -407,7 +413,7 @@ impl FastrAPI {
         request_timeout: Option<u64>,
         request_id_header: Option<String>,
         powered_by_header: Option<String>,
-        telemetry: Option<Bound<'_, PyDict>>,
+        telemetry: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         crate::ffi::decorators::tree::validate_dependencies(py, dependencies.as_ref())?;
         if let Some(url) = openapi_url.as_deref().filter(|url| !url.is_empty()) {
@@ -1231,6 +1237,7 @@ impl FastrAPI {
 }
 crate::generate_http_methods!(
     FastrAPI,
+    class_name: "FastAPI",
     router_ref,
     route_arg: route,
     websocket_arg: route,

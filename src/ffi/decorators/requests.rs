@@ -12,6 +12,7 @@ impl PyAPIRouter {
 }
 crate::generate_http_methods!(
     PyAPIRouter,
+    class_name: "APIRouter",
     router_ref,
     route_arg: endpoint,
     websocket_arg: endpoint,
