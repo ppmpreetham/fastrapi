@@ -296,11 +296,11 @@ pub(crate) async fn ws_handler(
     };
 
     match decision {
-        WSDecision::Reject(code) => {
+        WSDecision::Reject(code, reason) => {
             execute_teardowns_async(route.event_loop, teardowns, None).await;
             with_outcome(
                 StatusCode::FORBIDDEN.into_response(),
-                WebSocketOutcome::Close(code, String::new()),
+                WebSocketOutcome::Close(code, reason),
             )
         }
         WSDecision::Deny(response) => {
@@ -515,7 +515,7 @@ async fn rejected(
         )
     };
     match decision_rx.try_recv() {
-        Ok(WSDecision::Reject(code)) => forbidden(code, String::new()),
+        Ok(WSDecision::Reject(code, reason)) => forbidden(code, reason),
         Ok(WSDecision::Deny(response)) => with_outcome(response, WebSocketOutcome::Denied),
         Ok(WSDecision::Accept(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Err(_) => match outcome {

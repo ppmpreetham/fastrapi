@@ -3,14 +3,14 @@
 //! It also contains the 404 and 405 responses.
 
 use super::custom_route::install_custom_handlers;
-use super::dispatch::dispatch_or_not_found;
+use super::dispatch::{dispatch_or_not_found, finish_method_not_allowed};
 use super::files::{add_static_mount, serve_frontend_mounts};
 use super::middleware_stack;
 use super::serve::AppState;
 use crate::engine::handler_errors::log_python_error;
 
 use crate::engine::config::FastrAPI;
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{ConnectInfo, Extension, OriginalUri, Request};
@@ -170,7 +170,15 @@ pub(crate) fn build_router(
         frozen_router,
         host_apps,
     );
-    let app = register_docs_endpoints(app, py, app_config, docs_url, openapi_url, custom_openapi)?;
+    let app = register_docs_endpoints(
+        app,
+        py,
+        app_state,
+        app_config,
+        docs_url,
+        openapi_url,
+        custom_openapi,
+    )?;
     let app = nest_sub_apps(py, app, app_state, app_config)?;
     middleware_stack::build_stack(app, app_config, &middlewares, app_state.event_loop)
 }
@@ -352,6 +360,14 @@ fn register_routes(
     host_apps: &'static [HostApp],
 ) -> Router {
     let frontend_mounts = Arc::new(app_config.frontend_mounts.clone());
+    // A path with several routes can't use the direct axum route: a request
+    // for another method on it would get axum's 405 instead of running.
+    let mut seen_paths = AHashSet::new();
+    let shared_paths: AHashSet<&str> = routes
+        .iter()
+        .map(|route| route.path.as_str())
+        .filter(|path| !seen_paths.insert(*path))
+        .collect();
     let head_dispatch = on(MethodFilter::HEAD, move |req: Request| async move {
         dispatch_or_not_found(frozen_router, app_state, req)
             .await
@@ -364,6 +380,7 @@ fn register_routes(
             && route.handler.execution.custom_handler.get().is_none()
             && route.handler.execution.cache_response
             && !route.path.contains('{')
+            && !shared_paths.contains(route.path.as_str())
             && matches!(
                 route.handler.execution.execution_mode,
                 ExecutionMode::SyncNoArgs
@@ -384,6 +401,7 @@ fn register_routes(
             && route.handler.execution.custom_handler.get().is_none()
             && !route.handler.execution.cache_response
             && !route.path.contains('{')
+            && !shared_paths.contains(route.path.as_str())
             && matches!(
                 route.handler.execution.execution_mode,
                 ExecutionMode::SyncNoArgs | ExecutionMode::AsyncNoArgs
@@ -485,12 +503,19 @@ fn register_routes(
         if let Some(redirect) = slash_redirect(frozen_router, app_state, &req) {
             return redirect;
         }
-        let handled = status_handler(app_state, StatusCode::NOT_FOUND, None, &req);
-        match handled {
+        if !frontend_mounts.is_empty() {
+            // The mounts consume their request, and the 404 handler below needs the original.
+            let mut head = Request::new(Body::empty());
+            *head.method_mut() = req.method().clone();
+            *head.uri_mut() = req.uri().clone();
+            *head.headers_mut() = req.headers().clone();
+            if let Some(response) = serve_frontend_mounts(frontend_mounts.clone(), head).await {
+                return response;
+            }
+        }
+        match status_handler(app_state, StatusCode::NOT_FOUND, None, &req) {
             Some(response) => resolve_pending_handler(response).await,
-            None => serve_frontend_mounts(frontend_mounts, req)
-                .await
-                .unwrap_or_else(not_found_response),
+            None => not_found_response(),
         }
     };
     app.method_not_allowed_fallback(unmatched.clone())
@@ -605,6 +630,7 @@ pub(crate) fn method_not_allowed_response(
 pub(crate) fn register_docs_endpoints(
     mut app: Router,
     py: Python<'_>,
+    state: &'static AppState,
     app_config: &FastrAPI,
     docs_url: Option<&str>,
     openapi_url: Option<&str>,
@@ -624,7 +650,7 @@ pub(crate) fn register_docs_endpoints(
     let root_path_in_servers = app_config.root_path_in_servers;
     app = app.route(
         openapi_url,
-        get(move |mount: Option<Extension<AsgiMount>>| {
+        docs_get(state, move |mount: Option<Extension<AsgiMount>>| {
             let body = mount
                 .filter(|_| root_path_in_servers)
                 .and_then(|Extension(mount)| with_root_path_server(&openapi_json, &mount.root_path))
@@ -667,11 +693,11 @@ pub(crate) fn register_docs_endpoints(
             swagger_ui_parameters,
         };
         match docs::swagger_ui_page(py, &page) {
-            Ok(html) => app = html_route(app, docs, html),
+            Ok(html) => app = html_route(app, state, docs, html),
             Err(err) => log_python_error(py, "Swagger UI page setup failed", &err),
         }
         if let Some(redirect) = &app_config.swagger_ui_oauth2_redirect_url {
-            app = html_route(app, redirect, docs::OAUTH2_REDIRECT_HTML.to_owned());
+            app = html_route(app, state, redirect, docs::OAUTH2_REDIRECT_HTML.to_owned());
         }
     }
     if let Some(redoc) = &app_config.redoc_url {
@@ -682,15 +708,15 @@ pub(crate) fn register_docs_endpoints(
             docs::FAVICON_URL,
             true,
         );
-        app = html_route(app, redoc, html);
+        app = html_route(app, state, redoc, html);
     }
     if let Some(scalar) = &app_config.scalar_url {
         let html = include_str!("../../../static/scalar.html").replace(DOCS_SPEC_URL, &spec_url);
-        app = html_route(app, scalar, html);
+        app = html_route(app, state, scalar, html);
     }
     if let Some(elements) = &app_config.elements_url {
         let html = include_str!("../../../static/elements.html").replace(DOCS_SPEC_URL, &spec_url);
-        app = html_route(app, elements, html);
+        app = html_route(app, state, elements, html);
     }
 
     register_metrics_endpoint(app, app_config)
@@ -713,11 +739,24 @@ pub(crate) fn custom_openapi_spec(py: Python<'_>, app: &Bound<'_, PyAny>) -> Opt
 
 const DOCS_SPEC_URL: &str = "/api-docs/openapi.json";
 
-fn html_route(app: Router, path: &str, html: String) -> Router {
+/// A docs route answers `GET` and `HEAD`, and any other method with FastAPI's 405.
+fn docs_get<H, T>(state: &'static AppState, handler: H) -> MethodRouter
+where
+    H: Handler<T, ()>,
+    T: 'static,
+{
+    let allowed = HttpMethod::GET.bit() | HttpMethod::HEAD.bit();
+    get(handler).fallback(move |req: Request| async move {
+        let response = method_not_allowed_response(state, &req, allowed);
+        finish_method_not_allowed(response, allowed).await
+    })
+}
+
+fn html_route(app: Router, state: &'static AppState, path: &str, html: String) -> Router {
     let html: Arc<[u8]> = Arc::from(html.into_bytes());
     app.route(
         path,
-        get(move || {
+        docs_get(state, move || {
             let html = html.clone();
             async move { Html(Bytes::from_owner(html)) }
         }),

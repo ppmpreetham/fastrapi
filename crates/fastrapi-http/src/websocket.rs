@@ -2,6 +2,7 @@
 //! The class accepts the connection, sends and receives text, bytes, and JSON messages, and closes the connection.
 
 use crate::request::PyHTTPConnection;
+use crate::response_api::JSON_DUMPS;
 use crate::response_convert::convert_auto_response;
 use crate::stream::SlotLease;
 use axum::body::Body;
@@ -19,7 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::exceptions::PyWebSocketDisconnect;
 use fastrapi_pyutil::json::{json_to_py_object, write_py_json};
-use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 pub enum WSMessage {
@@ -36,7 +37,7 @@ fn disconnected() -> PyErr {
 
 pub enum WSDecision {
     Accept(HeaderMap),
-    Reject(u16),
+    Reject(u16, String),
     Deny(Response),
 }
 
@@ -78,8 +79,9 @@ fn disconnected_with_code(code: u16, reason: String) -> PyErr {
     })
 }
 
-fn expected(expected: &str, got: &str) -> PyErr {
-    PyTypeError::new_err(format!("Expected {expected}, got {got}"))
+/// Starlette reads `message["text"]` or `message["bytes"]`, so a frame of the other type is a `KeyError`.
+fn wrong_frame(key: &str) -> PyErr {
+    PyKeyError::new_err(key.to_owned())
 }
 
 fn binary_mode(mode: &str) -> PyResult<bool> {
@@ -89,6 +91,24 @@ fn binary_mode(mode: &str) -> PyResult<bool> {
         _ => Err(PyRuntimeError::new_err(
             "The \"mode\" argument should be \"text\" or \"binary\".",
         )),
+    }
+}
+
+/// Starlette serialises with `json.dumps`, which writes `NaN` and `Infinity` where the native writer raises.
+fn json_payload(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Bytes> {
+    let mut buf = BytesMut::new();
+    match write_py_json(py, data, &mut (&mut buf).writer()) {
+        Err(err) if err.is_instance_of::<PyValueError>(py) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(pyo3::intern!(py, "ensure_ascii"), false)?;
+            kwargs.set_item(pyo3::intern!(py, "separators"), (",", ":"))?;
+            let text: String = JSON_DUMPS
+                .get(py)?
+                .call((data,), Some(&kwargs))?
+                .extract()?;
+            Ok(Bytes::from(text))
+        }
+        result => result.map(|()| buf.freeze()),
     }
 }
 
@@ -154,6 +174,32 @@ fn asgi_message(py: Python<'_>, message: WSMessage) -> PyResult<Py<PyAny>> {
 }
 
 impl PyWebSocket {
+    /// Starlette's `receive_*` need an accepted connection (`application_state` CONNECTED).
+    fn ensure_receivable(&self) -> PyResult<()> {
+        if self.handshake_state.load(Ordering::Acquire) == 1 {
+            return Ok(());
+        }
+        Err(PyRuntimeError::new_err(
+            "WebSocket is not connected. Need to call \"accept\" first.",
+        ))
+    }
+
+    /// Starlette's `send_*` raise before `accept()` and after a close or denial.
+    fn ensure_sendable(&self) -> PyResult<()> {
+        Err(PyRuntimeError::new_err(
+            match self.handshake_state.load(Ordering::Acquire) {
+                1 => return Ok(()),
+                0 => {
+                    "Expected ASGI message \"websocket.accept\", \"websocket.close\" or \"websocket.http.response.start\", but got 'websocket.send'"
+                }
+                4 => {
+                    "Expected ASGI message \"websocket.http.response.body\", but got 'websocket.send'"
+                }
+                _ => "Cannot call \"send\" once a close message has been sent.",
+            },
+        ))
+    }
+
     pub fn deny<'py>(&self, py: Python<'py>, response: Response) -> PyResult<Bound<'py, PyAny>> {
         if self
             .handshake_state
@@ -196,6 +242,7 @@ impl PyWebSocket {
     }
 
     fn send_text<'py>(&self, py: Python<'py>, data: String) -> PyResult<Bound<'py, PyAny>> {
+        self.ensure_sendable()?;
         let tx = self.tx.clone();
         py_bridge::future_into_py(py, async move {
             tx.send(WSMessage::Text(Bytes::from(data)))
@@ -206,6 +253,7 @@ impl PyWebSocket {
     }
 
     fn send_bytes<'py>(&self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
+        self.ensure_sendable()?;
         let tx = self.tx.clone();
         py_bridge::future_into_py(py, async move {
             tx.send(WSMessage::Binary(Bytes::from(data)))
@@ -223,10 +271,8 @@ impl PyWebSocket {
         mode: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let binary = binary_mode(mode)?;
-        let mut buf = BytesMut::new();
-        let mut writer = (&mut buf).writer();
-        write_py_json(py, data, &mut writer)?;
-        let payload = buf.freeze();
+        let payload = json_payload(py, data)?;
+        self.ensure_sendable()?;
         let message = if binary {
             WSMessage::Binary(payload)
         } else {
@@ -240,23 +286,25 @@ impl PyWebSocket {
     }
 
     fn receive_text<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.ensure_receivable()?;
         let rx = self.rx.clone();
         py_bridge::future_into_py(py, async move {
             match next_message(rx).await? {
                 WSMessage::Text(bytes) => String::from_utf8(Vec::from(bytes))
                     .map_err(|e| PyValueError::new_err(e.to_string())),
-                WSMessage::Binary(_) => Err(expected("text", "binary")),
+                WSMessage::Binary(_) => Err(wrong_frame("text")),
                 WSMessage::Close(code, reason) => Err(disconnected_with_code(code, reason)),
             }
         })
     }
 
     fn receive_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.ensure_receivable()?;
         let rx = self.rx.clone();
         py_bridge::future_into_py(py, async move {
             match next_message(rx).await? {
                 WSMessage::Binary(data) => Ok(data),
-                WSMessage::Text(_) => Err(expected("binary", "text")),
+                WSMessage::Text(_) => Err(wrong_frame("bytes")),
                 WSMessage::Close(code, reason) => Err(disconnected_with_code(code, reason)),
             }
         })
@@ -265,13 +313,14 @@ impl PyWebSocket {
     #[pyo3(signature = (mode="text"))]
     fn receive_json<'py>(&self, py: Python<'py>, mode: &str) -> PyResult<Bound<'py, PyAny>> {
         let binary = binary_mode(mode)?;
+        self.ensure_receivable()?;
         let rx = self.rx.clone();
         py_bridge::future_into_py(py, async move {
             match next_message(rx).await? {
                 WSMessage::Text(bytes) if !binary => parse_json_bytes(bytes),
                 WSMessage::Binary(bytes) if binary => parse_json_bytes(bytes),
-                WSMessage::Text(_) => Err(expected("binary", "text")),
-                WSMessage::Binary(_) => Err(expected("text", "binary")),
+                WSMessage::Text(_) => Err(wrong_frame("bytes")),
+                WSMessage::Binary(_) => Err(wrong_frame("text")),
                 WSMessage::Close(code, reason) => Err(disconnected_with_code(code, reason)),
             }
         })
@@ -393,17 +442,18 @@ impl PyWebSocket {
         let tx = self.tx.clone();
         let decision = self.decision.clone();
         let state = self.handshake_state.clone();
+        let reason = reason.unwrap_or_default();
         py_bridge::future_into_py(py, async move {
             if state
                 .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
                 && let Some(sender) = decision.lock().take()
             {
-                let _ = sender.send(WSDecision::Reject(code));
+                let _ = sender.send(WSDecision::Reject(code, reason));
                 return Ok(());
             }
             _ = state.compare_exchange(1, 3, Ordering::AcqRel, Ordering::Acquire);
-            tx.send(WSMessage::Close(code, reason.unwrap_or_default()))
+            tx.send(WSMessage::Close(code, reason))
                 .await
                 .map_err(|_| closed())?;
             Ok(())
@@ -483,7 +533,10 @@ impl WSIterator {
         let payload = self.payload;
 
         py_bridge::future_into_py(py, async move {
-            let rx = Python::attach(|py| ws.borrow(py).rx.clone());
+            let rx = Python::attach(|py| {
+                let ws = ws.borrow(py);
+                ws.ensure_receivable().map(|()| ws.rx.clone())
+            })?;
             match next_message(rx).await {
                 Ok(WSMessage::Text(bytes)) if payload == WsPayload::Text => {
                     let text =
@@ -497,12 +550,16 @@ impl WSIterator {
                         PyBytes::new(py, &data).into_any().unbind()
                     }))
                 }
-                Ok(WSMessage::Text(_)) if payload == WsPayload::Bytes => {
-                    Err(expected("binary", "text"))
-                }
+                Ok(WSMessage::Text(_)) if payload == WsPayload::Bytes => Err(wrong_frame("bytes")),
                 Ok(WSMessage::Text(bytes)) => parse_json_bytes(bytes),
-                Ok(WSMessage::Binary(_)) => Err(expected("text", "binary")),
-                Ok(WSMessage::Close(..)) | Err(_) => Err(PyStopAsyncIteration::new_err(())),
+                Ok(WSMessage::Binary(_)) => Err(wrong_frame("text")),
+                Ok(WSMessage::Close(..)) => Err(PyStopAsyncIteration::new_err(())),
+                Err(err)
+                    if Python::attach(|py| err.is_instance_of::<PyWebSocketDisconnect>(py)) =>
+                {
+                    Err(PyStopAsyncIteration::new_err(()))
+                }
+                Err(err) => Err(err),
             }
         })
     }

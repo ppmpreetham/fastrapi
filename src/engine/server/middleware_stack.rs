@@ -201,9 +201,13 @@ fn trusted_host_layer(app: Router, config: &TrustedHostMiddleware) -> Router {
                 return redirect_to(&req, scheme, &format!("www.{authority}"));
             }
 
-            (StatusCode::BAD_REQUEST, "Invalid host header").into_response()
+            invalid_host_header()
         }
     }))
+}
+
+fn invalid_host_header() -> Response {
+    (StatusCode::BAD_REQUEST, "Invalid host header").into_response()
 }
 
 fn drop_default_port(authority: &Authority) -> String {
@@ -226,7 +230,7 @@ fn https_redirect_layer(app: Router) -> Router {
                 .and_then(|host| host.to_str().ok())
                 .and_then(|host| host.parse::<Authority>().ok())
             else {
-                return StatusCode::BAD_REQUEST.into_response();
+                return invalid_host_header();
             };
 
             redirect_to(&req, Scheme::HTTPS, &drop_default_port(&authority))

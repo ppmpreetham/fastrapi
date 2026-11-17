@@ -40,7 +40,7 @@ impl FromPyObject<'_, '_> for HeadersArg {
     }
 }
 
-fastrapi_pyutil::cached_py_import!(JSON_DUMPS, "json", "dumps");
+fastrapi_pyutil::cached_py_import!(pub(crate) JSON_DUMPS, "json", "dumps");
 fastrapi_pyutil::cached_py_import!(METHOD_DESCRIPTOR, "types", "MethodDescriptorType");
 fastrapi_pyutil::cached_py_import!(GETSET_DESCRIPTOR, "types", "GetSetDescriptorType");
 fastrapi_pyutil::cached_py_import!(WRAPPER_DESCRIPTOR, "types", "WrapperDescriptorType");

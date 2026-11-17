@@ -429,7 +429,8 @@ fn invoke(
         tracing::error!("call_next middleware returned None without awaiting call_next");
         return Err(plain_server_error());
     }
-    if mw.is_async {
+    // A plain `def` middleware may return `call_next(request)` un-awaited, which Starlette still awaits.
+    if mw.is_async || result.hasattr(intern!(py, "__await__")).map_err(fail)? {
         let fut = py_bridge::schedule_task(py, event_loop, result).map_err(fail)?;
         return Ok(Outcome::Await(fut));
     }

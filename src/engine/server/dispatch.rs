@@ -23,6 +23,17 @@ use fastrapi_routing::route::{ExecutionMode, RouteHandler};
 use fastrapi_runtime::py_bridge;
 use std::ptr;
 
+/// Completes the 405 `response` for a path that allows the methods in `allowed`.
+pub(crate) async fn finish_method_not_allowed(response: Response, allowed: u8) -> Response {
+    let mut response = resolve_pending_handler(response).await;
+    // Without it axum adds its own `Allow` (e.g. `GET,HEAD,HEAD`) to a handler response.
+    response
+        .headers_mut()
+        .entry(ALLOW)
+        .or_insert(allow_header(allowed));
+    response
+}
+
 /// Sends a request to its route handler.
 pub(crate) async fn dispatch_or_not_found(
     router: &'static FrozenRouter<RouteHandler>,
@@ -49,13 +60,7 @@ pub(crate) async fn dispatch_or_not_found(
         let allowed = router.allowed_methods(path_str, request_host);
         if allowed != 0 {
             let response = method_not_allowed_response(state, &req, allowed);
-            let mut response = resolve_pending_handler(response).await;
-            // Without it axum adds its own `Allow` (e.g. `GET,HEAD,HEAD`) to a handler response.
-            response
-                .headers_mut()
-                .entry(ALLOW)
-                .or_insert(allow_header(allowed));
-            return Ok(response);
+            return Ok(finish_method_not_allowed(response, allowed).await);
         }
         return Err(req);
     };
