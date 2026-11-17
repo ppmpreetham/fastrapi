@@ -24,6 +24,10 @@ pub enum PathConvertor {
     Path,
 }
 
+fn all_digits(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+}
+
 impl PathConvertor {
     fn from_name(name: &str) -> Option<Self> {
         Some(match name {
@@ -39,16 +43,11 @@ impl PathConvertor {
     fn matches(self, value: &str) -> bool {
         match self {
             Self::Str | Self::Path => true,
-            Self::Int => !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()),
-            Self::Float => match value.split_once('.') {
-                Some((int_part, frac_part)) => {
-                    !int_part.is_empty()
-                        && int_part.bytes().all(|b| b.is_ascii_digit())
-                        && !frac_part.is_empty()
-                        && frac_part.bytes().all(|b| b.is_ascii_digit())
-                }
-                None => false,
-            },
+            Self::Int => all_digits(value),
+            Self::Float => value.split_once('.').map_or_else(
+                || all_digits(value),
+                |(int, frac)| all_digits(int) && all_digits(frac),
+            ),
             Self::Uuid => {
                 let mut groups = value.split('-');
                 let shape: [Option<usize>; 6] = from_fn(|_| groups.next().map(str::len));

@@ -348,7 +348,11 @@ pub fn convert_response_by_type(
         .ok()
         .flatten()
         .filter(|background| !background.is_none());
-    let mut response = convert_response_object(py, result, kind, request_headers);
+    let mut response = if kind == ResponseKind::File {
+        convert_file_response(py, result, request_headers)?
+    } else {
+        convert_response_object(py, result, kind)
+    };
     if let Some(background) = background {
         if !matches!(kind, ResponseKind::Streaming | ResponseKind::Sse)
             && let Some(event_loop) = current_server()
@@ -363,20 +367,16 @@ pub fn convert_response_by_type(
     Ok(response)
 }
 
-fn convert_response_object(
-    py: Python,
-    result: &Bound<PyAny>,
-    kind: ResponseKind,
-    request_headers: Option<&HeaderMap>,
-) -> Response {
+fn convert_response_object(py: Python, result: &Bound<PyAny>, kind: ResponseKind) -> Response {
     match kind {
-        ResponseKind::File => convert_file_response(py, result, request_headers),
         ResponseKind::Streaming | ResponseKind::Sse => convert_streaming_response(py, result),
         ResponseKind::Json => convert_json_response(py, result),
         ResponseKind::Text => convert_text_response(py, result),
         ResponseKind::Html => convert_html_response(py, result),
         ResponseKind::Redirect => convert_redirect_response(py, result),
-        ResponseKind::Base | ResponseKind::Unknown => convert_auto_response(py, result),
+        ResponseKind::Base | ResponseKind::Unknown | ResponseKind::File => {
+            convert_auto_response(py, result)
+        }
     }
 }
 
@@ -503,10 +503,10 @@ fn convert_response_value(
                 || final_result.hasattr(intern!(py, "__fspath__"))? =>
         {
             let file = py.get_type::<PyFileResponse>().call1((final_result,))?;
-            convert_file_response(py, &file, request_headers)
+            convert_file_response(py, &file, request_headers)?
         }
 
-        ResponseType::File => convert_file_response(py, final_result, request_headers),
+        ResponseType::File => convert_file_response(py, final_result, request_headers)?,
 
         ResponseType::Custom => match &formatter.response_class {
             Some(class) => {
@@ -536,7 +536,7 @@ fn convert_response_value(
                 convert_streaming_response(py, final_result)
             } else if final_result.is_instance_of::<PyFileResponse>() || kind == ResponseKind::File
             {
-                convert_file_response(py, final_result, request_headers)
+                convert_file_response(py, final_result, request_headers)?
             } else {
                 py_to_response(py, final_result, default_status)
             }
@@ -1009,7 +1009,8 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
         return convert_streaming_response(py, result);
     }
     if result.is_instance_of::<PyFileResponse>() || kind == ResponseKind::File {
-        return convert_file_response(py, result, None);
+        return convert_file_response(py, result, None)
+            .unwrap_or_else(|err| render_failed(py, &err));
     }
 
     let status = response_status(result, StatusCode::OK);

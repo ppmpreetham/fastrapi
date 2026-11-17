@@ -3,7 +3,7 @@
 
 use super::constraints::extract_constraints;
 use super::module::analyze;
-use super::utils::{annotation_name, base_annotation, injected_source, is_inspect_empty};
+use super::utils::{assert_no_field_info, injected_source, is_inspect_empty};
 use crate::kernel_params::ParamKernel;
 use crate::route::{EmptyDefault, FastKind, ModelKey, ModelPresence, ParamModel, ParsedParameter};
 use fastrapi_core::params::{ParameterConstraints, ParameterSource};
@@ -159,11 +159,8 @@ pub fn parse_parameter_spec(
 ) -> PyResult<ParsedParameter> {
     let raw_annotation = param_obj.getattr(intern!(py, "annotation"))?.into_any();
     let has_annotation = !is_inspect_empty(py, &raw_annotation);
-    if has_annotation
-        && let Some(source) = annotation_name(py, &base_annotation(&raw_annotation).unbind())
-            .as_deref()
-            .and_then(injected_source)
-    {
+    if has_annotation && let Some(source) = injected_source(py, &raw_annotation) {
+        assert_no_field_info(py, &raw_annotation)?;
         return Ok(injected_parameter(py, param_name, source));
     }
 

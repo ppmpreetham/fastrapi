@@ -1107,7 +1107,7 @@ impl FastrAPI {
             return Ok(entry.dict.clone_ref(py));
         }
 
-        let spec = self.openapi_spec(py)?;
+        let spec = self.openapi_spec(py, false)?;
         let dict = fastrapi_pyutil::json::json_value_to_py(py, &spec)?;
         *self.openapi_cache.lock() = Some(super::config::OpenApiCacheEntry {
             fingerprint,
@@ -1357,7 +1357,12 @@ crate::generate_http_methods!(
 );
 
 impl FastrAPI {
-    pub(crate) fn openapi_spec(&self, py: Python<'_>) -> PyResult<simd_json::OwnedValue> {
+    /// The `/openapi.json` route adds the `root_path` server, but a direct `openapi()` call does not.
+    pub(crate) fn openapi_spec(
+        &self,
+        py: Python<'_>,
+        with_root_path_server: bool,
+    ) -> PyResult<simd_json::OwnedValue> {
         let flat = self.router.bind(py).borrow().flatten(py)?;
         let routes = &flat.0;
         let document = AppDocument {
@@ -1370,7 +1375,7 @@ impl FastrAPI {
             contact: self.contact.as_ref(),
             license_info: self.license_info.as_ref(),
             servers: self.servers.as_ref(),
-            root_path_in_servers: self.root_path_in_servers,
+            root_path_in_servers: self.root_path_in_servers && with_root_path_server,
             root_path: &self.root_path,
             openapi_tags: self.openapi_tags.as_ref(),
             openapi_external_docs: self.openapi_external_docs.as_ref(),

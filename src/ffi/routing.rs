@@ -363,9 +363,25 @@ impl PyAPIRoute {
         delegate.call_method1("handle", (scope, receive, send))
     }
 
-    fn __repr__(slf: &Bound<'_, Self>) -> String {
-        format!("APIRoute(path={})", slf.borrow().path)
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let methods = slf.py().import("builtins")?.getattr("sorted")?;
+        let methods = methods.call1((slf.getattr("methods")?,))?;
+        route_repr(slf.as_any(), Some(&methods))
     }
+}
+
+/// Starlette's `repr` of a route: `Class(path='/x', name='x', methods=['GET'])`.
+fn route_repr(route: &Bound<'_, PyAny>, methods: Option<&Bound<'_, PyAny>>) -> PyResult<String> {
+    let class = route.get_type().name()?;
+    let path = route.getattr("path")?.repr()?;
+    let name = route.getattr("name")?.repr()?;
+    Ok(match methods {
+        Some(methods) => format!(
+            "{class}(path={path}, name={name}, methods={})",
+            methods.repr()?
+        ),
+        None => format!("{class}(path={path}, name={name})"),
+    })
 }
 
 #[pyclass(frozen, name = "RouteEntry", module = "fastrapi.routing")]
@@ -543,6 +559,10 @@ impl PyAPIWebSocketRoute {
             .getattr("__dict__")?
             .call_method1("update", (attrs,))?;
         Ok(())
+    }
+
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        route_repr(slf.as_any(), None)
     }
 
     fn matches<'py>(

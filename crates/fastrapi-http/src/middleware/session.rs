@@ -224,7 +224,7 @@ impl SessionMiddleware {
     )]
     fn new(
         app: Option<&Bound<'_, PyAny>>,
-        secret_key: Option<String>,
+        secret_key: Option<&Bound<'_, PyAny>>,
         session_cookie: String,
         max_age: Option<i64>,
         path: String,
@@ -233,11 +233,15 @@ impl SessionMiddleware {
         domain: Option<String>,
         partitioned: bool,
     ) -> PyResult<Self> {
-        let secret_key = secret_key.ok_or_else(|| {
-            PyTypeError::new_err(
-                "SessionMiddleware.__init__() missing 1 required positional argument: 'secret_key'",
-            )
-        })?;
+        let secret_key = secret_key
+            .ok_or_else(|| {
+                PyTypeError::new_err(
+                    "SessionMiddleware.__init__() missing 1 required positional argument: 'secret_key'",
+                )
+            })?
+            .str()?
+            .to_cow()?
+            .into_owned();
         let config = Self {
             app: AsgiApp::new(app),
             secret_key,

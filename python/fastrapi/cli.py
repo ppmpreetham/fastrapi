@@ -6,6 +6,9 @@ from pathlib import Path
 from .fastrapi import FastrAPI, __version__
 
 
+DEFAULT_PATHS = ("main.py", "app.py", "api.py", "app/main.py", "app/app.py", "app/api.py")
+
+
 def load_app(target, name=None):
     module_name, attribute = target, name
     if ":" in target and not Path(target).exists():
@@ -24,19 +27,22 @@ def load_app(target, name=None):
     return app
 
 
-def main(argv=None):
+def main():
     parser = argparse.ArgumentParser(prog="fastrapi")
     parser.add_argument("--version", action="version", version=f"fastrapi {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     for command, host, reload in (("run", "0.0.0.0", False), ("dev", "127.0.0.1", True)):
         sub = commands.add_parser(command)
-        sub.add_argument("path", nargs="?", default="main.py")
+        sub.add_argument("path", nargs="?")
         sub.add_argument("--app")
         sub.add_argument("--host", default=host)
         sub.add_argument("--port", type=int, default=8000)
         sub.add_argument("--reload-dir", action="append")
         sub.add_argument("--reload", action=argparse.BooleanOptionalAction, default=reload)
-    args = parser.parse_args(argv)
-    app = load_app(args.path, args.app)
+    args = parser.parse_args()
+    path = args.path or next((path for path in DEFAULT_PATHS if Path(path).is_file()), None)
+    if path is None:
+        raise SystemExit("Could not find a default file to run, please provide an explicit path")
+    app = load_app(path, args.app)
     reload_dirs = (args.reload_dir or [str(Path.cwd())]) if args.reload else None
     app.serve(args.host, args.port, reload=args.reload, reload_dirs=reload_dirs)

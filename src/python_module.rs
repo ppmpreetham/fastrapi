@@ -163,10 +163,7 @@ mod fastrapi {
     #[pymodule]
     mod requests {
         #[pymodule_export]
-        use fastrapi_http::request::{
-            PyAppInfo as AppInfo, PyClientInfo as ClientInfo, PyHTTPConnection as HTTPConnection,
-            PyRequest as Request,
-        };
+        use fastrapi_http::request::{PyHTTPConnection as HTTPConnection, PyRequest as Request};
     }
 
     #[pymodule]
@@ -185,6 +182,7 @@ mod fastrapi {
             register(m)?;
             let py = m.py();
             m.add("ASGIApp", py.import("starlette.types")?.getattr("ASGIApp")?)?;
+            m.add("_PING_INTERVAL", 15.0)?;
             m.add_class::<crate::ffi::compat::DefaultPlaceholder>()?;
             m.add_function(wrap_pyfunction!(
                 crate::ffi::compat::default_placeholder,
@@ -546,7 +544,6 @@ mod fastrapi {
             "WebSocketDisconnect",
             py.get_type::<PyWebSocketDisconnect>(),
         )?;
-        websockets.add("WebSocketException", websocket_exception_type(py)?)?;
         if let Ok(value) = py
             .import("starlette.websockets")
             .and_then(|module| module.getattr("WebSocketState"))

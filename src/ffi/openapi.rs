@@ -11,7 +11,7 @@ use crate::ffi::routing::PyRouteEntry;
 use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
 use fastrapi_pyutil::json::json_to_py_object;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyModule, PySet};
+use pyo3::types::{PyAny, PyDict, PyList, PyModule, PySet};
 
 /// The values of `fastapi.openapi.constants`.
 pub(crate) const REF_PREFIX: &str = "#/components/schemas/";
@@ -109,8 +109,26 @@ fn router_from_routes<'py>(
     routes: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAPIRouter>> {
     let router = new_api_router(py, None)?;
-    add_route_objects(py, &router.borrow(), routes)?;
+    // Like FastAPI, only `APIRoute` objects are documented, not plain Starlette routes.
+    let api_routes = routes
+        .try_iter()?
+        .filter(|route| {
+            route
+                .as_ref()
+                .map_or(true, |route| !is_plain_starlette_route(py, route))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    add_route_objects(py, &router.borrow(), PyList::new(py, api_routes)?.as_any())?;
     Ok(router)
+}
+
+fastrapi_pyutil::cached_py_import!(STARLETTE_ROUTE, "starlette.routing", "Route");
+
+fn is_plain_starlette_route(py: Python<'_>, route: &Bound<'_, PyAny>) -> bool {
+    STARLETTE_ROUTE
+        .get(py)
+        .is_ok_and(|base| route.is_instance(base).unwrap_or(false))
+        && !route.hasattr("dependant").unwrap_or(false)
 }
 
 pub(crate) fn add_route_objects(

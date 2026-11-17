@@ -3,45 +3,36 @@
 
 use crate::annotations::strip_optional;
 use crate::params::PyDepends;
+use crate::security::PySecurityScopes;
 use fastrapi_core::params::ParameterSource;
+use pyo3::exceptions::PyAssertionError;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyString};
+use pyo3::types::{PyAny, PyType};
 
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_BACKGROUND_TASKS,
+    "starlette.background",
+    "BackgroundTasks"
+);
+fastrapi_pyutil::cached_py_import!(PYDANTIC_FIELD_INFO, "pydantic.fields", "FieldInfo");
 fastrapi_pyutil::cached_py_import!(INSPECT_PARAMETER_EMPTY, "inspect", "Parameter", "empty");
 
 pub fn is_inspect_empty(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     INSPECT_PARAMETER_EMPTY.is(py, value)
 }
 
-pub fn annotation_name(py: Python<'_>, annotation: &Py<PyAny>) -> Option<String> {
-    let annotation = annotation.bind(py);
-    annotation
-        .getattr("__name__")
-        .ok()
-        .and_then(|value| {
-            value
-                .cast::<PyString>()
-                .ok()
-                .and_then(|name| name.to_str().ok())
-                .map(str::to_owned)
-        })
-        .or_else(|| {
-            annotation
-                .str()
-                .ok()
-                .map(|value| value.to_string_lossy().into_owned())
-        })
-}
-
+/// The injected parameter source of a `BackgroundTasks` or `SecurityScopes` annotation, matched by class.
 #[must_use]
-pub fn injected_source(name: &str) -> Option<ParameterSource> {
-    let base = name.rsplit('.').next().unwrap_or(name);
-    match base {
-        "BackgroundTasks" => Some(ParameterSource::BackgroundTasks),
-        "SecurityScopes" => Some(ParameterSource::SecurityScopes),
-        _ => None,
+pub fn injected_source(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Option<ParameterSource> {
+    let class = base_annotation(annotation).cast_into::<PyType>().ok()?;
+    if class.is_subclass_of::<PySecurityScopes>().unwrap_or(false) {
+        return Some(ParameterSource::SecurityScopes);
     }
+    STARLETTE_BACKGROUND_TASKS
+        .get(py)
+        .is_ok_and(|base| class.is_subclass(base).unwrap_or(false))
+        .then_some(ParameterSource::BackgroundTasks)
 }
 
 #[must_use]
@@ -86,6 +77,23 @@ pub fn list_element_annotation<'py>(
     }
 
     (false, None)
+}
+
+/// Fails like FastAPI when a FastAPI annotation such as `Query()` is attached to an injected type.
+pub(crate) fn assert_no_field_info(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> PyResult<()> {
+    let Ok(metadata) = annotation.getattr(intern!(py, "__metadata__")) else {
+        return Ok(());
+    };
+    let field_info = PYDANTIC_FIELD_INFO.get(py)?;
+    for item in metadata.try_iter()? {
+        if item?.is_instance(field_info)? {
+            return Err(PyAssertionError::new_err(format!(
+                "Cannot specify FastAPI annotation for type {}",
+                base_annotation(annotation).repr()?
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[inline]

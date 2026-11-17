@@ -7,6 +7,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::StreamExt;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{Bound, Py, PyAny, intern};
@@ -231,7 +232,7 @@ pub fn convert_file_response(
     py: Python<'_>,
     result: &Bound<'_, PyAny>,
     request_headers: Option<&HeaderMap>,
-) -> Response {
+) -> PyResult<Response> {
     let get_str = |attr: &Bound<'_, PyString>| -> Option<String> {
         result
             .getattr_opt(attr)
@@ -241,7 +242,7 @@ pub fn convert_file_response(
             .and_then(|value| value.extract().ok())
     };
     let Some(path) = get_str(intern!(py, "path")) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
     };
     let status = result
         .getattr(intern!(py, "status_code"))
@@ -249,8 +250,18 @@ pub fn convert_file_response(
         .and_then(|value| value.extract::<u16>().ok())
         .and_then(|value| StatusCode::from_u16(value).ok())
         .unwrap_or(StatusCode::OK);
-    let Ok(metadata) = py.detach(|| fs::metadata(&path)) else {
-        return StatusCode::NOT_FOUND.into_response();
+    let metadata = match py.detach(|| fs::metadata(&path)) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => {
+            return Err(PyRuntimeError::new_err(format!(
+                "File at path {path} is not a file."
+            )));
+        }
+        Err(_) => {
+            return Err(PyRuntimeError::new_err(format!(
+                "File at path {path} does not exist."
+            )));
+        }
     };
     let length = metadata.len();
     let modified = metadata.modified().ok();
@@ -258,11 +269,11 @@ pub fn convert_file_response(
     let empty = HeaderMap::new();
     let headers = request_headers.unwrap_or(&empty);
     if conditional_not_modified(headers, &etag, modified) {
-        return Response::builder()
+        return Ok(Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(header::ETAG, &etag)
             .body(Body::empty())
-            .unwrap_or_else(|_| StatusCode::NOT_MODIFIED.into_response());
+            .unwrap_or_else(|_| StatusCode::NOT_MODIFIED.into_response()));
     }
     let use_range =
         headers.get(header::RANGE).is_some() && if_range_matches(headers, &etag, modified);
@@ -275,11 +286,11 @@ pub fn convert_file_response(
             .ok()
             .and_then(|ranges| ranges.validate(length).ok())
         else {
-            return Response::builder()
+            return Ok(Response::builder()
                 .status(StatusCode::RANGE_NOT_SATISFIABLE)
                 .header(header::CONTENT_RANGE, format!("bytes */{length}"))
                 .body(Body::empty())
-                .unwrap_or_else(|_| StatusCode::RANGE_NOT_SATISFIABLE.into_response());
+                .unwrap_or_else(|_| StatusCode::RANGE_NOT_SATISFIABLE.into_response()));
         };
         ranges
     } else if length == 0 {
@@ -352,9 +363,9 @@ pub fn convert_file_response(
         .getattr(intern!(py, "headers"))
         .ok()
         .and_then(|value| value.extract::<Py<PyDict>>().ok());
-    apply_raw_headers(
+    Ok(apply_raw_headers(
         apply_response_metadata(py, response, custom_headers.as_ref(), None),
         result,
         RawHeaders::CookiesOnly,
-    )
+    ))
 }

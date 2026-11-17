@@ -424,13 +424,19 @@ pub(crate) fn register_compat_modules(parent: &Bound<'_, PyModule>) -> PyResult<
         "contextmanager_in_threadpool",
         helpers.getattr("contextmanager_in_threadpool")?,
     )?;
+    helpers
+        .getattr("contextmanager_in_threadpool")?
+        .setattr("__module__", "fastrapi.concurrency")?;
     parent.add_submodule(&concurrency)?;
 
     let utils = PyModule::new(py, "utils")?;
     utils.add_function(wrap_pyfunction!(generate_operation_id_for_path, &utils)?)?;
     utils.add_function(wrap_pyfunction!(deep_dict_update, &utils)?)?;
     utils.add_function(wrap_pyfunction!(is_body_allowed_for_status_code, &utils)?)?;
-    utils.add_function(wrap_pyfunction!(get_path_param_names, &utils)?)?;
+    utils.add(
+        "get_path_param_names",
+        helpers.getattr("get_path_param_names")?,
+    )?;
     utils.add_function(wrap_pyfunction!(generate_unique_id, &utils)?)?;
     utils.add_function(wrap_pyfunction!(get_value_or_default, &utils)?)?;
     for name in ["ModelField", "create_model_field"] {
@@ -453,6 +459,20 @@ pub(crate) fn register_compat_modules(parent: &Bound<'_, PyModule>) -> PyResult<
         ("fastrapi.param_functions", &params),
     ] {
         fastrapi_pyutil::imports::register_module(py, name, module)?;
+    }
+    let openapi = parent.getattr("openapi")?;
+    let openapi_utils = openapi.getattr("utils")?;
+    let constants = openapi.getattr("constants")?;
+    let types = parent.getattr("types")?;
+    for (source, name) in [
+        (&constants, "REF_PREFIX"),
+        (&constants, "METHODS_WITH_BODY"),
+        (utils.as_any(), "deep_dict_update"),
+        (utils.as_any(), "is_body_allowed_for_status_code"),
+        (&types, "ModelNameMap"),
+        (&types, "DependencyCacheKey"),
+    ] {
+        openapi_utils.setattr(name, source.getattr(name)?)?;
     }
     Ok(())
 }

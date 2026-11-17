@@ -2,7 +2,6 @@
 //! The functions find the handler for an exception, a validation error or a status code.
 //! They call the handler and convert its result into an HTTP response.
 
-use axum::http::header::ALLOW;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
 use pyo3::exceptions::PyValueError;
@@ -280,7 +279,7 @@ pub(crate) fn dispatch_status_handler(
                 let allow = allow
                     .to_str()
                     .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                headers.set_item(ALLOW.as_str(), allow)?;
+                headers.set_item("Allow", allow)?;
                 Ok(headers)
             })
             .transpose();

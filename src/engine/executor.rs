@@ -49,6 +49,7 @@ fn specialized_response_conversion(
             if let Ok(s) = result.cast::<PyString>() {
                 return match fastrapi_pyutil::body::str_body(s) {
                     Ok(body) => (
+                        handler.response.default_status.unwrap_or(StatusCode::OK),
                         [(
                             axum::http::header::CONTENT_TYPE,
                             axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),

@@ -185,11 +185,14 @@ fn trusted_host_layer(app: Router, config: &TrustedHostMiddleware) -> Router {
                 .unwrap_or_default();
             let host = fastrapi_core::path::host_without_port(authority);
 
-            if host_matches(&allowed, host) {
+            // Starlette rejects a host with a colon but no port.
+            let well_formed = !authority.ends_with(':');
+            if well_formed && host_matches(&allowed, host) {
                 return next.run(req).await;
             }
 
-            if redirect
+            if well_formed
+                && redirect
                 && allowed
                     .iter()
                     .any(|pattern| pattern.strip_prefix("www.") == Some(host))

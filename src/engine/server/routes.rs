@@ -617,7 +617,7 @@ pub(crate) fn register_docs_endpoints(
         Some(spec) => spec,
         None => match app_config.openapi_schema.lock().as_ref() {
             Some(schema) => fastrapi_pyutil::json::py_any_to_json(py, schema.bind(py)),
-            None => app_config.openapi_spec(py)?,
+            None => app_config.openapi_spec(py, true)?,
         },
     };
     let openapi_body = serde_json::to_vec(&openapi_json).ok().map(Bytes::from);

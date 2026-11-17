@@ -3,6 +3,7 @@ import dataclasses
 import datetime
 import importlib
 import re
+import warnings
 from collections import defaultdict, deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from decimal import Decimal
@@ -54,6 +55,20 @@ except ImportError:
 
     class PyExtraColor:
         pass
+
+
+def get_path_param_names(path):
+    return set(re.findall("{(.*?)}", path))
+
+
+def is_pydantic_v1_model_instance(obj):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            from pydantic import v1
+    except ImportError:
+        return False
+    return isinstance(obj, v1.BaseModel)
 
 
 def isoformat(o):

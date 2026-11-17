@@ -346,8 +346,8 @@ fn extract_bound<'py>(kwargs: Option<&Bound<'py, PyDict>>, key: &str) -> Option<
 #[inline]
 fn func_name(func: &Bound<'_, PyAny>) -> String {
     func.getattr("__name__")
-        .ok()
-        .and_then(|n| n.extract::<String>().ok())
+        .or_else(|_| func.get_type().getattr("__name__"))
+        .and_then(|n| n.extract::<String>())
         .unwrap_or_default()
 }
 
@@ -981,6 +981,9 @@ impl PyAPIRouter {
                             _kwargs: Option<&Bound<'_, PyDict>>|
               -> PyResult<Py<PyAny>> {
             let func = args.get_item(0)?;
+            if decorators.is_empty() {
+                return Err(PyAssertionError::new_err(()));
+            }
             for decorator in &decorators {
                 decorator.bind(args.py()).call1((&func,))?;
             }
@@ -998,13 +1001,24 @@ impl PyAPIRouter {
         name: Option<String>,
         _include_in_schema: bool,
     ) -> PyResult<()> {
+        let mut methods = methods.unwrap_or_else(|| vec!["GET".to_owned()]);
+        // Starlette's `Route` answers HEAD wherever it allows GET.
+        if methods
+            .iter()
+            .any(|method| method.eq_ignore_ascii_case("GET"))
+            && !methods
+                .iter()
+                .any(|method| method.eq_ignore_ascii_case("HEAD"))
+        {
+            methods.push("HEAD".to_owned());
+        }
         let wrapped = crate::ffi::compat::py_helpers(py)?
             .getattr("request_endpoint")?
             .call1((endpoint,))?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("name", name.unwrap_or_else(|| func_name(endpoint)))?;
         kwargs.set_item("include_in_schema", false)?;
-        self.add_api_route_impl(py, path, &wrapped, methods, &kwargs)
+        self.add_api_route_impl(py, path, &wrapped, Some(methods), &kwargs)
     }
 
     pub(crate) fn add_api_route_impl(
@@ -1015,7 +1029,11 @@ impl PyAPIRouter {
         methods: Option<Vec<String>>,
         kwargs: &Bound<'_, PyDict>,
     ) -> PyResult<()> {
-        for method in methods.unwrap_or_else(|| vec!["GET".to_string()]) {
+        let methods = methods.unwrap_or_else(|| vec!["GET".to_string()]);
+        if methods.is_empty() {
+            return Err(PyAssertionError::new_err(()));
+        }
+        for method in methods {
             let http_method = HttpMethod::from_str(&method.to_ascii_uppercase())
                 .map_err(|_| PyValueError::new_err(format!("Invalid HTTP method: {method}")))?;
             let decorator =

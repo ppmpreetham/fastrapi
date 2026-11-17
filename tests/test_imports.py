@@ -34,7 +34,7 @@ def test_submodule_imports():
     from fastrapi.exceptions import HTTPException as ExceptionsHTTPException
     from fastrapi.params import Depends as ParamsDepends, Query as ParamsQuery
     from fastrapi.background import BackgroundTasks as BgBackgroundTasks
-    from fastrapi.middleware import CORSMiddleware
+    from fastrapi.middleware.cors import CORSMiddleware
 
     assert JSONResponse is not None
     assert HTMLResponse is not None

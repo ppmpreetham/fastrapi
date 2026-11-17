@@ -306,6 +306,7 @@ pub(crate) fn register_tables(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "decimal_encoder",
         "PyExtraColor",
         "IncEx",
+        "is_pydantic_v1_model_instance",
     ] {
         module.add(name, helpers.getattr(name)?)?;
     }

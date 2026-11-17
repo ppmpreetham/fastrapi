@@ -1,7 +1,8 @@
 use fastrapi_http::responses::PyHTMLResponse;
 use fastrapi_pyutil::json::write_py_json;
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 use std::fmt::Write;
 
 pub(crate) const SWAGGER_JS_URL: &str =
@@ -107,7 +108,13 @@ pub(crate) fn swagger_ui_default_parameters(py: Python<'_>) -> PyResult<Bound<'_
 fn html_safe_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {
     let mut buffer = Vec::new();
     write_py_json(py, value, &mut buffer)?;
-    Ok(String::from_utf8_lossy(&buffer)
+    // FastAPI writes the page with `json.dumps`, whose separators contain a space.
+    let json = py.import(intern!(py, "json"))?;
+    let value = json.call_method1(intern!(py, "loads"), (PyBytes::new(py, &buffer),))?;
+    let dumped: String = json
+        .call_method1(intern!(py, "dumps"), (value,))?
+        .extract()?;
+    Ok(dumped
         .replace('<', "\\u003c")
         .replace('>', "\\u003e")
         .replace('&', "\\u0026"))

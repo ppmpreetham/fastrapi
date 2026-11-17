@@ -651,9 +651,11 @@ pub fn create_py_request(
     scope.set_item(intern!(py, "path"), path)?;
     if let Some(mount) = mount {
         scope.set_item(intern!(py, "root_path"), &*mount.root_path)?;
-        if let Some(app_root_path) = &mount.app_root_path {
-            scope.set_item(intern!(py, "app_root_path"), app_root_path)?;
-        }
+        let app_root_path = mount.app_root_path.as_ref().map_or_else(
+            || intern!(py, "").as_any().clone(),
+            |path| path.bind(py).clone(),
+        );
+        scope.set_item(intern!(py, "app_root_path"), app_root_path)?;
         if let Some(router) = &mount.router {
             scope.set_item(intern!(py, "router"), router)?;
         }

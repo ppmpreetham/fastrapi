@@ -49,6 +49,18 @@ impl PyJinja2Templates {
         })
     }
 
+    fn get_template<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+        self.inner.bind(py).call_method1("get_template", (name,))
+    }
+
+    #[pyo3(name = "_setup_env_defaults")]
+    fn setup_env_defaults<'py>(&self, py: Python<'py>, env: &Bound<'py, PyAny>) -> PyResult<()> {
+        self.inner
+            .bind(py)
+            .call_method1("_setup_env_defaults", (env,))
+            .map(drop)
+    }
+
     fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         Ok(self.inner.bind(py).getattr(name)?.unbind())
     }

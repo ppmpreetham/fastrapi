@@ -238,7 +238,7 @@ def test_http_exception_subclass(client, app):
 
 
 def test_cors_default_methods_are_get_only(client, app):
-    from fastrapi.middleware import CORSMiddleware
+    from fastrapi.middleware.cors import CORSMiddleware
 
     app.add_middleware(CORSMiddleware, allow_origins=["https://a.example"])
 
@@ -254,7 +254,7 @@ def test_cors_default_methods_are_get_only(client, app):
 
 
 def test_cors_wildcards_with_credentials(client, app):
-    from fastrapi.middleware import CORSMiddleware
+    from fastrapi.middleware.cors import CORSMiddleware
 
     app.add_middleware(
         CORSMiddleware,
@@ -282,7 +282,7 @@ def test_cors_wildcards_with_credentials(client, app):
 
 
 def test_https_redirect_uses_https(client, app):
-    from fastrapi.middleware import HTTPSRedirectMiddleware
+    from fastrapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 
     app.add_middleware(HTTPSRedirectMiddleware)
 
@@ -297,7 +297,7 @@ def test_https_redirect_uses_https(client, app):
 
 
 def test_trusted_host_redirects_to_www(client, app):
-    from fastrapi.middleware import TrustedHostMiddleware
+    from fastrapi.middleware.trustedhost import TrustedHostMiddleware
 
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["www.example.com"])
 
@@ -1043,7 +1043,7 @@ def test_security_classes_share_bases():
 
 
 def test_https_redirect_ignores_forwarded_proto(client, app):
-    from fastrapi.middleware import HTTPSRedirectMiddleware
+    from fastrapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 
     app.add_middleware(HTTPSRedirectMiddleware)
 
@@ -1127,7 +1127,7 @@ def test_async_exit_stack_middleware():
 
 
 def test_cors_origin_regex(client, app):
-    from fastrapi.middleware import CORSMiddleware
+    from fastrapi.middleware.cors import CORSMiddleware
 
     app.add_middleware(CORSMiddleware, allow_origin_regex="https://[a-z]+[.]example[.]org")
 
@@ -1912,11 +1912,11 @@ def test_invalid_router_dependencies_fail_at_registration():
 
     from fastrapi import APIRouter, Depends
 
-    with pytest.raises(TypeError):
+    with pytest.raises(AssertionError):
         APIRouter(dependencies=[Depends(1)])
-    with pytest.raises(TypeError):
+    with pytest.raises(AssertionError):
         FastrAPI().include_router(APIRouter(), dependencies=[Depends(1)])
-    with pytest.raises(TypeError):
+    with pytest.raises(AssertionError):
         FastrAPI(dependencies=[Depends(1)])
 
 

@@ -5,7 +5,7 @@ use super::document::OpenApiSpec;
 use super::paths::PathSettings;
 use super::paths::build_paths_from_routes;
 use super::schema::py_dicts_to_json_vec;
-use fastrapi_pyutil::json::py_dict_to_json;
+use fastrapi_pyutil::json::{json_to_py_object, py_dict_to_json};
 use fastrapi_routing::route::RouteEntry;
 use indexmap::IndexMap;
 use pyo3::exceptions::PyValueError;
@@ -136,6 +136,10 @@ pub fn build_openapi_spec(
         PyValueError::new_err(format!("Could not build the OpenAPI document: {err}"))
     })?;
     drop_nulls(&mut document);
+    // Like FastAPI, the finished document must satisfy the OpenAPI models.
+    py.import("fastrapi.openapi.models")?
+        .getattr("OpenAPI")?
+        .call_method1("model_validate", (json_to_py_object(py, &document),))?;
     Ok(document)
 }
 

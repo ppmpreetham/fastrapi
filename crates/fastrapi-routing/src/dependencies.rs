@@ -15,8 +15,11 @@ use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::task::block_in_place;
 
 use crate::security::{OAuth2PasswordRequestForm, describe_scheme};
+use fastrapi_core::params::ParameterSource;
 use fastrapi_core::security::SecurityKind;
-use pyo3::exceptions::{PyBaseException, PyRuntimeError, PyStopAsyncIteration, PyStopIteration};
+use pyo3::exceptions::{
+    PyAssertionError, PyBaseException, PyRuntimeError, PyStopAsyncIteration, PyStopIteration,
+};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyCFunction, PyDict, PyFunction, PyString, PyTuple, PyType};
@@ -494,19 +497,6 @@ pub async fn execute_request_dependencies(
     Ok(results)
 }
 
-fn annotation_display_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> Option<String> {
-    annotation
-        .getattr(intern!(py, "__name__"))
-        .ok()
-        .and_then(|value| value.extract::<String>().ok())
-        .or_else(|| {
-            annotation
-                .str()
-                .ok()
-                .map(|value| value.to_string_lossy().into_owned())
-        })
-}
-
 fn is_connection_annotation(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> bool {
     crate::annotations::connection_kind(py, annotation).is_some()
 }
@@ -612,6 +602,11 @@ pub fn parse_external_dependencies(
             .ok()
             .filter(|dependency| !dependency.is_none())
             .unwrap_or_else(|| marker.clone());
+        if params::is_dependency_marker(marker) && !callable.is_callable() {
+            return Err(PyAssertionError::new_err(
+                "A parameter-less dependency must have a callable dependency",
+            ));
+        }
         let scopes = marker
             .getattr(keys.scopes)
             .ok()
@@ -776,8 +771,15 @@ fn extract_and_flatten(
         }
 
         if let Ok(default) = param_obj.getattr(keys.default) {
-            let marker = params::find_annotated_dependency_marker(&param_obj)
-                .or_else(|| (!params::is_inspect_empty(py, &default)).then_some(default));
+            let annotated = params::find_annotated_dependency_marker(&param_obj);
+            if annotated.is_some() && params::is_dependency_marker(&default) {
+                return Err(PyAssertionError::new_err(format!(
+                    "Cannot specify `Depends` in `Annotated` and default value together for {}",
+                    param_name.repr()?
+                )));
+            }
+            let marker =
+                annotated.or_else(|| (!params::is_inspect_empty(py, &default)).then_some(default));
 
             let Some(marker) = marker else {
                 continue;
@@ -906,15 +908,13 @@ fn build_injection_plan(
             if is_response_annotation(py, &ann) {
                 return Some(InjectionType::Response);
             }
-            annotation_display_name(py, &ann).and_then(|ann_name| {
-                if ann_name.contains("SecurityScopes") {
-                    Some(InjectionType::SecurityScopes)
-                } else {
-                    None
-                }
-            })
+            (params::injected_source(py, &ann) == Some(ParameterSource::SecurityScopes))
+                .then_some(InjectionType::SecurityScopes)
         });
 
+        if special_injection.is_some() {
+            params::assert_no_field_info(py, &param.getattr(keys.annotation)?)?;
+        }
         match special_injection {
             Some(InjectionType::Request) => {
                 plan.push((name, InjectionType::Request));

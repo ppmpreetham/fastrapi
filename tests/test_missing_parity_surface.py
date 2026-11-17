@@ -202,7 +202,7 @@ def test_openapi_helpers_models_docs_and_route_filters():
         """listed summary"""
 
     routes = [APIRoute("/listed", listed, methods=["GET"]), APIRoute("/hidden", listed, include_in_schema=False)]
-    spec = get_openapi(title="T", version="1", routes=routes, tags=[{"name": "x"}], external_docs={"url": "/docs"})
+    spec = get_openapi(title="T", version="1", routes=routes, tags=[{"name": "x"}], external_docs={"url": "https://example.com/docs"})
     assert spec["info"] == {"title": "T", "version": "1"}
     assert set(spec["paths"]) == {"/listed"}
     assert spec["paths"]["/listed"]["get"]["summary"] == "Listed"

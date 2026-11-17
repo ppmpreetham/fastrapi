@@ -23,6 +23,9 @@ if sys.version_info >= (3, 13):
 else:
     from asyncio import iscoroutinefunction
 
+# `skip_file_prefixes` (3.12+) points a warning at the user's file whatever the call depth.
+_WARN_LOCATION = {"skip_file_prefixes": ("fastrapi/params.py",)} if sys.version_info >= (3, 12) else {"stacklevel": 5}
+
 Undefined = PydanticUndefined
 RequiredParam = PydanticUndefined
 
@@ -85,7 +88,7 @@ def _init_field(
         warnings.warn(
             "`example` has been deprecated, please use `examples` instead",
             category=FastAPIDeprecationWarning,
-            stacklevel=5,
+            **_WARN_LOCATION,
         )
     self.example = None if example is Unset else example
     self.include_in_schema = include_in_schema
@@ -117,7 +120,7 @@ def _init_field(
         warnings.warn(
             "`regex` has been deprecated, please use `pattern` instead",
             category=FastAPIDeprecationWarning,
-            stacklevel=5,
+            **_WARN_LOCATION,
         )
     kwargs["deprecated"] = deprecated
     if serialization_alias in (Unset, None) and isinstance(alias, str):
