@@ -3,7 +3,6 @@
 
 use fastrapi_http::exceptions::request_validation_error_type;
 use fastrapi_http::request::PyRequest;
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict, PyList};
 
@@ -52,16 +51,20 @@ use pyo3::types::{IntoPyDict, PyDict, PyList};
     name = "OAuth2PasswordRequestForm",
     module = "fastrapi.security",
     subclass,
-    get_all,
     skip_from_py_object
 )]
 #[derive(Clone)]
 pub struct OAuth2PasswordRequestForm {
+    #[pyo3(get)]
     pub grant_type: Option<String>,
+    #[pyo3(get)]
     pub username: String,
+    #[pyo3(get)]
     pub password: String,
     pub scope: String,
+    #[pyo3(get)]
     pub client_id: Option<String>,
+    #[pyo3(get)]
     pub client_secret: Option<String>,
 }
 
@@ -220,19 +223,19 @@ fn password_form(request: &Bound<'_, PyRequest>, strict: bool) -> PyResult<Passw
 #[pymethods]
 impl OAuth2PasswordRequestForm {
     #[new]
-    #[pyo3(signature = (*, grant_type=None, username=None, password=None, scope=String::new(), client_id=None, client_secret=None))]
-    fn new(
+    #[pyo3(signature = (*, grant_type=None, username, password, scope=String::new(), client_id=None, client_secret=None))]
+    const fn new(
         grant_type: Option<String>,
-        username: Option<String>,
-        password: Option<String>,
+        username: String,
+        password: String,
         scope: String,
         client_id: Option<String>,
         client_secret: Option<String>,
     ) -> Self {
         Self {
             grant_type,
-            username: username.unwrap_or_default(),
-            password: password.unwrap_or_default(),
+            username,
+            password,
             scope,
             client_id,
             client_secret,
@@ -265,20 +268,16 @@ impl From<PasswordForm> for OAuth2PasswordRequestForm {
 #[pymethods]
 impl OAuth2PasswordRequestFormStrict {
     #[new]
-    #[pyo3(signature = (*, grant_type=None, username=None, password=None, scope=String::new(), client_id=None, client_secret=None))]
+    #[pyo3(signature = (*, grant_type, username, password, scope=String::new(), client_id=None, client_secret=None))]
     fn new(
-        grant_type: Option<String>,
-        username: Option<String>,
-        password: Option<String>,
+        grant_type: String,
+        username: String,
+        password: String,
         scope: String,
         client_id: Option<String>,
         client_secret: Option<String>,
-    ) -> PyResult<PyClassInitializer<Self>> {
-        let grant_type = grant_type.unwrap_or_else(|| "password".to_owned());
-        if grant_type != "password" {
-            return Err(PyValueError::new_err("grant_type must be password"));
-        }
-        Ok(PyClassInitializer::from(OAuth2PasswordRequestForm::new(
+    ) -> PyClassInitializer<Self> {
+        PyClassInitializer::from(OAuth2PasswordRequestForm::new(
             Some(grant_type),
             username,
             password,
@@ -286,7 +285,7 @@ impl OAuth2PasswordRequestFormStrict {
             client_id,
             client_secret,
         ))
-        .add_subclass(Self))
+        .add_subclass(Self)
     }
 
     fn __call__(&self, request: &Bound<'_, PyRequest>) -> PyResult<Py<Self>> {

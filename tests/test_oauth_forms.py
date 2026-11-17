@@ -5,14 +5,12 @@ from fastrapi.security import OAuth2PasswordRequestForm, OAuth2PasswordRequestFo
 
 
 def test_oauth2_password_request_form(client, app):
-    form = OAuth2PasswordRequestForm()
-
     @app.post("/token")
-    async def token(form_data=Depends(form)):
+    async def token(form_data=Depends(OAuth2PasswordRequestForm)):
         return {
             "username": form_data.username,
             "password": form_data.password,
-            "scope": form_data.scope,
+            "scope": form_data.scopes,
         }
 
     response = client.post(
@@ -23,10 +21,10 @@ def test_oauth2_password_request_form(client, app):
     assert response.json() == {
         "username": "alice",
         "password": "secret",
-        "scope": "read write",
+        "scope": ["read", "write"],
     }
 
 
 def test_oauth2_password_request_form_strict():
-    with pytest.raises(ValueError):
-        OAuth2PasswordRequestFormStrict(grant_type="client_credentials")
+    with pytest.raises(TypeError):
+        OAuth2PasswordRequestFormStrict(username="alice", password="secret")

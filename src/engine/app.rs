@@ -142,6 +142,21 @@ impl FastrAPI {
         Ok(())
     }
 
+    /// The built-in documentation routes, made once.
+    fn docs_routes<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyList>> {
+        let py = slf.py();
+        let app = slf.borrow();
+        let docs = app.docs_routes.get_or_try_init(py, || {
+            crate::ffi::compat::py_helpers(py)?
+                .getattr(intern!(py, "docs_routes"))?
+                .call1((slf,))?
+                .cast_into::<PyList>()
+                .map(Bound::unbind)
+                .map_err(PyErr::from)
+        })?;
+        Ok(docs.bind(py).clone())
+    }
+
     fn mounted_url_path<'py>(
         &self,
         py: Python<'py>,
@@ -174,7 +189,7 @@ impl FastrAPI {
             let Some(child) = child_name(mount.name.as_deref(), name) else {
                 continue;
             };
-            if let Ok(found) = mount.app.borrow(py).url_path_for(py, child, path_params) {
+            if let Ok(found) = Self::url_path_for(mount.app.bind(py), child, path_params) {
                 let found = found.into_bound(py);
                 let path = format!("{}{}", mount.path.trim_end_matches('/'), found.str()?);
                 return url_path.call1((path, found.getattr(protocol)?)).map(Some);
@@ -184,7 +199,7 @@ impl FastrAPI {
             let Some(child) = child_name(mount.name.as_deref(), name) else {
                 continue;
             };
-            if let Ok(found) = mount.app.borrow(py).url_path_for(py, child, path_params) {
+            if let Ok(found) = Self::url_path_for(mount.app.bind(py), child, path_params) {
                 let found = found.into_bound(py);
                 return url_path
                     .call1((found.str()?, found.getattr(protocol)?, &mount.host))
@@ -695,6 +710,8 @@ impl FastrAPI {
     /// Read more about it in the
     /// [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/#alternative-events-deprecated).
     fn on_event(slf: Py<Self>, py: Python<'_>, event_type: &str) -> PyResult<Py<PyAny>> {
+        // FastAPI's deprecated `FastAPI.on_event` calls the deprecated `APIRouter.on_event`, so it warns twice.
+        crate::ffi::decorators::warn_on_event_deprecated(py)?;
         crate::ffi::decorators::warn_on_event_deprecated(py)?;
         let event_type = event_type.to_owned();
         let decorator = move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| {
@@ -707,16 +724,6 @@ impl FastrAPI {
             })
         };
         PyCFunction::new_closure(py, Some(c"on_event"), None, decorator).map(Into::into)
-    }
-
-    fn add_event_handler(
-        &mut self,
-        py: Python<'_>,
-        event_type: &str,
-        func: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        let startup = is_startup_event(event_type)?;
-        self.push_event_handler(py, startup, func)
     }
 
     #[pyo3(signature = (host, app, *, name=None))]
@@ -779,15 +786,8 @@ impl FastrAPI {
     fn get_routes<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyList>> {
         let py = slf.py();
         let app = slf.borrow();
-        let docs = app.docs_routes.get_or_try_init(py, || {
-            crate::ffi::compat::py_helpers(py)?
-                .getattr(intern!(py, "docs_routes"))?
-                .call1((slf,))?
-                .cast_into::<PyList>()
-                .map(Bound::unbind)
-                .map_err(PyErr::from)
-        })?;
-        let all = PyList::new(py, docs.bind(py))?;
+        let docs = Self::docs_routes(slf)?;
+        let all = PyList::new(py, &docs)?;
         let (routes, websockets) = app.router.bind(py).borrow().snapshot(py)?;
         for route in crate::ffi::routing::route_objects(py, &routes, &websockets)? {
             route.setattr(intern!(py, "dependency_overrides_provider"), slf)?;
@@ -798,23 +798,31 @@ impl FastrAPI {
 
     #[pyo3(signature = (name, /, **path_params))]
     fn url_path_for(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         name: &str,
         path_params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let routed = self
+        let py = slf.py();
+        let app = slf.borrow();
+        let routed = app
             .router
             .bind(py)
             .borrow()
             .url_path_for_name(py, name, path_params);
-        match routed {
-            Err(err) => self
-                .mounted_url_path(py, name, path_params)?
-                .map(Bound::unbind)
-                .ok_or(err),
-            found => found,
+        let Err(err) = routed else {
+            return routed;
+        };
+        if let Some(found) = app.mounted_url_path(py, name, path_params)? {
+            return Ok(found.unbind());
         }
+        for route in Self::docs_routes(slf)?.iter() {
+            if route.getattr(intern!(py, "name"))?.eq(name)? {
+                return Ok(route
+                    .call_method(intern!(py, "url_path_for"), (name,), path_params)?
+                    .unbind());
+            }
+        }
+        Err(err)
     }
 
     #[pyo3(signature = (path, methods=None, **kwargs))]

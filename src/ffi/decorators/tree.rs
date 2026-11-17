@@ -51,7 +51,11 @@ fn merge_responses(py: Python<'_>, layers: &[Option<&Py<PyAny>>]) -> Option<Py<P
     }
 }
 
-fn fill_path(template: &str, params: &HashMap<String, String>) -> String {
+/// Fills each `{name:kind}` of `template` with the value that Starlette's convertor for `kind` renders.
+fn fill_path(py: Python<'_>, template: &str, params: &Bound<'_, PyDict>) -> PyResult<String> {
+    let convertors = py
+        .import("starlette.convertors")?
+        .getattr("CONVERTOR_TYPES")?;
     let mut filled = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find('{') {
@@ -60,12 +64,19 @@ fn fill_path(template: &str, params: &HashMap<String, String>) -> String {
         };
         filled.push_str(&rest[..start]);
         let inner = &rest[start + 1..start + len];
-        let key = inner.split(':').next().unwrap_or(inner);
-        filled.push_str(params.get(key).map_or("", String::as_str));
+        let (key, kind) = inner.split_once(':').unwrap_or((inner, "str"));
+        if let Some(value) = params.get_item(key)? {
+            let convertor = convertors.get_item(kind)?;
+            filled.push_str(
+                &convertor
+                    .call_method1("to_string", (value,))?
+                    .extract::<String>()?,
+            );
+        }
         rest = &rest[start + len + 1..];
     }
     filled.push_str(rest);
-    filled
+    Ok(filled)
 }
 
 impl PyAPIRouter {
@@ -75,11 +86,10 @@ impl PyAPIRouter {
         name: &str,
         path_params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        let path_params = path_params.cloned().unwrap_or_else(|| PyDict::new(py));
         let mut params = HashMap::new();
-        if let Some(path_params) = path_params {
-            for (key, value) in path_params.iter() {
-                params.insert(key.extract::<String>()?, value.str()?.to_string());
-            }
+        for (key, value) in path_params.iter() {
+            params.insert(key.extract::<String>()?, value.str()?.to_string());
         }
         let mut stack = vec![(self.clone(), String::new())];
         while let Some((router, prefix)) = stack.pop() {
@@ -108,7 +118,7 @@ impl PyAPIRouter {
                     let url_path = py
                         .import("starlette.datastructures")?
                         .getattr("URLPath")?
-                        .call1((fill_path(&template, &params), protocol))?;
+                        .call1((fill_path(py, &template, &path_params)?, protocol))?;
                     return Ok(url_path.unbind());
                 }
             }

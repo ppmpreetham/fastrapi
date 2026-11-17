@@ -550,7 +550,7 @@ def test_routing_exports_starlette_helpers():
 
 def test_add_event_handler(client, app):
     events = []
-    app.add_event_handler("startup", lambda: events.append("started"))
+    app.router.add_event_handler("startup", lambda: events.append("started"))
 
     @app.get("/events")
     def read_events():

@@ -119,3 +119,67 @@ def test_callback_only_app_has_no_validation_components():
         return app.openapi().get("components")
 
     both(run)
+
+
+def test_url_path_for_includes_builtin_routes():
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/where")
+        def where(request: lib.Request):
+            return {"url": str(request.url_for("openapi"))}
+
+        client = TestClient(app) if lib is fastapi else LiveServerTestClient(app)
+        with client:
+            return (
+                app.url_path_for("swagger_ui_html"),
+                app.url_path_for("openapi"),
+                app.url_path_for("redoc_html"),
+                client.get("/where").json()["url"].rsplit("/", 1)[-1],
+            )
+
+    both(run)
+
+
+def test_url_path_for_runs_the_convertor():
+    def run(lib):
+        app = new_app(lib)
+
+        @app.get("/n/{a:int}", name="n")
+        def n(a: int):
+            return a
+
+        return app.url_path_for("n", a=3), error_of(lambda: app.url_path_for("n", a="abc"))
+
+    both(run)
+
+
+def test_on_event_warns_twice():
+    def run(lib):
+        app = new_app(lib)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            app.on_event("startup")
+        return len([w for w in caught if issubclass(w.category, DeprecationWarning)])
+
+    assert run(fastrapi) == run(fastapi) == 2
+
+
+def test_app_has_no_add_event_handler():
+    assert not hasattr(fastrapi.FastrAPI(), "add_event_handler") and not hasattr(fastapi.FastAPI(), "add_event_handler")
+
+
+def test_oauth2_password_request_forms_signature():
+    from fastapi.security import OAuth2PasswordRequestForm as Expected
+    from fastapi.security import OAuth2PasswordRequestFormStrict as ExpectedStrict
+    from fastrapi.security import OAuth2PasswordRequestForm as Actual
+    from fastrapi.security import OAuth2PasswordRequestFormStrict as ActualStrict
+
+    for actual, expected in ((Actual, Expected), (ActualStrict, ExpectedStrict)):
+        form = actual(grant_type="password", username="a", password="b")
+        reference = expected(grant_type="password", username="a", password="b")
+        assert hasattr(form, "scope") is hasattr(reference, "scope") is False
+        assert form.scopes == reference.scopes == []
+        assert error_of(lambda: actual(grant_type="password", password="b"))[0] is TypeError
+        assert error_of(lambda: expected(grant_type="password", password="b"))[0] is TypeError
+    assert error_of(lambda: ActualStrict(username="a", password="b"))[0] is TypeError

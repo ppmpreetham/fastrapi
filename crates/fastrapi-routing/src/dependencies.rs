@@ -22,7 +22,7 @@ use pyo3::exceptions::{
 };
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyCFunction, PyDict, PyFunction, PyString, PyTuple, PyType};
+use pyo3::types::{IntoPyDict, PyAny, PyCFunction, PyDict, PyFunction, PyString, PyTuple, PyType};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::mem::take;
@@ -557,7 +557,16 @@ fn adapt_security_schemes(py: Python<'_>, nodes: &mut [DependencyNode]) {
             .func
             .bind(py)
             .is_instance_of::<OAuth2PasswordRequestForm>();
-        if is_form_type && let Ok(instance) = node.func.bind(py).call0() {
+        // The instance only stands in for the class: its `__call__` reads the request's form.
+        if is_form_type
+            && let Ok(instance) = [
+                ("grant_type", "password"),
+                ("username", ""),
+                ("password", ""),
+            ]
+            .into_py_dict(py)
+            .and_then(|blank| node.func.bind(py).call((), Some(&blank)))
+        {
             node.func = instance.unbind();
             node.call = node.func.clone_ref(py);
         }
