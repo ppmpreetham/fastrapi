@@ -23,7 +23,7 @@ use fastrapi_routing::route::{ExecutionMode, RouteHandler};
 use fastrapi_runtime::py_bridge::EventLoop;
 use fastrapi_runtime::{blocking, py_bridge};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PySet, PyString};
+use pyo3::types::{PyDict, PyString};
 use smallvec::SmallVec;
 use std::sync::{Arc, OnceLock};
 
@@ -31,6 +31,7 @@ use super::deferred::{Cleanup, finish_request};
 use fastrapi_http::exceptions::plain_server_error;
 use fastrapi_http::request::create_py_request;
 use fastrapi_http::response_convert::convert_response_by_type;
+use fastrapi_http::response_convert::is_plain_or_subclass_value;
 use fastrapi_pyutil::call::CallArgs;
 use fastrapi_pyutil::json::py_json_response_with_dump_options;
 use fastrapi_runtime::thread_state;
@@ -271,15 +272,7 @@ pub(crate) fn render_no_request_json_response(
             .into_response();
     }
 
-    let is_plain_value = result.is_instance_of::<PyDict>()
-        || result.is_instance_of::<PyList>()
-        || result.is_instance_of::<PySet>()
-        || result.is_instance_of::<PyString>()
-        || result.is_instance_of::<PyBool>()
-        || result.is_instance_of::<PyInt>()
-        || result.is_instance_of::<PyFloat>();
-
-    if !is_plain_value {
+    if !is_plain_or_subclass_value(&result) {
         return match convert_response_by_type(
             py,
             &result,

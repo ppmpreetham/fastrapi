@@ -4,7 +4,7 @@
 use crate::response_api::HeadersArg;
 use crate::response_api::RenderOverrides;
 use axum::http::StatusCode;
-use papaya::HashMap;
+use fastrapi_pyutil::type_cache::TypeCache;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyType};
 use pyo3::{Bound, Py, PyAny, intern, pyclass, pymethods};
@@ -23,25 +23,12 @@ pub(crate) enum ResponseKind {
     File,
 }
 
-static RESPONSE_KIND_CACHE: LazyLock<papaya::HashMap<usize, (Py<PyType>, ResponseKind)>> =
-    LazyLock::new(|| HashMap::with_capacity(32));
+static RESPONSE_KIND_CACHE: LazyLock<TypeCache<ResponseKind>> =
+    LazyLock::new(|| TypeCache::new(32, 1024));
 
 #[inline]
 pub(crate) fn response_kind(result: &Bound<'_, PyAny>) -> ResponseKind {
-    let ty = result.get_type();
-    let type_ptr = ty.as_ptr() as usize;
-
-    let guard = RESPONSE_KIND_CACHE.guard();
-    if let Some((_, kind)) = RESPONSE_KIND_CACHE.get(&type_ptr, &guard) {
-        return *kind;
-    }
-    drop(guard);
-
-    let kind = probe_response_kind(&ty);
-    RESPONSE_KIND_CACHE
-        .pin()
-        .insert(type_ptr, (ty.unbind(), kind));
-    kind
+    RESPONSE_KIND_CACHE.get_or_probe(result.get_type(), probe_response_kind)
 }
 
 fn probe_response_kind(ty: &Bound<'_, PyType>) -> ResponseKind {

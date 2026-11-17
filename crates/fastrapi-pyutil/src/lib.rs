@@ -8,3 +8,4 @@ pub mod imports;
 pub mod json;
 pub mod lazy;
 pub mod subclass;
+pub mod type_cache;

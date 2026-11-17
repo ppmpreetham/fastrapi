@@ -19,6 +19,23 @@ pub enum ResponseType {
     Custom,
 }
 
+/// The validator and serializer of a route's response model, taken from its `TypeAdapter`
+/// when the route is defined so a request calls them without a Python frame in between.
+pub struct ResponseModelCodec {
+    /// `validator.validate_python`.
+    pub validate: Py<PyAny>,
+    /// `serializer.to_json`.
+    pub to_json: Py<PyAny>,
+    /// `serializer.to_python`.
+    pub to_python: Py<PyAny>,
+    /// `from_attributes=True`.
+    pub validate_options: Py<PyDict>,
+    /// The `response_model_*` options.
+    pub json_options: Py<PyDict>,
+    /// The `response_model_*` options with `mode="json"`.
+    pub python_options: Py<PyDict>,
+}
+
 #[derive(Clone)]
 pub struct ResponseFormatter {
     pub response_type: ResponseType,
@@ -27,6 +44,6 @@ pub struct ResponseFormatter {
     pub response_model: Option<Py<PyAny>>,
     pub response_class: Option<Py<PyAny>>,
     pub dump_options: Option<Py<PyDict>>,
-    pub response_adapter: std::sync::Arc<pyo3::sync::PyOnceLock<Py<PyAny>>>,
+    pub response_adapter: std::sync::Arc<pyo3::sync::PyOnceLock<ResponseModelCodec>>,
     pub stream_factory: Option<Py<PyAny>>,
 }

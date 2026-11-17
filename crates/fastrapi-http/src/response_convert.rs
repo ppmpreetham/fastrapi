@@ -12,7 +12,7 @@ use crate::background::{
 use crate::exceptions::PyFastAPIError;
 use crate::exceptions::server_error_response;
 use crate::response_api::content_type;
-use crate::response_type::{ResponseFormatter, ResponseType};
+use crate::response_type::{ResponseFormatter, ResponseModelCodec, ResponseType};
 use crate::responses::{PyHTMLResponse, PyJSONResponse, PyPlainTextResponse, PyStreamingResponse};
 use crate::sse::PyEventSourceResponse;
 use crate::sse::{event_fields, format_sse_event, json_dumps, sse_options};
@@ -23,9 +23,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use bytes::Bytes;
 use fastrapi_pyutil::body::{bytes_body, str_body};
-use fastrapi_pyutil::json::{
-    py_json_response_with_dump_options, py_json_response_with_status, py_to_response,
-};
+use fastrapi_pyutil::json::{py_json_response_with_dump_options, py_json_response_with_status};
 use fastrapi_runtime::blocking::run_python;
 use fastrapi_runtime::py_bridge;
 use fastrapi_runtime::py_bridge::EventLoop;
@@ -35,7 +33,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyStopIteration};
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple,
+    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMemoryView, PySet, PyString,
+    PyTuple,
 };
 use pyo3::{Bound, Py, PyAny, intern};
 use pyo3_async_runtimes::TaskLocals;
@@ -203,19 +202,6 @@ pub(crate) fn validate_stream_item<'py>(
         .call1((adapter, item))
 }
 
-static SERIALIZE_RESPONSE: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
-static VALIDATE_RESPONSE: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
-
-fn response_helper<'py>(
-    py: Python<'py>,
-    cell: &'static pyo3::sync::PyOnceLock<Py<PyAny>>,
-    name: &Bound<'py, PyString>,
-) -> PyResult<&'static Py<PyAny>> {
-    cell.get_or_try_init(py, || {
-        response_helpers(py)?.getattr(name).map(Bound::unbind)
-    })
-}
-
 fastrapi_pyutil::cached_py_import!(TYPE_ADAPTER, "pydantic", "TypeAdapter");
 fastrapi_pyutil::cached_py_import!(
     SCHEMA_GENERATION_ERROR,
@@ -249,14 +235,62 @@ pub fn response_type_adapter<'py>(model: &Bound<'py, PyAny>) -> PyResult<Bound<'
         })
 }
 
+/// Takes the validator and serializer out of the model's `TypeAdapter`. An adapter whose
+/// schema is not built yet (an unresolved forward reference) keeps its own lazy methods.
+fn response_model_codec(
+    py: Python<'_>,
+    formatter: &ResponseFormatter,
+    model: &Py<PyAny>,
+) -> PyResult<ResponseModelCodec> {
+    let adapter = response_type_adapter(model.bind(py))?;
+    let complete = adapter
+        .getattr(intern!(py, "pydantic_complete"))
+        .and_then(|complete| complete.is_truthy())
+        .unwrap_or(false);
+    let (validate, to_json, to_python) = if complete {
+        let validator = adapter.getattr(intern!(py, "validator"))?;
+        let serializer = adapter.getattr(intern!(py, "serializer"))?;
+        (
+            validator.getattr(intern!(py, "validate_python"))?,
+            serializer.getattr(intern!(py, "to_json"))?,
+            serializer.getattr(intern!(py, "to_python"))?,
+        )
+    } else {
+        response_helpers(py)?
+            .getattr(intern!(py, "lazy_codec"))?
+            .call1((&adapter,))?
+            .extract()?
+    };
+    let validate_options = PyDict::new(py);
+    validate_options.set_item(intern!(py, "from_attributes"), true)?;
+    let json_options = match &formatter.dump_options {
+        Some(options) => options.bind(py).copy()?,
+        None => PyDict::new(py),
+    };
+    // FastAPI always passes `by_alias`, so `False` overrides the model's `serialize_by_alias`.
+    if !json_options.contains(intern!(py, "by_alias"))? {
+        json_options.set_item(intern!(py, "by_alias"), false)?;
+    }
+    let python_options = json_options.copy()?;
+    python_options.set_item(intern!(py, "mode"), intern!(py, "json"))?;
+    Ok(ResponseModelCodec {
+        validate: validate.unbind(),
+        to_json: to_json.unbind(),
+        to_python: to_python.unbind(),
+        validate_options: validate_options.unbind(),
+        json_options: json_options.unbind(),
+        python_options: python_options.unbind(),
+    })
+}
+
 fn response_adapter<'a>(
     py: Python<'_>,
     formatter: &'a ResponseFormatter,
     model: &Py<PyAny>,
-) -> PyResult<&'a Py<PyAny>> {
-    formatter.response_adapter.get_or_try_init(py, || {
-        response_type_adapter(model.bind(py)).map(Bound::unbind)
-    })
+) -> PyResult<&'a ResponseModelCodec> {
+    formatter
+        .response_adapter
+        .get_or_try_init(py, || response_model_codec(py, formatter, model))
 }
 
 /// Builds the route's response model adapter when the route is defined, as FastAPI does.
@@ -271,39 +305,59 @@ pub fn prepare_response_model(py: Python<'_>, formatter: &ResponseFormatter) -> 
     }
 }
 
-fn apply_response_helper<'py>(
-    py: Python<'py>,
-    cell: &'static pyo3::sync::PyOnceLock<Py<PyAny>>,
-    name: &Bound<'py, PyString>,
-    formatter: &ResponseFormatter,
-    model: &Py<PyAny>,
-    content: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let adapter = response_adapter(py, formatter, model)?;
-    response_helper(py, cell, name)?.bind(py).call(
-        (adapter.bind(py), content),
-        formatter
-            .dump_options
-            .as_ref()
-            .map(|options| options.bind(py)),
-    )
+#[cold]
+fn response_error(py: Python<'_>, err: &PyErr, content: &Bound<'_, PyAny>) -> PyErr {
+    response_helpers(py)
+        .and_then(|helpers| {
+            helpers
+                .getattr(intern!(py, "response_error"))?
+                .call1((err.value(py), content))
+        })
+        .map_or_else(|failed| failed, PyErr::from_value)
 }
 
+/// Validates a return value against the response model like FastAPI's `ModelField.validate`:
+/// the value itself is validated with `from_attributes=True`, nothing is dumped first.
+#[inline]
+fn validate_response_model<'py>(
+    py: Python<'py>,
+    codec: &ResponseModelCodec,
+    content: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    codec
+        .validate
+        .bind(py)
+        .call((content,), Some(codec.validate_options.bind(py)))
+        .map_err(|err| response_error(py, &err, content))
+}
+
+/// FastAPI's `serialize_response(dump_json=True)`: validate, then dump straight to JSON bytes.
+#[inline]
 fn serialize_response_model(
     py: Python<'_>,
-    formatter: &ResponseFormatter,
-    model: &Py<PyAny>,
+    codec: &ResponseModelCodec,
     content: &Bound<'_, PyAny>,
 ) -> PyResult<Bytes> {
-    let json = apply_response_helper(
-        py,
-        &SERIALIZE_RESPONSE,
-        intern!(py, "serialize_response"),
-        formatter,
-        model,
-        content,
-    )?;
+    let value = validate_response_model(py, codec, content)?;
+    let json = codec
+        .to_json
+        .bind(py)
+        .call((value,), Some(codec.json_options.bind(py)))?;
     Ok(bytes_body(json.cast::<PyBytes>()?))
+}
+
+/// FastAPI's `serialize_response(dump_json=False)`: validate, then dump to JSON-compatible
+/// Python data that the route's `response_class` renders.
+fn dump_response_model<'py>(
+    py: Python<'py>,
+    codec: &ResponseModelCodec,
+    content: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let value = validate_response_model(py, codec, content)?;
+    codec
+        .to_python
+        .bind(py)
+        .call((value,), Some(codec.python_options.bind(py)))
 }
 
 const fn body_allowed(status: StatusCode) -> bool {
@@ -319,6 +373,8 @@ fn null_json_response(status: StatusCode) -> Response {
         .into_response()
 }
 
+/// Whether the value is exactly a `dict`, `list`, `str`, `int`, `bool` or `float`. Such a
+/// value is never a response object, so it can skip the response class checks.
 #[must_use]
 pub fn is_plain_value(value: &Bound<'_, PyAny>) -> bool {
     value.is_exact_instance_of::<PyDict>()
@@ -329,6 +385,19 @@ pub fn is_plain_value(value: &Bound<'_, PyAny>) -> bool {
         || value.is_exact_instance_of::<PyFloat>()
 }
 
+/// Like [`is_plain_value`], but it also accepts subclasses of those types and `set`. The
+/// handler path without a request uses it to write JSON without looking at response classes.
+#[must_use]
+pub fn is_plain_or_subclass_value(value: &Bound<'_, PyAny>) -> bool {
+    value.is_instance_of::<PyDict>()
+        || value.is_instance_of::<PyList>()
+        || value.is_instance_of::<PySet>()
+        || value.is_instance_of::<PyString>()
+        || value.is_instance_of::<PyBool>()
+        || value.is_instance_of::<PyInt>()
+        || value.is_instance_of::<PyFloat>()
+}
+
 #[inline(always)]
 pub fn convert_response_by_type(
     py: Python,
@@ -337,11 +406,11 @@ pub fn convert_response_by_type(
     request_headers: Option<&HeaderMap>,
 ) -> PyResult<Response> {
     if result.is_none() || is_plain_value(result) {
-        return convert_response_value(py, result, formatter, request_headers);
+        return convert_response_value(py, result, formatter, request_headers, true);
     }
     let kind = response_kind(result);
     if kind == ResponseKind::Unknown {
-        return convert_response_value(py, result, formatter, request_headers);
+        return convert_response_value(py, result, formatter, request_headers, false);
     }
     let background = result
         .getattr_opt(intern!(py, "background"))
@@ -386,16 +455,22 @@ fn convert_response_value(
     result: &Bound<PyAny>,
     formatter: &ResponseFormatter,
     request_headers: Option<&HeaderMap>,
+    plain: bool,
 ) -> PyResult<Response> {
-    if let Some(factory) = &formatter.stream_factory
-        && !is_plain_value(result)
+    if !plain
+        && let Some(factory) = &formatter.stream_factory
         && response_kind(result) == ResponseKind::Unknown
         && (result.hasattr(intern!(py, "__anext__"))? || result.hasattr(intern!(py, "__next__"))?)
     {
         let streamed = factory.bind(py).call1((result,))?;
         return convert_response_by_type(py, &streamed, formatter, request_headers);
     }
-    if result.is_none() {
+    let model = formatter
+        .response_model
+        .as_ref()
+        .filter(|model| !model.bind(py).is_none());
+    // With a response model, `None` is validated like any other value.
+    if result.is_none() && model.is_none() {
         let status = formatter.default_status.unwrap_or(StatusCode::OK);
         match formatter.response_type {
             ResponseType::Json | ResponseType::Auto if body_allowed(status) => {
@@ -408,19 +483,17 @@ fn convert_response_value(
 
     let default_status = formatter.default_status.unwrap_or(StatusCode::OK);
     let mut final_result = result;
-    let validated_storage;
-    let mut kind = ResponseKind::Unknown;
+    let dumped;
+    // A dumped model is plain data, so only a value without a model can be a response object.
+    let mut plain = plain;
 
-    if let Some(model) = formatter
-        .response_model
-        .as_ref()
-        .filter(|model| !model.bind(py).is_none())
-    {
+    if let Some(model) = model {
+        let codec = response_adapter(py, formatter, model)?;
         if matches!(
             formatter.response_type,
             ResponseType::Json | ResponseType::Auto
         ) {
-            let body = serialize_response_model(py, formatter, model, final_result)?;
+            let body = serialize_response_model(py, codec, final_result)?;
             let response = if body_allowed(default_status) {
                 (
                     default_status,
@@ -433,16 +506,9 @@ fn convert_response_value(
             };
             return Ok(response);
         }
-        validated_storage = apply_response_helper(
-            py,
-            &VALIDATE_RESPONSE,
-            intern!(py, "validate_response"),
-            formatter,
-            model,
-            final_result,
-        )?;
-        final_result = &validated_storage;
-        kind = response_kind(final_result);
+        dumped = dump_response_model(py, codec, final_result)?;
+        final_result = &dumped;
+        plain = true;
     }
 
     let response = match formatter.response_type {
@@ -512,33 +578,18 @@ fn convert_response_value(
             Some(class) => {
                 custom_class_response(py, class, final_result, formatter.default_status)?
             }
-            None => py_to_response(py, final_result, default_status),
+            None => py_json_response_with_status(py, default_status, final_result)?,
         },
 
         ResponseType::Auto => {
-            if final_result.is_instance_of::<PyJSONResponse>() || kind == ResponseKind::Json {
-                convert_json_response(py, final_result)
-            } else if final_result.is_instance_of::<PyPlainTextResponse>()
-                || kind == ResponseKind::Text
-            {
-                convert_text_response(py, final_result)
-            } else if final_result.is_instance_of::<PyHTMLResponse>() || kind == ResponseKind::Html
-            {
-                convert_html_response(py, final_result)
-            } else if final_result.is_instance_of::<PyRedirectResponse>()
-                || kind == ResponseKind::Redirect
-            {
-                convert_redirect_response(py, final_result)
-            } else if final_result.is_instance_of::<PyStreamingResponse>()
-                || kind == ResponseKind::Streaming
-                || kind == ResponseKind::Sse
-            {
-                convert_streaming_response(py, final_result)
-            } else if final_result.is_instance_of::<PyFileResponse>() || kind == ResponseKind::File
-            {
-                convert_file_response(py, final_result, request_headers)?
+            let object = if plain {
+                None
             } else {
-                py_to_response(py, final_result, default_status)
+                convert_by_response_class(py, final_result, request_headers)
+            };
+            match object {
+                Some(response) => response?,
+                None => py_json_response_with_status(py, default_status, final_result)?,
             }
         }
     };
@@ -980,6 +1031,34 @@ pub fn convert_streaming_response(py: Python, result: &Bound<PyAny>) -> Response
     apply_response_metadata(py, res, headers.as_ref(), media_type)
 }
 
+/// Converts a response object by its class. It returns `None` for a value that is not one
+/// of the response classes, which the caller then writes as JSON.
+fn convert_by_response_class(
+    py: Python,
+    result: &Bound<PyAny>,
+    request_headers: Option<&HeaderMap>,
+) -> Option<PyResult<Response>> {
+    let kind = response_kind(result);
+    let response = if result.is_instance_of::<PyJSONResponse>() || kind == ResponseKind::Json {
+        convert_json_response(py, result)
+    } else if result.is_instance_of::<PyPlainTextResponse>() || kind == ResponseKind::Text {
+        convert_text_response(py, result)
+    } else if result.is_instance_of::<PyHTMLResponse>() || kind == ResponseKind::Html {
+        convert_html_response(py, result)
+    } else if result.is_instance_of::<PyRedirectResponse>() || kind == ResponseKind::Redirect {
+        convert_redirect_response(py, result)
+    } else if result.is_instance_of::<PyStreamingResponse>()
+        || matches!(kind, ResponseKind::Streaming | ResponseKind::Sse)
+    {
+        convert_streaming_response(py, result)
+    } else if result.is_instance_of::<PyFileResponse>() || kind == ResponseKind::File {
+        return Some(convert_file_response(py, result, request_headers));
+    } else {
+        return None;
+    };
+    Some(Ok(response))
+}
+
 #[inline(always)]
 #[must_use]
 pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
@@ -990,27 +1069,8 @@ pub fn convert_auto_response(py: Python, result: &Bound<PyAny>) -> Response {
         return null_json_response(StatusCode::OK);
     }
 
-    let kind = response_kind(result);
-    if result.is_instance_of::<PyJSONResponse>() || kind == ResponseKind::Json {
-        return convert_json_response(py, result);
-    }
-    if result.is_instance_of::<PyPlainTextResponse>() || kind == ResponseKind::Text {
-        return convert_text_response(py, result);
-    }
-    if result.is_instance_of::<PyHTMLResponse>() || kind == ResponseKind::Html {
-        return convert_html_response(py, result);
-    }
-    if result.is_instance_of::<PyRedirectResponse>() || kind == ResponseKind::Redirect {
-        return convert_redirect_response(py, result);
-    }
-    if result.is_instance_of::<PyStreamingResponse>()
-        || matches!(kind, ResponseKind::Streaming | ResponseKind::Sse)
-    {
-        return convert_streaming_response(py, result);
-    }
-    if result.is_instance_of::<PyFileResponse>() || kind == ResponseKind::File {
-        return convert_file_response(py, result, None)
-            .unwrap_or_else(|err| render_failed(py, &err));
+    if let Some(response) = convert_by_response_class(py, result, None) {
+        return response.unwrap_or_else(|err| render_failed(py, &err));
     }
 
     let status = response_status(result, StatusCode::OK);

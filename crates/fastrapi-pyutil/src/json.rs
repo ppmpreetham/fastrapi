@@ -2,11 +2,11 @@
 //! It writes Python values, Pydantic models, and dataclasses as JSON, and it makes axum JSON responses.
 //! It also converts JSON values back into Python objects.
 
+use crate::type_cache::TypeCache;
 use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response as AxumResponse};
+use axum::response::Response as AxumResponse;
 use bytes::{BufMut, BytesMut};
-use papaya::HashMap;
 use pyo3::exceptions::PyAttributeError;
 use pyo3::exceptions::PyRecursionError;
 use pyo3::exceptions::PyTypeError;
@@ -15,7 +15,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyMemoryView;
 use pyo3::types::{
     PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet,
-    PyString, PyTuple, PyType,
+    PyString, PyTuple,
 };
 use pyo3::{Bound, intern};
 use simd_json::owned::Object;
@@ -25,7 +25,6 @@ use std::cell::RefCell;
 use std::io::{self, Write};
 use std::str::from_utf8;
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const KEY_CACHE_SLOTS: usize = 512;
 const KEY_CACHE_MAX_LEN: usize = 64;
@@ -518,35 +517,11 @@ enum ObjKind {
     FallbackStr,
 }
 
-static OBJ_KIND_CACHE: LazyLock<papaya::HashMap<usize, (Py<PyType>, ObjKind)>> =
-    LazyLock::new(|| HashMap::with_capacity(256));
-
-/// The cache holds a strong reference to each type, so it stops growing at this size
-/// to keep classes made at runtime from piling up. Types past the limit are probed each time.
-const OBJ_KIND_CACHE_LIMIT: usize = 1024;
-static OBJ_KIND_CACHE_LEN: AtomicUsize = AtomicUsize::new(0);
+static OBJ_KIND_CACHE: LazyLock<TypeCache<ObjKind>> = LazyLock::new(|| TypeCache::new(256, 1024));
 
 #[inline]
 fn classify_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
-    let ty = value.get_type();
-    let type_ptr = ty.as_ptr() as usize;
-
-    let guard = OBJ_KIND_CACHE.guard();
-    if let Some((_, kind)) = OBJ_KIND_CACHE.get(&type_ptr, &guard) {
-        return *kind;
-    }
-    drop(guard);
-
-    let kind = probe_object_kind(py, value);
-    if OBJ_KIND_CACHE_LEN.load(Ordering::Relaxed) < OBJ_KIND_CACHE_LIMIT
-        && OBJ_KIND_CACHE
-            .pin()
-            .try_insert(type_ptr, (ty.unbind(), kind))
-            .is_ok()
-    {
-        OBJ_KIND_CACHE_LEN.fetch_add(1, Ordering::Relaxed);
-    }
-    kind
+    OBJ_KIND_CACHE.get_or_probe(value.get_type(), |_| probe_object_kind(py, value))
 }
 
 fn probe_object_kind(py: Python<'_>, value: &Bound<'_, PyAny>) -> ObjKind {
@@ -1090,15 +1065,6 @@ pub fn json_value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'
             }
             dict.into_any()
         }
-    })
-}
-
-#[inline]
-#[must_use]
-pub fn py_to_response(py: Python<'_>, obj: &Bound<'_, PyAny>, status: StatusCode) -> AxumResponse {
-    py_json_response_with_status(py, status, obj).unwrap_or_else(|err| {
-        err.print(py);
-        StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })
 }
 

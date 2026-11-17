@@ -1032,7 +1032,7 @@ fn apply_json_body<'py>(
             kwargs.set(param.name_py.bind(py), converted)?;
             continue;
         }
-        let raw = found.and_then(|value| json_value_to_py(py, value).ok());
+        let raw = found.map(|value| json_value_to_py(py, value)).transpose()?;
         if let Some(value) = resolve(py, param, raw, loc, errors)? {
             kwargs.set(param.name_py.bind(py), value)?;
         }
