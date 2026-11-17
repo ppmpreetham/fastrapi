@@ -49,17 +49,13 @@ impl CallLayout {
     }
 }
 
+/// The keyword arguments of one call, in the order they were set.
+///
+/// Every name must be an interned string (`PyString::intern` or `intern!`), as `CallLayout`
+/// names are: equal names are then the same object, so a name is found by pointer alone.
 #[derive(Default)]
 pub struct CallArgs {
     entries: SmallVec<[(Py<PyString>, Py<PyAny>); 8]>,
-}
-
-fn same_name(py: Python<'_>, left: &Py<PyString>, right: &Bound<'_, PyString>) -> bool {
-    left.as_ptr() == right.as_ptr()
-        || matches!(
-            (left.bind(py).to_str(), right.to_str()),
-            (Ok(left), Ok(right)) if left == right
-        )
 }
 
 impl CallArgs {
@@ -69,15 +65,21 @@ impl CallArgs {
     }
 
     fn position(&self, name: &Bound<'_, PyString>) -> Option<usize> {
-        let py = name.py();
-        self.entries
+        let found = self
+            .entries
             .iter()
-            .position(|(key, _)| key.as_ptr() == name.as_ptr())
-            .or_else(|| {
-                self.entries
-                    .iter()
-                    .position(|(key, _)| same_name(py, key, name))
-            })
+            .position(|(key, _)| key.as_ptr() == name.as_ptr());
+        debug_assert!(
+            found.is_some()
+                || !self.entries.iter().any(|(key, _)| {
+                    matches!(
+                        (key.bind(name.py()).to_str(), name.to_str()),
+                        (Ok(key), Ok(name)) if key == name
+                    )
+                }),
+            "CallArgs name is not interned"
+        );
+        found
     }
 
     pub fn set<'py, V>(&mut self, name: &Bound<'py, PyString>, value: V) -> PyResult<()>

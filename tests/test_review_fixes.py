@@ -144,3 +144,32 @@ def test_response_model_validates_the_return_value_itself(response_model_clients
         want.headers.get("content-type"),
         want.text,
     )
+
+
+def rejected_body_app(lib):
+    app = new_app(lib)
+
+    @app.post("/items")
+    def items(items: list[int]):
+        return items
+
+    return app
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        ("{" + ",".join(f'"k{index}": {index}' for index in range(40, 0, -1)) + "}").encode(),
+        rb'{"name": "\ud800"}',
+        b'{"big": 123456789012345678901234567890, "big": 1}',
+        b"[1, 2,",
+    ],
+    ids=["key_order", "lone_surrogate", "big_int_duplicate_key", "invalid_json"],
+)
+def test_rejected_json_body_reports_the_json_loads_document(body):
+    headers = {"content-type": "application/json"}
+    with LiveServerTestClient(rejected_body_app(fastrapi)) as actual:
+        got = actual.post("/items", content=body, headers=headers)
+    expected = TestClient(rejected_body_app(fastapi), raise_server_exceptions=False)
+    want = expected.post("/items", content=body, headers=headers)
+    assert (got.status_code, got.text) == (want.status_code, want.text)

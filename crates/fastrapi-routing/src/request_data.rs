@@ -947,10 +947,7 @@ fn single_json_body<'py>(
     if let Ok(value) = validate_json.bind(py).call1((PyBytes::new(py, raw),)) {
         return Ok(Some(value));
     }
-    if let Some(parsed) = parse_json(py, raw) {
-        let value = json_value_to_py(py, &parsed)?;
-        return resolve(py, param, Some(value), loc, errors);
-    }
+    // Validation failed, so the errors are built from the document `json.loads` gives, as FastAPI's are.
     let (found, document) = json_document(py, raw)?;
     if found.is_truthy()? {
         errors.extend(&found)?;

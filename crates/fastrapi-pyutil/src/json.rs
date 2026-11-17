@@ -260,6 +260,11 @@ fn int_text(py: Python<'_>, number: &Bound<'_, PyInt>) -> PyResult<String> {
     if let Ok(small) = number.extract::<i64>() {
         return Ok(itoa::Buffer::new().format(small).to_owned());
     }
+    big_int_text(py, number)
+}
+
+#[cold]
+fn big_int_text(py: Python<'_>, number: &Bound<'_, PyInt>) -> PyResult<String> {
     let repr = py
         .get_type::<PyInt>()
         .getattr(intern!(py, "__repr__"))?
@@ -301,6 +306,37 @@ fn json_key_text(py: Python<'_>, key: &Bound<'_, PyAny>, depth: usize) -> PyResu
             "keys must be str, int, float, bool or None, not {}",
             key.get_type().name()?
         ))),
+    }
+}
+
+#[inline]
+fn write_json_null<W: Write>(writer: &mut W) -> PyResult<()> {
+    writer.write_all(b"null").map_err(json_io_error)
+}
+
+#[inline]
+fn write_json_bool<W: Write>(writer: &mut W, flag: bool) -> PyResult<()> {
+    let literal: &[u8] = if flag { b"true" } else { b"false" };
+    writer.write_all(literal).map_err(json_io_error)
+}
+
+#[inline]
+fn write_json_int<W: Write>(writer: &mut W, number: &Bound<'_, PyInt>) -> PyResult<()> {
+    match number.extract::<i64>() {
+        Ok(small) => writer
+            .write_all(itoa::Buffer::new().format(small).as_bytes())
+            .map_err(json_io_error),
+        Err(_) => writer
+            .write_all(big_int_text(number.py(), number)?.as_bytes())
+            .map_err(json_io_error),
+    }
+}
+
+/// Writes `str(value)`, or `null` when the value has no usable text.
+fn write_json_text_or_null<W: Write>(writer: &mut W, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    match json_text_of(value) {
+        Ok(text) => write_json_string(writer, &text),
+        Err(_) => write_json_null(writer),
     }
 }
 
@@ -698,24 +734,16 @@ fn write_plain_json<W: Write>(
         return Ok(false);
     }
     if value.is_none() {
-        writer.write_all(b"null").map_err(json_io_error)?;
+        write_json_null(writer)?;
     } else if let Ok(text) = value.cast_exact::<PyString>() {
         let Ok(text) = text.to_str() else {
             return Ok(false);
         };
         write_json_string(writer, text)?;
     } else if let Ok(flag) = value.cast_exact::<PyBool>() {
-        let literal: &[u8] = if flag.is_true() { b"true" } else { b"false" };
-        writer.write_all(literal).map_err(json_io_error)?;
+        write_json_bool(writer, flag.is_true())?;
     } else if let Ok(number) = value.cast_exact::<PyInt>() {
-        match number.extract::<i64>() {
-            Ok(number) => writer
-                .write_all(itoa::Buffer::new().format(number).as_bytes())
-                .map_err(json_io_error)?,
-            Err(_) => writer
-                .write_all(number.str()?.to_str()?.as_bytes())
-                .map_err(json_io_error)?,
-        }
+        write_json_int(writer, number)?;
     } else if let Ok(number) = value.cast_exact::<PyFloat>() {
         if !number.value().is_finite() {
             return Ok(false);
@@ -796,7 +824,7 @@ fn write_py_json_at<W: Write>(
         return Err(json_depth_error());
     }
     match classify_py_value(py, value) {
-        PyJsonKind::None => writer.write_all(b"null").map_err(json_io_error),
+        PyJsonKind::None => write_json_null(writer),
 
         PyJsonKind::Dict(dict) => {
             writer.write_all(b"{").map_err(json_io_error)?;
@@ -826,25 +854,9 @@ fn write_py_json_at<W: Write>(
 
         PyJsonKind::Str(s) => write_json_string(writer, &json_text(s)?),
 
-        PyJsonKind::Bool(b) => {
-            if b.is_true() {
-                writer.write_all(b"true").map_err(json_io_error)
-            } else {
-                writer.write_all(b"false").map_err(json_io_error)
-            }
-        }
+        PyJsonKind::Bool(b) => write_json_bool(writer, b.is_true()),
 
-        PyJsonKind::Int(i) => {
-            if let Ok(v) = i.extract::<i64>() {
-                writer
-                    .write_all(itoa::Buffer::new().format(v).as_bytes())
-                    .map_err(json_io_error)
-            } else {
-                writer
-                    .write_all(int_text(py, i)?.as_bytes())
-                    .map_err(json_io_error)
-            }
-        }
+        PyJsonKind::Int(i) => write_json_int(writer, i),
 
         PyJsonKind::Float(f) => write_json_float(writer, f.value()),
 
@@ -861,7 +873,7 @@ fn write_py_json_at<W: Write>(
             {
                 return write_json_bytes(writer, bytes.as_bytes());
             }
-            writer.write_all(b"null").map_err(json_io_error)
+            write_json_null(writer)
         }
 
         PyJsonKind::PydanticModel => {
@@ -876,7 +888,7 @@ fn write_py_json_at<W: Write>(
 
         PyJsonKind::Dataclass => {
             let Some(asdict) = dataclasses_asdict(py) else {
-                return writer.write_all(b"null").map_err(json_io_error);
+                return write_json_null(writer);
             };
             write_py_json_at(py, &asdict.call1((value,))?, writer, depth + 1)
         }
@@ -888,7 +900,7 @@ fn write_py_json_at<W: Write>(
                 return write_json_string(writer, &json_text(s)?);
             }
 
-            writer.write_all(b"null").map_err(json_io_error)
+            write_json_null(writer)
         }
 
         PyJsonKind::Timedelta => {
@@ -898,11 +910,7 @@ fn write_py_json_at<W: Write>(
                 return write_json_float(writer, f);
             }
 
-            if let Ok(s) = json_text_of(value) {
-                write_json_string(writer, &s)
-            } else {
-                writer.write_all(b"null").map_err(json_io_error)
-            }
+            write_json_text_or_null(writer, value)
         }
 
         PyJsonKind::Iterable => {
@@ -914,33 +922,24 @@ fn write_py_json_at<W: Write>(
 
         PyJsonKind::Object => match object_fields(py, value) {
             Some(fields) => write_py_json_at(py, &fields, writer, depth + 1),
-            None => match json_text_of(value) {
-                Ok(s) => write_json_string(writer, &s),
-                Err(_) => writer.write_all(b"null").map_err(json_io_error),
-            },
+            None => write_json_text_or_null(writer, value),
         },
 
         PyJsonKind::Decimal => match decimal_number(py, value) {
             Ok(number) => write_py_json_at(py, &number, writer, depth + 1),
-            Err(_) => writer.write_all(b"null").map_err(json_io_error),
+            Err(_) => write_json_null(writer),
         },
 
         PyJsonKind::UuidOrDecimal
         | PyJsonKind::Path
         | PyJsonKind::IpAddress
-        | PyJsonKind::FallbackStr => {
-            if let Ok(s) = json_text_of(value) {
-                write_json_string(writer, &s)
-            } else {
-                writer.write_all(b"null").map_err(json_io_error)
-            }
-        }
+        | PyJsonKind::FallbackStr => write_json_text_or_null(writer, value),
 
         PyJsonKind::Enum => {
             if let Ok(inner) = value.getattr(intern!(py, "value")) {
                 write_py_json_at(py, &inner, writer, depth + 1)
             } else {
-                writer.write_all(b"null").map_err(json_io_error)
+                write_json_null(writer)
             }
         }
     }
@@ -1127,6 +1126,14 @@ pub fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> Value {
     py_any_to_json_at(py, value, 0)
 }
 
+/// `str(value)` as a JSON string, or `null` when the value has no text.
+fn text_or_null(value: &Bound<'_, PyAny>) -> Value {
+    value.str().map_or_else(
+        |_| simd_json::json!(null),
+        |text| simd_json::json!(lossy_text(&text)),
+    )
+}
+
 fn py_any_to_json_at(py: Python<'_>, value: &Bound<'_, PyAny>, depth: usize) -> Value {
     if depth > MAX_JSON_DEPTH {
         return simd_json::json!(null);
@@ -1138,16 +1145,9 @@ fn py_any_to_json_at(py: Python<'_>, value: &Bound<'_, PyAny>, depth: usize) -> 
         PyJsonKind::List(list) => json_array_at(py, list.iter(), list.len(), depth),
         PyJsonKind::Str(s) => simd_json::json!(lossy_text(s)),
         PyJsonKind::Bool(b) => simd_json::json!(b.is_true()),
-        PyJsonKind::Int(i) => i.extract::<i64>().map_or_else(
-            |_| {
-                if let Ok(s) = value.str() {
-                    simd_json::json!(lossy_text(&s))
-                } else {
-                    simd_json::json!(null)
-                }
-            },
-            |v| simd_json::json!(v),
-        ),
+        PyJsonKind::Int(i) => i
+            .extract::<i64>()
+            .map_or_else(|_| text_or_null(value), |v| simd_json::json!(v)),
 
         PyJsonKind::Float(f) => match f.extract::<f64>() {
             Ok(v) if v.is_finite() => simd_json::json!(v),
@@ -1214,10 +1214,7 @@ fn py_any_to_json_at(py: Python<'_>, value: &Bound<'_, PyAny>, depth: usize) -> 
             {
                 return simd_json::json!(f);
             }
-            value.str().map_or_else(
-                |_| simd_json::json!(null),
-                |s| simd_json::json!(lossy_text(&s)),
-            )
+            text_or_null(value)
         }
 
         PyJsonKind::Iterable => value.try_iter().map_or_else(
@@ -1232,12 +1229,7 @@ fn py_any_to_json_at(py: Python<'_>, value: &Bound<'_, PyAny>, depth: usize) -> 
         ),
 
         PyJsonKind::Object => object_fields(py, value).map_or_else(
-            || {
-                value.str().map_or_else(
-                    |_| simd_json::json!(null),
-                    |s| simd_json::json!(lossy_text(&s)),
-                )
-            },
+            || text_or_null(value),
             |fields| py_any_to_json_at(py, &fields, next),
         ),
 
@@ -1249,10 +1241,7 @@ fn py_any_to_json_at(py: Python<'_>, value: &Bound<'_, PyAny>, depth: usize) -> 
         PyJsonKind::UuidOrDecimal
         | PyJsonKind::Path
         | PyJsonKind::IpAddress
-        | PyJsonKind::FallbackStr => value.str().map_or_else(
-            |_| simd_json::json!(null),
-            |s| simd_json::json!(lossy_text(&s)),
-        ),
+        | PyJsonKind::FallbackStr => text_or_null(value),
 
         PyJsonKind::Enum => {
             if let Ok(inner) = value.getattr(intern!(py, "value")) {

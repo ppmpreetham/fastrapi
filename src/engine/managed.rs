@@ -2,7 +2,9 @@
 //! It injects the dependencies, applies the response metadata and closes the dependency exit stacks.
 
 use super::deferred::{Cleanup, finish_request, with_cleanup};
-use super::executor::{build_request_input_from_parts, kwargs_or_pending, request_object};
+use super::executor::{
+    build_request_input_from_parts, inject_dependencies, kwargs_or_pending, request_object,
+};
 use super::handler_errors::python_error_to_response_in;
 use super::pending_validation::dependency_failure;
 use super::server::telemetry::Operation;
@@ -232,16 +234,6 @@ async fn call_endpoint(
         Ok(value) => Ok(value),
         Err(future) => Ok(future.await?),
     }
-}
-
-fn inject_dependencies(
-    py: Python<'_>,
-    kwargs: &mut CallArgs,
-    values: dependencies::ResolvedDependencies,
-) -> PyResult<()> {
-    values
-        .into_iter()
-        .try_for_each(|(name, value)| kwargs.set(name.bind(py), value.bind(py)))
 }
 
 fn schedule_stack_exit(

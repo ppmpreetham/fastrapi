@@ -15,8 +15,8 @@ use fastrapi_core::params::PathParamRange;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::response_type::ResponseType;
 use fastrapi_routing::dependencies::{
-    self, TeardownTasks, execute_teardowns_async, execute_teardowns_sync, run_teardowns_async,
-    run_teardowns_sync, split_function_scope,
+    self, ResolvedDependencies, TeardownTasks, execute_teardowns_async, execute_teardowns_sync,
+    run_teardowns_async, run_teardowns_sync, split_function_scope,
 };
 use fastrapi_routing::request_data::Rejection;
 use fastrapi_routing::route::{ExecutionMode, RouteHandler};
@@ -45,33 +45,25 @@ fn specialized_response_conversion(
     server: EventLoop,
 ) -> Response {
     let request_headers = request_input.map(|input| input.headers);
-    match handler.response.response_type {
-        ResponseType::PlainText => {
-            if let Ok(s) = result.cast::<PyString>() {
-                return match fastrapi_pyutil::body::str_body(s) {
-                    Ok(body) => (
-                        handler.response.default_status.unwrap_or(StatusCode::OK),
-                        [(
-                            axum::http::header::CONTENT_TYPE,
-                            axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
-                        )],
-                        body,
-                    )
-                        .into_response(),
-                    Err(_) => s.to_string_lossy().into_owned().into_response(),
-                };
-            }
-
-            match convert_response_by_type(py, result, &handler.response, request_headers) {
-                Ok(resp) => resp,
-                Err(err) => error_response(py, &err, request_input, server),
-            }
-        }
-
-        _ => match convert_response_by_type(py, result, &handler.response, request_headers) {
-            Ok(resp) => resp,
-            Err(err) => error_response(py, &err, request_input, server),
-        },
+    if matches!(handler.response.response_type, ResponseType::PlainText)
+        && let Ok(s) = result.cast::<PyString>()
+    {
+        return match fastrapi_pyutil::body::str_body(s) {
+            Ok(body) => (
+                handler.response.default_status.unwrap_or(StatusCode::OK),
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+                )],
+                body,
+            )
+                .into_response(),
+            Err(_) => s.to_string_lossy().into_owned().into_response(),
+        };
+    }
+    match convert_response_by_type(py, result, &handler.response, request_headers) {
+        Ok(resp) => resp,
+        Err(err) => error_response(py, &err, request_input, server),
     }
 }
 
@@ -208,12 +200,56 @@ fn resolve_sync_deps(
         ));
     }
 
-    dep_results.into_iter().try_for_each(|(name, value)| {
-        kwargs
-            .set(name.bind(py), value.bind(py))
-            .map_err(|_| plain_server_error())
-    })?;
+    inject_dependencies(py, kwargs, dep_results).map_err(|_| plain_server_error())?;
     Ok(teardowns)
+}
+
+/// Adds the resolved dependency values to the handler arguments.
+#[inline(always)]
+pub(crate) fn inject_dependencies(
+    py: Python<'_>,
+    kwargs: &mut CallArgs,
+    values: ResolvedDependencies,
+) -> PyResult<()> {
+    values
+        .into_iter()
+        .try_for_each(|(name, value)| kwargs.set(name.bind(py), value.bind(py)))
+}
+
+/// Builds the request object when the dependencies need one.
+#[inline(always)]
+fn dependency_request_object(
+    py: Python<'_>,
+    needed: bool,
+    handler: &RouteHandler,
+    kwargs: &CallArgs,
+    request_input: &RequestInput<'_>,
+    payload: Option<&BodyPayload>,
+) -> Result<Option<Py<PyAny>>, Response> {
+    if !needed {
+        return Ok(None);
+    }
+    request_object(py, handler, kwargs, request_input, payload)
+        .map(Some)
+        .map_err(|err| python_error_to_response_in(py, &err, Some(request_input)))
+}
+
+/// Calls an async handler and starts the coroutine it returns.
+#[inline(always)]
+fn call_and_start(
+    py: Python<'_>,
+    event_loop: EventLoop,
+    handler: &RouteHandler,
+    request_input: &RequestInput<'_>,
+    kwargs: &CallArgs,
+) -> Result<HandlerRun, Response> {
+    let coroutine = kwargs
+        .call(
+            handler.execution.func.bind(py),
+            handler.execution.call_layout.as_deref(),
+        )
+        .map_err(|err| python_error_to_response_in(py, &err, Some(request_input)))?;
+    start_coroutine(py, event_loop, handler, Some(request_input), coroutine)
 }
 
 #[inline(always)]
@@ -229,16 +265,7 @@ fn call_handler_and_convert(
         || py_func.call0(),
         |kw| kw.call(py_func, handler.execution.call_layout.as_deref()),
     );
-    match result {
-        Ok(res) => Ok(specialized_response_conversion(
-            py,
-            &res,
-            handler,
-            request_input,
-            server,
-        )),
-        Err(err) => Err(err),
-    }
+    result.map(|res| specialized_response_conversion(py, &res, handler, request_input, server))
 }
 
 pub(crate) fn render_no_request_response(
@@ -460,10 +487,9 @@ async fn core_async_no_args(
             .map_err(|err| error_response(py, &err, request_input.as_ref(), event_loop))?;
         start_coroutine(py, event_loop, handler, request_input.as_ref(), coroutine)
     });
-    match await_python_future(event_loop, handler, request_input.as_ref(), future_res).await {
-        Ok(res) => res,
-        Err(err) => err,
-    }
+    let (Ok(response) | Err(response)) =
+        await_python_future(event_loop, handler, request_input.as_ref(), future_res).await;
+    response
 }
 
 pub(crate) fn payload_raw_bytes(payload: Option<&BodyPayload>) -> Option<bytes::Bytes> {
@@ -484,15 +510,14 @@ fn run_sync_gil_section(
     } = *state;
 
     let (mut kwargs, pending) = kwargs_or_pending(py, handler, request_input, payload)?;
-
-    let req_obj = if needs_request_object {
-        Some(
-            request_object(py, handler, &kwargs, request_input, payload)
-                .map_err(|e| python_error_to_response_in(py, &e, Some(request_input)))?,
-        )
-    } else {
-        None
-    };
+    let req_obj = dependency_request_object(
+        py,
+        needs_request_object,
+        handler,
+        &kwargs,
+        request_input,
+        payload,
+    )?;
 
     let teardowns = resolve_sync_deps(py, handler, request_input, req_obj, &mut kwargs, pending)?;
 
@@ -651,25 +676,12 @@ async fn core_async_no_deps(
         &handler.payload.path_param_names,
         event_loop,
     );
-    let future_res = Python::attach(|py| -> Result<_, Response> {
+    let started = Python::attach(|py| {
         let kwargs = prepare_kwargs_and_payload(py, handler, &request_input, payload.as_ref())?;
-
-        let coroutine = kwargs
-            .call(
-                handler.execution.func.bind(py),
-                handler.execution.call_layout.as_deref(),
-            )
-            .map_err(|err| python_error_to_response_in(py, &err, Some(&request_input)))?;
-
-        start_coroutine(py, event_loop, handler, Some(&request_input), coroutine)
+        call_and_start(py, event_loop, handler, &request_input, &kwargs)
     });
 
-    let future_res = match future_res {
-        Ok(future) => future,
-        Err(resp) => return resp,
-    };
-
-    match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
+    match await_python_future(event_loop, handler, Some(&request_input), started).await {
         Ok(response) => finish_request(event_loop, &request_input, response, None),
         Err(err_resp) => err_resp,
     }
@@ -713,12 +725,7 @@ async fn core_async_sync_deps<const NEEDS_REQ: bool>(
         .await;
     };
 
-    let future_res = match setup {
-        Ok(future) => future,
-        Err(resp) => return resp,
-    };
-
-    match await_python_future(event_loop, handler, Some(&request_input), Ok(future_res)).await {
+    match await_python_future(event_loop, handler, Some(&request_input), setup).await {
         Ok(response) => finish_request(event_loop, &request_input, response, None),
         Err(err_resp) => err_resp,
     }
@@ -732,26 +739,11 @@ fn start_async_with_sync_deps<const NEEDS_REQ: bool>(
     payload: Option<&BodyPayload>,
 ) -> Result<HandlerRun, Response> {
     let (mut kwargs, pending) = kwargs_or_pending(py, handler, request_input, payload)?;
-
-    let req_obj = if NEEDS_REQ {
-        Some(
-            request_object(py, handler, &kwargs, request_input, payload)
-                .map_err(|e| python_error_to_response_in(py, &e, Some(request_input)))?,
-        )
-    } else {
-        None
-    };
+    let req_obj =
+        dependency_request_object(py, NEEDS_REQ, handler, &kwargs, request_input, payload)?;
 
     resolve_sync_deps(py, handler, request_input, req_obj, &mut kwargs, pending)?;
-
-    let coroutine = kwargs
-        .call(
-            handler.execution.func.bind(py),
-            handler.execution.call_layout.as_deref(),
-        )
-        .map_err(|err| python_error_to_response_in(py, &err, Some(request_input)))?;
-
-    start_coroutine(py, event_loop, handler, Some(request_input), coroutine)
+    call_and_start(py, event_loop, handler, request_input, &kwargs)
 }
 
 type AsyncDepsPrep = (Option<Py<PyAny>>, CallArgs, Option<PendingValidation>);
@@ -776,14 +768,14 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
         Some((|| {
             let (kwargs, pending) =
                 kwargs_or_pending(py, handler, &request_input, payload.as_ref())?;
-            let req_obj = if NEEDS_REQ {
-                Some(
-                    request_object(py, handler, &kwargs, &request_input, payload.as_ref())
-                        .map_err(|e| python_error_to_response_in(py, &e, Some(&request_input)))?,
-                )
-            } else {
-                None
-            };
+            let req_obj = dependency_request_object(
+                py,
+                NEEDS_REQ,
+                handler,
+                &kwargs,
+                &request_input,
+                payload.as_ref(),
+            )?;
             Ok((req_obj, kwargs, pending))
         })())
     });
@@ -829,22 +821,9 @@ async fn core_async_async_deps<const NEEDS_REQ: bool>(
     }
 
     let setup = Python::attach(|py| -> Result<_, Response> {
-        dependency_results
-            .into_iter()
-            .try_for_each(|(name, value)| {
-                kwargs
-                    .set(name.bind(py), value.bind(py))
-                    .map_err(|_| plain_server_error())
-            })?;
-
-        let coroutine = kwargs
-            .call(
-                handler.execution.func.bind(py),
-                handler.execution.call_layout.as_deref(),
-            )
-            .map_err(|err| python_error_to_response_in(py, &err, Some(&request_input)))?;
-
-        start_coroutine(py, event_loop, handler, Some(&request_input), coroutine)
+        inject_dependencies(py, &mut kwargs, dependency_results)
+            .map_err(|_| plain_server_error())?;
+        call_and_start(py, event_loop, handler, &request_input, &kwargs)
     });
 
     let future_res = match setup {
