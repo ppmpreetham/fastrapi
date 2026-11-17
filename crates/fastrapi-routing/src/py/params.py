@@ -12,11 +12,12 @@ from types import NoneType, UnionType
 from typing import Annotated, Any, Union, get_args, get_origin
 
 from pydantic import AliasChoices, BaseModel, BeforeValidator, Field, Json, Tag, TypeAdapter
+from pydantic.errors import PydanticSchemaGenerationError
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined, ValidationError
 from typing_inspection.typing_objects import is_typealiastype
 
-from fastrapi.exceptions import FastAPIDeprecationWarning
+from fastrapi.exceptions import FastAPIDeprecationWarning, FastAPIError
 
 if sys.version_info >= (3, 13):
     from inspect import iscoroutinefunction
@@ -379,7 +380,15 @@ def type_adapter(field_info: FieldInfo) -> TypeAdapter:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         fields = field_info.asdict()
-        return TypeAdapter(Annotated[(fields["annotation"], *fields["metadata"], Field(**fields["attributes"]))])
+        try:
+            return TypeAdapter(Annotated[(fields["annotation"], *fields["metadata"], Field(**fields["attributes"]))])
+        except PydanticSchemaGenerationError:
+            raise FastAPIError(
+                f"Invalid args for response field! Hint: check that {fields['annotation']} is a valid Pydantic field type."
+                " If you are using a return type annotation that is not a valid Pydantic field (e.g. Union[Response, dict, None])"
+                " you can disable generating the response model from the type annotation with the path operation decorator"
+                " parameter response_model=None. Read more: https://fastapi.tiangolo.com/tutorial/response-model/"
+            ) from None
 
 
 def validation_alias(field_info: FieldInfo, name: str) -> str:

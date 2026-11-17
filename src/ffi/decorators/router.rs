@@ -5,8 +5,8 @@ use fastrapi_core::method::HttpMethod;
 use fastrapi_http::exceptions::PyFastAPIError;
 use fastrapi_pyutil::subclass::NativeSubclass;
 use fastrapi_routing::route::{RouteEntry, WebSocketEntry};
-use pyo3::exceptions::{PyAssertionError, PyDeprecationWarning, PyTypeError};
-use pyo3::types::{PyDict, PyList, PyType};
+use pyo3::exceptions::{PyAssertionError, PyAttributeError, PyDeprecationWarning, PyTypeError};
+use pyo3::types::{PyDict, PyList, PyType, PyTypeMethods as _};
 
 use crate::engine::app::{CheckDir, frontend_mount};
 use crate::engine::config::FrontendMount;
@@ -228,6 +228,21 @@ impl Default for PyAPIRouter {
             asgi: Arc::new(PyOnceLock::new()),
         }
     }
+}
+
+/// FastAPI reads `router._contains_router` first, so a non-router raises `AttributeError`.
+pub(crate) fn router_argument<'py>(
+    router: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAPIRouter>> {
+    router.cast::<PyAPIRouter>().cloned().map_err(|_| {
+        PyAttributeError::new_err(format!(
+            "'{}' object has no attribute '_contains_router'",
+            router
+                .get_type()
+                .name()
+                .map_or_else(|_| "?".into(), |name| name.to_string())
+        ))
+    })
 }
 
 #[pymethods]
@@ -613,7 +628,7 @@ impl PyAPIRouter {
     #[pyo3(signature = (router, *, prefix="", tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, callbacks=None, generate_unique_id_function=None))]
     pub fn include_router(
         &self,
-        router: &Bound<'_, Self>,
+        router: &Bound<'_, PyAny>,
         prefix: &str,
         tags: Option<&Bound<'_, PyAny>>,
         dependencies: Option<&Bound<'_, PyAny>>,
@@ -625,6 +640,7 @@ impl PyAPIRouter {
         generate_unique_id_function: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let py = router.py();
+        let router = &router_argument(router)?;
         if std::ptr::eq(self, &raw const *router.borrow()) {
             return Err(PyAssertionError::new_err(
                 "Cannot include the same APIRouter instance into itself. Did you mean to include a different router?",

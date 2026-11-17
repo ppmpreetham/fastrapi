@@ -677,15 +677,21 @@ pub fn merge_dependencies(
     merged
 }
 
-#[must_use]
+/// The entries of a `dependencies=[...]` argument. Like FastAPI, which reads `.dependency` of each,
+/// a plain callable raises `AttributeError`.
 pub fn collect_dependency_markers(
     py: Python<'_>,
     dependencies: Option<&Py<PyAny>>,
-) -> Vec<Py<PyAny>> {
-    dependencies
+) -> PyResult<Vec<Py<PyAny>>> {
+    let markers: Vec<_> = dependencies
         .and_then(|deps| deps.bind(py).try_iter().ok())
         .map(|iter| iter.flatten().map(Bound::unbind).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let keys = ParserKeys::new(py);
+    for marker in &markers {
+        marker.bind(py).getattr(keys.dependency)?;
+    }
+    Ok(markers)
 }
 
 /// The scopes a `SecurityScopes` parameter receives: the parent scopes, then each own scope not already listed, as FastAPI's `_get_oauth_scopes`.

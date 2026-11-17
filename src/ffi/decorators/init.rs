@@ -669,7 +669,7 @@ impl PyAPIRouter {
             let mut metadata = parse_route_metadata(py, &func, &path_for_closure)?;
             if let Some(dependencies) = &opts.dependencies {
                 let path_param_names = extract_path_param_names(&path_for_closure);
-                let markers = collect_dependency_markers(py, Some(dependencies));
+                let markers = collect_dependency_markers(py, Some(dependencies))?;
                 let external = parse_external_dependencies(py, &markers, &path_param_names)?;
                 metadata.dependencies = merge_dependencies(external, metadata.dependencies);
             }
@@ -950,7 +950,7 @@ impl PyAPIRouter {
             super::tree::ensure_unfrozen(&frozen)?;
             let mut nodes = parse_dependencies(py, func.bind(py), &path_param_names)?;
             if let Some(dependencies) = &dependencies {
-                let markers = collect_dependency_markers(py, Some(dependencies));
+                let markers = collect_dependency_markers(py, Some(dependencies))?;
                 let external = parse_external_dependencies(py, &markers, &path_param_names)?;
                 nodes = merge_dependencies(external, nodes);
             }
@@ -1042,6 +1042,9 @@ impl PyAPIRouter {
         methods: Option<Vec<String>>,
         kwargs: &Bound<'_, PyDict>,
     ) -> PyResult<()> {
+        if !endpoint.is_callable() {
+            return Err(PyAssertionError::new_err("An endpoint must be a callable"));
+        }
         let methods = methods.unwrap_or_else(|| vec!["GET".to_string()]);
         if methods.is_empty() {
             return Err(PyAssertionError::new_err(()));

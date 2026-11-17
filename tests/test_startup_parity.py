@@ -1,7 +1,9 @@
 """Registration-time and OpenAPI-generation parity with FastAPI 0.162 (no per-request behaviour except the status code)."""
 
+import importlib
 import json
 import warnings
+from typing import Annotated
 
 import fastapi
 import pytest
@@ -249,3 +251,57 @@ def test_slash_redirect_inside_mount_keeps_prefix():
         response = client.get("/m/i/", follow_redirects=False)
     assert response.status_code == 307
     assert response.headers["location"] == f"http://127.0.0.1:{client.port}/m/i"
+
+
+class SecurityScopes:
+    pass
+
+
+def test_unsupported_parameter_types_raise_fastapi_error():
+    def run(lib):
+        app = new_app(lib)
+
+        def user_class():
+            @app.post("/a")
+            def a(scopes: Annotated[SecurityScopes, lib.Body()]): ...
+
+        def unresolved():
+            @app.get("/b")
+            def b(value: "Undefined"): ...
+
+        return error_of(user_class)[0].__name__, error_of(unresolved)[0].__name__
+
+    both(run)
+
+
+def test_route_registration_assertions():
+    def run(lib):
+        app = new_app(lib)
+        return [
+            error_of(lambda: app.add_api_route("/a", lambda: 1, dependencies=[lambda: 1])),
+            error_of(lambda: app.add_api_route("/b", "not callable")),
+            error_of(lambda: app.include_router(5)),
+            error_of(lambda: lib.APIRouter().include_router(5)),
+        ]
+
+    both(run)
+
+
+def test_trusted_host_denies_a_websocket_handshake():
+    def run(lib):
+        app = new_app(lib)
+        app.add_middleware(
+            importlib.import_module(f"{lib.__name__ if lib is fastrapi else 'starlette'}.middleware.trustedhost").TrustedHostMiddleware,
+            allowed_hosts=["good.com"],
+        )
+
+        @app.websocket("/ws")
+        async def ws(socket: lib.WebSocket):
+            await socket.accept()
+
+        with pytest.raises(Exception) as caught:
+            with TestClient(app, base_url="http://bad.com").websocket_connect("/ws"):
+                pass
+        return type(caught.value).__name__, caught.value.status_code, caught.value.content
+
+    both(run)

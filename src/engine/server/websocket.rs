@@ -94,7 +94,7 @@ pub(crate) enum WebSocketOutcome {
     Denied,
 }
 
-fn with_outcome(mut response: Response, outcome: WebSocketOutcome) -> Response {
+pub(crate) fn with_outcome(mut response: Response, outcome: WebSocketOutcome) -> Response {
     response.extensions_mut().insert(outcome);
     response
 }

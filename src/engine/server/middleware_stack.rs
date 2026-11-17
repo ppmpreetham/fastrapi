@@ -24,6 +24,7 @@ use crate::engine::config::FastrAPI;
 use crate::engine::server::routes::{
     parse_header_name, parse_header_value, record_prometheus_metrics,
 };
+use crate::engine::server::websocket::{WebSocketOutcome, with_outcome};
 use fastrapi_http::middleware::PyMiddlewareKind;
 use fastrapi_http::middleware::{
     CorsPolicy, DeclaredLayer, GZipMiddleware, MiddlewareContainer, PreparedMiddlewares,
@@ -201,7 +202,8 @@ fn trusted_host_layer(app: Router, config: &TrustedHostMiddleware) -> Router {
                 return redirect_to(&req, scheme, &format!("www.{authority}"));
             }
 
-            invalid_host_header()
+            // A WebSocket handshake is denied with the same 400 response, as Starlette does.
+            with_outcome(invalid_host_header(), WebSocketOutcome::Denied)
         }
     }))
 }

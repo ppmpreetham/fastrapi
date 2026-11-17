@@ -251,7 +251,7 @@ fn merge_callbacks(base: Option<&JsonValue>, extra: Option<&JsonValue>) -> Optio
 }
 
 pub fn validate_dependencies(py: Python<'_>, dependencies: Option<&Py<PyAny>>) -> PyResult<()> {
-    let markers = collect_dependency_markers(py, dependencies);
+    let markers = collect_dependency_markers(py, dependencies)?;
     if !markers.is_empty() {
         parse_external_dependencies(py, &markers, &[])?;
     }
@@ -301,7 +301,10 @@ pub fn flatten_router(
         });
 
         let mut chain_deps = level.dependencies;
-        chain_deps.extend(collect_dependency_markers(py, router.dependencies.as_ref()));
+        chain_deps.extend(collect_dependency_markers(
+            py,
+            router.dependencies.as_ref(),
+        )?);
 
         let mut chain_cache: HashMap<Vec<String>, Vec<DependencyNode>> = HashMap::new();
         let chain_security = if chain_deps.is_empty() {
@@ -401,7 +404,7 @@ pub fn flatten_router(
 
             let mut sub_deps = chain_deps.clone();
             if let Some(deps) = sub.dependencies.as_ref() {
-                sub_deps.extend(collect_dependency_markers(py, Some(deps)));
+                sub_deps.extend(collect_dependency_markers(py, Some(deps))?);
             }
 
             let sub_callbacks = sub.callbacks.as_ref().and_then(|callbacks| {

@@ -1041,7 +1041,7 @@ impl FastrAPI {
     #[pyo3(signature = (router, *, prefix="", tags=None, dependencies=None, responses=None, deprecated=None, include_in_schema=true, default_response_class=None, callbacks=None, generate_unique_id_function=None))]
     fn include_router(
         &self,
-        router: &Bound<'_, PyAPIRouter>,
+        router: &Bound<'_, pyo3::PyAny>,
         prefix: &str,
         tags: Option<&Bound<'_, pyo3::PyAny>>,
         dependencies: Option<&Bound<'_, pyo3::PyAny>>,
