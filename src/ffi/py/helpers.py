@@ -5,6 +5,7 @@ import importlib
 import re
 import warnings
 from collections import defaultdict, deque
+from collections.abc import Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from decimal import Decimal
 from enum import Enum
@@ -71,11 +72,11 @@ def is_pydantic_v1_model_instance(obj):
     return isinstance(obj, v1.BaseModel)
 
 
-def isoformat(o):
+def isoformat(o: datetime.date | datetime.time) -> str:
     return o.isoformat()
 
 
-def decimal_encoder(dec_value):
+def decimal_encoder(dec_value: Decimal) -> int | float:
     exponent = dec_value.as_tuple().exponent
     if isinstance(exponent, int) and exponent >= 0:
         return int(dec_value)
@@ -111,7 +112,9 @@ ENCODERS_BY_TYPE = {
 }
 
 
-def generate_encoders_by_class_tuples(type_encoder_map):
+def generate_encoders_by_class_tuples(
+    type_encoder_map: dict[Any, Callable[[Any], Any]],
+) -> dict[Callable[[Any], Any], tuple[Any, ...]]:
     encoders_by_class_tuples = defaultdict(tuple)
     for type_, encoder in type_encoder_map.items():
         encoders_by_class_tuples[encoder] += (type_,)

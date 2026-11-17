@@ -268,7 +268,7 @@ fn html_response(py: Python<'_>, html: String) -> PyResult<Py<PyAny>> {
     oauth2_redirect_url = None,
     init_oauth = None,
     swagger_ui_parameters = None
-))]
+), text_signature = "(*, openapi_url, title, swagger_js_url='https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js', swagger_css_url='https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css', swagger_favicon_url='https://fastapi.tiangolo.com/img/favicon.png', oauth2_redirect_url=None, init_oauth=None, swagger_ui_parameters=None)")]
 #[expect(
     clippy::too_many_arguments,
     reason = "the signature copies FastAPI's get_swagger_ui_html"
@@ -308,7 +308,7 @@ fn get_swagger_ui_html(
     redoc_js_url = REDOC_JS_URL,
     redoc_favicon_url = FAVICON_URL,
     with_google_fonts = true
-))]
+), text_signature = "(*, openapi_url, title, redoc_js_url='https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js', redoc_favicon_url='https://fastapi.tiangolo.com/img/favicon.png', with_google_fonts=True)")]
 fn get_redoc_html(
     py: Python<'_>,
     openapi_url: &str,

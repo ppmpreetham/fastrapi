@@ -183,3 +183,69 @@ def test_oauth2_password_request_forms_signature():
         assert error_of(lambda: actual(grant_type="password", password="b"))[0] is TypeError
         assert error_of(lambda: expected(grant_type="password", password="b"))[0] is TypeError
     assert error_of(lambda: ActualStrict(username="a", password="b"))[0] is TypeError
+
+
+def test_http_exception_init_signature():
+    import inspect
+
+    def run(lib):
+        return [(n, p.default) for n, p in inspect.signature(lib.HTTPException.__init__).parameters.items()]
+
+    both(run)
+
+
+def test_encoder_helper_annotations():
+    import inspect
+
+    from fastapi import encoders as expected
+    from fastrapi import encoders as actual
+
+    for name in ("decimal_encoder", "isoformat", "generate_encoders_by_class_tuples"):
+        assert str(inspect.signature(getattr(actual, name))) == str(inspect.signature(getattr(expected, name)))
+
+
+def test_docs_helper_signature_defaults():
+    import inspect
+
+    from fastapi.openapi import docs as expected
+    from fastrapi.openapi import docs as actual
+
+    for name in ("get_swagger_ui_html", "get_redoc_html"):
+        defaults = lambda module: [p.default for p in inspect.signature(getattr(module, name)).parameters.values()]
+        assert defaults(actual) == defaults(expected)
+
+
+def test_function_scope_dependency_under_request_scope_generator():
+    def run(lib):
+        def leaf():
+            yield 1
+
+        def parent(value=lib.Depends(leaf, scope="function")):
+            yield value
+
+        app = new_app(lib)
+
+        def register():
+            @app.get("/a")
+            def endpoint(value=lib.Depends(parent)):
+                return value
+
+        error_type, message = error_of(register)
+        return error_type.__name__, message
+
+    both(run)
+
+
+def test_slash_redirect_inside_mount_keeps_prefix():
+    sub = fastrapi.FastrAPI()
+
+    @sub.get("/i")
+    def item():
+        return "i"
+
+    app = fastrapi.FastrAPI()
+    app.mount("/m", sub)
+    with LiveServerTestClient(app) as client:
+        response = client.get("/m/i/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == f"http://127.0.0.1:{client.port}/m/i"

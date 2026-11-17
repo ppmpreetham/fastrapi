@@ -329,6 +329,17 @@ impl RustMethod {
         }
     }
 
+    /// `inspect.signature` reads this, so `HTTPException.__init__` reports starlette's signature.
+    #[getter]
+    fn __signature__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("inspect")?.call_method1(
+            "signature",
+            (STARLETTE_HTTP_EXCEPTION
+                .get(py)?
+                .getattr(intern!(py, "__init__"))?,),
+        )
+    }
+
     #[pyo3(signature = (*args, **kwargs))]
     fn __call__<'py>(
         &self,

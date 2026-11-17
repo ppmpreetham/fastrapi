@@ -543,9 +543,18 @@ fn slash_redirect(
     if router.allowed_methods(lookup, host_name) == 0 {
         return None;
     }
+    let mount_prefix = request
+        .extensions()
+        .get::<AsgiMount>()
+        .map_or("", |mount| mount.root_path.as_ref());
     let mut location = host.map_or_else(
-        || toggled.clone(),
-        |host| format!("{}://{host}{toggled}", request_scheme(request)),
+        || format!("{mount_prefix}{toggled}"),
+        |host| {
+            format!(
+                "{}://{host}{mount_prefix}{toggled}",
+                request_scheme(request)
+            )
+        },
     );
     if let Some(query) = request.uri().query() {
         location.push('?');

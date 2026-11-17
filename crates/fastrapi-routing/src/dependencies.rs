@@ -6,6 +6,7 @@ use super::params;
 use super::security::PySecurityScopes;
 use crate::request_data::{Errors, request_param_value};
 use crate::route::ParsedParameter;
+use fastrapi_http::exceptions::PyDependencyScopeError;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_http::responses::PyResponse;
 use fastrapi_pyutil::call::{CallArgs, CallLayout};
@@ -819,6 +820,22 @@ fn extract_and_flatten(
                 .and_then(|value| extract_string_list(&value))
                 .unwrap_or_default();
 
+            let marker_options = MarkerOptions::of(&marker, keys);
+            if (is_generator || is_async_generator)
+                && scope == Some(DependencyScope::Request)
+                && marker_options.scope == Some(DependencyScope::Function)
+            {
+                let name = func
+                    .getattr(intern!(py, "__name__"))
+                    .map_or_else(|_| "<unnamed_callable>".into(), |name| name.to_string());
+                return Err(PyErr::from_type(
+                    py.get_type::<PyDependencyScopeError>(),
+                    format!(
+                        "The dependency \"{name}\" has a scope of \"request\", it cannot depend on dependencies with scope \"function\"."
+                    ),
+                ));
+            }
+
             let (target_index, child_uses_scopes) = extract_and_flatten(
                 py,
                 keys,
@@ -828,7 +845,7 @@ fn extract_and_flatten(
                 Some(param_name_str),
                 &current_scopes,
                 &child_own_scopes,
-                MarkerOptions::of(&marker, keys),
+                marker_options,
                 flat_plan,
                 visited,
             )?;
