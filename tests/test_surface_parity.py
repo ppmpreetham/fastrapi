@@ -1,4 +1,5 @@
 import inspect
+from collections.abc import AsyncIterable
 from typing import Annotated
 
 import fastapi
@@ -202,3 +203,138 @@ def test_response_headers():
         else:
             with LiveServerTestClient(app) as client:
                 assert client.get("/sse").headers["content-type"] == "text/event-stream; charset=utf-8"
+
+
+def test_route_context_attributes():
+    def attributes(lib):
+        app = app_for(lib)
+        app.get("/ctx/{item}")(endpoint)
+        route = next(r for r in app.routes if getattr(r, "path", None) == "/ctx/{item}")
+        context = lib.routing.RouteContext(route)
+        return context.path, context.path_format, context.name, context.methods, context.endpoint is endpoint
+
+    expected, actual = both(attributes)
+    assert actual == expected
+
+
+def test_router_matches_scope_keyword():
+    expected, actual = both(lambda lib: lib.APIRouter().matches(scope={"type": "http"}))
+    assert actual == expected
+
+
+def test_request_form_limit_defaults_are_ints():
+    def defaults(lib):
+        parameters = inspect.signature(lib.Request.form).parameters
+        return {name: parameters[name].default for name in ("max_files", "max_fields", "max_part_size")}
+
+    expected, actual = both(defaults)
+    assert actual == expected
+    assert all(type(value) is int for value in actual.values())
+
+
+def test_route_class_assignable_after_creation():
+    def header(lib):
+        class Wrapped(lib.routing.APIRoute):
+            def get_route_handler(self):
+                original = super().get_route_handler()
+
+                async def handler(request):
+                    response = await original(request)
+                    response.headers["x-wrapped"] = "yes"
+                    return response
+
+                return handler
+
+        router = lib.APIRouter()
+        router.route_class = Wrapped
+        router.get("/x")(endpoint)
+        app = app_for(lib)
+        app.include_router(router)
+        if lib is fastapi:
+            return TestClient(app).get("/x").headers.get("x-wrapped")
+        with LiveServerTestClient(app) as client:
+            return client.get("/x").headers.get("x-wrapped")
+
+    expected, actual = both(header)
+    assert actual == expected == "yes"
+
+
+def test_include_router_response_class_inheritance():
+    def media_types(lib):
+        def level(number):
+            return type(f"Level{number}", (lib.responses.JSONResponse,), {"media_type": f"application/x-level-{number}"})
+
+        app = app_for(lib)
+        app.default_response_class = level(0)
+        outer, inner, leaf = lib.APIRouter(default_response_class=level(1)), lib.APIRouter(), lib.APIRouter()
+        leaf.get("/c")(endpoint)
+        leaf.get("/d", response_class=level(5))(endpoint)
+        inner.include_router(leaf, prefix="/b", default_response_class=level(3))
+        outer.include_router(inner, prefix="/a")
+        outer.get("/own")(endpoint)
+        app.include_router(outer, prefix="/x", default_response_class=level(4))
+        app.get("/app")(endpoint)
+        paths = ("/app", "/x/own", "/x/a/b/c", "/x/a/b/d")
+        if lib is fastapi:
+            client = TestClient(app)
+            return [client.get(path).headers["content-type"] for path in paths]
+        with LiveServerTestClient(app) as client:
+            return [client.get(path).headers["content-type"] for path in paths]
+
+    expected, actual = both(media_types)
+    assert actual == expected
+
+
+@pytest.mark.parametrize("kind", ["Path", "Query"])
+def test_union_mode_on_path_and_query(kind):
+    def run(lib):
+        marker = getattr(lib, kind)(union_mode="left_to_right")
+        app = app_for(lib)
+        path = "/u/{v}" if kind == "Path" else "/u"
+
+        @app.get(path)
+        def handler(v: Annotated[int | str, marker]):
+            return {"v": v}
+
+        url = "/u/123" if kind == "Path" else "/u?v=123"
+        if lib is fastapi:
+            return TestClient(app).get(url).json()
+        with LiveServerTestClient(app) as client:
+            return client.get(url).json()
+
+    expected, actual = both(run)
+    assert actual == expected == {"v": 123}
+
+
+def test_non_finite_floats_in_streams():
+    def bodies(lib):
+        sse = lib.sse if lib is fastrapi else __import__("fastapi.sse", fromlist=["x"])
+        app = app_for(lib)
+
+        @app.get("/lines")
+        async def lines() -> AsyncIterable[dict]:
+            yield {"x": float("nan"), "y": [float("inf")], "z": {"k": float("-inf")}}
+
+        @app.get("/events", response_class=sse.EventSourceResponse)
+        async def events():
+            yield {"x": float("nan")}
+            yield sse.ServerSentEvent(data={"y": [float("inf")]})
+
+        def fetch(client):
+            return client.get("/lines").text, client.get("/events").text
+
+        if lib is fastapi:
+            return fetch(TestClient(app))
+        with LiveServerTestClient(app) as client:
+            return fetch(client)
+
+    expected, actual = both(bodies)
+    assert actual == expected
+
+
+def test_solved_dependency_exported():
+    from fastapi.dependencies.utils import SolvedDependency as expected
+    from fastrapi.dependencies.utils import SolvedDependency as actual
+
+    assert actual.__name__ == expected.__name__
+    assert [f for f in actual.__dataclass_fields__] == [f for f in expected.__dataclass_fields__]

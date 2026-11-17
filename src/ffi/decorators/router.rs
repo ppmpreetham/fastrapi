@@ -282,8 +282,10 @@ impl PyAPIRouter {
     fn matches<'py>(
         &self,
         py: Python<'py>,
-        _scope: &Bound<'py, PyAny>,
+        scope: &Bound<'py, PyAny>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyDict>)> {
+        // The router itself never matches; the parameter is named `scope` as in Starlette.
+        let _ = scope;
         Ok((STARLETTE_MATCH.get(py)?.getattr("NONE")?, PyDict::new(py)))
     }
 
