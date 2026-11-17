@@ -89,6 +89,8 @@ pub(crate) struct AppState {
     pub(crate) max_file_size: Option<usize>,
     pub(crate) reject_unknown_multipart_fields: bool,
     pub(crate) root_path: Box<str>,
+    /// Where the app is mounted in its parent, which its docs pages add to the schema URL.
+    pub(crate) mount_prefix: Box<str>,
     pub(crate) metrics_enabled: bool,
     pub(crate) redirect_slashes: bool,
     pub(crate) app: Py<PyAny>,
@@ -111,6 +113,7 @@ impl AppState {
             max_file_size: app_config.max_file_size,
             reject_unknown_multipart_fields: app_config.reject_unknown_multipart_fields,
             root_path: app_config.root_path.trim_end_matches('/').into(),
+            mount_prefix: Box::default(),
             metrics_enabled: app_config.prometheus_config.is_some(),
             redirect_slashes: app_config.redirect_slashes,
             app: app.clone_ref(py).into_any(),

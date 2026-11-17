@@ -21,6 +21,7 @@ use fastrapi_routing::dependencies::InjectionType;
 use fastrapi_routing::route::{
     ModelPresence, ParamModel, ParsedParameter, RouteEntry, RouteHandler,
 };
+use fastrapi_routing::security::{OAuth2PasswordRequestForm, OAuth2PasswordRequestFormStrict};
 use indexmap::IndexMap;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -721,6 +722,57 @@ fn build_request_body(
     Some(RequestBody { content, required })
 }
 
+/// The form body of the OAuth2 password form classes. Their `__new__` is Rust, so
+/// no parameters are parsed from them, and FastAPI's fields are written out here.
+fn password_form_body(
+    operation_id: &str,
+    strict: bool,
+    schemas: &mut IndexMap<String, JsonValue>,
+) -> RequestBody {
+    let name = format!("Body_{operation_id}");
+    let nullable = |title: &str| json!({ "anyOf": [{ "type": "string" }, { "type": "null" }], "title": title });
+    let (mut grant_type, mut password, mut client_secret, mut required) = (
+        json!({ "pattern": "^password$", "title": "Grant Type", "type": "string" }),
+        json!({ "title": "Password", "type": "string" }),
+        nullable("Client Secret"),
+        vec![json!("grant_type"), json!("username"), json!("password")],
+    );
+    if !strict {
+        grant_type = json!({
+            "anyOf": [{ "pattern": "^password$", "type": "string" }, { "type": "null" }],
+            "title": "Grant Type",
+        });
+        for schema in [&mut password, &mut client_secret] {
+            if let Some(object) = schema.as_object_mut() {
+                object.insert("format".to_owned(), json!("password"));
+            }
+        }
+        required.remove(0);
+    }
+    let schema = json!({
+        "properties": {
+            "grant_type": grant_type,
+            "username": { "title": "Username", "type": "string" },
+            "password": password,
+            "scope": { "default": "", "title": "Scope", "type": "string" },
+            "client_id": nullable("Client Id"),
+            "client_secret": client_secret,
+        },
+        "required": required,
+        "title": name,
+        "type": "object",
+    });
+    schemas.insert(name.clone(), schema);
+    let media = MediaType {
+        schema: Some(json!({ "$ref": format!("#/components/schemas/{name}") })),
+        ..MediaType::default()
+    };
+    RequestBody {
+        content: IndexMap::from([("application/x-www-form-urlencoded".to_owned(), media)]),
+        required: true,
+    }
+}
+
 /// The operation ids of a document. Like FastAPI's `operation_ids`, a repeated id is reported
 /// with a warning that names the endpoint.
 #[derive(Default)]
@@ -908,13 +960,19 @@ pub fn build_paths_from_routes(
             | ParameterSource::BackgroundTasks
             | ParameterSource::SecurityScopes => 4,
         });
-        // FastAPI documents a 422 response only for routes that read request parameters or a body.
-        let validates_request = all_params.iter().any(|param| {
-            !matches!(
-                param.source,
-                ParameterSource::BackgroundTasks | ParameterSource::SecurityScopes
-            )
+        let password_form = handler.payload.dependencies.iter().find_map(|node| {
+            let func = node.func.bind(py);
+            func.is_instance_of::<OAuth2PasswordRequestForm>()
+                .then(|| func.is_instance_of::<OAuth2PasswordRequestFormStrict>())
         });
+        // FastAPI documents a 422 response only for routes that read request parameters or a body.
+        let validates_request = password_form.is_some()
+            || all_params.iter().any(|param| {
+                !matches!(
+                    param.source,
+                    ParameterSource::BackgroundTasks | ParameterSource::SecurityScopes
+                )
+            });
         let parameters: Vec<Parameter> = all_params
             .iter()
             .flat_map(|param| {
@@ -997,6 +1055,9 @@ pub fn build_paths_from_routes(
             schemas,
             &mut registry,
         );
+        if let (None, Some(strict)) = (&operation.request_body, password_form) {
+            operation.request_body = Some(password_form_body(&operation_id, strict, schemas));
+        }
         let response_desc = route
             .response_description
             .clone()

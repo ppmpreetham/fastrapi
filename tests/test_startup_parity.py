@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import re
 import warnings
 from typing import Annotated
 
@@ -372,5 +373,72 @@ def test_openapi_extra_deep_merges_a_body_schema():
 
         operation = app.openapi()["paths"]["/a"]["post"]
         return operation["tags"], operation["requestBody"]
+
+    both(run)
+
+
+def test_password_form_dependency_documents_a_form_body():
+    def run(lib):
+        app = new_app(lib)
+        security = importlib.import_module(f"{lib.__name__}.security")
+
+        @app.post("/t")
+        def t(form: Annotated[security.OAuth2PasswordRequestForm, lib.Depends()]): ...
+
+        @app.post("/s")
+        def s(form: Annotated[security.OAuth2PasswordRequestFormStrict, lib.Depends()]): ...
+
+        return app.openapi()
+
+    both(run)
+
+
+def _client(lib, app):
+    return TestClient(app) if lib is fastapi else LiveServerTestClient(app)
+
+
+def test_app_mounted_at_root_serves_what_the_parent_does_not():
+    def run(lib):
+        sub = new_app(lib)
+
+        @sub.get("/hello")
+        def hello():
+            return {"h": 1}
+
+        app = new_app(lib)
+
+        @app.get("/own")
+        def own():
+            return {"o": 1}
+
+        app.mount("/", sub)
+        with _client(lib, app) as client:
+            return [(path, client.get(path).status_code) for path in ("/own", "/hello", "/nope", "/docs")]
+
+    both(run)
+
+
+def _spec_urls(client, *paths):
+    return [re.findall(r"url: '([^']*)'", client.get(path).text) for path in paths]
+
+
+def test_docs_page_of_a_mounted_app_uses_its_mount_path():
+    def run(lib):
+        app = new_app(lib)
+        app.mount("/sub", new_app(lib))
+        with _client(lib, app) as client:
+            return _spec_urls(client, "/sub/docs", "/docs")
+
+    both(run)
+
+
+def test_docs_and_openapi_are_served_under_root_path():
+    def run(lib):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            app = new_app(lib, root_path="/app")
+        with _client(lib, app) as client:
+            statuses = [client.get(path).status_code for path in ("/docs", "/app/docs", "/app/openapi.json")]
+            return statuses, _spec_urls(client, "/docs")
 
     both(run)

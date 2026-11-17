@@ -209,14 +209,20 @@ fn nest_sub_apps(
     app_config: &FastrAPI,
 ) -> PyResult<Router> {
     app_config.app_mounts.iter().try_fold(app, |app, mount| {
-        let prefix: Arc<str> = mount.path.as_str().into();
-        let sub_app = sub_app_router(py, parent, &mount.app)?.layer(axum::middleware::map_request(
-            move |mut request: Request| {
+        let at_root = mount.path == "/";
+        let prefix: Arc<str> = if at_root { "" } else { mount.path.as_str() }.into();
+        let sub_app = sub_app_router(py, parent, &prefix, &mount.app)?.layer(
+            axum::middleware::map_request(move |mut request: Request| {
                 mark_mounted(&mut request, &prefix);
                 async move { request }
-            },
-        ));
-        Ok(app.nest_service(&mount.path, sub_app))
+            }),
+        );
+        // axum cannot nest at the root: the app answers what the parent has no route for.
+        Ok(if at_root {
+            app.fallback_service(sub_app)
+        } else {
+            app.nest_service(&mount.path, sub_app)
+        })
     })
 }
 
@@ -274,7 +280,7 @@ fn host_apps(
     let apps = app_config
         .host_mounts
         .iter()
-        .map(|mount| HostApp::new(py, &mount.host, sub_app_router(py, parent, &mount.app)?))
+        .map(|mount| HostApp::new(py, &mount.host, sub_app_router(py, parent, "", &mount.app)?))
         .collect::<PyResult<Vec<_>>>()?;
     Ok(Vec::leak(apps))
 }
@@ -316,6 +322,7 @@ async fn serve_host_app(
 fn sub_app_router(
     py: Python<'_>,
     parent: &'static AppState,
+    mount_prefix: &str,
     app: &Py<FastrAPI>,
 ) -> PyResult<Router> {
     let bound = app.bind(py);
@@ -324,7 +331,9 @@ fn sub_app_router(
     event_loop.server().set_app(app.clone_ref(py).into_any());
     let custom_openapi = custom_openapi_spec(py, bound.as_any());
     let config = bound.borrow();
-    let state = AppState::of(py, event_loop, app, &config).leak();
+    let mut state = AppState::of(py, event_loop, app, &config);
+    state.mount_prefix = mount_prefix.into();
+    let state = state.leak();
     build_router(
         py,
         state,
@@ -657,25 +666,30 @@ pub(crate) fn register_docs_endpoints(
     };
     let openapi_body = serde_json::to_vec(&openapi_json).ok().map(Bytes::from);
     let root_path_in_servers = app_config.root_path_in_servers;
-    app = app.route(
-        openapi_url,
-        docs_get(state, move |mount: Option<Extension<AsgiMount>>| {
-            let body = mount
-                .filter(|_| root_path_in_servers)
-                .and_then(|Extension(mount)| with_root_path_server(&openapi_json, &mount.root_path))
-                .map_or_else(
-                    || openapi_body.clone(),
-                    |document| serde_json::to_vec(&document).ok().map(Bytes::from),
-                );
-            async move {
-                body.map_or_else(
-                    || StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-                    |body| json_body(StatusCode::OK, body),
-                )
-            }
-        }),
-    );
-    let root_path = app_config.root_path.trim_end_matches('/');
+    let openapi_route = docs_get(state, move |mount: Option<Extension<AsgiMount>>| {
+        let body = mount
+            .filter(|_| root_path_in_servers)
+            .and_then(|Extension(mount)| with_root_path_server(&openapi_json, &mount.root_path))
+            .map_or_else(
+                || openapi_body.clone(),
+                |document| serde_json::to_vec(&document).ok().map(Bytes::from),
+            );
+        async move {
+            body.map_or_else(
+                || StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                |body| json_body(StatusCode::OK, body),
+            )
+        }
+    });
+    for path in root_paths(state, openapi_url) {
+        app = app.route(&path, openapi_route.clone());
+    }
+    // A mounted app's schema is under its mount path, like the root path of FastAPI's scope.
+    let root_path = if state.root_path.is_empty() {
+        &*state.mount_prefix
+    } else {
+        &*state.root_path
+    };
     let spec_url = format!("{root_path}{openapi_url}");
     let title = &app_config.title;
     if let Some(docs) = docs_url {
@@ -763,13 +777,22 @@ where
 
 fn html_route(app: Router, state: &'static AppState, path: &str, html: String) -> Router {
     let html: Arc<[u8]> = Arc::from(html.into_bytes());
-    app.route(
-        path,
-        docs_get(state, move || {
-            let html = html.clone();
-            async move { Html(Bytes::from_owner(html)) }
-        }),
-    )
+    let route = docs_get(state, move || {
+        let html = html.clone();
+        async move { Html(Bytes::from_owner(html)) }
+    });
+    root_paths(state, path)
+        .into_iter()
+        .fold(app, |app, path| app.route(&path, route.clone()))
+}
+
+/// A docs path, and the same path under the app's `root_path`, which FastAPI serves too.
+fn root_paths(state: &AppState, path: &str) -> Vec<String> {
+    let mut paths = vec![path.to_owned()];
+    if !state.root_path.is_empty() {
+        paths.push(format!("{}{path}", state.root_path));
+    }
+    paths
 }
 
 fn register_metrics_endpoint(mut app: Router, app_config: &FastrAPI) -> PyResult<Router> {
