@@ -17,6 +17,7 @@ pub fn deep_merge_json(target: &mut JsonValue, source: JsonValue) {
                 }
             }
         }
+        (JsonValue::Array(target), JsonValue::Array(source)) => target.extend(*source),
         (target, source) => *target = source,
     }
 }
@@ -25,21 +26,23 @@ pub fn deep_merge_json(target: &mut JsonValue, source: JsonValue) {
 pub struct OpenApiSpec {
     pub openapi: String,
     pub info: OpenApiInfo,
-    pub paths: IndexMap<String, PathItem>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub servers: Option<Vec<JsonValue>>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<JsonValue>>,
+    pub paths: IndexMap<String, PathItem>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhooks: Option<IndexMap<String, PathItem>>,
 
-    #[serde(skip_serializing_if = "Option::is_none", rename = "externalDocs")]
-    pub external_docs: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub components: Option<Components>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<JsonValue>>,
+
+    #[serde(skip_serializing_if = "Option::is_none", rename = "externalDocs")]
+    pub external_docs: Option<JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,24 +92,24 @@ pub struct PathItem {
 #[serde(rename_all = "camelCase")]
 pub struct Operation {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deprecated: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<Vec<Parameter>>,
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "operationId")]
     pub operation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_body: Option<RequestBody>,
-    pub responses: IndexMap<String, Response>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub callbacks: Option<IndexMap<String, JsonValue>>,
+    pub deprecated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security: Option<Vec<JsonValue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<Vec<Parameter>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_body: Option<RequestBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callbacks: Option<IndexMap<String, JsonValue>>,
+    pub responses: IndexMap<String, Response>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

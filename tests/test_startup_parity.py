@@ -305,3 +305,72 @@ def test_trusted_host_denies_a_websocket_handshake():
         return type(caught.value).__name__, caught.value.status_code, caught.value.content
 
     both(run)
+
+
+def _dependency_marker_app(lib):
+    app = new_app(lib)
+
+    @app.get("/two")
+    def two(a: Annotated[int, lib.Depends(lambda: 1), lib.Depends(lambda: 2)]):
+        return a
+
+    @app.get("/query")
+    def query(a: Annotated[int, lib.Depends(lambda: 1), lib.Query()]):
+        return a
+
+    return app
+
+
+def test_last_annotated_marker_wins():
+    def run(lib):
+        client = TestClient(_dependency_marker_app(lib))
+        return client.get("/two").json(), client.get("/query").status_code, client.get("/query?a=7").json()
+
+    both(run)
+
+
+def test_openapi_is_cached_in_openapi_schema():
+    for lib in (fastrapi, fastapi):
+        app = new_app(lib)
+        assert app.openapi() is app.openapi() is app.openapi_schema
+        app.openapi_schema = {"custom": 1}
+        assert app.openapi() == {"custom": 1}
+
+
+def test_openapi_key_order():
+    def run(lib):
+        app = new_app(lib, servers=[{"url": "http://x"}], openapi_tags=[{"name": "t"}])
+
+        @app.post("/a", tags=["t"], deprecated=True, description="d")
+        def a(q: int = 1): ...
+
+        schema = app.openapi()
+        return list(schema), list(schema["paths"]["/a"]["post"])
+
+    both(run)
+
+
+def test_bytes_and_optional_upload_schemas():
+    def run(lib):
+        app = new_app(lib)
+
+        @app.post("/f")
+        def f(file: bytes = lib.Query(), up: Annotated[lib.UploadFile | None, lib.File()] = None): ...
+
+        schema = app.openapi()
+        return schema["paths"]["/f"]["post"]["parameters"], schema["components"]["schemas"]
+
+    both(run)
+
+
+def test_openapi_extra_deep_merges_a_body_schema():
+    def run(lib):
+        app = new_app(lib)
+
+        @app.post("/a", tags=["a"], openapi_extra={"tags": ["t"], "requestBody": {"content": {"application/json": {"schema": {"type": "string"}}}}})
+        def a(item: dict): ...
+
+        operation = app.openapi()["paths"]["/a"]["post"]
+        return operation["tags"], operation["requestBody"]
+
+    both(run)

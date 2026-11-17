@@ -2035,7 +2035,8 @@ def test_host_routes_accept_ipv6_hosts_and_websockets_respect_hosts():
     assert b" 404 " in upgrade(f"127.0.0.1:{port}")
 
 
-def test_openapi_cache_sees_routes_added_to_included_router():
+def test_openapi_cache_is_reset_through_openapi_schema():
+    # FastAPI keeps the cached document until `openapi_schema` is reset.
     from fastrapi import APIRouter
 
     app = FastrAPI()
@@ -2047,6 +2048,8 @@ def test_openapi_cache_sees_routes_added_to_included_router():
     def later():
         return {}
 
+    assert app.openapi()["paths"] == {}
+    app.openapi_schema = None
     assert "/later" in app.openapi()["paths"]
 
 

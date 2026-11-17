@@ -63,15 +63,6 @@ pub struct PrometheusConfig {
     pub metrics_path: String,
 }
 
-pub(crate) struct OpenApiCacheEntry {
-    pub fingerprint: u64,
-    pub openapi_version: String,
-    pub title: String,
-    pub version: String,
-    pub description: String,
-    pub dict: Py<PyAny>,
-}
-
 /// `FastAPI` app class, the main entrypoint to use FastAPI.
 ///
 /// Read more in the
@@ -204,7 +195,6 @@ pub struct FastrAPI {
     pub(crate) host_mounts: Vec<HostMount>,
     pub(crate) prometheus_config: Option<PrometheusConfig>,
     pub(crate) middlewares: MiddlewareContainer,
-    pub(crate) openapi_cache: parking_lot::Mutex<Option<OpenApiCacheEntry>>,
     pub(crate) openapi_schema: parking_lot::Mutex<Option<Py<PyAny>>>,
     pub(crate) asgi: crate::engine::server::asgi_app::AsgiCell,
     pub(crate) stack_override: Option<Py<PyAny>>,

@@ -8,7 +8,6 @@ use crate::engine::exception_dispatch::invalidate_handler_cache;
 use crate::engine::server::asgi_app::new_asgi_cell;
 use crate::ffi::decorators;
 use crate::ffi::decorators::{PyAPIRouter, collect_router_routes, new_api_router};
-use ahash::AHasher;
 use fastrapi_core::method::HttpMethod;
 use fastrapi_http::middleware::{DeclaredLayer, MiddlewareContainer, PyMiddleware};
 use fastrapi_http::staticfiles::PyStaticFiles;
@@ -21,7 +20,6 @@ use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyAny, PyCFunction, PyDict, PyList, PyMapping, PyTuple};
 use pyo3::{Bound, intern};
 use std::env::var_os;
-use std::hash::Hasher;
 use std::num::NonZero;
 use std::path::Path;
 use std::path::PathBuf;
@@ -566,7 +564,6 @@ impl FastrAPI {
             host_mounts: Vec::new(),
             prometheus_config: None,
             middlewares: MiddlewareContainer::default(),
-            openapi_cache: Mutex::new(None),
             openapi_schema: Mutex::new(None),
             asgi: new_asgi_cell(),
             stack_override: None,
@@ -1107,42 +1104,21 @@ impl FastrAPI {
     /// [FastAPI docs for OpenAPI](https://fastapi.tiangolo.com/how-to/extending-openapi/).
     #[pyo3(signature = ())]
     fn openapi(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(schema) = self.openapi_schema.lock().as_ref() {
-            return Ok(schema.clone_ref(py));
+        if let Some(schema) = self.get_openapi_schema(py) {
+            return Ok(schema);
         }
-        let fingerprint = self.openapi_fingerprint(py);
-        if let Some(entry) = self.openapi_cache.lock().as_ref()
-            && entry.fingerprint == fingerprint
-            && entry.openapi_version == self.openapi_version
-            && entry.title == self.title
-            && entry.version == self.version
-            && entry.description == self.description
-        {
-            return Ok(entry.dict.clone_ref(py));
-        }
-
         let spec = self.openapi_spec(py, false)?;
-        let dict = fastrapi_pyutil::json::json_value_to_py(py, &spec)?;
-        *self.openapi_cache.lock() = Some(super::config::OpenApiCacheEntry {
-            fingerprint,
-            openapi_version: self.openapi_version.clone(),
-            title: self.title.clone(),
-            version: self.version.clone(),
-            description: self.description.clone(),
-            dict: dict.clone().unbind(),
-        });
-        Ok(dict.unbind())
+        let schema = fastrapi_pyutil::json::json_value_to_py(py, &spec)?.unbind();
+        *self.openapi_schema.lock() = Some(schema.clone_ref(py));
+        Ok(schema)
     }
 
     #[getter]
     fn get_openapi_schema(&self, py: Python<'_>) -> Option<Py<PyAny>> {
-        if let Some(schema) = self.openapi_schema.lock().as_ref() {
-            return Some(schema.clone_ref(py));
-        }
-        self.openapi_cache
+        self.openapi_schema
             .lock()
             .as_ref()
-            .map(|entry| entry.dict.clone_ref(py))
+            .map(|schema| schema.clone_ref(py))
     }
 
     #[setter]
@@ -1212,35 +1188,6 @@ impl FastrAPI {
     #[inline]
     fn router_ref<'py>(&self, py: Python<'py>) -> pyo3::PyRef<'py, decorators::PyAPIRouter> {
         self.router.bind(py).borrow()
-    }
-
-    fn openapi_fingerprint(&self, py: Python<'_>) -> u64 {
-        let mut h = AHasher::default();
-        self.hash_openapi_state(py, &mut h, 0);
-        h.finish()
-    }
-
-    fn hash_openapi_state(&self, py: Python<'_>, h: &mut AHasher, depth: u8) {
-        let router = self.router.bind(py);
-        let Ok(router) = router.try_borrow() else {
-            h.write_u8(0xFF);
-            return;
-        };
-        h.write_u64(router.tree_revision(py));
-        h.write_usize(router.route_entries.lock().len());
-        h.write_usize(router.websocket_entries.lock().len());
-        h.write_usize(router.sub_routers.lock().len());
-        h.write_usize(self.static_mounts.len());
-        h.write_usize(self.frontend_mounts.len());
-        h.write_usize(self.app_mounts.len());
-
-        if depth < 8 {
-            for mount in &self.app_mounts {
-                if let Ok(sub) = mount.app.bind(py).try_borrow() {
-                    sub.hash_openapi_state(py, h, depth + 1);
-                }
-            }
-        }
     }
 }
 crate::generate_http_methods!(

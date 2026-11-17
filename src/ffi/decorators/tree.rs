@@ -147,17 +147,6 @@ impl PyAPIRouter {
         self.revision.fetch_add(1, Ordering::Release);
     }
 
-    pub(crate) fn tree_revision(&self, py: Python<'_>) -> u64 {
-        let mut total = self.revision.load(Ordering::Acquire);
-        for sub in self.sub_routers.lock().iter() {
-            if let Ok(router) = sub.router.bind(py).try_borrow() {
-                total = total
-                    .wrapping_mul(31)
-                    .wrapping_add(router.tree_revision(py));
-            }
-        }
-        total
-    }
     pub fn freeze(&self, py: Python<'_>) -> PyResult<()> {
         if self.frozen.load(Ordering::Acquire) && self.cached_flat.lock().is_some() {
             return Ok(());

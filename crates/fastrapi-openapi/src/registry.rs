@@ -1,7 +1,10 @@
+use super::document::deep_merge_json;
+use fastrapi_pyutil::imports::python_source_module;
 use fastrapi_pyutil::json::py_any_to_json;
 use fastrapi_routing::route::SchemaAliases;
 use indexmap::IndexMap;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use simd_json::json;
 use simd_json::owned::Object;
@@ -10,6 +13,25 @@ use simd_json::prelude::{ValueAsMutObject, ValueAsScalar, ValueObjectAccess};
 
 const MARKER: &str = "$fastrapi_schema";
 const REF_TEMPLATE: &str = "#/components/schemas/{model}";
+const GENERATOR_SOURCE: &str = include_str!("py/json_schema.py");
+
+static GENERATOR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// FastAPI's `GenerateJsonSchema`, which writes `bytes` as `contentMediaType` like FastAPI.
+fn generator_class(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    GENERATOR
+        .get_or_try_init(py, || {
+            python_source_module(
+                py,
+                GENERATOR_SOURCE,
+                c"fastrapi/json_schema.py",
+                c"fastrapi.json_schema",
+            )?
+            .getattr("GenerateJsonSchema")
+            .map(Bound::unbind)
+        })
+        .map(|class| class.bind(py))
+}
 
 struct Field {
     annotation: Py<PyAny>,
@@ -114,10 +136,7 @@ impl SchemaRegistry {
     ) -> PyResult<Vec<(usize, JsonValue)>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("ref_template", REF_TEMPLATE)?;
-        let generator = py
-            .import("pydantic.json_schema")?
-            .getattr("GenerateJsonSchema")?
-            .call((), Some(&kwargs))?;
+        let generator = generator_class(py)?.call((), Some(&kwargs))?;
         let type_adapter = py.import("pydantic")?.getattr("TypeAdapter")?;
         let inputs = PyList::empty(py);
         for &index in indices {
@@ -254,10 +273,14 @@ fn trim_description(definition: &mut JsonValue) {
 pub(crate) fn substitute(value: &mut JsonValue, resolved: &[JsonValue]) {
     match value {
         JsonValue::Object(object) => {
-            if object.len() == 1
-                && let Some(index) = object.get(MARKER).and_then(ValueAsScalar::as_usize)
+            if let Some(index) = object
+                .remove(MARKER)
+                .as_ref()
+                .and_then(ValueAsScalar::as_usize)
             {
-                *value = resolved.get(index).cloned().unwrap_or_else(|| json!({}));
+                let mut merged = resolved.get(index).cloned().unwrap_or_else(|| json!({}));
+                deep_merge_json(&mut merged, std::mem::take(value));
+                *value = merged;
                 return;
             }
             for (_, child) in object.iter_mut() {

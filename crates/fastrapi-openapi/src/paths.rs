@@ -16,6 +16,7 @@ use fastrapi_core::path::strip_path_convertors;
 use fastrapi_core::security::SecurityKind;
 use fastrapi_pyutil::imports::TYPING;
 use fastrapi_pyutil::json::py_any_to_json;
+use fastrapi_routing::annotations::strip_optional;
 use fastrapi_routing::dependencies::InjectionType;
 use fastrapi_routing::route::{
     ModelPresence, ParamModel, ParsedParameter, RouteEntry, RouteHandler,
@@ -403,11 +404,22 @@ fn field_schema(
     let title = schema_title(&param.external_name);
     if param.is_file || marker_class(py, param).as_deref() == Some("File") {
         let binary = json!({ "type": "string", "contentMediaType": "application/octet-stream" });
-        return if param.is_list {
-            json!({ "type": "array", "items": binary, "title": title })
+        let mut schema = if param.is_list {
+            json!({ "type": "array", "items": binary })
         } else {
-            json!({ "type": "string", "contentMediaType": "application/octet-stream", "title": title })
+            binary
         };
+        if param
+            .annotation
+            .as_ref()
+            .is_some_and(|annotation| strip_optional(py, annotation.bind(py)).is_some())
+        {
+            schema = json!({ "anyOf": [schema, { "type": "null" }] });
+        }
+        if let Some(object) = schema.as_object_mut() {
+            object.insert("title".to_string(), json!(title));
+        }
+        return schema;
     }
     let Some(annotation) = param.annotation.as_ref() else {
         return json!({ "title": title.as_str() });

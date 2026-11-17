@@ -3,12 +3,13 @@
 
 use crate::annotations::strip_optional;
 use crate::params::PyDepends;
+use crate::params::module::params_module;
 use crate::security::PySecurityScopes;
 use fastrapi_core::params::ParameterSource;
 use pyo3::exceptions::PyAssertionError;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyType};
+use pyo3::types::{PyAny, PyTuple, PyType};
 
 fastrapi_pyutil::cached_py_import!(
     STARLETTE_BACKGROUND_TASKS,
@@ -105,18 +106,30 @@ pub(crate) fn is_dependency_marker(marker: &Bound<'_, PyAny>) -> bool {
             && marker.hasattr(intern!(py, "use_cache")).unwrap_or(false))
 }
 
+/// The `Depends` that wins in `Annotated`: like FastAPI, the last of its `Depends`, `Param` and `Body` markers.
 #[must_use]
 pub fn find_annotated_dependency_marker<'py>(
     param_obj: &Bound<'py, PyAny>,
 ) -> Option<Bound<'py, PyAny>> {
-    let annotation = param_obj.getattr("annotation").ok()?;
-    let metadata = annotation.getattr("__metadata__").ok()?;
-
-    for item in metadata.try_iter().ok()? {
-        let Ok(item) = item else { continue };
-        if is_dependency_marker(&item) {
-            return Some(item);
-        }
-    }
-    None
+    let py = param_obj.py();
+    let metadata = param_obj
+        .getattr("annotation")
+        .ok()?
+        .getattr("__metadata__")
+        .ok()?;
+    let params = params_module(py).ok()?;
+    let field_markers = PyTuple::new(
+        py,
+        [params.getattr("Param").ok()?, params.getattr("Body").ok()?],
+    )
+    .ok()?;
+    let winner = metadata
+        .try_iter()
+        .ok()?
+        .flatten()
+        .filter(|item| {
+            is_dependency_marker(item) || item.is_instance(&field_markers).unwrap_or(false)
+        })
+        .last()?;
+    is_dependency_marker(&winner).then_some(winner)
 }

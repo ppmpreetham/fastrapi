@@ -939,7 +939,8 @@ def analyze_param(*, param_name: str, annotation: Any, value: Any, path_param_na
     annotated = get_origin(annotation) is Annotated
     type_annotation = get_args(annotation)[0] if annotated else annotation
     markers = get_args(annotation)[1:] if annotated else ()
-    depends = value if _is_depends(value) else next((marker for marker in reversed(markers) if _is_depends(marker)), None)
+    last_marker = next((marker for marker in reversed(markers) if _is_depends(marker) or isinstance(marker, (Param, Body))), None)
+    depends = value if _is_depends(value) else last_marker if _is_depends(last_marker) else None
     if depends is not None:
         return ParamDetails(type_annotation, depends, None)
     if _is_injected(type_annotation):
