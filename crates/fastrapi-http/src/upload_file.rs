@@ -19,6 +19,11 @@ use std::sync::Arc;
 
 fastrapi_pyutil::cached_py_import!(TEMPFILE_MODULE, "tempfile");
 fastrapi_pyutil::cached_py_import!(STARLETTE_DATASTRUCTURES, "starlette.datastructures");
+fastrapi_pyutil::cached_py_import!(
+    STARLETTE_UPLOAD_FILE,
+    "starlette.datastructures",
+    "UploadFile"
+);
 
 const SPOOL_MAX_MEM: usize = 1024 * 1024;
 
@@ -166,7 +171,25 @@ impl PyUploadFile {
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = cls.py();
         py.import(intern!(py, "pydantic_core.core_schema"))?
-            .call_method1(intern!(py, "is_instance_schema"), (cls,))
+            .call_method1(
+                intern!(py, "with_info_plain_validator_function"),
+                (cls.getattr(intern!(py, "_validate"))?,),
+            )
+    }
+
+    #[classmethod]
+    fn _validate<'py>(
+        _cls: &Bound<'py, PyType>,
+        value: Bound<'py, PyAny>,
+        _info: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if !STARLETTE_UPLOAD_FILE.is_instance(value.py(), &value) {
+            return Err(PyValueError::new_err(format!(
+                "Expected UploadFile, received: {}",
+                value.get_type()
+            )));
+        }
+        Ok(value)
     }
 
     #[new]

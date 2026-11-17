@@ -14,6 +14,8 @@ use pyo3::types::{PyBytes, PyString, PyTuple};
 use std::sync::{Arc, OnceLock};
 
 const MULTIPART: &str = "multipart/form-data";
+/// Starlette's message for a multipart request without a boundary.
+pub const MISSING_BOUNDARY: &str = "Missing boundary in multipart.";
 const URLENCODED: &str = "application/x-www-form-urlencoded";
 
 pub(crate) enum FormEntry {
@@ -80,13 +82,20 @@ pub(crate) async fn parse_form(
     raw: Bytes,
     limits: FormLimits,
 ) -> Result<Vec<FormEntry>, String> {
-    if content_type.starts_with(MULTIPART) {
+    if has_media_type(content_type, MULTIPART) {
         return parse_multipart(content_type, raw, limits).await;
     }
-    if content_type.starts_with(URLENCODED) {
+    if has_media_type(content_type, URLENCODED) {
         return parse_urlencoded(&raw, limits);
     }
     Ok(Vec::new())
+}
+
+/// Only the media type is case-insensitive: the boundary keeps its case.
+fn has_media_type(content_type: &str, media_type: &str) -> bool {
+    content_type
+        .get(..media_type.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(media_type))
 }
 
 fn parse_urlencoded(raw: &[u8], limits: FormLimits) -> Result<Vec<FormEntry>, String> {
@@ -107,7 +116,7 @@ async fn parse_multipart(
     raw: Bytes,
     limits: FormLimits,
 ) -> Result<Vec<FormEntry>, String> {
-    let boundary = multer::parse_boundary(content_type).map_err(|e| e.to_string())?;
+    let boundary = multer::parse_boundary(content_type).map_err(|_| MISSING_BOUNDARY.to_owned())?;
     let stream = once(async move { Ok::<_, String>(raw) });
     let mut multipart = Multipart::new(stream, boundary);
     let mut entries = Vec::new();
@@ -269,6 +278,5 @@ pub(crate) fn content_type_of(py: Python<'_>, scope: &Bound<'_, PyAny>) -> Strin
             .extract::<Vec<u8>>()
             .map(|raw| String::from_utf8_lossy(&raw).into_owned())
     });
-    text.map(|text| text.trim().to_ascii_lowercase())
-        .unwrap_or_default()
+    text.map(|text| text.trim().to_owned()).unwrap_or_default()
 }

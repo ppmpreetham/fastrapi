@@ -36,6 +36,7 @@ fastrapi_pyutil::cached_py_import!(
     "WebSocketException"
 );
 fastrapi_pyutil::cached_py_import!(METHOD_TYPE, "types", "MethodType");
+fastrapi_pyutil::cached_py_import!(PARTIAL, "functools", "partial");
 fastrapi_pyutil::cached_py_import!(STATUS_PHRASES, "http.client", "responses");
 
 #[pyclass(
@@ -186,8 +187,32 @@ impl PyValidationException {
         Self::create(errors, endpoint_ctx)
     }
 
-    #[pyo3(signature = (*_args, **_kwargs))]
-    const fn __init__(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) {}
+    /// Like `BaseException.__new__`, `args` holds the positional arguments.
+    #[pyo3(signature = (*args, **_kwargs))]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        slf.setattr(intern!(slf.py(), "args"), args)
+    }
+
+    /// Rebuilds the exception with its keyword arguments, so `pickle` and `copy` keep them.
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "endpoint_ctx"), &slf.borrow().endpoint_ctx)?;
+        if slf.hasattr(intern!(py, "body"))? {
+            kwargs.set_item(intern!(py, "body"), slf.getattr(intern!(py, "body"))?)?;
+        }
+        let errors = slf.borrow().errors.clone_ref(py);
+        let rebuild = PARTIAL
+            .get(py)?
+            .call((slf.get_type(), errors), Some(&kwargs))?;
+        Ok((rebuild, PyTuple::empty(py)))
+    }
 
     fn errors(&self, py: Python<'_>) -> Py<PyAny> {
         self.errors.clone_ref(py)

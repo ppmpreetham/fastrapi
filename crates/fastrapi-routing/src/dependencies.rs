@@ -258,6 +258,7 @@ fn visit(
         replacement_root.index = root;
         replacement_root.cache_key = original.cache_key.clone();
         replacement_root.bindings.clone_from(&original.bindings);
+        replacement_root.scopes.clone_from(&original.scopes);
         replacement_root.is_top_level = original.is_top_level;
         replacement_root.use_cache = original.use_cache;
         output.push(replacement_root);

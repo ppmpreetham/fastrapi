@@ -5,7 +5,7 @@
 use crate::background::{PyBackgroundTasks, background_tasks_type};
 use axum::extract::ConnectInfo;
 use axum::http::header::COOKIE;
-use axum::http::{Extensions, HeaderMap, HeaderName};
+use axum::http::{Extensions, HeaderMap, HeaderName, HeaderValue};
 use cookie::Cookie;
 use fastrapi_core::connection::PeerAddrs;
 use fastrapi_runtime::py_bridge::EventLoop;
@@ -161,20 +161,23 @@ impl<'a> RequestInput<'a> {
             .map(|(_, v)| *v)
     }
 
-    pub fn get_header(&self, key: &str) -> Option<&'a str> {
-        self.headers.get(key).and_then(|v| v.to_str().ok())
+    pub fn get_header(&self, key: &str) -> Option<Cow<'a, str>> {
+        self.headers.get(key).map(header_text)
     }
 
-    pub fn get_header_by_name(&self, key: &HeaderName) -> Option<&'a str> {
-        self.headers.get(key).and_then(|v| v.to_str().ok())
+    pub fn get_header_by_name(&self, key: &HeaderName) -> Option<Cow<'a, str>> {
+        self.headers.get(key).map(header_text)
     }
 
     pub fn get_header_values<'s>(&'s self, key: &str) -> SmallVec<[Cow<'s, str>; 4]> {
-        self.headers
-            .get_all(key)
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .map(Cow::Borrowed)
-            .collect()
+        self.headers.get_all(key).iter().map(header_text).collect()
     }
+}
+
+/// A header value as text. Only a value that is not plain ASCII allocates: it decodes as latin-1, like Starlette.
+pub fn header_text(value: &HeaderValue) -> Cow<'_, str> {
+    value.to_str().map_or_else(
+        |_| Cow::Owned(value.as_bytes().iter().copied().map(char::from).collect()),
+        Cow::Borrowed,
+    )
 }

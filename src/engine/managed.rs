@@ -11,6 +11,7 @@ use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 use fastrapi_core::body::BodyPayload;
 use fastrapi_core::params::PathParamRange;
+use fastrapi_http::exceptions::PyFastAPIError;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_pyutil::call::CallArgs;
 use fastrapi_pyutil::errors::exc_info;
@@ -272,8 +273,9 @@ fn finish_managed_response(
         {
             return python_error_to_response_in(
                 py,
-                &PyRuntimeError::new_err(
-                    "A dependency suppressed an exception before a response was produced",
+                &PyErr::from_type(
+                    py.get_type::<PyFastAPIError>(),
+                    "Response not awaited. There's a high chance that the application code is raising an exception and a dependency with yield has a block with a bare except, or a block with except Exception, and is not raising the exception again. Read more about it in the docs: https://fastapi.tiangolo.com/tutorial/dependencies/dependencies-with-yield/#dependencies-with-yield-and-except",
                 ),
                 Some(input),
             );

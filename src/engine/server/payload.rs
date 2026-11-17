@@ -10,6 +10,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use fastrapi_core::body::{BodyField, BodyPayload, FormText, UploadedFile};
 use fastrapi_core::params::ParameterSource;
+use fastrapi_http::form::MISSING_BOUNDARY;
 use fastrapi_routing::route::ParsedParameter;
 use fastrapi_routing::route::RouteHandler;
 use futures_util::StreamExt;
@@ -113,8 +114,14 @@ pub(crate) async fn parse_multipart_form(
     handler: &RouteHandler,
     state: &AppState,
 ) -> Result<AHashMap<FormText, SmallVec<[BodyField; 2]>>, Response> {
-    let boundary = multer::parse_boundary(content_type)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Missing multipart boundary").into_response())?;
+    let boundary = multer::parse_boundary(content_type).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            format!(r#"{{"detail":"{MISSING_BOUNDARY}"}}"#),
+        )
+            .into_response()
+    })?;
     let stream = body
         .into_data_stream()
         .map(|res| res.map_err(|e| e.to_string()));

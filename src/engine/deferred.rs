@@ -2,6 +2,7 @@ use axum::response::Response;
 use fastrapi_http::background::{
     AfterResponse, BackgroundJob, BackgroundRun, DeferredWork, OwnBackground, run_after_body,
 };
+use fastrapi_http::exceptions::is_http_exception;
 use fastrapi_http::request_input::RequestInput;
 use fastrapi_routing::dependencies::{
     TeardownTasks, execute_teardowns_async, execute_teardowns_sync,
@@ -38,7 +39,18 @@ impl Cleanup {
                         .call_method1(intern!(py, "__aexit__"), (&none, &none, &none))?;
                     py_bridge::schedule_task(py, event_loop, coroutine)
                 })?;
-                exit.await.map(drop)
+                exit.await.map(drop).map_err(|err| {
+                    // Like Starlette: a handled exception after the response started.
+                    Python::attach(|py| {
+                        if is_http_exception(err.value(py).as_any()) {
+                            PyRuntimeError::new_err(
+                                "Caught handled exception, but response already started.",
+                            )
+                        } else {
+                            err
+                        }
+                    })
+                })
             }
         }
     }

@@ -16,7 +16,7 @@ use fastrapi_http::middleware::asgi::{
 use fastrapi_http::request_input::{AsgiMount, NamedClient};
 use fastrapi_runtime::blocking::run_python;
 use fastrapi_runtime::py_bridge::{self, TaskLocals};
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyAssertionError, PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -101,7 +101,7 @@ pub(crate) fn call<'py>(
     let send = send.unbind();
     let kind = scope
         .get_item(intern!(py, "type"))?
-        .ok_or_else(|| PyValueError::new_err("ASGI scope has no type"))?;
+        .ok_or_else(|| PyKeyError::new_err("type"))?;
     match kind.cast::<PyString>()?.to_str()? {
         "http" => {
             let request = http_request(scope)?;
@@ -130,9 +130,7 @@ pub(crate) fn call<'py>(
             locals.clone(),
             lifespan(asgi, locals, receive, send),
         ),
-        other => Err(PyRuntimeError::new_err(format!(
-            "unsupported ASGI scope type: {other}"
-        ))),
+        _ => Err(PyAssertionError::new_err(())),
     }
 }
 

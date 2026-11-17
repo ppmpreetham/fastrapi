@@ -19,13 +19,13 @@ use fastrapi_http::exceptions::{
     is_default_handler, request_validation_error, request_validation_error_type,
 };
 use fastrapi_http::request::create_py_request;
-use fastrapi_http::request_input::RequestInput;
+use fastrapi_http::request_input::{RequestInput, header_text};
 use fastrapi_http::upload_file::PyUploadFile;
 use fastrapi_pyutil::call::CallArgs;
 use fastrapi_pyutil::json::{json_value_to_py, write_json_string, write_py_json};
 use fastrapi_runtime::server_state::current_server;
 use percent_encoding::percent_decode_str;
-use pydantic_core_kernel::ErrorDetail;
+use pydantic_core_kernel::{ErrorDetail, LocItem};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyBytes, PyDict, PyFloat, PyList, PySet, PyString, PyTuple};
 use pyo3::{IntoPyObjectExt, intern};
@@ -55,6 +55,28 @@ pub enum Rejection {
 impl From<PyErr> for Rejection {
     fn from(err: PyErr) -> Self {
         Self::Python(err)
+    }
+}
+
+impl ErrorItem<'_> {
+    /// The position of the item's source in FastAPI's error order.
+    fn rank(&self) -> usize {
+        let source = match self {
+            Self::Missing { source, .. } => (*source).to_owned(),
+            Self::Python(error) => error
+                .get_item(intern!(error.py(), "loc"))
+                .and_then(|loc| loc.get_item(0))
+                .and_then(|source| source.extract())
+                .unwrap_or_default(),
+            Self::Kernel(detail) => match detail.loc.first() {
+                Some(LocItem::S(source)) => source.clone(),
+                _ => String::new(),
+            },
+        };
+        ["path", "query", "header", "cookie"]
+            .iter()
+            .position(|name| *name == source)
+            .unwrap_or(4)
     }
 }
 
@@ -140,10 +162,11 @@ impl<'py> Errors<'py> {
         self.items.is_empty()
     }
 
-    pub fn into_list(self) -> PyResult<Option<Bound<'py, PyList>>> {
+    pub fn into_list(mut self) -> PyResult<Option<Bound<'py, PyList>>> {
         if self.items.is_empty() {
             return Ok(None);
         }
+        self.items.sort_by_key(ErrorItem::rank);
         let list = PyList::empty(self.py);
         for item in &self.items {
             match item {
@@ -165,7 +188,8 @@ impl<'py> Errors<'py> {
         }
     }
 
-    fn json(&self) -> PyResult<Vec<u8>> {
+    fn json(&mut self) -> PyResult<Vec<u8>> {
+        self.items.sort_by_key(ErrorItem::rank);
         let mut out = Vec::with_capacity(128);
         out.extend_from_slice(b"{\"detail\":[");
         for (index, item) in self.items.iter().enumerate() {
@@ -198,7 +222,7 @@ impl<'py> Errors<'py> {
     }
 
     pub fn reject(
-        self,
+        mut self,
         input: &RequestInput<'_>,
         body: impl FnOnce() -> PyResult<Option<Bound<'py, PyAny>>>,
     ) -> Rejection {
@@ -524,7 +548,7 @@ fn source_value<'a>(
             .get_path_param(key)
             .map(|value| percent_decode_str(value).decode_utf8_lossy()),
         ParameterSource::Query => input.get_query_param(key).map(Cow::Borrowed),
-        ParameterSource::Header => input.get_header(key).map(Cow::Borrowed),
+        ParameterSource::Header => input.get_header(key),
         ParameterSource::Cookie => input.get_cookie(key).map(unquote_cookie),
         ParameterSource::Body
         | ParameterSource::BackgroundTasks
@@ -551,7 +575,7 @@ fn source_values<'a>(
 
 fn param_value<'a>(param: &ParsedParameter, input: &'a RequestInput<'_>) -> Option<Cow<'a, str>> {
     match &param.header_name {
-        Some(name) => input.get_header_by_name(name).map(Cow::Borrowed),
+        Some(name) => input.get_header_by_name(name),
         None => source_value(&param.source, &param.external_name, input),
     }
 }
@@ -629,10 +653,8 @@ fn model_param<'py>(
         }
         ParameterSource::Header => {
             for (name, value) in input.headers {
-                if let Ok(value) = value.to_str()
-                    && !is_model_key(py, keys, name.as_str())
-                {
-                    add_received(&dict, name.as_str(), value, true)?;
+                if !is_model_key(py, keys, name.as_str()) {
+                    add_received(&dict, name.as_str(), &header_text(value), true)?;
                 }
             }
         }
@@ -866,7 +888,8 @@ fn json_body<'a>(
     match payload {
         Some(BodyPayload::Json { raw }) if !raw.is_empty() => {
             if is_json_content_type(headers, handler.payload.strict_content_type.unwrap_or(true)) {
-                JsonBody::Json(raw)
+                // `json.loads` accepts a UTF-8 BOM.
+                JsonBody::Json(raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(raw))
             } else {
                 JsonBody::Bytes(raw)
             }
@@ -880,15 +903,6 @@ fn json_document<'py>(
     raw: &[u8],
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     json_error(py)?.call1((PyBytes::new(py, raw),))?.extract()
-}
-
-fn json_invalid<'py>(py: Python<'py>, raw: &[u8], errors: &mut Errors<'py>) -> PyResult<bool> {
-    let (found, _) = json_document(py, raw)?;
-    if found.is_truthy()? {
-        errors.extend(&found)?;
-        return Ok(true);
-    }
-    Ok(false)
 }
 
 fn single_json_body<'py>(
@@ -930,18 +944,43 @@ fn single_json_body<'py>(
             errors,
         );
     };
-    let err = match validate_json.bind(py).call1((PyBytes::new(py, raw),)) {
-        Ok(value) => return Ok(Some(value)),
-        Err(err) => err,
-    };
+    if let Ok(value) = validate_json.bind(py).call1((PyBytes::new(py, raw),)) {
+        return Ok(Some(value));
+    }
     if let Some(parsed) = parse_json(py, raw) {
         let value = json_value_to_py(py, &parsed)?;
         return resolve(py, param, Some(value), loc, errors);
     }
-    if !json_invalid(py, raw, errors)? {
-        errors.rejected(err, loc)?;
+    let (found, document) = json_document(py, raw)?;
+    if found.is_truthy()? {
+        errors.extend(&found)?;
+        return Ok(None);
     }
-    Ok(None)
+    resolve(py, param, Some(document), loc, errors)
+}
+
+/// Rare path: JSON that `simd_json` rejects but `json.loads` accepts (BOM, `1e999`, lone surrogates).
+fn apply_python_document<'py>(
+    py: Python<'py>,
+    params: &[&ParsedParameter],
+    raw: &[u8],
+    kwargs: &mut CallArgs,
+    errors: &mut Errors<'py>,
+) -> PyResult<()> {
+    let (found, document) = json_document(py, raw)?;
+    if found.is_truthy()? {
+        return errors.extend(&found);
+    }
+    let object = document.cast::<PyDict>().ok();
+    for param in params {
+        let (value, loc) = choose(param, |name| {
+            object.and_then(|object| object.get_item(name).ok().flatten())
+        });
+        if let Some(value) = resolve(py, param, value, loc, errors)? {
+            kwargs.set(param.name_py.bind(py), value)?;
+        }
+    }
+    Ok(())
 }
 
 fn apply_json_body<'py>(
@@ -973,8 +1012,7 @@ fn apply_json_body<'py>(
     let parsed = match body {
         JsonBody::Json(raw) => {
             let Some(parsed) = parse_json(py, raw) else {
-                json_invalid(py, raw, errors)?;
-                return Ok(());
+                return apply_python_document(py, params, raw, kwargs, errors);
             };
             Some(parsed)
         }
