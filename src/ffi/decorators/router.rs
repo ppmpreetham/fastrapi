@@ -525,8 +525,11 @@ impl PyAPIRouter {
     }
 
     #[pyo3(signature = (path))]
-    fn const_get(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
-        self.create_method_decorator_kw(py, HttpMethod::GET, path, None)
+    pub(crate) fn const_get(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
+        // The same as `get(path, cache_resp=True)`: the response is rendered once and then reused.
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("cache_resp", true)?;
+        self.create_method_decorator_kw(py, HttpMethod::GET, path, Some(&kwargs))
     }
 
     #[pyo3(signature = (path, endpoint, *, methods=None, **kwargs))]
@@ -697,15 +700,20 @@ impl PyAPIRouter {
             .map(|lifespan| lifespan.clone_ref(py));
         drop(included);
         if let Some(nested) = nested {
-            let mut own = self.lifespan.lock();
-            let merged = match own.take() {
+            // The merge calls Python, so it runs without the lock and a failure keeps the original.
+            let original = self
+                .lifespan
+                .lock()
+                .as_ref()
+                .map(|lifespan| lifespan.clone_ref(py));
+            let merged = match original {
                 Some(original) => crate::ffi::compat::py_helpers(py)?
                     .getattr("merge_lifespan_context")?
                     .call1((original, nested))?
                     .unbind(),
                 None => nested,
             };
-            *own = Some(merged);
+            *self.lifespan.lock() = Some(merged);
         }
 
         self.touch();

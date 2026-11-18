@@ -28,23 +28,81 @@ use fastrapi_routing::security::describe_scheme;
 use hyper::StatusCode;
 use pyo3::Bound;
 use pyo3::exceptions::PyAssertionError;
+use pyo3::exceptions::PyTypeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyCFunction, PyDict, PyTuple};
+use pyo3::types::{PyCFunction, PyDict, PyInt, PyString, PyTuple};
 use smallvec::SmallVec;
 use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
-#[inline]
-fn extract<'py, T>(kwargs: Option<&Bound<'py, PyDict>>, key: &str) -> Option<T>
+/// Reads a route option. A missing option and `None` both count as not given.
+fn option<'py>(
+    kwargs: Option<&Bound<'py, PyDict>>,
+    key: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Some(kwargs) = kwargs else {
+        return Ok(None);
+    };
+    Ok(kwargs.get_item(key)?.filter(|value| !value.is_none()))
+}
+
+fn wrong_type(key: &str, expected: &str, value: &Bound<'_, PyAny>) -> PyErr {
+    let found = value
+        .get_type()
+        .name()
+        .map_or_else(|_| "object".to_owned(), |name| name.to_string());
+    PyTypeError::new_err(format!("{key} must be {expected}, not '{found}'"))
+}
+
+/// Reads a text option. FastAPI stores any value here without a check, so a value that is not
+/// a string is not an error; it is left out.
+fn text_option(kwargs: Option<&Bound<'_, PyDict>>, key: &str) -> PyResult<Option<String>> {
+    Ok(option(kwargs, key)?.and_then(|value| value.extract().ok()))
+}
+
+/// Reads an option that FastAPI only tests for truth, so every value is accepted.
+fn truth_option(kwargs: Option<&Bound<'_, PyDict>>, key: &str) -> PyResult<Option<bool>> {
+    let Some(kwargs) = kwargs else {
+        return Ok(None);
+    };
+    kwargs
+        .get_item(key)?
+        .map(|value| value.is_truthy())
+        .transpose()
+}
+
+/// Reads a boolean option that only fastrapi has.
+fn bool_option(kwargs: Option<&Bound<'_, PyDict>>, key: &str) -> PyResult<Option<bool>> {
+    option(kwargs, key)?
+        .map(|value| {
+            value
+                .extract()
+                .map_err(|_| wrong_type(key, "a bool", &value))
+        })
+        .transpose()
+}
+
+/// Reads an integer option; a value of another type is a `TypeError`, and `range` is the
+/// `ValueError` for an integer that does not fit.
+fn int_option<'py, T>(
+    kwargs: Option<&Bound<'py, PyDict>>,
+    key: &str,
+    range: &'static str,
+) -> PyResult<Option<T>>
 where
-    T: for<'a> pyo3::FromPyObject<'a, 'py>,
+    T: for<'a> FromPyObject<'a, 'py>,
 {
-    let kw = kwargs?;
-    let obj = kw.get_item(key).ok()??;
-    obj.extract().ok()
+    option(kwargs, key)?
+        .map(|value| {
+            if !value.is_instance_of::<PyInt>() {
+                return Err(wrong_type(key, "an int", &value));
+            }
+            value.extract().map_err(|_| PyValueError::new_err(range))
+        })
+        .transpose()
 }
 
 pub(crate) fn security_requirements(
@@ -363,6 +421,9 @@ fn func_name(func: &Bound<'_, PyAny>) -> String {
         .unwrap_or_default()
 }
 
+const STATUS_CODE_RANGE: &str = "status_code must be between 100 and 599";
+const RATE_LIMIT_RANGE: &str = "rate_limit must be greater than 0";
+
 struct RouteOptions {
     name: Option<String>,
     generate_unique_id_function: Option<Py<PyAny>>,
@@ -395,35 +456,44 @@ impl RouteOptions {
         parent_tags: &[String],
         parent_deprecated: Option<bool>,
     ) -> PyResult<Self> {
-        let name = extract::<String>(kwargs, "name");
+        let name = text_option(kwargs, "name")?;
         let generate_unique_id_function = extract_bound(kwargs, "generate_unique_id_function")
             .filter(|function| !function.is_none())
             .map(Bound::unbind);
         let dependencies = extract_py(kwargs, "dependencies");
-        let status_code = extract::<u16>(kwargs, "status_code");
-        let summary = extract::<String>(kwargs, "summary");
-        let description = extract::<String>(kwargs, "description");
-        let include_in_schema = extract::<bool>(kwargs, "include_in_schema").unwrap_or(true);
-        let strict_content_type = extract::<bool>(kwargs, "strict_content_type");
-        let cache_resp = extract::<bool>(kwargs, "cache_resp").unwrap_or(false);
-        let rate_limit = extract::<u32>(kwargs, "rate_limit")
-            .map(|rps| {
-                NonZeroU32::new(rps)
-                    .ok_or_else(|| PyValueError::new_err("rate_limit must be greater than 0"))
+        // FastAPI stores any `status_code` without a check, so a value that is not an int is left out.
+        let status_code =
+            option(kwargs, "status_code")?.and_then(|value| value.extract::<u16>().ok());
+        let summary = text_option(kwargs, "summary")?;
+        // FastAPI calls `description.split` when the route is defined.
+        let description = option(kwargs, "description")?
+            .filter(|description| {
+                description.is_instance_of::<PyString>() || description.is_truthy().unwrap_or(true)
+            })
+            .map(|description| {
+                description
+                    .extract::<String>()
+                    .map_err(|_| match description.getattr("split") {
+                        Ok(_) => wrong_type("description", "a str", &description),
+                        Err(err) => err,
+                    })
             })
             .transpose()?;
-        let response_description = extract::<String>(kwargs, "response_description");
-        let operation_id = extract::<String>(kwargs, "operation_id");
-        let deprecated = extract::<bool>(kwargs, "deprecated");
+        let include_in_schema = truth_option(kwargs, "include_in_schema")?.unwrap_or(true);
+        let strict_content_type = bool_option(kwargs, "strict_content_type")?;
+        let cache_resp = bool_option(kwargs, "cache_resp")?.unwrap_or(false);
+        let rate_limit = int_option::<u32>(kwargs, "rate_limit", RATE_LIMIT_RANGE)?
+            .map(|rps| NonZeroU32::new(rps).ok_or_else(|| PyValueError::new_err(RATE_LIMIT_RANGE)))
+            .transpose()?;
+        let response_description = text_option(kwargs, "response_description")?;
+        let operation_id = text_option(kwargs, "operation_id")?;
+        let deprecated = truth_option(kwargs, "deprecated")?;
 
         let response_model = extract_py(kwargs, "response_model");
         let response_class = extract_py(kwargs, "response_class");
 
         let default_status = status_code
-            .map(|c| {
-                StatusCode::from_u16(c)
-                    .map_err(|_| PyValueError::new_err("status_code must be between 100 and 599"))
-            })
+            .map(|c| StatusCode::from_u16(c).map_err(|_| PyValueError::new_err(STATUS_CODE_RANGE)))
             .transpose()?;
 
         let bypass_serialization = response_model
@@ -492,11 +562,11 @@ fn build_dump_options(
 ) -> PyResult<Option<Py<PyDict>>> {
     let include = extract_py(kwargs, "response_model_include");
     let exclude = extract_py(kwargs, "response_model_exclude");
-    let by_alias = extract::<bool>(kwargs, "response_model_by_alias").unwrap_or(true);
-    let exclude_unset = extract::<bool>(kwargs, "response_model_exclude_unset").unwrap_or(false);
+    let by_alias = truth_option(kwargs, "response_model_by_alias")?.unwrap_or(true);
+    let exclude_unset = truth_option(kwargs, "response_model_exclude_unset")?.unwrap_or(false);
     let exclude_defaults =
-        extract::<bool>(kwargs, "response_model_exclude_defaults").unwrap_or(false);
-    let exclude_none = extract::<bool>(kwargs, "response_model_exclude_none").unwrap_or(false);
+        truth_option(kwargs, "response_model_exclude_defaults")?.unwrap_or(false);
+    let exclude_none = truth_option(kwargs, "response_model_exclude_none")?.unwrap_or(false);
 
     if include.is_none()
         && exclude.is_none()
@@ -877,7 +947,8 @@ impl PyAPIRouter {
 
             super::tree::ensure_unfrozen(&frozen)?;
             revision.fetch_add(1, Ordering::Release);
-            routes.lock().push(RouteEntry {
+            // The entry is built first: `endpoint_description` calls Python, which must not run under the lock.
+            let entry = RouteEntry {
                 method,
                 path: path_for_closure.clone(),
                 name: route_name,
@@ -918,7 +989,8 @@ impl PyAPIRouter {
                     && router_include_in_schema,
                 security: security_requirements,
                 host: None,
-            });
+            };
+            routes.lock().push(entry);
 
             Ok(func.unbind())
         };

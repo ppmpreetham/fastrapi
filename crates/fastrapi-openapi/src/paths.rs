@@ -836,7 +836,13 @@ pub fn build_paths_from_routes(
 
     for route in collected {
         let overridden;
-        let route = match route.route_object.lock().as_ref() {
+        // The object is cloned out first: reading its attributes calls Python, which must not run under the lock.
+        let object = route
+            .route_object
+            .lock()
+            .as_ref()
+            .map(|object| object.clone_ref(py));
+        let route = match object {
             Some(object) => {
                 let mut entry = route.clone();
                 apply_route_overrides(object.bind(py), &mut entry);

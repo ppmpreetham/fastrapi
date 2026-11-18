@@ -15,7 +15,8 @@ use fastrapi_core::path::{host_without_port, strip_path_convertors};
 use fastrapi_core::router::RouteMatch;
 use fastrapi_http::background::{AfterResponse, run_after_body};
 use fastrapi_http::exceptions::UnhandledError;
-use fastrapi_http::middleware::asgi::build_scope;
+use fastrapi_http::request::asgi_scope;
+use fastrapi_http::request_input::RequestInput;
 use fastrapi_routing::route::RouteHandler;
 use fastrapi_runtime::py_bridge::{RequestContext, request_context};
 use pyo3::intern;
@@ -116,15 +117,15 @@ impl Telemetry {
         request: &Request,
         route: Option<String>,
     ) -> PyResult<Option<Exchange>> {
-        let scope = build_scope(
-            py,
+        let input = RequestInput::new(
             request.method(),
             request.uri(),
             request.headers(),
-            self.state.event_loop,
-        )?;
+            request.extensions(),
+            Some(self.state.event_loop),
+        );
+        let scope = asgi_scope(py, &input)?;
         if request.headers().contains_key(UPGRADE) {
-            let scope = scope.bind(py);
             scope.set_item(intern!(py, "type"), intern!(py, "websocket"))?;
             scope.set_item(intern!(py, "scheme"), intern!(py, "ws"))?;
         }

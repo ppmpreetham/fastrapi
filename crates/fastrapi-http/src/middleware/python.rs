@@ -2,9 +2,11 @@
 //! It supports three middleware types: context functions, starlette-style `call_next` functions, and ASGI classes.
 //! It also contains the `Headers` class that Python middleware reads.
 
+use crate::request::{complete_scope, http_scope};
+use crate::request_input::RequestInput;
 use crate::response_convert::convert_auto_response;
 use axum::extract::Request;
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use fastrapi_pyutil::imports::INSPECT;
@@ -113,10 +115,7 @@ impl PyMiddleware {
         }
 
         let instance: Bound<'_, PyAny> = if obj.is_instance_of::<PyType>() {
-            match obj.call(args, kwargs) {
-                Ok(instance) => instance,
-                Err(_) => obj.call0()?,
-            }
+            obj.call(args, kwargs)?
         } else if let Some(kwargs) = kwargs
             && !kwargs.is_empty()
         {
@@ -170,27 +169,26 @@ fn context_error(err: &PyErr) -> Response {
 
 fn build_request_context(
     py: Python<'_>,
-    method: &Method,
-    uri: &Uri,
-    headers: Arc<HeaderMap>,
+    request: &Request,
+    event_loop: EventLoop,
 ) -> PyResult<Py<PyDict>> {
     let ctx = PyDict::new(py);
+    let headers = Arc::new(request.headers().clone());
     let headers_obj = Bound::new(py, PyLazyHeaders { headers })?.into_any();
+    let input = RequestInput::new(
+        request.method(),
+        request.uri(),
+        request.headers(),
+        request.extensions(),
+        Some(event_loop),
+    );
+    let scope = http_scope(py, &input, &headers_obj)?;
+    complete_scope(scope.as_any(), input.server_addr())?;
 
-    let scope_dict = PyDict::new(py);
-    scope_dict.set_item(intern!(py, "type"), intern!(py, "http"))?;
-    scope_dict.set_item(intern!(py, "method"), method.as_str())?;
-    scope_dict.set_item(intern!(py, "path"), uri.path())?;
-    scope_dict.set_item(
-        intern!(py, "query_string"),
-        PyBytes::new(py, uri.query().unwrap_or("").as_bytes()),
-    )?;
-
-    scope_dict.set_item(intern!(py, "headers"), &headers_obj)?;
-    ctx.set_item(intern!(py, "scope"), scope_dict)?;
+    ctx.set_item(intern!(py, "scope"), scope)?;
     ctx.set_item(intern!(py, "headers"), &headers_obj)?;
-    ctx.set_item(intern!(py, "method"), method.as_str())?;
-    ctx.set_item(intern!(py, "path"), uri.path())?;
+    ctx.set_item(intern!(py, "method"), input.method)?;
+    ctx.set_item(intern!(py, "path"), input.path)?;
 
     Ok(ctx.unbind())
 }
@@ -394,32 +392,30 @@ pub async fn execute_py_middlewares(
     next: Next,
     event_loop: EventLoop,
 ) -> Response {
-    let mut ctx = if middlewares.context.is_empty() {
-        None
+    let (mut ctx, request) = if middlewares.context.is_empty() {
+        (None, request)
     } else if middlewares.sync_prefix > 0 && middlewares.sync_to_threadpool {
-        let headers = Arc::new(request.headers().clone());
         let sync_chain = middlewares.clone();
-        let (method, uri) = (request.method().clone(), request.uri().clone());
-        let outcome = run_python(move |py| -> Result<Py<PyDict>, Response> {
-            let ctx = build_request_context(py, &method, &uri, headers)
-                .map_err(|err| context_error(&err))?;
-            run_sync_chain(py, sync_chain.sync_chain(), ctx)
+        let outcome = run_python(move |py| {
+            let ctx = build_request_context(py, &request, event_loop)
+                .map_err(|err| context_error(&err))
+                .and_then(|ctx| run_sync_chain(py, sync_chain.sync_chain(), ctx));
+            (ctx, request)
         })
         .await;
         match outcome {
-            Ok(Ok(ctx)) => Some(ctx),
-            Ok(Err(resp)) => return resp,
+            Ok((Ok(ctx), request)) => (Some(ctx), request),
+            Ok((Err(resp), _)) => return resp,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
     } else {
-        let headers = Arc::new(request.headers().clone());
         let outcome = Python::attach(|py| -> Result<Py<PyDict>, Response> {
-            let ctx = build_request_context(py, request.method(), request.uri(), headers)
+            let ctx = build_request_context(py, &request, event_loop)
                 .map_err(|err| context_error(&err))?;
             run_sync_chain(py, middlewares.sync_chain(), ctx)
         });
         match outcome {
-            Ok(ctx) => Some(ctx),
+            Ok(ctx) => (Some(ctx), request),
             Err(resp) => return resp,
         }
     };

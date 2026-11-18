@@ -8,7 +8,6 @@ use crate::engine::exception_dispatch::invalidate_handler_cache;
 use crate::engine::server::asgi_app::new_asgi_cell;
 use crate::ffi::decorators;
 use crate::ffi::decorators::{PyAPIRouter, collect_router_routes, new_api_router};
-use fastrapi_core::method::HttpMethod;
 use fastrapi_http::middleware::{DeclaredLayer, MiddlewareContainer, PyMiddleware};
 use fastrapi_http::staticfiles::PyStaticFiles;
 use fastrapi_openapi::spec::{AppDocument, build_openapi_spec};
@@ -607,10 +606,7 @@ impl FastrAPI {
 
     #[pyo3(signature = (path))]
     fn const_get(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
-        self.router
-            .bind(py)
-            .borrow()
-            .create_method_decorator_kw(py, HttpMethod::GET, path, None)
+        self.router.bind(py).borrow().const_get(py, path)
     }
 
     /// Decorate a WebSocket function.

@@ -147,7 +147,8 @@ fn host_server(scope: &Bound<'_, PyDict>) -> PyResult<Option<(String, u16)>> {
     Ok(None)
 }
 
-fn complete_scope(scope: &Bound<'_, PyAny>, server: Option<SocketAddr>) -> PyResult<()> {
+/// Adds the scope keys that are not set up front, as most requests never read them.
+pub(crate) fn complete_scope(scope: &Bound<'_, PyAny>, server: Option<SocketAddr>) -> PyResult<()> {
     let Ok(scope) = scope.cast::<PyDict>() else {
         return Ok(());
     };
@@ -633,12 +634,15 @@ fn request_state<'py>(state: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> 
     }
 }
 
-pub fn create_py_request(
-    py: Python<'_>,
+/// Builds the HTTP scope of a request. Every scope that Python sees starts here, so that the
+/// request of a route, of a `call_next` middleware and of an ASGI middleware agree.
+/// `raw_path`, `root_path`, `scheme`, `http_version` and `server` are added by `complete_scope`.
+#[inline]
+pub fn http_scope<'py>(
+    py: Python<'py>,
     input: &RequestInput<'_>,
-    raw_body: Option<Bytes>,
-) -> PyResult<Py<PyAny>> {
-    let headers = Arc::new(input.headers.clone());
+    headers: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyDict>> {
     let scope = PyDict::new(py);
     scope.set_item(intern!(py, "type"), intern!(py, "http"))?;
     scope.set_item(intern!(py, "method"), input.method)?;
@@ -664,10 +668,7 @@ pub fn create_py_request(
         }
     }
     scope.set_item(intern!(py, "query_string"), input.query_string)?;
-    scope.set_item(
-        intern!(py, "headers"),
-        Bound::new(py, PyScopeHeaders::new(Arc::clone(&headers)))?,
-    )?;
+    scope.set_item(intern!(py, "headers"), headers)?;
     if let Some(server) = input.server.or_else(current_server) {
         let server = server.server();
         if let Some(app) = server.app() {
@@ -677,6 +678,65 @@ pub fn create_py_request(
             scope.set_item(intern!(py, "state"), request_state(state.bind(py))?)?;
         }
     }
+    if let Some(client) = input.client() {
+        scope.set_item(intern!(py, "client"), client)?;
+    }
+    if let Some(SessionHandle(slot)) = input.extensions.get::<SessionHandle>() {
+        scope.set_item(intern!(py, "session"), slot.session(py)?)?;
+    }
+    Ok(scope)
+}
+
+/// Builds the scope that a raw ASGI app receives. Such an app reads the dict itself, so the
+/// scope is completed at once and the headers are a list.
+pub fn asgi_scope<'py>(py: Python<'py>, input: &RequestInput<'_>) -> PyResult<Bound<'py, PyDict>> {
+    let headers = PyList::empty(py);
+    for (name, value) in input.headers {
+        headers.append(PyScopeHeaders::pair(py, name, value)?)?;
+    }
+    let scope = http_scope(py, input, headers.as_any())?;
+    complete_scope(scope.as_any(), input.server_addr())?;
+    let asgi = PyDict::new(py);
+    asgi.set_item(intern!(py, "version"), intern!(py, "3.0"))?;
+    asgi.set_item(intern!(py, "spec_version"), intern!(py, "2.3"))?;
+    scope.set_item(intern!(py, "asgi"), asgi)?;
+    if !scope.contains(intern!(py, "client"))? {
+        scope.set_item(intern!(py, "client"), py.None())?;
+    }
+    if !scope.contains(intern!(py, "state"))? {
+        scope.set_item(intern!(py, "state"), PyDict::new(py))?;
+    }
+    Ok(scope)
+}
+
+/// Creates the `Request` of a middleware, which has no path parameters and reads the body
+/// through `receive`.
+pub fn create_middleware_request<'py>(
+    py: Python<'py>,
+    input: &RequestInput<'_>,
+    receive: Py<PyAny>,
+) -> PyResult<Bound<'py, PyRequest>> {
+    let headers = Arc::new(input.headers.clone());
+    let scope_headers = Bound::new(py, PyScopeHeaders::new(Arc::clone(&headers)))?;
+    let scope = http_scope(py, input, scope_headers.as_any())?;
+    let conn = PyHTTPConnection::from_scope(scope.into_any().unbind(), receive)
+        .with_server(input.server_addr());
+    let request = PyRequest {
+        send: py.None(),
+        body_cache: Arc::new(OnceCell::new()),
+        raw_headers: Some(headers),
+    };
+    Bound::new(py, PyClassInitializer::from(conn).add_subclass(request))
+}
+
+pub fn create_py_request(
+    py: Python<'_>,
+    input: &RequestInput<'_>,
+    raw_body: Option<Bytes>,
+) -> PyResult<Py<PyAny>> {
+    let headers = Arc::new(input.headers.clone());
+    let scope_headers = Bound::new(py, PyScopeHeaders::new(Arc::clone(&headers)))?;
+    let scope = http_scope(py, input, scope_headers.as_any())?;
 
     let path_params = match input.extensions.get::<HostPathParams>() {
         Some(HostPathParams(host)) => host.bind(py).copy()?,
@@ -688,12 +748,6 @@ pub fn create_py_request(
             .try_for_each(|(k, v)| path_params.set_item(*k, decode_path(v)))?;
     }
     scope.set_item(intern!(py, "path_params"), path_params)?;
-    if let Some(client) = input.client() {
-        scope.set_item(intern!(py, "client"), client)?;
-    }
-    if let Some(SessionHandle(slot)) = input.extensions.get::<SessionHandle>() {
-        scope.set_item(intern!(py, "session"), slot.session(py)?)?;
-    }
 
     let bound_req = PyRequest::create_bound(
         py,

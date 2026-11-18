@@ -3,6 +3,8 @@
 //! It collects the response messages that the middleware sends.
 
 use crate::exceptions::{http_exception_response, plain_server_error, server_error_response};
+use crate::request::asgi_scope;
+use crate::request_input::RequestInput;
 use axum::body::{Body, to_bytes};
 use axum::extract::{OriginalUri, Request};
 use axum::http::request::Parts;
@@ -405,7 +407,7 @@ async fn run_asgi_app(
     };
     let scope = Python::attach(|py| -> PyResult<_> {
         let locals = py_bridge::TaskLocals::new(event_loop.bind(py).clone());
-        let scope = build_scope(py, &parts.method, &parts.uri, &parts.headers, event_loop)?;
+        let scope = request_scope(py, &parts, event_loop)?;
         let handle = Py::new(
             py,
             PyDownstreamASGI {
@@ -415,10 +417,8 @@ async fn run_asgi_app(
                 max_body_size,
             },
         )?;
-        scope
-            .bind(py)
-            .set_item(intern!(py, DOWNSTREAM_KEY), handle)?;
-        Ok(scope)
+        scope.set_item(intern!(py, DOWNSTREAM_KEY), handle)?;
+        Ok(scope.unbind())
     });
     drive_asgi(&instance, scope, body_bytes, event_loop)
         .await
@@ -440,11 +440,9 @@ pub async fn mounted_asgi(
         return payload_too_large();
     };
     let scope = Python::attach(|py| -> PyResult<_> {
-        let scope = build_scope(py, &parts.method, &parts.uri, &parts.headers, event_loop)?;
-        scope
-            .bind(py)
-            .set_item(intern!(py, "root_path"), &*prefix)?;
-        Ok(scope)
+        let scope = request_scope(py, &parts, event_loop)?;
+        scope.set_item(intern!(py, "root_path"), &*prefix)?;
+        Ok(scope.unbind())
     });
     drive_asgi(&app, scope, body_bytes, event_loop)
         .await
@@ -452,6 +450,21 @@ pub async fn mounted_asgi(
             Python::attach(|py| http_exception_response(err.value(py)))
                 .unwrap_or_else(|| server_error(&err, event_loop))
         })
+}
+
+fn request_scope<'py>(
+    py: Python<'py>,
+    parts: &Parts,
+    event_loop: EventLoop,
+) -> PyResult<Bound<'py, PyDict>> {
+    let input = RequestInput::new(
+        &parts.method,
+        &parts.uri,
+        &parts.headers,
+        &parts.extensions,
+        Some(event_loop),
+    );
+    asgi_scope(py, &input)
 }
 
 fn server_error(err: &PyErr, event_loop: EventLoop) -> Response {
@@ -619,48 +632,4 @@ fn build_response(status: u16, headers: Vec<(Bytes, Bytes)>, body: Body) -> Resp
         *parts = header_map;
     }
     builder.body(body).unwrap_or_else(|_| plain_server_error())
-}
-
-/// Builds the ASGI HTTP scope of a request.
-pub fn build_scope(
-    py: Python<'_>,
-    method: &axum::http::Method,
-    uri: &axum::http::Uri,
-    headers: &axum::http::HeaderMap,
-    server: EventLoop,
-) -> PyResult<Py<PyDict>> {
-    let scope = PyDict::new(py);
-    scope.set_item(intern!(py, "type"), intern!(py, "http"))?;
-    let asgi = PyDict::new(py);
-    asgi.set_item(intern!(py, "version"), intern!(py, "3.0"))?;
-    asgi.set_item(intern!(py, "spec_version"), intern!(py, "2.3"))?;
-    scope.set_item(intern!(py, "asgi"), asgi)?;
-    scope.set_item(intern!(py, "http_version"), intern!(py, "1.1"))?;
-    scope.set_item(intern!(py, "method"), method.as_str())?;
-    scope.set_item(intern!(py, "scheme"), intern!(py, "http"))?;
-    scope.set_item(intern!(py, "path"), crate::request::decode_path(uri.path()))?;
-    scope.set_item(
-        intern!(py, "raw_path"),
-        PyBytes::new(py, uri.path().as_bytes()),
-    )?;
-    scope.set_item(
-        intern!(py, "query_string"),
-        PyBytes::new(py, uri.query().unwrap_or("").as_bytes()),
-    )?;
-    scope.set_item(intern!(py, "root_path"), "")?;
-    let raw = PyList::empty(py);
-    for (name, value) in headers {
-        raw.append((
-            PyBytes::new(py, name.as_str().as_bytes()),
-            PyBytes::new(py, value.as_bytes()),
-        ))?;
-    }
-    scope.set_item(intern!(py, "headers"), raw)?;
-    scope.set_item(intern!(py, "client"), py.None())?;
-    scope.set_item(intern!(py, "server"), py.None())?;
-    if let Some(app) = server.server().app() {
-        scope.set_item(intern!(py, "app"), app.bind(py))?;
-    }
-    scope.set_item(intern!(py, "state"), PyDict::new(py))?;
-    Ok(scope.unbind())
 }

@@ -6,15 +6,16 @@ use fastrapi_runtime::py_bridge::EventLoop;
 use std::sync::Arc;
 
 use crate::exceptions::{UnhandledError, plain_server_error, server_error_response};
-use crate::request::{PyRequest, PyScopeHeaders};
-use crate::request_input::AsgiMount;
+use crate::request::create_middleware_request;
+use crate::request_input::RequestInput;
 use crate::response_convert::convert_auto_response;
 use crate::stream::SlotLease;
-use axum::body::{Body, BodyDataStream};
+use axum::body::{Body, BodyDataStream, to_bytes};
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
+use bytes::Bytes;
 use fastrapi_runtime::blocking::run_python;
 use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
@@ -24,7 +25,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 use pyo3::{Bound, intern};
 use pyo3_async_runtimes::TaskLocals;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
 #[pyclass(
     frozen,
@@ -184,8 +185,62 @@ impl PyBodyIterator {
     skip_from_py_object
 )]
 pub struct PyCallNext {
-    downstream: Mutex<Option<Downstream>>,
+    downstream: DownstreamSlot,
     event_loop: EventLoop,
+}
+
+type DownstreamSlot = Arc<Mutex<Option<Downstream>>>;
+
+/// The `receive` of the request that a `call_next` middleware gets. It reads the request body
+/// and puts it back, so that the next layers still get the body, like Starlette's cached request.
+#[pyclass(
+    frozen,
+    name = "DownstreamReceive",
+    module = "fastrapi.middleware",
+    skip_from_py_object
+)]
+pub struct PyDownstreamReceive {
+    downstream: DownstreamSlot,
+    delivered: AtomicBool,
+}
+
+#[pymethods]
+impl PyDownstreamReceive {
+    fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let delivered = self.delivered.swap(true, Ordering::AcqRel);
+        let body = self
+            .downstream
+            .lock()
+            .as_mut()
+            .filter(|_| !delivered)
+            .map(|downstream| std::mem::take(downstream.request.body_mut()));
+        let slot = Arc::clone(&self.downstream);
+        py_bridge::future_into_py(py, async move {
+            let body = match body {
+                Some(body) => {
+                    let body = to_bytes(body, usize::MAX)
+                        .await
+                        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+                    if let Some(downstream) = slot.lock().as_mut() {
+                        *downstream.request.body_mut() = Body::from(body.clone());
+                    }
+                    body
+                }
+                None => Bytes::new(),
+            };
+            Python::attach(|py| {
+                let message = PyDict::new(py);
+                if delivered {
+                    message.set_item(intern!(py, "type"), intern!(py, "http.disconnect"))?;
+                } else {
+                    message.set_item(intern!(py, "type"), intern!(py, "http.request"))?;
+                    message.set_item(intern!(py, "body"), PyBytes::new(py, &body))?;
+                    message.set_item(intern!(py, "more_body"), false)?;
+                }
+                Ok(message.unbind())
+            })
+        })
+    }
 }
 
 struct Downstream {
@@ -305,7 +360,6 @@ pub(crate) async fn run_call_next_stack(
     drive(middlewares.clone(), 0, request, next, event_loop).await
 }
 
-#[allow(clippy::too_many_arguments)]
 fn drive(
     middlewares: Arc<Vec<Arc<super::PyMiddleware>>>,
     idx: usize,
@@ -323,33 +377,14 @@ fn drive(
         };
         let is_async = mw.is_async;
 
-        let (parts, body) = request.into_parts();
-        let method = parts.method.clone();
-        let uri = parts.uri.clone();
-        let mount = parts.extensions.get::<AsgiMount>().cloned();
-        let headers = Arc::new(parts.headers.clone());
         let downstream = Downstream {
             middlewares,
             idx,
-            request: Request::from_parts(parts, body),
+            request,
             next,
         };
 
-        let call = move |py: Python<'_>| -> Result<Outcome, Response> {
-            invoke(
-                py,
-                &mw,
-                method.as_str(),
-                mount
-                    .as_ref()
-                    .map_or_else(|| uri.path(), |mount| &mount.path),
-                mount.as_ref().map(|mount| &*mount.root_path),
-                uri.query().unwrap_or(""),
-                headers,
-                downstream,
-                event_loop,
-            )
-        };
+        let call = move |py: Python<'_>| invoke(py, &mw, downstream, event_loop);
         let outcome = if is_async {
             Ok(Python::attach(call))
         } else {
@@ -376,15 +411,9 @@ fn drive(
     }))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn invoke(
     py: Python<'_>,
     mw: &super::PyMiddleware,
-    method: &str,
-    path: &str,
-    root_path: Option<&str>,
-    query: &str,
-    headers: Arc<HeaderMap>,
     downstream: Downstream,
     event_loop: EventLoop,
 ) -> Result<Outcome, Response> {
@@ -393,29 +422,38 @@ fn invoke(
         server_error_response(py, &err, Some(event_loop))
     };
 
-    let scope = PyDict::new(py);
-    _ = scope.set_item(intern!(py, "type"), intern!(py, "http"));
-    _ = scope.set_item(intern!(py, "method"), method);
-    _ = scope.set_item(intern!(py, "path"), crate::request::decode_path(path));
-    if let Some(root_path) = root_path {
-        _ = scope.set_item(intern!(py, "root_path"), root_path);
+    let slot = Arc::new(Mutex::new(None));
+    let receive = Bound::new(
+        py,
+        PyDownstreamReceive {
+            downstream: Arc::clone(&slot),
+            delivered: AtomicBool::new(false),
+        },
+    )
+    .map_err(fail)?
+    .into_any()
+    .unbind();
+    let req_obj = {
+        let request = &downstream.request;
+        let input = RequestInput::new(
+            request.method(),
+            request.uri(),
+            request.headers(),
+            request.extensions(),
+            Some(event_loop),
+        );
+        create_middleware_request(py, &input, receive)
     }
-    _ = scope.set_item(
-        intern!(py, "query_string"),
-        PyBytes::new(py, query.as_bytes()),
-    );
-    let scope_headers = Bound::new(py, PyScopeHeaders::new(Arc::clone(&headers))).map_err(fail)?;
-    _ = scope.set_item(intern!(py, "headers"), scope_headers);
-
-    let req_obj = PyRequest::create_bound(py, scope.into_any().unbind(), Some(headers), None, None)
-        .map_err(fail)?
-        .into_any()
-        .unbind();
+    .map_err(fail)?
+    .into_any()
+    .unbind();
+    *slot.lock() = Some(downstream);
+    let downstream = slot;
 
     let call_next = Bound::new(
         py,
         PyCallNext {
-            downstream: Mutex::new(Some(downstream)),
+            downstream,
             event_loop,
         },
     )

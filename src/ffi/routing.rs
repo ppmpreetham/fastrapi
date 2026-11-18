@@ -8,7 +8,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PySet, PyString, PyTuple,
+    PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyMapping, PyModule, PySet, PyString,
+    PyTuple,
 };
 
 use fastrapi_core::method::HttpMethod;
@@ -17,6 +18,7 @@ use fastrapi_pyutil::json::json_to_py_object;
 use fastrapi_pyutil::lazy::LazyPyAttr;
 
 fastrapi_pyutil::cached_py_import!(COMPILE_PATH, "starlette.routing", "compile_path");
+fastrapi_pyutil::cached_py_import!(GET_ROUTE_PATH, "starlette.routing", "get_route_path");
 fastrapi_pyutil::cached_py_import!(
     DEFAULT_PLACEHOLDER,
     "fastrapi.datastructures",
@@ -27,34 +29,8 @@ fastrapi_pyutil::cached_py_import!(JSON_RESPONSE, "fastrapi.responses", "JSONRes
 use fastrapi_routing::route::{RouteEntry, WebSocketEntry};
 use pyo3::Bound;
 
-/// Gets the path parameters from a matched request path, in declaration order.
-fn path_captures<'py>(
-    path: &str,
-    request_path: &str,
-    py: Python<'py>,
-) -> Option<Bound<'py, PyDict>> {
-    let segments = path.split('/').zip(request_path.split('/'));
-    let captures = PyDict::new(py);
-    for (route_segment, request_segment) in segments {
-        let Some(placeholder) = route_segment
-            .strip_prefix('{')
-            .and_then(|s| s.strip_suffix('}'))
-        else {
-            if route_segment != request_segment {
-                return None;
-            }
-            continue;
-        };
-        let name = placeholder.split(':').next().unwrap_or(placeholder);
-        if request_segment.is_empty() && !matches!(placeholder.split_once(':'), Some((_, "path"))) {
-            return None;
-        }
-        captures.set_item(name, request_segment).ok()?;
-    }
-    Some(captures)
-}
-
-/// Matches a request path and method against a route, as `starlette.routing.Route.matches` does.
+/// Matches a scope against a route, as `starlette.routing.Route.matches` and FastAPI's
+/// `APIRoute.matches` do: with the compiled `path_regex` and the convertors of the route.
 /// The function returns `(Match, child_scope)`. It reads the attributes of the route at each call.
 /// Thus Python subclasses that change these attributes in `__init__` get the updated behavior.
 pub(crate) fn route_matches<'py>(
@@ -62,53 +38,46 @@ pub(crate) fn route_matches<'py>(
     scope: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let py = scope.py();
-    let path: String = route.getattr("path")?.extract()?;
-    let request_path: String = scope
-        .get_item("path")?
-        .extract()
-        .unwrap_or_else(|_| "/".into());
-    let Some(path_params) = path_captures(&path, &request_path, py) else {
-        return match_result(py, "NONE");
-    };
-
-    let scope_type: Option<String> = scope.get_item("type").ok().and_then(|t| t.extract().ok());
-    let methods: Vec<String> = match route.getattr("methods") {
-        Ok(methods) if !methods.is_none() => methods
-            .try_iter()?
-            .filter_map(Result::ok)
-            .filter_map(|m| m.extract().ok())
-            .collect(),
-        _ => Vec::new(),
-    };
-
-    let full = match scope_type.as_deref() {
-        Some("http") => {
-            methods.is_empty()
-                || scope
-                    .get_item("method")
-                    .ok()
-                    .and_then(|m| m.extract::<String>().ok())
-                    .is_some_and(|request_method| {
-                        methods
-                            .iter()
-                            .any(|m| m.eq_ignore_ascii_case(&request_method))
-                    })
-        }
-        Some("websocket") => true,
-        _ => false,
-    };
-    if !full {
-        return match_result(py, "PARTIAL");
+    let none = || match_result(py, "NONE");
+    if scope
+        .get_item(intern!(py, "type"))?
+        .ne(intern!(py, "http"))?
+    {
+        return none();
+    }
+    let route_path = GET_ROUTE_PATH.get(py)?.call1((scope,))?;
+    let matched = route
+        .getattr(intern!(py, "path_regex"))?
+        .call_method1(intern!(py, "match"), (route_path,))?;
+    if matched.is_none() {
+        return none();
+    }
+    let convertors = route.getattr(intern!(py, "param_convertors"))?;
+    let path_params = PyDict::new(py);
+    let inherited = scope.call_method1(intern!(py, "get"), (intern!(py, "path_params"),))?;
+    if !inherited.is_none() {
+        path_params.update(inherited.cast::<PyMapping>()?)?;
+    }
+    let groups = matched.call_method0(intern!(py, "groupdict"))?;
+    for (name, value) in groups.cast::<PyDict>()?.iter() {
+        let converted = convertors
+            .get_item(&name)?
+            .call_method1(intern!(py, "convert"), (value,))?;
+        path_params.set_item(name, converted)?;
     }
 
     let child_scope = PyDict::new(py);
-    child_scope.set_item("path_params", path_params)?;
-    if let Ok(endpoint) = route.getattr("endpoint") {
-        child_scope.set_item("endpoint", endpoint)?;
-    }
-    child_scope.set_item("route", route)?;
-    let full = match_enum(py)?.getattr("FULL")?;
-    Ok(PyTuple::new(py, [full, child_scope.into_any()])?.into_any())
+    child_scope.set_item(
+        intern!(py, "endpoint"),
+        route.getattr(intern!(py, "endpoint"))?,
+    )?;
+    child_scope.set_item(intern!(py, "path_params"), path_params)?;
+    child_scope.set_item(intern!(py, "route"), route)?;
+    let methods = route.getattr(intern!(py, "methods"))?;
+    let partial =
+        methods.is_truthy()? && !methods.contains(scope.get_item(intern!(py, "method"))?)?;
+    let matched = match_enum(py)?.getattr(if partial { "PARTIAL" } else { "FULL" })?;
+    Ok(PyTuple::new(py, [matched, child_scope.into_any()])?.into_any())
 }
 
 /// Returns the `Match` enum of starlette, which is also available as `fastrapi.routing.Match`.
@@ -573,7 +542,13 @@ impl PyAPIWebSocketRoute {
         let route = py.import("starlette.routing")?.getattr("WebSocketRoute")?;
         let delegate =
             route.call1((slf.borrow().path.clone(), slf.as_any().getattr("endpoint")?))?;
-        delegate.call_method1("matches", (scope,))
+        let matched = delegate.call_method1("matches", (scope,))?;
+        let (kind, child_scope) = matched.extract::<(Bound<'py, PyAny>, Bound<'py, PyAny>)>()?;
+        // Like FastAPI's `APIWebSocketRoute.matches`, which adds the route to a match.
+        if !kind.is(&match_enum(py)?.getattr("NONE")?) {
+            child_scope.set_item("route", slf)?;
+        }
+        Ok(matched)
     }
 
     #[pyo3(signature = (name, /, **params))]
